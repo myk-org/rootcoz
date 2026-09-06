@@ -193,6 +193,7 @@ export interface AnalysisResult {
   passed_count?: number
   skipped_count?: number
   failed_count?: number
+  analysis_state?: 'submitted' | 'analyzed'
 }
 
 // -- Dashboard ------------------------------------------------------
@@ -221,6 +222,7 @@ export interface DashboardJob {
   passed_count?: number
   skipped_count?: number
   failed_count?: number
+  analysis_state?: 'submitted' | 'analyzed'
 }
 
 export interface TestEntry {

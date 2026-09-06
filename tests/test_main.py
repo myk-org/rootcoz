@@ -1,5 +1,6 @@
 """Tests for FastAPI main application."""
 
+import asyncio
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -6987,3 +6988,178 @@ class TestReadLogTail:
         result = _read_log_tail(path, 50, max_bytes=250, chunk_size=100)
         assert 0 < len(result) < 50
         assert all(line.startswith("y") for line in result)
+
+
+class TestSubmitIntake:
+    def test_submit_raw_does_not_require_ai(self, test_client) -> None:
+        data, mock_process = _post_submit_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [
+                    {"test_name": "test_foo", "error_message": "assert False"},
+                ],
+            },
+        )
+        assert "job_id" in data
+        assert mock_process.await_args.kwargs["ingest_only"] is True
+
+    def test_submit_sets_submitted_state(self, test_client) -> None:
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [{"test_name": "t", "error_message": "e"}],
+            },
+        )
+        stored = test_client.get(f"/results/{data['job_id']}").json()
+        assert stored["result"]["analysis_state"] == "submitted"
+
+    def test_submit_does_not_persist_artifact_skip(self, test_client) -> None:
+        data, mock_process = _post_submit_queued(
+            test_client,
+            {
+                "type": "jenkins",
+                "job_name": "test-job",
+                "build_number": 1,
+            },
+        )
+        merged = mock_process.await_args.kwargs["merged"]
+        assert merged.get_job_artifacts is False
+        stored = test_client.get(f"/results/{data['job_id']}").json()
+        params = stored["result"]["request_params"]
+        assert params.get("get_job_artifacts") is True
+
+    def test_in_place_analyze_keeps_stored_artifact_opt_out(self, test_client) -> None:
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "jenkins",
+                "job_name": "test-job",
+                "build_number": 1,
+            },
+        )
+        job_id = data["job_id"]
+
+        async def _complete_with_artifacts_off() -> None:
+            stored = await storage.get_result(job_id, strip_sensitive=False)
+            result = stored["result"]
+            result["request_params"]["get_job_artifacts"] = False
+            await storage.update_status(job_id, "completed", result)
+
+        asyncio.run(_complete_with_artifacts_off())
+        with patch(
+            "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+        ) as mock_process:
+            response = test_client.post(
+                f"/results/{job_id}/analyze",
+                json={"ai_provider": "claude", "ai_model": "test-model"},
+            )
+            assert response.status_code == 202, response.text
+            merged = mock_process.await_args.kwargs["merged"]
+            assert merged.get_job_artifacts is False
+
+    def test_in_place_analyze_requires_submitted(self, test_client) -> None:
+        data, _ = _post_analyze_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [{"test_name": "t", "error_message": "e"}],
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            },
+        )
+        response = test_client.post(f"/results/{data['job_id']}/analyze")
+        assert response.status_code == 409
+
+    def test_in_place_analyze_rejects_second_claim(self, test_client) -> None:
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "jenkins",
+                "job_name": "test-job",
+                "build_number": 1,
+            },
+        )
+        job_id = data["job_id"]
+        asyncio.run(storage.update_status(job_id, "completed"))
+        analyze_body = {"ai_provider": "claude", "ai_model": "test-model"}
+        with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+            first = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
+            second = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
+        assert first.status_code == 202, first.text
+        assert second.status_code == 409
+
+    def test_in_place_analyze_releases_claim_when_enqueue_fails(
+        self, test_client
+    ) -> None:
+        from fastapi import HTTPException
+
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "jenkins",
+                "job_name": "test-job",
+                "build_number": 1,
+            },
+        )
+        job_id = data["job_id"]
+        asyncio.run(storage.update_status(job_id, "completed"))
+        analyze_body = {"ai_provider": "claude", "ai_model": "test-model"}
+        with patch(
+            "rootcoz.main._enqueue_ci_source_analysis",
+            side_effect=HTTPException(status_code=422, detail="enqueue failed"),
+        ):
+            failed = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
+        assert failed.status_code == 422
+        stored = test_client.get(f"/results/{job_id}").json()
+        assert stored["status"] == "completed"
+        with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+            retry = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
+        assert retry.status_code == 202, retry.text
+
+    def test_in_place_analyze_release_keeps_failed_ingest_status(
+        self, test_client
+    ) -> None:
+        from fastapi import HTTPException
+
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "jenkins",
+                "job_name": "test-job",
+                "build_number": 1,
+            },
+        )
+        job_id = data["job_id"]
+        asyncio.run(storage.update_status(job_id, "failed"))
+        analyze_body = {"ai_provider": "claude", "ai_model": "test-model"}
+        with patch(
+            "rootcoz.main._enqueue_ci_source_analysis",
+            side_effect=HTTPException(status_code=422, detail="enqueue failed"),
+        ):
+            failed = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
+        assert failed.status_code == 422
+        stored = test_client.get(f"/results/{job_id}").json()
+        assert stored["status"] == "failed"
+
+    def test_dashboard_analysis_state_filter(self, test_client) -> None:
+        ok = test_client.get(
+            "/api/dashboard/filtered", params={"analysis_state": "submitted"}
+        )
+        assert ok.status_code == 200
+        bad = test_client.get(
+            "/api/dashboard/filtered", params={"analysis_state": "nope"}
+        )
+        assert bad.status_code == 400
+
+
+def _post_submit_queued(test_client, payload: dict) -> tuple[dict, AsyncMock]:
+    with patch(
+        "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+    ) as mock_process:
+        response = test_client.post("/submit", json=payload)
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "queued"
+        return data, mock_process

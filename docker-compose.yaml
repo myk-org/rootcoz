@@ -45,6 +45,8 @@ services:
       # Dev mode: mount source for hot-reload (uncomment with DEV_MODE=true)
       # - ./src:/app/src
       # - ./frontend:/app/frontend
+      # Keep node_modules writable inside the container (host bind-mount is often EACCES for appuser)
+      # - /app/frontend/node_modules
 
 
     # Restart policy: container restarts unless explicitly stopped

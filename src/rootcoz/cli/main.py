@@ -655,12 +655,17 @@ def version(
 @results_app.command("list")
 def results_list(
     limit: int = typer.Option(50, "--limit", "-l", help="Max results to return."),
+    analysis_state: str = typer.Option(
+        "",
+        "--analysis-state",
+        help="Filter: submitted, analyzed.",
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List recent analyzed jobs."""
 
     def _list(c: RootCozClient) -> Any:
-        data = c.list_results(limit=limit)
+        data = c.list_results(limit=limit, analysis_state=analysis_state)
         if isinstance(data, list):
             for row in data:
                 if isinstance(row, dict) and not row.get("build_url"):
@@ -670,7 +675,7 @@ def results_list(
     _run_client_command(
         json_output,
         _list,
-        columns=["job_id", "status", "build_url", "created_at"],
+        columns=["job_id", "status", "analysis_state", "build_url", "created_at"],
         labels={
             "job_id": "JOB ID",
             "build_url": "BUILD URL",
@@ -692,12 +697,22 @@ def dashboard(
     review_status: str = typer.Option(
         "all", "--review-status", help="Filter: all, reviewed, not_reviewed."
     ),
+    analysis_state: str = typer.Option(
+        "",
+        "--analysis-state",
+        help="Filter: submitted, analyzed.",
+    ),
     limit: int = typer.Option(500, "--limit", help="Max results (0 = no limit)."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List analysis jobs with dashboard metadata (failure counts, review progress)."""
     use_filtered = bool(
-        label or exclude_tag or search or review_status != "all" or limit != 500
+        label
+        or exclude_tag
+        or search
+        or review_status != "all"
+        or analysis_state
+        or limit != 500
     )
 
     def _fetch(c: RootCozClient) -> Any:
@@ -707,6 +722,7 @@ def dashboard(
                 exclude_labels=exclude_tag or None,
                 search=search,
                 review_status=review_status,
+                analysis_state=analysis_state,
                 limit=limit,
             )
             # dashboard_filtered returns {jobs, total}
@@ -721,6 +737,7 @@ def dashboard(
             "job_name",
             "build_number",
             "status",
+            "analysis_state",
             "failure_count",
             "reviewed_count",
             "comment_count",
@@ -1243,6 +1260,7 @@ def _emit_queued_output(data: dict[str, Any]) -> None:
 
 @app.command()
 def analyze(
+    ctx: typer.Context,
     source: str = typer.Option(
         "jenkins",
         "--source",
@@ -1542,8 +1560,10 @@ def analyze(
     try:
         client = _get_client()
         data: dict[str, Any]
+        ingest_only = ctx.info_name == "submit"
         if source == "jenkins":
-            data = client.analyze(job_name, jenkins_build_number, name=name, **extras)
+            post = client.submit if ingest_only else client.analyze
+            data = post(job_name, jenkins_build_number, name=name, **extras)
         elif source == "prow":
             extras["prow_job_name"] = job_name
             extras["build_id"] = build_number
@@ -1556,18 +1576,40 @@ def analyze(
                 extras["gcs_bucket"] = effective_gcs_bucket
             if gcs_prefix:
                 extras["gcs_prefix"] = gcs_prefix
-            data = client.analyze(name=name, type="prow", **extras)
+            post = client.submit if ingest_only else client.analyze
+            data = post(name=name, type="prow", **extras)
         else:
             try:
                 raw_xml = Path(xml_file).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
                 typer.echo(f"Error: cannot read XML file '{xml_file}': {exc}", err=True)
                 raise typer.Exit(1) from None
-            data = client.analyze_file(raw_xml, name=name, **extras)
+            post_file = client.submit_file if ingest_only else client.analyze_file
+            data = post_file(raw_xml, name=name, **extras)
     except RootCozError as err:
         _handle_error(err)
 
     _emit_queued_output(data)
+
+
+app.command("submit", help="Queue CI ingest without AI (same flags as analyze).")(
+    analyze
+)
+
+
+@results_app.command("analyze")
+def results_analyze(
+    job_id: str = typer.Argument(help="Submitted job ID to analyze in place."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Run AI analysis on a submitted job (same job_id)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.analyze_submitted(job_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        _echo_queued_job(data, prefix="Analysis")
 
 
 def _echo_queued_job(data: dict[str, Any], prefix: str = "Job") -> None:

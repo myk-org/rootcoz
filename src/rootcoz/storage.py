@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 import aiosqlite
 from simple_logger.logger import get_logger
@@ -35,7 +35,12 @@ from rootcoz.models import (
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
+
 DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
+
+ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
+ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
+VALID_ANALYSIS_STATES = frozenset({ANALYSIS_STATE_SUBMITTED, ANALYSIS_STATE_ANALYZED})
 
 
 @asynccontextmanager
@@ -557,7 +562,8 @@ async def init_db() -> None:
                 analysis_started_at TIMESTAMP,
                 job_name TEXT NOT NULL DEFAULT '',
                 build_number INTEGER NOT NULL DEFAULT 0,
-                build_id TEXT NOT NULL DEFAULT ''
+                build_id TEXT NOT NULL DEFAULT '',
+                analysis_state TEXT NOT NULL DEFAULT 'analyzed'
             )
         """)
         await db.execute("""
@@ -708,6 +714,12 @@ async def init_db() -> None:
             db, "results", "build_number", "INTEGER NOT NULL DEFAULT 0"
         )
         await _migrate_add_column(db, "results", "build_id", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(
+            db,
+            "results",
+            "analysis_state",
+            "TEXT NOT NULL DEFAULT 'analyzed'",
+        )
 
         # Backfill job_name/build_number/build_id from result_json.
         # Uses atomic claim so only one concurrent init_db() runs the scan.
@@ -1657,6 +1669,26 @@ def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, in
     return (job_name, build_number, build_id)
 
 
+def _coerce_analysis_state(value: Any) -> str:
+    """Return a valid analysis_state, defaulting unknown/empty to analyzed."""
+    state = str(value or ANALYSIS_STATE_ANALYZED)
+    return state if state in VALID_ANALYSIS_STATES else ANALYSIS_STATE_ANALYZED
+
+
+def _analysis_state_filter_sql(
+    analysis_state: str, *, column: str
+) -> tuple[str, list[Any]]:
+    """SQL fragment and params for an optional analysis_state filter."""
+    if not analysis_state:
+        return "", []
+    if analysis_state not in VALID_ANALYSIS_STATES:
+        raise ValueError(
+            f"Invalid analysis_state '{analysis_state}'. "
+            f"Must be {', '.join(sorted(VALID_ANALYSIS_STATES))}."
+        )
+    return f"COALESCE({column}, 'analyzed') = ?", [analysis_state]
+
+
 def _append_denormalized_set_parts(
     result: dict[str, Any],
     set_parts: list[str],
@@ -1678,6 +1710,9 @@ def _append_denormalized_set_parts(
     if "build_id" in result:
         set_parts.append("build_id = ?")
         params.append(build_id)
+    if "analysis_state" in result:
+        set_parts.append("analysis_state = ?")
+        params.append(_coerce_analysis_state(result.get("analysis_state")))
 
 
 def _build_status_update_clause(
@@ -1746,11 +1781,12 @@ async def save_result(
     async with _connect_db() as db:
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
         job_name, build_number, build_id_val = _extract_denormalized_fields(result)
+        insert_state = _coerce_analysis_state((result or {}).get("analysis_state"))
         await db.execute(
             """
             INSERT OR IGNORE INTO results (job_id, build_url, status, result_json,
-                                           job_name, build_number, build_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                           job_name, build_number, build_id, analysis_state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -1760,6 +1796,7 @@ async def save_result(
                 job_name,
                 build_number,
                 build_id_val,
+                insert_state,
             ),
         )
         # Update the row (handles both fresh inserts and existing rows).
@@ -1802,6 +1839,51 @@ async def update_status(
 
         if cursor.rowcount == 0:
             logger.warning(f"update_status: no row found for job_id={job_id}")
+        await db.commit()
+
+
+async def claim_submitted_job_for_analyze(job_id: str) -> bool:
+    """Atomically claim a completed submitted job for in-place analyze.
+
+    Returns True only for the caller that flipped ``status`` to ``pending``.
+    """
+    placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"""
+            UPDATE results
+            SET status = 'pending'
+            WHERE job_id = ?
+              AND COALESCE(analysis_state, 'analyzed') = ?
+              AND status NOT IN ({placeholders})
+            """,
+            (job_id, ANALYSIS_STATE_SUBMITTED, *ACTIVE_STATUSES),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
+async def release_submitted_job_analyze_claim(
+    job_id: str, previous_status: str
+) -> None:
+    """Restore a submitted job if analyze enqueue failed after claiming.
+
+    Uses the status from before the claim so a failed ingest stays ``failed``.
+    """
+    restore_status = previous_status
+    if not restore_status or restore_status in ACTIVE_STATUSES:
+        restore_status = "completed"
+    async with _connect_db() as db:
+        await db.execute(
+            """
+            UPDATE results
+            SET status = ?
+            WHERE job_id = ?
+              AND status = 'pending'
+              AND COALESCE(analysis_state, 'analyzed') = ?
+            """,
+            (restore_status, job_id, ANALYSIS_STATE_SUBMITTED),
+        )
         await db.commit()
 
 
@@ -1983,6 +2065,56 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> b
     return changed
 
 
+def _analysis_identity_key(item: dict[str, Any], *fields: str) -> tuple[Any, ...]:
+    return tuple(item.get(field) for field in fields)
+
+
+def _copy_failure_ids(prior: list[Any], current: list[Any]) -> None:
+    unused = [p for p in prior if isinstance(p, dict)]
+    for new in current:
+        if not isinstance(new, dict):
+            continue
+        key = _analysis_identity_key(new, "test_name", "error_signature")
+        for index, old in enumerate(unused):
+            if _analysis_identity_key(old, "test_name", "error_signature") != key:
+                continue
+            if old.get("id"):
+                new["id"] = old["id"]
+            unused.pop(index)
+            break
+
+
+def _copy_child_analysis_ids(prior: list[Any], current: list[Any]) -> None:
+    unused = [p for p in prior if isinstance(p, dict)]
+    for new in current:
+        if not isinstance(new, dict):
+            continue
+        key = _analysis_identity_key(new, "job_name", "build_number")
+        for index, old in enumerate(unused):
+            if _analysis_identity_key(old, "job_name", "build_number") != key:
+                continue
+            if old.get("id"):
+                new["id"] = old["id"]
+            _copy_failure_ids(old.get("failures") or [], new.get("failures") or [])
+            _copy_child_analysis_ids(
+                old.get("failed_children") or [],
+                new.get("failed_children") or [],
+            )
+            unused.pop(index)
+            break
+
+
+def copy_stable_analysis_ids(
+    prior: dict[str, Any], result_data: dict[str, Any]
+) -> None:
+    """Reuse submitted failure/child UUIDs when identity still matches."""
+    _copy_failure_ids(prior.get("failures") or [], result_data.get("failures") or [])
+    _copy_child_analysis_ids(
+        prior.get("child_job_analyses") or [],
+        result_data.get("child_job_analyses") or [],
+    )
+
+
 async def get_result(
     job_id: str, *, strip_sensitive: bool = True
 ) -> dict[str, Any] | None:
@@ -2131,24 +2263,37 @@ async def find_failure_by_uuid(
     return None
 
 
-async def list_results(limit: int = 50) -> list[dict[str, Any]]:
+async def list_results(
+    limit: int = 50, *, analysis_state: str = ""
+) -> list[dict[str, Any]]:
     """List recent analysis results.
 
     Args:
         limit: Maximum number of results to return.
+        analysis_state: Optional ``submitted`` / ``analyzed`` filter.
 
     Returns:
         List of result summary dictionaries.
     """
+    conditions: list[str] = []
+    params: list[Any] = []
+    clause, extra = _analysis_state_filter_sql(analysis_state, column="analysis_state")
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit)
     async with _connect_db() as db:
         cursor = await db.execute(
-            """
-            SELECT job_id, build_url, status, created_at
+            f"""
+            SELECT job_id, build_url, status, created_at,
+                   COALESCE(analysis_state, 'analyzed') AS analysis_state
             FROM results
+            {where}
             ORDER BY created_at DESC
             LIMIT ?
             """,
-            (limit,),
+            params,
         )
         rows = await cursor.fetchall()
         return [with_build_url_aliases(dict(row)) for row in rows]
@@ -3327,6 +3472,7 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         "error": row_data.get("error", ""),
         "reviewed_count": row_data["reviewed_count"],
         "comment_count": row_data["comment_count"],
+        "analysis_state": row_data.get("analysis_state") or ANALYSIS_STATE_ANALYZED,
     }
     result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
     if result_data:
@@ -3362,6 +3508,7 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
 _DASHBOARD_BASE_SQL = """
     SELECT r.job_id, r.build_url, r.status, r.result_json,
         r.created_at, r.completed_at, r.analysis_started_at, r.error,
+        COALESCE(r.analysis_state, 'analyzed') AS analysis_state,
         (SELECT COUNT(*) FROM failure_reviews fr
          WHERE fr.job_id = r.job_id AND fr.reviewed = 1) AS reviewed_count,
         (SELECT COUNT(*) FROM comments c
@@ -3416,6 +3563,7 @@ async def list_results_for_dashboard_filtered(
     date_from: str = "",
     date_to: str = "",
     review_status: str = "all",
+    analysis_state: str = "",
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -3491,6 +3639,13 @@ async def list_results_for_dashboard_filtered(
             "NOT EXISTS (SELECT 1 FROM failure_reviews fr "
             "WHERE fr.job_id = r.job_id AND fr.reviewed = 1)"
         )
+
+    clause, extra = _analysis_state_filter_sql(
+        analysis_state, column="r.analysis_state"
+    )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
 
     if job_names is not None:
         if not job_names:
@@ -3830,31 +3985,68 @@ async def save_test_entries(
         child_job_name: Child job name (empty for top-level).
         child_build_number: Child build number (0 for top-level).
     """
-    if not entries:
-        return
-
     async with _connect_db() as db:
-        # Delete existing entries for this scope (idempotent upsert)
+        # Delete existing entries for this scope (idempotent upsert).
+        # Empty *entries* still deletes so a later empty refetch cannot leave
+        # stale rows that disagree with cached counts.
         await db.execute(
             "DELETE FROM test_entries WHERE job_id = ? AND child_job_name = ? AND child_build_number = ?",
             (job_id, child_job_name, child_build_number),
         )
+        if not entries:
+            await db.commit()
+            return
         # Batch insert
         await db.executemany(
             "INSERT INTO test_entries (job_id, child_job_name, child_build_number, test_name, duration, status) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             [
-                (
-                    job_id,
-                    child_job_name,
-                    child_build_number,
-                    e.get("test_name", ""),
-                    e.get("duration", 0.0),
-                    e.get("status", ""),
-                )
+                _test_entry_row(job_id, child_job_name, child_build_number, e)
                 for e in entries
             ],
         )
+        await db.commit()
+
+
+def _test_entry_row(
+    job_id: str,
+    child_job_name: str,
+    child_build_number: int,
+    entry: dict[str, Any],
+) -> tuple[Any, ...]:
+    return (
+        job_id,
+        child_job_name,
+        child_build_number,
+        entry.get("test_name", ""),
+        entry.get("duration", 0.0),
+        entry.get("status", ""),
+    )
+
+
+async def replace_job_test_entries(
+    job_id: str,
+    top_entries: list[dict[str, Any]],
+    child_scopes: list[tuple[str, int, list[dict[str, Any]]]] | None = None,
+) -> None:
+    """Replace every stored test-entry row for a job with the latest snapshot."""
+    rows: list[tuple[Any, ...]] = [
+        _test_entry_row(job_id, "", 0, entry) for entry in top_entries
+    ]
+    for child_job_name, child_build_number, entries in child_scopes or []:
+        rows.extend(
+            _test_entry_row(job_id, child_job_name, child_build_number, entry)
+            for entry in entries
+        )
+    async with _connect_db() as db:
+        await db.execute("DELETE FROM test_entries WHERE job_id = ?", (job_id,))
+        if rows:
+            await db.executemany(
+                "INSERT INTO test_entries "
+                "(job_id, child_job_name, child_build_number, test_name, duration, status) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
         await db.commit()
 
 

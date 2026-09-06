@@ -662,7 +662,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   </div>
                 </>
               )}
-              {isOperator && (
+              {isOperator && result?.analysis_state !== 'submitted' && (
                 <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
                   <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
                   Re-analyze

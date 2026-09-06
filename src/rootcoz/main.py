@@ -205,10 +205,19 @@ from rootcoz.sources import (
     setup_analysis_workspace,
 )
 from rootcoz.sources import chat_workspace as source_chat_workspace
-from rootcoz.sources.base import CISourceResult, resolve_display_build_id
+from rootcoz.sources.base import (
+    INGEST_COMPLETE_SUMMARY,
+    CISourceResult,
+    resolve_display_build_id,
+)
 from rootcoz.storage import (
+    ACTIVE_STATUSES,
     AI_SYSTEM_USERNAME,
+    ANALYSIS_STATE_ANALYZED,
+    ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
+    claim_submitted_job_for_analyze,
+    copy_stable_analysis_ids,
     get_effective_classification,
     get_history_classification,
     get_result,
@@ -219,6 +228,8 @@ from rootcoz.storage import (
     list_results_for_dashboard_filtered,
     patch_result_json,
     populate_failure_history,
+    release_submitted_job_analyze_claim,
+    replace_job_test_entries,
     save_result,
     stamp_build_url,
     update_status,
@@ -1153,6 +1164,7 @@ async def _preserve_request_params(job_id: str, result_data: dict[str, Any]) -> 
         ):
             if key in stored_result and key not in result_data:
                 result_data[key] = stored_result[key]
+        copy_stable_analysis_ids(stored_result, result_data)
 
 
 async def _fail_resumed_waiting_job(
@@ -3087,6 +3099,81 @@ def _strip_old_submitter_tag(tags: list[str], result_data: dict[str, Any]) -> li
     return [t for t in tags if not (isinstance(t, str) and t.lower() == old_normalized)]
 
 
+def _analysis_state_for_ingest(
+    ingest_only: bool,
+) -> Literal["submitted", "analyzed"]:
+    return ANALYSIS_STATE_SUBMITTED if ingest_only else ANALYSIS_STATE_ANALYZED
+
+
+async def _finish_ci_ingest(
+    *,
+    job_id: str,
+    display_name: str,
+    source_result: CISourceResult,
+    extra_labels: list[str] | None,
+    metadata_job_name: str,
+    metadata_rules: Any,
+    ingest_only: bool,
+    source: CISource | None,
+) -> None:
+    """Persist fetched CI results and stop before AI when ingest_only."""
+    _all_entries = source_result.test_entry_dicts()
+    passed_count, skipped_count, failed_count = source_result.test_counts()
+    analysis_state = _analysis_state_for_ingest(ingest_only)
+    if ingest_only:
+        summary = INGEST_COMPLETE_SUMMARY
+        failures = source_result.unanalyzed_failure_analyses()
+    else:
+        summary = "No test failures found in the provided input."
+        failures = []
+    analysis_result = FailureAnalysisResult(
+        job_id=job_id,
+        status="completed",
+        summary=summary,
+        enriched_xml=getattr(source, "raw_xml", None),
+        passed_count=passed_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        failures=failures,
+        analysis_state=analysis_state,
+    )
+    result_data = analysis_result.model_dump(mode="json")
+    result_data["job_name"] = display_name
+    _stamp_result_metadata(result_data, source_result)
+    child_job_analyses: list[Any] = []
+    child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] = []
+    if ingest_only and source is not None and source_result.child_job_infos:
+        child_job_analyses, child_test_scopes = await source.analyze_children(
+            source_result,
+            settings=getattr(source, "settings", None),
+            ingest_only=True,
+        )
+        if child_job_analyses:
+            result_data["child_job_analyses"] = [
+                c.model_dump(mode="json") for c in child_job_analyses
+            ]
+        _apply_cached_test_counts(result_data, _all_entries, child_test_scopes)
+    await replace_job_test_entries(job_id, _all_entries, child_test_scopes)
+    await _preserve_request_params(job_id, result_data)
+    logger.info(
+        "Job %s: ingest complete (%s), %d failed, %d passed, %d skipped",
+        job_id,
+        analysis_state,
+        result_data.get("failed_count", failed_count),
+        result_data.get("passed_count", passed_count),
+        result_data.get("skipped_count", skipped_count),
+    )
+    await update_status(job_id, "completed", result_data)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+    notify_job_status_changed(job_id)
+    await _auto_assign_metadata(
+        metadata_job_name,
+        metadata_rules,
+        extra_labels=extra_labels,
+    )
+
+
 async def _enqueue_ci_source_analysis(
     body: "UnifiedAnalyzeRequest",
     merged: "Settings",
@@ -3101,6 +3188,8 @@ async def _enqueue_ci_source_analysis(
     reanalyzed_from_job_id: str = "",
     reanalyzed_from_job_name: str = "",
     is_admin: bool = False,
+    ingest_only: bool = False,
+    existing_job_id: str = "",
 ) -> dict[str, Any]:
     """Build params, persist initial state, spawn task, and return response.
 
@@ -3122,19 +3211,27 @@ async def _enqueue_ci_source_analysis(
     Returns:
         JSON-serialisable response dict with ``status``, ``job_id``, links.
     """
-    ai_provider, ai_model = await _resolve_ai_config_allow_defer(
-        body, merged, request=None
-    )
+    persist_merged = merged
+    if ingest_only:
+        ai_provider, ai_model = "", ""
+        # Skip artifact download during ingest only; keep the caller's artifact
+        # preference in stored request_params for a later in-place analyze.
+        merged = merged.model_copy(update={"get_job_artifacts": False})
+        resolved_peers = None
+    else:
+        ai_provider, ai_model = await _resolve_ai_config_allow_defer(
+            body, persist_merged, request=None
+        )
 
     # Resolve repos
-    tests_repo_url_raw = resolve_tests_repo_url(body, merged)
+    tests_repo_url_raw = resolve_tests_repo_url(body, persist_merged)
     tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
     resolved_tests_repo_token = (
-        resolve_tests_repo_token(body, merged) if tests_repo_url else ""
+        resolve_tests_repo_token(body, persist_merged) if tests_repo_url else ""
     )
-    additional_repos_list = resolve_additional_repos(body, merged)
+    additional_repos_list = resolve_additional_repos(body, persist_merged)
 
-    job_id = str(uuid.uuid4())
+    job_id = existing_job_id or str(uuid.uuid4())
     job_id_var.set(job_id)
 
     # Append short job_id suffix to generic fallback names for uniqueness
@@ -3165,7 +3262,7 @@ async def _enqueue_ci_source_analysis(
     base_params["issue_prompt"] = body.issue_prompt or ""
     base_params["analysis_type"] = analysis_type
     base_params["original_name"] = body.name or ""
-    _apply_base_analysis_overrides(base_params, body, merged)
+    _apply_base_analysis_overrides(base_params, body, persist_merged)
 
     source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
     if source_cls is None:
@@ -3173,10 +3270,10 @@ async def _enqueue_ci_source_analysis(
             status_code=422, detail=f"Unsupported analysis type: {analysis_type}"
         )
     try:
-        source_cls.validate_request(body, merged)
+        source_cls.validate_request(body, persist_merged)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    source_cls.build_request_params(body, merged, base_params)
+    source_cls.build_request_params(body, persist_merged, base_params)
 
     initial_result: dict[str, Any] = {
         "job_name": display_name,
@@ -3193,9 +3290,26 @@ async def _enqueue_ci_source_analysis(
     )
     effective_tags = tags if tags is not None else (body.tags or None)
     initial_result["tags"] = _ensure_submitter_tag(effective_tags, username)
-    initial_status = source_cls.initial_status(body, merged)
+    initial_result["analysis_state"] = _analysis_state_for_ingest(ingest_only)
+    if ingest_only:
+        initial_result["analyzed_by"] = ""
+        initial_result["analyzed_at"] = ""
+    elif existing_job_id:
+        initial_result["analyzed_by"] = username
+        initial_result["analyzed_at"] = datetime.now(UTC).isoformat()
+    initial_status = source_cls.initial_status(body, persist_merged)
     # Prefer a known build URL at enqueue time (e.g. Jenkins waiting jobs).
-    initial_build_url = source_cls.pre_enqueue_build_url(body, merged)
+    initial_build_url = source_cls.pre_enqueue_build_url(body, persist_merged)
+    if existing_job_id:
+        stored = await get_result(existing_job_id, strip_sensitive=False)
+        prior = stored.get("result") if stored else None
+        if isinstance(prior, dict):
+            merged_result = dict(prior)
+            for key, value in initial_result.items():
+                if key == "failures" and not value:
+                    continue
+                merged_result[key] = value
+            initial_result = merged_result
     await save_result(job_id, initial_build_url, initial_status, initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -3217,6 +3331,7 @@ async def _enqueue_ci_source_analysis(
             base_url=base_url,
             username=username,
             is_admin=is_admin,
+            ingest_only=ingest_only,
         )
     )
     _register_job_task(job_id, task)
@@ -3282,29 +3397,6 @@ def _count_test_entry_statuses(entries: list[dict[str, Any]]) -> tuple[int, int,
         elif status == "failed":
             failed += 1
     return passed, skipped, failed
-
-
-async def _save_test_entry_scopes(
-    job_id: str,
-    scopes: list[tuple[str, int, list[dict[str, Any]]]],
-) -> None:
-    """Persist child-scoped test entry batches via ``save_test_entries``."""
-    for child_job_name, child_build_number, entries in scopes:
-        if not entries:
-            continue
-        await storage.save_test_entries(
-            job_id,
-            entries,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-        )
-        logger.info(
-            "Job %s: saved %d test entries for child %s #%s",
-            job_id,
-            len(entries),
-            child_job_name,
-            child_build_number,
-        )
 
 
 def _apply_cached_test_counts(
@@ -3615,6 +3707,7 @@ async def _process_ci_source_analysis(
     base_url: str,
     username: str = "",
     is_admin: bool = False,
+    ingest_only: bool = False,
 ) -> None:
     """Background task for CISource plugin analysis (file/raw/prow/jenkins)."""
     job_id_var.set(job_id)
@@ -3649,6 +3742,7 @@ async def _process_ci_source_analysis(
                     "job_name": display_name,
                     "display_name": display_name,
                     "error": pre_fetch_error,
+                    "analysis_state": _analysis_state_for_ingest(ingest_only),
                 }
                 _stamp_result_metadata(fail_data, None)
                 await _preserve_request_params(job_id, fail_data)
@@ -3681,46 +3775,17 @@ async def _process_ci_source_analysis(
 
         await source.persist_fetch_metadata(job_id, source_result)
 
-        if source_result.skip_analysis:
-            # Save test entries (passed/skipped/failed) to test_entries table
-            _all_entries = source_result.test_entry_dicts()
-            if _all_entries:
-                await storage.save_test_entries(job_id, _all_entries)
-
-            _passed_count, _skipped_count, _failed_count = source_result.test_counts()
-
-            summary = "No test failures found in the provided input."
-            analysis_result = FailureAnalysisResult(
+        if ingest_only or source_result.skip_analysis:
+            await _finish_ci_ingest(
                 job_id=job_id,
-                status="completed",
-                summary=summary,
-                enriched_xml=getattr(source, "raw_xml", None),
-                passed_count=_passed_count,
-                skipped_count=_skipped_count,
-                failed_count=_failed_count,
-            )
-            result_data = analysis_result.model_dump(mode="json")
-            result_data["job_name"] = display_name
-            _stamp_result_metadata(result_data, source_result)
-            await _preserve_request_params(job_id, result_data)
-            logger.info(
-                "Job %s: zero failures, %d passed, %d skipped — skipping AI analysis",
-                job_id,
-                _passed_count,
-                _skipped_count,
-            )
-            await update_status(job_id, "completed", result_data)
-            notify_active_count_changed()
-            notify_dashboard_changed()
-            notify_job_status_changed(job_id)
-
-            # Auto-assign job metadata from name pattern rules / request labels
-            await _auto_assign_metadata(
-                metadata_job_name,
-                merged.metadata_rules,
+                display_name=display_name,
+                source_result=source_result,
                 extra_labels=extra_labels,
+                metadata_job_name=metadata_job_name,
+                metadata_rules=merged.metadata_rules,
+                ingest_only=ingest_only,
+                source=source,
             )
-
             return
 
         test_failures = source_result.failures
@@ -4003,9 +4068,7 @@ async def _process_ci_source_analysis(
 
                 # Persist top-level + child-scoped test entries
                 _top_entries = source_result.test_entry_dicts()
-                if _top_entries:
-                    await storage.save_test_entries(job_id, _top_entries)
-                await _save_test_entry_scopes(job_id, child_test_scopes)
+                await replace_job_test_entries(job_id, _top_entries, child_test_scopes)
                 _apply_cached_test_counts(result_data, _top_entries, child_test_scopes)
 
                 await _carry_forward_overrides(job_id, result_data)
@@ -4142,9 +4205,7 @@ async def _process_ci_source_analysis(
 
         # Save ALL test entries (passed/skipped/failed) to test_entries table
         _all_test_entries = source_result.test_entry_dicts()
-        if _all_test_entries:
-            await storage.save_test_entries(job_id, _all_test_entries)
-        await _save_test_entry_scopes(job_id, child_test_scopes)
+        await replace_job_test_entries(job_id, _all_test_entries, child_test_scopes)
 
         # Cache job-level test counts in result_json for dashboard display
         _apply_cached_test_counts(result_data, _all_test_entries, child_test_scopes)
@@ -4201,6 +4262,7 @@ async def _process_ci_source_analysis(
             summary=user_error,
             ai_provider=ai_provider,
             ai_model=ai_model,
+            analysis_state=_analysis_state_for_ingest(ingest_only),
         )
         fail_data = fail_result.model_dump(mode="json")
         fail_data["error"] = fail_result.summary
@@ -4226,6 +4288,21 @@ async def _process_ci_source_analysis(
         await _cleanup_ai_session(auth_header)
 
 
+def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
+    """Resolve dashboard display name from the request or the source plugin."""
+    display_name: str = body.name or ""
+    if display_name:
+        return display_name
+    from rootcoz.sources.registry import SOURCE_REGISTRY
+
+    source_cls = SOURCE_REGISTRY.get(body.type)
+    return (
+        source_cls.default_display_name(body)
+        if source_cls is not None
+        else f"{body.type}-analysis"
+    )
+
+
 @app.post("/analyze", status_code=202, response_model=None, operation_id="analyze")
 async def analyze(
     request: Request,
@@ -4233,7 +4310,7 @@ async def analyze(
     *,
     settings: Settings = _SETTINGS_DEP,
 ) -> dict[str, Any]:
-    """Submit an analysis job.
+    """Queue an end-to-end analysis job (CI ingest + AI).
 
     Dispatches to the appropriate CI source plugin based on the ``type`` field.
     All types return 202 with a job_id for async polling.
@@ -4243,22 +4320,9 @@ async def analyze(
     _check_allow_list(request)
     base_url = _extract_base_url()
 
-    # Validate AI config early (may defer when tests repo can supply settings.json)
     await _resolve_ai_config_allow_defer(body, settings, request)
 
-    # Resolve display name via plugin registry (source-agnostic)
-    display_name: str = body.name or ""
-    if not display_name:
-        from rootcoz.sources.registry import SOURCE_REGISTRY
-
-        source_cls = SOURCE_REGISTRY.get(body.type)
-        display_name = (
-            source_cls.default_display_name(body)
-            if source_cls is not None
-            else f"{body.type}-analysis"
-        )
-
-    # All sources — enqueue as async background task
+    display_name = _resolve_request_display_name(body)
     merged = _merge_settings(body, settings)
     resolved_peers = await _validate_peer_configs(body, merged)
     return await _enqueue_ci_source_analysis(
@@ -4272,6 +4336,159 @@ async def analyze(
         message_prefix="Analysis",
         is_admin=bool(request.state.is_admin),
     )
+
+
+@app.post("/submit", status_code=202, response_model=None, operation_id="submit")
+async def submit(
+    request: Request,
+    body: UnifiedAnalyzeRequest,
+    *,
+    settings: Settings = _SETTINGS_DEP,
+) -> dict[str, Any]:
+    """Queue CI ingest without AI analysis.
+
+    Same source validation and test-result collection as ``POST /analyze``,
+    then stops before repository clone and AI. Requires operator or admin.
+    """
+    _require_operator(request)
+    _check_allow_list(request)
+    base_url = _extract_base_url()
+
+    display_name = _resolve_request_display_name(body)
+    merged = _merge_settings(body, settings)
+    return await _enqueue_ci_source_analysis(
+        body=body,
+        merged=merged,
+        resolved_peers=None,
+        display_name=display_name,
+        analysis_type=body.type,
+        base_url=base_url,
+        username=request.state.username,
+        message_prefix="Submit",
+        is_admin=bool(request.state.is_admin),
+        ingest_only=True,
+    )
+
+
+@app.post(
+    "/results/{job_id}/analyze",
+    status_code=202,
+    response_model=None,
+    operation_id="analyzeSubmittedJob",
+)
+async def analyze_submitted_job(
+    job_id: str,
+    request: Request,
+    body: ReAnalyzeRequest | None = None,
+    _: None = Depends(_bind_job_id),
+) -> dict[str, Any]:
+    """Run the AI pipeline in place on a submitted (ingest-only) job."""
+    _check_allow_list(request)
+    _require_operator(request)
+
+    stored = await get_result(job_id, strip_sensitive=False)
+    if not stored or not stored.get("result"):
+        raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
+
+    result_data = stored["result"]
+    state = result_data.get("analysis_state") or stored.get("analysis_state")
+    if state != ANALYSIS_STATE_SUBMITTED:
+        raise HTTPException(
+            status_code=409,
+            detail="Only submitted jobs can be analyzed in place. Use re-analyze for analyzed jobs.",
+        )
+    if stored.get("status") in ACTIVE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="Job is still ingesting; wait until submit completes.",
+        )
+
+    if "request_params" not in result_data:
+        raise HTTPException(
+            status_code=400,
+            detail="Submitted job has no stored request_params; cannot analyze",
+        )
+
+    params = result_data.get("request_params", {})
+    analysis_type = params.get("analysis_type", "jenkins")
+    try:
+        decrypted_params = decrypt_sensitive_fields(dict(params))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to decrypt stored params: {exc}",
+        ) from exc
+    _validate_decrypted_sensitive_fields(decrypted_params)
+
+    unified_fields = _unified_fields_from_stored_params(decrypted_params, analysis_type)
+    if body is not None:
+        for field_name in body.model_fields_set:
+            unified_fields[field_name] = getattr(body, field_name)
+    if "get_job_artifacts" not in unified_fields:
+        unified_fields["get_job_artifacts"] = True
+    unified_body = UnifiedAnalyzeRequest(**unified_fields)
+    source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
+    if source_cls is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported analysis type: {analysis_type}",
+        )
+
+    await _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
+    merged = _merge_settings(unified_body, get_settings())
+    resolved_peers = await _validate_peer_configs(unified_body, merged)
+    display_name = (
+        unified_body.name
+        or result_data.get("display_name")
+        or result_data.get("job_name")
+        or source_cls.default_display_name(unified_body)
+    )
+    previous_status = str(stored.get("status") or "completed")
+    claimed = await claim_submitted_job_for_analyze(job_id)
+    if not claimed:
+        raise HTTPException(
+            status_code=409,
+            detail="Job is already being analyzed or is no longer submitted.",
+        )
+    try:
+        return await _enqueue_ci_source_analysis(
+            body=unified_body,
+            merged=merged,
+            resolved_peers=resolved_peers,
+            display_name=display_name,
+            analysis_type=analysis_type,
+            base_url=_extract_base_url(),
+            username=request.state.username,
+            tags=list(result_data.get("tags") or []),
+            message_prefix="Analysis",
+            is_admin=bool(request.state.is_admin),
+            existing_job_id=job_id,
+        )
+    except Exception:
+        await release_submitted_job_analyze_claim(job_id, previous_status)
+        raise
+
+
+def _unified_fields_from_stored_params(
+    decrypted_params: dict[str, Any], analysis_type: str
+) -> dict[str, Any]:
+    """Rebuild UnifiedAnalyzeRequest fields from stored request_params."""
+    unified_fields: dict[str, Any] = {"type": analysis_type}
+    stored_name = decrypted_params.get("original_name", "")
+    if stored_name:
+        unified_fields["name"] = stored_name
+    source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
+    if source_cls is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported analysis type for re-analysis: {analysis_type}",
+        )
+    try:
+        unified_fields.update(source_cls.restore_reanalyze_fields(decrypted_params))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _copy_analysis_settings(decrypted_params, unified_fields)
+    return unified_fields
 
 
 @app.post(
@@ -4331,29 +4548,13 @@ async def re_analyze(
 
     _validate_decrypted_sensitive_fields(decrypted_params)
 
-    # Prefer the original user-supplied name (before UUID suffix was added)
-    # over the resolved display_name / job_name.
-    unified_fields: dict[str, Any] = {
-        "type": analysis_type,
-    }
-    # Only restore name if user explicitly provided one;
-    # leave unset so _enqueue_ci_source_analysis generates a fresh fallback.
-    stored_name = decrypted_params.get("original_name", "")
-    if stored_name:
-        unified_fields["name"] = stored_name
-    # Restore source-specific fields via plugin registry
+    unified_fields = _unified_fields_from_stored_params(decrypted_params, analysis_type)
     source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
     if source_cls is None:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported analysis type for re-analysis: {analysis_type}",
         )
-    try:
-        unified_fields.update(source_cls.restore_reanalyze_fields(decrypted_params))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    _copy_analysis_settings(decrypted_params, unified_fields)
 
     # Apply overrides from request body
     for field_name in body.model_fields_set:
@@ -7400,10 +7601,19 @@ async def get_review_status(
 
 
 @app.get("/results", operation_id="listJobResults")
-async def list_job_results(limit: int = Query(50, le=100)) -> list[dict[str, Any]]:
+async def list_job_results(
+    limit: int = Query(50, le=100),
+    analysis_state: str = Query(
+        default="",
+        description="Filter: submitted, analyzed (empty = all)",
+    ),
+) -> list[dict[str, Any]]:
     """List recent analysis jobs."""
     logger.debug(f"GET /results: limit={limit}")
-    return await list_results(limit)
+    try:
+        return await list_results(limit, analysis_state=analysis_state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.delete("/api/results/bulk", operation_id="bulkDeleteJobsEndpoint")
@@ -10250,6 +10460,10 @@ async def api_dashboard_filtered(
     review_status: str = Query(
         default="all", description="Filter: all, reviewed, not_reviewed"
     ),
+    analysis_state: str = Query(
+        default="",
+        description="Filter: submitted, analyzed (empty = all)",
+    ),
     limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
 ) -> dict[str, Any]:
@@ -10295,17 +10509,21 @@ async def api_dashboard_filtered(
             if job_labels & exclude_set:
                 exclude_job_names.add(m["job_name"])
 
-    result = await list_results_for_dashboard_filtered(
-        job_names=job_names,
-        exclude_job_names=exclude_job_names,
-        search=search,
-        status=status,
-        date_from=date_from,
-        date_to=date_to,
-        review_status=review_status,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        result = await list_results_for_dashboard_filtered(
+            job_names=job_names,
+            exclude_job_names=exclude_job_names,
+            search=search,
+            status=status,
+            date_from=date_from,
+            date_to=date_to,
+            review_status=review_status,
+            analysis_state=analysis_state,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     jobs = result["jobs"]
 
     # Attach metadata to each job
