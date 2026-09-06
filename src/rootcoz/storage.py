@@ -1863,18 +1863,26 @@ async def claim_submitted_job_for_analyze(job_id: str) -> bool:
         return cursor.rowcount == 1
 
 
-async def release_submitted_job_analyze_claim(job_id: str) -> None:
-    """Restore a submitted job if analyze enqueue failed after claiming."""
+async def release_submitted_job_analyze_claim(
+    job_id: str, previous_status: str
+) -> None:
+    """Restore a submitted job if analyze enqueue failed after claiming.
+
+    Uses the status from before the claim so a failed ingest stays ``failed``.
+    """
+    restore_status = previous_status
+    if not restore_status or restore_status in ACTIVE_STATUSES:
+        restore_status = "completed"
     async with _connect_db() as db:
         await db.execute(
             """
             UPDATE results
-            SET status = 'completed'
+            SET status = ?
             WHERE job_id = ?
               AND status = 'pending'
               AND COALESCE(analysis_state, 'analyzed') = ?
             """,
-            (job_id, ANALYSIS_STATE_SUBMITTED),
+            (restore_status, job_id, ANALYSIS_STATE_SUBMITTED),
         )
         await db.commit()
 

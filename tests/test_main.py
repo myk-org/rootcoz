@@ -7118,6 +7118,31 @@ class TestSubmitIntake:
             retry = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
         assert retry.status_code == 202, retry.text
 
+    def test_in_place_analyze_release_keeps_failed_ingest_status(
+        self, test_client
+    ) -> None:
+        from fastapi import HTTPException
+
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "jenkins",
+                "job_name": "test-job",
+                "build_number": 1,
+            },
+        )
+        job_id = data["job_id"]
+        asyncio.run(storage.update_status(job_id, "failed"))
+        analyze_body = {"ai_provider": "claude", "ai_model": "test-model"}
+        with patch(
+            "rootcoz.main._enqueue_ci_source_analysis",
+            side_effect=HTTPException(status_code=422, detail="enqueue failed"),
+        ):
+            failed = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
+        assert failed.status_code == 422
+        stored = test_client.get(f"/results/{job_id}").json()
+        assert stored["status"] == "failed"
+
     def test_dashboard_analysis_state_filter(self, test_client) -> None:
         ok = test_client.get(
             "/api/dashboard/filtered", params={"analysis_state": "submitted"}

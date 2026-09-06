@@ -4443,6 +4443,7 @@ async def analyze_submitted_job(
         or result_data.get("job_name")
         or source_cls.default_display_name(unified_body)
     )
+    previous_status = str(stored.get("status") or "completed")
     claimed = await claim_submitted_job_for_analyze(job_id)
     if not claimed:
         raise HTTPException(
@@ -4464,7 +4465,7 @@ async def analyze_submitted_job(
             existing_job_id=job_id,
         )
     except Exception:
-        await release_submitted_job_analyze_claim(job_id)
+        await release_submitted_job_analyze_claim(job_id, previous_status)
         raise
 
 
