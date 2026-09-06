@@ -206,6 +206,16 @@ class TestResultsCommands:
         assert result.exit_code == 0
         assert "abc-123" in result.output
 
+    def test_results_list_analysis_state(self, mock_client):
+        mock_client.list_results.return_value = []
+        result = runner.invoke(
+            app, ["results", "list", "--analysis-state", "submitted"]
+        )
+        assert result.exit_code == 0
+        mock_client.list_results.assert_called_with(
+            limit=50, analysis_state="submitted"
+        )
+
     def test_results_show(self, mock_client):
         mock_client.get_result.return_value = {
             "job_id": "abc-123",

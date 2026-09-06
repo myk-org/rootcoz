@@ -49,21 +49,6 @@ class TestInitDb:
             await storage.init_db()
             await storage.init_db()  # Should not raise
 
-    def test_resolve_db_path_falls_back_when_unwritable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        blocked = tmp_path / "blocked"
-        blocked.mkdir()
-        monkeypatch.setenv("DB_PATH", str(blocked / "results.db"))
-        fallback_root = tmp_path / "xdg"
-        monkeypatch.setenv("XDG_DATA_HOME", str(fallback_root))
-        blocked.chmod(0o555)
-        try:
-            resolved = storage._resolve_db_path()
-        finally:
-            blocked.chmod(0o755)
-        assert resolved == fallback_root / "rootcoz" / "results.db"
-
 
 class TestSaveResult:
     """Tests for the save_result function."""
@@ -1650,6 +1635,97 @@ class TestSaveTestEntriesChildScope:
             assert child["total"] == 2
             names = {e["test_name"] for e in child["entries"]}
             assert names == {"child.pass", "child.skip"}
+
+    async def test_empty_save_clears_scope(self, setup_test_db: Path) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="job-empty-scope",
+                jenkins_url="https://jenkins.example.com/job/pipe/1/",
+                status="completed",
+            )
+            await storage.save_test_entries(
+                "job-empty-scope",
+                [{"test_name": "gone", "duration": 0.1, "status": "passed"}],
+            )
+            await storage.save_test_entries("job-empty-scope", [])
+            remaining = await storage.get_test_entries("job-empty-scope")
+            assert remaining["total"] == 0
+
+    async def test_replace_job_test_entries_drops_missing_children(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="job-replace-entries",
+                jenkins_url="https://jenkins.example.com/job/pipe/1/",
+                status="completed",
+            )
+            await storage.replace_job_test_entries(
+                "job-replace-entries",
+                [{"test_name": "top", "duration": 0.1, "status": "passed"}],
+                [
+                    (
+                        "old-child",
+                        1,
+                        [{"test_name": "c", "duration": 0.0, "status": "failed"}],
+                    )
+                ],
+            )
+            await storage.replace_job_test_entries("job-replace-entries", [], [])
+            remaining = await storage.get_test_entries("job-replace-entries")
+            assert remaining["total"] == 0
+
+    def test_copy_stable_analysis_ids(self) -> None:
+        prior = {
+            "failures": [
+                {
+                    "id": "fail-1",
+                    "test_name": "t",
+                    "error_signature": "sig",
+                }
+            ],
+            "child_job_analyses": [
+                {
+                    "id": "child-1",
+                    "job_name": "leaf",
+                    "build_number": 9,
+                    "failures": [
+                        {
+                            "id": "fail-child",
+                            "test_name": "ct",
+                            "error_signature": "csig",
+                        }
+                    ],
+                }
+            ],
+        }
+        current = {
+            "failures": [
+                {
+                    "id": "new-fail",
+                    "test_name": "t",
+                    "error_signature": "sig",
+                }
+            ],
+            "child_job_analyses": [
+                {
+                    "id": "new-child",
+                    "job_name": "leaf",
+                    "build_number": 9,
+                    "failures": [
+                        {
+                            "id": "new-fail-child",
+                            "test_name": "ct",
+                            "error_signature": "csig",
+                        }
+                    ],
+                }
+            ],
+        }
+        storage.copy_stable_analysis_ids(prior, current)
+        assert current["failures"][0]["id"] == "fail-1"
+        assert current["child_job_analyses"][0]["id"] == "child-1"
+        assert current["child_job_analyses"][0]["failures"][0]["id"] == "fail-child"
 
 
 class TestWithBuildUrlAliases:

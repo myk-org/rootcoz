@@ -274,9 +274,14 @@ class RootCozClient:
 
     # -- Results --------------------------------------------------------------
 
-    def list_results(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list_results(
+        self, limit: int = 50, *, analysis_state: str = ""
+    ) -> list[dict[str, Any]]:
         """List recent analyzed jobs. GET /results?limit="""
-        return self._request("GET", "/results", params={"limit": limit})
+        params: dict[str, Any] = {"limit": limit}
+        if analysis_state:
+            params["analysis_state"] = analysis_state
+        return self._request("GET", "/results", params=params)
 
     def dashboard(self, limit: int = 500) -> list[dict[str, Any]]:
         """List analysis jobs with dashboard metadata. GET /api/dashboard"""

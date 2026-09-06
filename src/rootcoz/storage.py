@@ -36,37 +36,7 @@ from rootcoz.models import (
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 
-def _resolve_db_path() -> Path:
-    """Use ``DB_PATH`` when its directory is writable, else XDG data home.
-
-    Bind-mounted ``/data`` is often owned by the host user, so the container
-    ``appuser`` cannot create WAL files next to the SQLite database.
-    """
-    configured = Path(os.getenv("DB_PATH", "/data/results.db"))
-    parent = configured.parent
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-        probe = parent / ".rootcoz-write-probe"
-        probe.write_bytes(b"")
-        probe.unlink(missing_ok=True)
-        if configured.exists() and not os.access(configured, os.W_OK):
-            raise OSError(f"{configured} is not writable")
-        return configured
-    except OSError as exc:
-        xdg = os.environ.get("XDG_DATA_HOME")
-        fallback_root = Path(xdg) if xdg else Path.home() / ".local" / "share"
-        fallback = fallback_root / "rootcoz" / "results.db"
-        fallback.parent.mkdir(parents=True, exist_ok=True)
-        logger.warning(
-            "Database path %s is not writable (%s); using %s",
-            configured,
-            exc,
-            fallback,
-        )
-        return fallback
-
-
-DB_PATH = _resolve_db_path()
+DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
 
 ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
 ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
@@ -1872,6 +1842,27 @@ async def update_status(
         await db.commit()
 
 
+async def claim_submitted_job_for_analyze(job_id: str) -> bool:
+    """Atomically claim a completed submitted job for in-place analyze.
+
+    Returns True only for the caller that flipped ``status`` to ``pending``.
+    """
+    placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"""
+            UPDATE results
+            SET status = 'pending'
+            WHERE job_id = ?
+              AND COALESCE(analysis_state, 'analyzed') = ?
+              AND status NOT IN ({placeholders})
+            """,
+            (job_id, ANALYSIS_STATE_SUBMITTED, *ACTIVE_STATUSES),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+
 async def update_build_url(job_id: str, build_url: str) -> None:
     """Update the build_url DB column for an existing result."""
     from rootcoz.url_utils import sanitize_http_href
@@ -2048,6 +2039,56 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> b
             await db.commit()
         logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
     return changed
+
+
+def _analysis_identity_key(item: dict[str, Any], *fields: str) -> tuple[Any, ...]:
+    return tuple(item.get(field) for field in fields)
+
+
+def _copy_failure_ids(prior: list[Any], current: list[Any]) -> None:
+    unused = [p for p in prior if isinstance(p, dict)]
+    for new in current:
+        if not isinstance(new, dict):
+            continue
+        key = _analysis_identity_key(new, "test_name", "error_signature")
+        for index, old in enumerate(unused):
+            if _analysis_identity_key(old, "test_name", "error_signature") != key:
+                continue
+            if old.get("id"):
+                new["id"] = old["id"]
+            unused.pop(index)
+            break
+
+
+def _copy_child_analysis_ids(prior: list[Any], current: list[Any]) -> None:
+    unused = [p for p in prior if isinstance(p, dict)]
+    for new in current:
+        if not isinstance(new, dict):
+            continue
+        key = _analysis_identity_key(new, "job_name", "build_number")
+        for index, old in enumerate(unused):
+            if _analysis_identity_key(old, "job_name", "build_number") != key:
+                continue
+            if old.get("id"):
+                new["id"] = old["id"]
+            _copy_failure_ids(old.get("failures") or [], new.get("failures") or [])
+            _copy_child_analysis_ids(
+                old.get("failed_children") or [],
+                new.get("failed_children") or [],
+            )
+            unused.pop(index)
+            break
+
+
+def copy_stable_analysis_ids(
+    prior: dict[str, Any], result_data: dict[str, Any]
+) -> None:
+    """Reuse submitted failure/child UUIDs when identity still matches."""
+    _copy_failure_ids(prior.get("failures") or [], result_data.get("failures") or [])
+    _copy_child_analysis_ids(
+        prior.get("child_job_analyses") or [],
+        result_data.get("child_job_analyses") or [],
+    )
 
 
 async def get_result(
@@ -3920,31 +3961,68 @@ async def save_test_entries(
         child_job_name: Child job name (empty for top-level).
         child_build_number: Child build number (0 for top-level).
     """
-    if not entries:
-        return
-
     async with _connect_db() as db:
-        # Delete existing entries for this scope (idempotent upsert)
+        # Delete existing entries for this scope (idempotent upsert).
+        # Empty *entries* still deletes so a later empty refetch cannot leave
+        # stale rows that disagree with cached counts.
         await db.execute(
             "DELETE FROM test_entries WHERE job_id = ? AND child_job_name = ? AND child_build_number = ?",
             (job_id, child_job_name, child_build_number),
         )
+        if not entries:
+            await db.commit()
+            return
         # Batch insert
         await db.executemany(
             "INSERT INTO test_entries (job_id, child_job_name, child_build_number, test_name, duration, status) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             [
-                (
-                    job_id,
-                    child_job_name,
-                    child_build_number,
-                    e.get("test_name", ""),
-                    e.get("duration", 0.0),
-                    e.get("status", ""),
-                )
+                _test_entry_row(job_id, child_job_name, child_build_number, e)
                 for e in entries
             ],
         )
+        await db.commit()
+
+
+def _test_entry_row(
+    job_id: str,
+    child_job_name: str,
+    child_build_number: int,
+    entry: dict[str, Any],
+) -> tuple[Any, ...]:
+    return (
+        job_id,
+        child_job_name,
+        child_build_number,
+        entry.get("test_name", ""),
+        entry.get("duration", 0.0),
+        entry.get("status", ""),
+    )
+
+
+async def replace_job_test_entries(
+    job_id: str,
+    top_entries: list[dict[str, Any]],
+    child_scopes: list[tuple[str, int, list[dict[str, Any]]]] | None = None,
+) -> None:
+    """Replace every stored test-entry row for a job with the latest snapshot."""
+    rows: list[tuple[Any, ...]] = [
+        _test_entry_row(job_id, "", 0, entry) for entry in top_entries
+    ]
+    for child_job_name, child_build_number, entries in child_scopes or []:
+        rows.extend(
+            _test_entry_row(job_id, child_job_name, child_build_number, entry)
+            for entry in entries
+        )
+    async with _connect_db() as db:
+        await db.execute("DELETE FROM test_entries WHERE job_id = ?", (job_id,))
+        if rows:
+            await db.executemany(
+                "INSERT INTO test_entries "
+                "(job_id, child_job_name, child_build_number, test_name, duration, status) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
         await db.commit()
 
 

@@ -43,7 +43,10 @@ interface ReAnalyzeDialogProps {
   inPlaceAnalyze?: boolean
 }
 
-function initFormState(p: AnalysisResult['request_params']) {
+function initFormState(
+  p: AnalysisResult['request_params'],
+  forceArtifactsOn = false,
+) {
   return {
     aiProvider: normalizeProvider(p?.ai_provider || 'claude'),
     aiModel: p?.ai_model || '',
@@ -67,7 +70,11 @@ function initFormState(p: AnalysisResult['request_params']) {
     enableJira: p?.enable_jira != null ? (p.enable_jira as boolean) : undefined,
     jiraUrl: (p?.jira_url as string) || '',
     jiraProjectKey: (p?.jira_project_key as string) || '',
-    getArtifacts: p?.get_job_artifacts != null ? (p.get_job_artifacts as boolean) : undefined,
+    getArtifacts: forceArtifactsOn
+      ? true
+      : p?.get_job_artifacts != null
+        ? (p.get_job_artifacts as boolean)
+        : undefined,
     maxArtifactsSize: p?.jenkins_artifacts_max_size_mb != null ? (p.jenkins_artifacts_max_size_mb as number) : undefined,
   }
 }
@@ -77,7 +84,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const params = result.request_params
   const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
-  const init = initFormState(params)
+  const init = initFormState(params, Boolean(inPlaceAnalyze))
   const [aiProvider, setAiProvider] = useState(init.aiProvider)
   const [aiModel, setAiModel] = useState(init.aiModel)
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(init.aiCallTimeout)
@@ -108,7 +115,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   // Reset form state when dialog opens
   useEffect(() => {
     if (!open) return
-    const s = initFormState(result.request_params)
+    const s = initFormState(result.request_params, Boolean(inPlaceAnalyze))
     setAiProvider(s.aiProvider)
     setAiModel(s.aiModel)
     setAiCallTimeout(s.aiCallTimeout)
@@ -126,7 +133,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setMaxArtifactsSize(s.maxArtifactsSize)
     setSubmitting(false)
     setError('')
-  }, [open, result.request_params])
+  }, [open, result.request_params, inPlaceAnalyze])
 
   const handleSubmit = useCallback(async () => {
     setSubmitting(true)
@@ -139,7 +146,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         ...(enableJira !== undefined && { enable_jira: enableJira }),
         ...(jiraUrl && { jira_url: jiraUrl }),
         ...(jiraProjectKey && { jira_project_key: jiraProjectKey }),
-        ...(getArtifacts !== undefined && { get_job_artifacts: getArtifacts }),
+        ...(inPlaceAnalyze
+          ? { get_job_artifacts: getArtifacts ?? true }
+          : getArtifacts !== undefined
+            ? { get_job_artifacts: getArtifacts }
+            : {}),
         ...(maxArtifactsSize !== undefined && { jenkins_artifacts_max_size_mb: maxArtifactsSize }),
         ...(rawPrompt && { raw_prompt: rawPrompt }),
         ...(testsRepoUrl && { tests_repo_url: testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl }),

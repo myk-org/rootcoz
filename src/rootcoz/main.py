@@ -216,6 +216,8 @@ from rootcoz.storage import (
     ANALYSIS_STATE_ANALYZED,
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
+    claim_submitted_job_for_analyze,
+    copy_stable_analysis_ids,
     get_effective_classification,
     get_history_classification,
     get_result,
@@ -226,6 +228,7 @@ from rootcoz.storage import (
     list_results_for_dashboard_filtered,
     patch_result_json,
     populate_failure_history,
+    replace_job_test_entries,
     save_result,
     stamp_build_url,
     update_status,
@@ -1160,6 +1163,7 @@ async def _preserve_request_params(job_id: str, result_data: dict[str, Any]) -> 
         ):
             if key in stored_result and key not in result_data:
                 result_data[key] = stored_result[key]
+        copy_stable_analysis_ids(stored_result, result_data)
 
 
 async def _fail_resumed_waiting_job(
@@ -3113,8 +3117,6 @@ async def _finish_ci_ingest(
 ) -> None:
     """Persist fetched CI results and stop before AI when ingest_only."""
     _all_entries = source_result.test_entry_dicts()
-    if _all_entries:
-        await storage.save_test_entries(job_id, _all_entries)
     passed_count, skipped_count, failed_count = source_result.test_counts()
     analysis_state = _analysis_state_for_ingest(ingest_only)
     if ingest_only:
@@ -3149,8 +3151,8 @@ async def _finish_ci_ingest(
             result_data["child_job_analyses"] = [
                 c.model_dump(mode="json") for c in child_job_analyses
             ]
-        await _save_test_entry_scopes(job_id, child_test_scopes)
         _apply_cached_test_counts(result_data, _all_entries, child_test_scopes)
+    await replace_job_test_entries(job_id, _all_entries, child_test_scopes)
     await _preserve_request_params(job_id, result_data)
     logger.info(
         "Job %s: ingest complete (%s), %d failed, %d passed, %d skipped",
@@ -3208,22 +3210,25 @@ async def _enqueue_ci_source_analysis(
     Returns:
         JSON-serialisable response dict with ``status``, ``job_id``, links.
     """
+    persist_merged = merged
     if ingest_only:
         ai_provider, ai_model = "", ""
+        # Skip artifact download during ingest only; keep the caller's artifact
+        # preference in stored request_params for a later in-place analyze.
         merged = merged.model_copy(update={"get_job_artifacts": False})
         resolved_peers = None
     else:
         ai_provider, ai_model = await _resolve_ai_config_allow_defer(
-            body, merged, request=None
+            body, persist_merged, request=None
         )
 
     # Resolve repos
-    tests_repo_url_raw = resolve_tests_repo_url(body, merged)
+    tests_repo_url_raw = resolve_tests_repo_url(body, persist_merged)
     tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
     resolved_tests_repo_token = (
-        resolve_tests_repo_token(body, merged) if tests_repo_url else ""
+        resolve_tests_repo_token(body, persist_merged) if tests_repo_url else ""
     )
-    additional_repos_list = resolve_additional_repos(body, merged)
+    additional_repos_list = resolve_additional_repos(body, persist_merged)
 
     job_id = existing_job_id or str(uuid.uuid4())
     job_id_var.set(job_id)
@@ -3256,7 +3261,7 @@ async def _enqueue_ci_source_analysis(
     base_params["issue_prompt"] = body.issue_prompt or ""
     base_params["analysis_type"] = analysis_type
     base_params["original_name"] = body.name or ""
-    _apply_base_analysis_overrides(base_params, body, merged)
+    _apply_base_analysis_overrides(base_params, body, persist_merged)
 
     source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
     if source_cls is None:
@@ -3264,10 +3269,10 @@ async def _enqueue_ci_source_analysis(
             status_code=422, detail=f"Unsupported analysis type: {analysis_type}"
         )
     try:
-        source_cls.validate_request(body, merged)
+        source_cls.validate_request(body, persist_merged)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    source_cls.build_request_params(body, merged, base_params)
+    source_cls.build_request_params(body, persist_merged, base_params)
 
     initial_result: dict[str, Any] = {
         "job_name": display_name,
@@ -3291,15 +3296,18 @@ async def _enqueue_ci_source_analysis(
     elif existing_job_id:
         initial_result["analyzed_by"] = username
         initial_result["analyzed_at"] = datetime.now(UTC).isoformat()
-    initial_status = source_cls.initial_status(body, merged)
+    initial_status = source_cls.initial_status(body, persist_merged)
     # Prefer a known build URL at enqueue time (e.g. Jenkins waiting jobs).
-    initial_build_url = source_cls.pre_enqueue_build_url(body, merged)
+    initial_build_url = source_cls.pre_enqueue_build_url(body, persist_merged)
     if existing_job_id:
         stored = await get_result(existing_job_id, strip_sensitive=False)
         prior = stored.get("result") if stored else None
         if isinstance(prior, dict):
             merged_result = dict(prior)
-            merged_result.update(initial_result)
+            for key, value in initial_result.items():
+                if key == "failures" and not value:
+                    continue
+                merged_result[key] = value
             initial_result = merged_result
     await save_result(job_id, initial_build_url, initial_status, initial_result)
     notify_active_count_changed()
@@ -3388,29 +3396,6 @@ def _count_test_entry_statuses(entries: list[dict[str, Any]]) -> tuple[int, int,
         elif status == "failed":
             failed += 1
     return passed, skipped, failed
-
-
-async def _save_test_entry_scopes(
-    job_id: str,
-    scopes: list[tuple[str, int, list[dict[str, Any]]]],
-) -> None:
-    """Persist child-scoped test entry batches via ``save_test_entries``."""
-    for child_job_name, child_build_number, entries in scopes:
-        if not entries:
-            continue
-        await storage.save_test_entries(
-            job_id,
-            entries,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-        )
-        logger.info(
-            "Job %s: saved %d test entries for child %s #%s",
-            job_id,
-            len(entries),
-            child_job_name,
-            child_build_number,
-        )
 
 
 def _apply_cached_test_counts(
@@ -4082,9 +4067,7 @@ async def _process_ci_source_analysis(
 
                 # Persist top-level + child-scoped test entries
                 _top_entries = source_result.test_entry_dicts()
-                if _top_entries:
-                    await storage.save_test_entries(job_id, _top_entries)
-                await _save_test_entry_scopes(job_id, child_test_scopes)
+                await replace_job_test_entries(job_id, _top_entries, child_test_scopes)
                 _apply_cached_test_counts(result_data, _top_entries, child_test_scopes)
 
                 await _carry_forward_overrides(job_id, result_data)
@@ -4221,9 +4204,7 @@ async def _process_ci_source_analysis(
 
         # Save ALL test entries (passed/skipped/failed) to test_entries table
         _all_test_entries = source_result.test_entry_dicts()
-        if _all_test_entries:
-            await storage.save_test_entries(job_id, _all_test_entries)
-        await _save_test_entry_scopes(job_id, child_test_scopes)
+        await replace_job_test_entries(job_id, _all_test_entries, child_test_scopes)
 
         # Cache job-level test counts in result_json for dashboard display
         _apply_cached_test_counts(result_data, _all_test_entries, child_test_scopes)
@@ -4442,6 +4423,10 @@ async def analyze_submitted_job(
     if body is not None:
         for field_name in body.model_fields_set:
             unified_fields[field_name] = getattr(body, field_name)
+    if body is None or "get_job_artifacts" not in body.model_fields_set:
+        # Submit ingest skips artifacts; in-place analyze should still fetch
+        # them unless the caller explicitly turns them off.
+        unified_fields["get_job_artifacts"] = True
     unified_body = UnifiedAnalyzeRequest(**unified_fields)
     source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
     if source_cls is None:
@@ -4459,6 +4444,12 @@ async def analyze_submitted_job(
         or result_data.get("job_name")
         or source_cls.default_display_name(unified_body)
     )
+    claimed = await claim_submitted_job_for_analyze(job_id)
+    if not claimed:
+        raise HTTPException(
+            status_code=409,
+            detail="Job is already being analyzed or is no longer submitted.",
+        )
     return await _enqueue_ci_source_analysis(
         body=unified_body,
         merged=merged,

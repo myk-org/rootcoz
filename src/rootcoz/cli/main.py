@@ -655,12 +655,17 @@ def version(
 @results_app.command("list")
 def results_list(
     limit: int = typer.Option(50, "--limit", "-l", help="Max results to return."),
+    analysis_state: str = typer.Option(
+        "",
+        "--analysis-state",
+        help="Filter: submitted, analyzed.",
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List recent analyzed jobs."""
 
     def _list(c: RootCozClient) -> Any:
-        data = c.list_results(limit=limit)
+        data = c.list_results(limit=limit, analysis_state=analysis_state)
         if isinstance(data, list):
             for row in data:
                 if isinstance(row, dict) and not row.get("build_url"):
@@ -670,7 +675,7 @@ def results_list(
     _run_client_command(
         json_output,
         _list,
-        columns=["job_id", "status", "build_url", "created_at"],
+        columns=["job_id", "status", "analysis_state", "build_url", "created_at"],
         labels={
             "job_id": "JOB ID",
             "build_url": "BUILD URL",

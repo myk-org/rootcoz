@@ -73,6 +73,15 @@ class TestRootCozClientResults:
         assert len(result) == 2
         assert result[0]["job_id"] == "abc-123"
 
+    def test_list_results_analysis_state(self):
+        def handler(request):
+            assert request.url.params.get("analysis_state") == "submitted"
+            return httpx.Response(200, json=[])
+
+        client = _make_client(handler)
+        result = client.list_results(limit=10, analysis_state="submitted")
+        assert result == []
+
     def test_get_result(self):
         sample = {
             "job_id": "abc-123",
