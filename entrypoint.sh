@@ -24,39 +24,8 @@ export PORT="${PORT:-8000}"
 if [ "${DEV_MODE:-}" = "true" ] && [ -f /app/frontend/package.json ]; then
     echo "[DEV] Frontend source detected, starting Vite dev server..."
     cd /app/frontend || { echo "[DEV] Failed to change to frontend directory"; exit 1; }
-    # Bind-mounted host node_modules is often not writable by appuser. Skip
-    # install when Vite is already present; never abort the API if npm fails.
-    if [ -x node_modules/.bin/vite ]; then
-        echo "[DEV] Using existing frontend/node_modules (skipping npm install)"
-    elif [ ! -w . ] || { [ -d node_modules ] && [ ! -w node_modules ]; }; then
-        echo "[DEV] frontend/node_modules is not writable; skipping npm install."
-        echo "[DEV] Run 'npm install' on the host, or overlay an anonymous volume on /app/frontend/node_modules."
-    else
-        npm install --no-audit --no-fund || echo "[DEV] npm install failed; continuing"
-    fi
-    export VITE_CACHE_DIR="${VITE_CACHE_DIR:-/tmp/rootcoz-vite-cache}"
-    mkdir -p "$VITE_CACHE_DIR"
-    _vite_can_write_temp() {
-        if mkdir -p node_modules/.vite-temp 2>/dev/null \
-            && touch node_modules/.vite-temp/.write-probe 2>/dev/null; then
-            rm -f node_modules/.vite-temp/.write-probe
-            return 0
-        fi
-        # Host-owned .vite-temp: mkdir succeeds, writes fail. Remove it so Vite
-        # falls back to a temp file next to vite.config.ts.
-        rm -rf node_modules/.vite-temp 2>/dev/null || true
-        touch .vite-config-write-probe 2>/dev/null || return 1
-        rm -f .vite-config-write-probe
-        return 0
-    }
-    if [ -x node_modules/.bin/vite ] && _vite_can_write_temp; then
-        npm run dev -- --host 0.0.0.0 --port 5173 &
-    elif [ -x node_modules/.bin/vite ]; then
-        echo "[DEV] Vite cannot write under frontend/node_modules; skipping HMR."
-        echo "[DEV] Overlay an anonymous volume on /app/frontend/node_modules, or chmod the host frontend dir."
-    else
-        echo "[DEV] Vite not found; serving built assets from /app/frontend/dist"
-    fi
+    npm install --no-audit --no-fund
+    npm run dev -- --host 0.0.0.0 --port 5173 &
     cd /app || { echo "[DEV] Failed to return to app directory"; exit 1; }
 fi
 
