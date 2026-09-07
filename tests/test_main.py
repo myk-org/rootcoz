@@ -7030,6 +7030,39 @@ class TestSubmitIntake:
         params = stored["result"]["request_params"]
         assert params.get("get_job_artifacts") is True
 
+    def test_in_place_analyze_keeps_submitter_and_records_analyzer(
+        self, test_client
+    ) -> None:
+        data, _ = _post_submit_queued(
+            test_client,
+            {
+                "type": "raw",
+                "failures": [{"test_name": "t", "error_message": "e"}],
+            },
+        )
+        job_id = data["job_id"]
+
+        async def _set_submitter() -> None:
+            stored = await storage.get_result(job_id, strip_sensitive=False)
+            result = stored["result"]
+            result["request_params"]["submitted_by"] = "alice"
+            result["tags"] = ["alice"]
+            await storage.update_status(job_id, "completed", result)
+
+        asyncio.run(_set_submitter())
+        with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                f"/results/{job_id}/analyze",
+                json={"ai_provider": "claude", "ai_model": "test-model"},
+            )
+        assert response.status_code == 202, response.text
+        stored = test_client.get(f"/results/{job_id}").json()["result"]
+        assert stored["request_params"]["submitted_by"] == "alice"
+        assert stored["analyzed_by"] == "admin"
+        assert stored.get("analyzed_at")
+        assert "alice" in stored["tags"]
+        assert "admin" not in stored["tags"]
+
     def test_in_place_analyze_keeps_stored_artifact_opt_out(self, test_client) -> None:
         data, _ = _post_submit_queued(
             test_client,

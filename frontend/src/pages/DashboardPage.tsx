@@ -41,7 +41,8 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
-import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, User, MinusCircle } from 'lucide-react'
+import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, MinusCircle } from 'lucide-react'
+import { JobAttribution } from '@/components/shared/JobAttribution'
 import { useAuth } from '@/lib/auth'
 import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
@@ -902,12 +903,12 @@ export function DashboardPage() {
                             })()}
                           </TooltipContent>
                         </Tooltip>
-                        {job.submitted_by && (
-                          <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary">
-                            <User className="h-2.5 w-2.5" />
-                            {job.submitted_by}
-                          </span>
-                        )}
+                        <JobAttribution
+                          submittedBy={job.submitted_by}
+                          analyzedBy={job.analyzed_by}
+                          className="inline-flex flex-wrap items-center gap-1 text-[10px] text-text-tertiary"
+                          iconClassName="h-2.5 w-2.5"
+                        />
                       </div>
                     </TableCell>
 
@@ -1150,12 +1151,12 @@ export function DashboardPage() {
                                       })()}
                                     </TooltipContent>
                                   </Tooltip>
-                                  {job.submitted_by && (
-                                    <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary">
-                                      <User className="h-2.5 w-2.5" />
-                                      {job.submitted_by}
-                                    </span>
-                                  )}
+                                  <JobAttribution
+                                    submittedBy={job.submitted_by}
+                                    analyzedBy={job.analyzed_by}
+                                    className="inline-flex flex-wrap items-center gap-1 text-[10px] text-text-tertiary"
+                                    iconClassName="h-2.5 w-2.5"
+                                  />
                                 </div>
                               </TableCell>
                               {canDelete && (

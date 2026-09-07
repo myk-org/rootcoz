@@ -3497,6 +3497,9 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         submitted_by = request_params.get("submitted_by", "")
         if submitted_by:
             entry["submitted_by"] = submitted_by
+        analyzed_by = result_data.get("analyzed_by", "")
+        if analyzed_by:
+            entry["analyzed_by"] = analyzed_by
         # Test counts (zero for old jobs missing these keys)
         for count_key in ("passed_count", "skipped_count", "failed_count"):
             val = result_data.get(count_key, 0)

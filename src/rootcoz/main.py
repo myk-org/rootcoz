@@ -1140,11 +1140,11 @@ async def _preserve_request_params(job_id: str, result_data: dict[str, Any]) -> 
     """Copy persisted enqueue-time fields from the stored result into result_data.
 
     The initial ``save_result`` persists ``request_params``, ``tags``,
-    ``display_name``, and identity fields (``job_name``, ``build_number``,
-    ``build_id``) but the ``AnalysisResult`` model dump produced when
-    analysis finishes does not include those keys.  Without this merge the
-    fields would be silently lost when ``update_status`` overwrites
-    ``result_json``.
+    ``display_name``, identity fields (``job_name``, ``build_number``,
+    ``build_id``), and ``analyzed_by`` / ``analyzed_at`` but the
+    ``AnalysisResult`` model dump produced when analysis finishes does not
+    include those keys.  Without this merge the fields would be silently
+    lost when ``update_status`` overwrites ``result_json``.
 
     Args:
         job_id: The analysis job identifier.
@@ -1161,6 +1161,8 @@ async def _preserve_request_params(job_id: str, result_data: dict[str, Any]) -> 
             "job_name",
             "build_number",
             "build_id",
+            "analyzed_by",
+            "analyzed_at",
         ):
             if key in stored_result and key not in result_data:
                 result_data[key] = stored_result[key]
@@ -3282,14 +3284,26 @@ async def _enqueue_ci_source_analysis(
     }
     # Persist real identity for history matching and auto-review
     initial_result.update(source_cls.pre_persist_identity_from_request(body))
-    initial_result["request_params"]["submitted_by"] = username
+    prior: dict[str, Any] | None = None
+    if existing_job_id:
+        stored = await get_result(existing_job_id, strip_sensitive=False)
+        prior_raw = stored.get("result") if stored else None
+        if isinstance(prior_raw, dict):
+            prior = prior_raw
+    prior_submitted = ""
+    if prior:
+        prior_submitted = str(
+            (prior.get("request_params") or {}).get("submitted_by") or ""
+        ).strip()
+    submitter = prior_submitted or username
+    initial_result["request_params"]["submitted_by"] = submitter
     _stamp_reanalysis_metadata(
         initial_result["request_params"],
         reanalyzed_from_job_id,
         reanalyzed_from_job_name,
     )
     effective_tags = tags if tags is not None else (body.tags or None)
-    initial_result["tags"] = _ensure_submitter_tag(effective_tags, username)
+    initial_result["tags"] = _ensure_submitter_tag(effective_tags, submitter)
     initial_result["analysis_state"] = _analysis_state_for_ingest(ingest_only)
     if ingest_only:
         initial_result["analyzed_by"] = ""
@@ -3300,16 +3314,13 @@ async def _enqueue_ci_source_analysis(
     initial_status = source_cls.initial_status(body, persist_merged)
     # Prefer a known build URL at enqueue time (e.g. Jenkins waiting jobs).
     initial_build_url = source_cls.pre_enqueue_build_url(body, persist_merged)
-    if existing_job_id:
-        stored = await get_result(existing_job_id, strip_sensitive=False)
-        prior = stored.get("result") if stored else None
-        if isinstance(prior, dict):
-            merged_result = dict(prior)
-            for key, value in initial_result.items():
-                if key == "failures" and not value:
-                    continue
-                merged_result[key] = value
-            initial_result = merged_result
+    if prior:
+        merged_result = dict(prior)
+        for key, value in initial_result.items():
+            if key == "failures" and not value:
+                continue
+            merged_result[key] = value
+        initial_result = merged_result
     await save_result(job_id, initial_build_url, initial_status, initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()

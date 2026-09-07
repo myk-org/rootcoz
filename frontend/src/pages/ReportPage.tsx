@@ -23,7 +23,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { Button } from '@/components/ui/button'
-import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, RotateCw, Copy, Check, MessageCircle, User } from 'lucide-react'
+import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, RotateCw, Copy, Check, MessageCircle } from 'lucide-react'
+import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
 import { TokenUsageBadge } from './report/TokenUsageBadge'
@@ -505,12 +506,14 @@ function ReportContent() {
 
       {/* ---- Metadata detail row ---- */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-text-tertiary animate-slide-up">
-          {typeof result.request_params?.submitted_by === 'string' && result.request_params.submitted_by && (
-            <span className="inline-flex items-center gap-1">
-              <User className="h-3 w-3" />
-              {result.request_params.submitted_by}
-            </span>
-          )}
+          <JobAttribution
+            submittedBy={
+              typeof result.request_params?.submitted_by === 'string'
+                ? result.request_params.submitted_by
+                : undefined
+            }
+            analyzedBy={typeof result.analyzed_by === 'string' ? result.analyzed_by : undefined}
+          />
           {state.createdAt && (
             <span className="inline-flex items-center gap-1">
               <Calendar className="h-3 w-3" />
