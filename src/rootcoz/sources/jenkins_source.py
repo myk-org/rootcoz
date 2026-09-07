@@ -42,6 +42,7 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.base import (
+    INGEST_COMPLETE_SUMMARY,
     CISource,
     CISourceResult,
     link_artifacts_to_workspace,
@@ -615,6 +616,7 @@ class JenkinsSource(CISource):
         peer_ai_configs: list[Any] | None = None,
         cloned_repos: dict[str, Any] | None = None,
         auth_header: str = "",
+        ingest_only: bool = False,
     ) -> tuple[list[ChildJobAnalysis], list[tuple[str, int, list[dict[str, Any]]]]]:
         """Analyze failed Jenkins child jobs in parallel.
 
@@ -643,6 +645,7 @@ class JenkinsSource(CISource):
                 additional_repos=cloned_repos or None,
                 max_concurrent_ai_calls=effective_settings.max_concurrent_ai_calls,
                 auth_header=auth_header,
+                ingest_only=ingest_only,
             )
             for child_name, child_num in source_result.child_job_infos
         ]
@@ -1135,10 +1138,12 @@ async def analyze_child_job(
     additional_repos: dict[str, Path] | None = None,
     max_concurrent_ai_calls: int = 3,
     auth_header: str = "",
+    ingest_only: bool = False,
 ) -> ChildJobResult:
     """Analyze a single child job, recursively analyzing its failed children.
 
     Each child job gets its own AI call to manage context size.
+    When ``ingest_only`` is True, fetch tests and nested children without AI.
 
     Args:
         job_name: Name of the Jenkins job to analyze.
@@ -1218,6 +1223,7 @@ async def analyze_child_job(
             additional_repos=additional_repos,
             max_concurrent_ai_calls=max_concurrent_ai_calls,
             auth_header=auth_header,
+            ingest_only=ingest_only,
         )
     finally:
         source.cleanup()
@@ -1318,6 +1324,81 @@ async def _analyze_grouped_failures(
     return failures, unique_errors, failed_groups
 
 
+async def _ingest_child_job_inner(
+    *,
+    source_result: CISourceResult,
+    job_name: str,
+    build_number: int,
+    jenkins_url: str,
+    settings: Settings,
+    depth: int,
+    max_depth: int,
+    passed_count: int,
+    skipped_count: int,
+    failed_count: int,
+    own_scopes: list[tuple[str, int, list[dict[str, Any]]]],
+    max_concurrent_ai_calls: int,
+) -> ChildJobResult:
+    """Fetch nested children and persist tests without clone or AI."""
+    failed_children = source_result.child_job_infos
+    if failed_children:
+        child_tasks: list[Coroutine[Any, Any, Any]] = [
+            analyze_child_job(
+                child_name,
+                child_num,
+                settings,
+                depth + 1,
+                max_depth,
+                ingest_only=True,
+                max_concurrent_ai_calls=max_concurrent_ai_calls,
+            )
+            for child_name, child_num in failed_children
+        ]
+        child_results = await run_parallel_with_limit(
+            child_tasks, max_concurrency=max_concurrent_ai_calls
+        )
+        child_bundles = _normalize_child_results(failed_children, child_results)
+        child_analyses = [b.analysis for b in child_bundles]
+        scopes = list(own_scopes)
+        for bundle in child_bundles:
+            scopes.extend(bundle.test_entry_scopes)
+        total_failures = sum(len(child.failures) for child in child_analyses)
+        summary = (
+            f"Pipeline ingest: {len(child_analyses)} child job(s) collected. "
+            f"{INGEST_COMPLETE_SUMMARY}"
+        )
+        if total_failures > 0:
+            summary += f" Total: {total_failures} failure(s) stored."
+        return ChildJobResult(
+            analysis=ChildJobAnalysis(
+                job_name=job_name,
+                build_number=build_number,
+                jenkins_url=jenkins_url,
+                summary=summary,
+                failures=[],
+                failed_children=child_analyses,
+                passed_count=passed_count,
+                skipped_count=skipped_count,
+                failed_count=failed_count,
+            ),
+            test_entry_scopes=scopes,
+        )
+
+    return ChildJobResult(
+        analysis=ChildJobAnalysis(
+            job_name=job_name,
+            build_number=build_number,
+            jenkins_url=jenkins_url,
+            summary=INGEST_COMPLETE_SUMMARY,
+            failures=source_result.unanalyzed_failure_analyses(),
+            passed_count=passed_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+        ),
+        test_entry_scopes=own_scopes,
+    )
+
+
 async def _analyze_child_job_inner(
     *,
     source: JenkinsSource,
@@ -1340,12 +1421,29 @@ async def _analyze_child_job_inner(
     additional_repos: dict[str, Path] | None,
     max_concurrent_ai_calls: int,
     auth_header: str,
+    ingest_only: bool,
 ) -> ChildJobResult:
     """Inner logic for analyze_child_job, separated to allow cleanup after completion."""
     child_artifacts_context = source_result.artifacts_context
     failed_children = source_result.child_job_infos
     _passed_count, _skipped_count, _failed_count = _child_counts_kwargs(source_result)
     own_scopes = _own_test_scope(job_name, build_number, source_result)
+
+    if ingest_only:
+        return await _ingest_child_job_inner(
+            source_result=source_result,
+            job_name=job_name,
+            build_number=build_number,
+            jenkins_url=jenkins_url,
+            settings=settings,
+            depth=depth,
+            max_depth=max_depth,
+            passed_count=_passed_count,
+            skipped_count=_skipped_count,
+            failed_count=_failed_count,
+            own_scopes=own_scopes,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+        )
 
     if failed_children:
         # Recursively analyze failed children IN PARALLEL with bounded concurrency

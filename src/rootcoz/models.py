@@ -904,6 +904,10 @@ class FailureAnalysisResult(BaseModel):
     passed_count: int = Field(default=0, description="Number of passed tests")
     skipped_count: int = Field(default=0, description="Number of skipped tests")
     failed_count: int = Field(default=0, description="Number of failed tests")
+    analysis_state: Literal["submitted", "analyzed"] = Field(
+        default="analyzed",
+        description="Whether AI analysis has run (analyzed) or only CI ingest (submitted)",
+    )
     cross_failure_patterns: list[CrossFailurePattern] = Field(
         default_factory=list,
         description="Patterns detected across multiple failure groups",

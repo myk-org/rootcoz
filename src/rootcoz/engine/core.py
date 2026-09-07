@@ -53,7 +53,7 @@ _log_file = get_log_file()
 logger = get_logger(
     name=__name__,
     level=os.environ.get("LOG_LEVEL", "INFO"),
-    filename=_log_file,
+    **({"filename": _log_file} if _log_file else {}),
 )
 
 

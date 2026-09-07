@@ -1,8 +1,9 @@
 """Tests for job_id logging context."""
 
 import logging
+from pathlib import Path
 
-from rootcoz.logging_context import JobIdFilter, job_id_var
+from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 
 
 class TestJobIdFilter:
@@ -80,3 +81,23 @@ class TestJobIdFilter:
         finally:
             job_id_var.set("")
             test_logger.removeHandler(handler)
+
+
+class TestGetLogFile:
+    def test_creates_writable_log_file(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "results.db"))
+        path = get_log_file()
+        assert path == str(tmp_path / "logs" / "rootcoz.log")
+        assert Path(path).is_file()
+
+    def test_returns_none_when_log_dir_not_writable(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "results.db"))
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        log_dir.chmod(0o555)
+        try:
+            assert get_log_file() is None
+        finally:
+            log_dir.chmod(0o755)

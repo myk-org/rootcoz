@@ -132,7 +132,7 @@ src/rootcoz/
   - CORS preflight (OPTIONS) requests bypass authentication on all endpoints.
   - **Viewers** can: view jobs/results only. Cannot chat, comment, re-analyze, or modify anything.
   - **Reviewers** can: everything viewers can, plus chat about jobs, comment on jobs, register, login, rotate their own API key, manage their own tracker tokens.
-  - **Operators** can: everything reviewers can, plus submit NEW analyses (`POST /analyze`), re-analyze any job, delete their own jobs.
+  - **Operators** can: everything reviewers can, plus submit NEW analyses (`POST /analyze` or ingest-only `POST /submit`), re-analyze any job, delete their own jobs.
   - **Admins** can: everything operators can, plus delete any job, rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete users, change user roles, manage `can_view_reports`, access admin-only endpoints (`/api/admin/*`). Admins always have reports access.
   - **`can_view_reports`** (DB flag, default false, orthogonal to role): when true, the user may call `/api/reports/*`. Non-admins reload the flag from the users table on each request (so grants/revokes apply without session invalidation); admins have effective access (`True`) without depending on the stored column. Managed via `PUT /api/admin/users/{username}/can-view-reports`, admin user create (`can_view_reports` in body), CLI `admin users create --can-view-reports` / `admin users set-can-view-reports`, and the admin UI. Exposed on `request.state.can_view_reports`, `GET /api/auth/me`, and `POST /api/auth/login`.
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
@@ -259,6 +259,7 @@ All test outcomes (passed, skipped, failed) are stored in the `test_entries` tab
 
 - **Paginated API**: `GET /api/results/{job_id}/tests?status=passed&status=skipped&offset=0&limit=50` (viewer+ auth, CLI: `rootcoz results tests`)
 - **Zero-failure fast path**: When `CISourceResult.skip_analysis=True` (e.g. Jenkins SUCCESS, file with no failures), the pipeline skips AI analysis, repo cloning, and workspace setup. Test entries are still saved and counts cached. Metadata assignment, SSE notifications, and auth enforcement still apply.
+- **Submit vs Analyze**: `POST /submit` (`rootcoz submit`) runs the same CI ingest as `POST /analyze` then stops before clone/AI (`analysis_state=submitted`). `POST /results/{job_id}/analyze` (`rootcoz results analyze`) runs the AI pipeline in place. Existing jobs backfill to `analyzed`. Submit does not require AI config.
 - **Jenkins FAILURE/UNSTABLE/ABORTED with empty test report**: NOT fast path — console-only analysis runs (preserves existing behavior).
 
 ### Failure Deduplication

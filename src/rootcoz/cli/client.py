@@ -274,9 +274,14 @@ class RootCozClient:
 
     # -- Results --------------------------------------------------------------
 
-    def list_results(self, limit: int = 50) -> list[dict[str, Any]]:
+    def list_results(
+        self, limit: int = 50, *, analysis_state: str = ""
+    ) -> list[dict[str, Any]]:
         """List recent analyzed jobs. GET /results?limit="""
-        return self._request("GET", "/results", params={"limit": limit})
+        params: dict[str, Any] = {"limit": limit}
+        if analysis_state:
+            params["analysis_state"] = analysis_state
+        return self._request("GET", "/results", params=params)
 
     def dashboard(self, limit: int = 500) -> list[dict[str, Any]]:
         """List analysis jobs with dashboard metadata. GET /api/dashboard"""
@@ -298,6 +303,7 @@ class RootCozClient:
         date_from: str = "",
         date_to: str = "",
         review_status: str = "all",
+        analysis_state: str = "",
         limit: int = 500,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -321,6 +327,8 @@ class RootCozClient:
             params["date_to"] = date_to
         if review_status != "all":
             params["review_status"] = review_status
+        if analysis_state:
+            params["analysis_state"] = analysis_state
         if limit != 500:
             params["limit"] = limit
         if offset:
@@ -403,6 +411,7 @@ class RootCozClient:
         name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
+        endpoint: str = "/analyze",
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Submit an analysis job. POST /analyze
@@ -417,6 +426,7 @@ class RootCozClient:
             tags: Optional list of tags for categorization.
             labels: Optional job-side labels to merge into
                 ``job_metadata.labels``.
+            endpoint: Path to POST (``/analyze`` or ``/submit``).
             **kwargs: Additional fields (type, prow_job_name, build_id, etc.).
 
         Returns:
@@ -439,9 +449,30 @@ class RootCozClient:
             body["labels"] = labels
         return self._request(
             "POST",
-            "/analyze",
+            endpoint,
             json=body,
             accept_statuses=(202,),
+        )
+
+    def submit(
+        self,
+        job_name: str = "",
+        build_number: int = 0,
+        *,
+        name: str = "",
+        tags: list[str] | None = None,
+        labels: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Queue CI ingest without AI. POST /submit"""
+        return self.analyze(
+            job_name,
+            build_number,
+            name=name,
+            tags=tags,
+            labels=labels,
+            endpoint="/submit",
+            **kwargs,
         )
 
     def analyze_file(
@@ -451,6 +482,7 @@ class RootCozClient:
         name: str = "",
         tags: list[str] | None = None,
         labels: list[str] | None = None,
+        endpoint: str = "/analyze",
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Submit JUnit XML for analysis. POST /analyze with type=file
@@ -461,6 +493,7 @@ class RootCozClient:
             tags: Optional list of tags for categorization.
             labels: Optional job-side labels to merge into
                 ``job_metadata.labels``.
+            endpoint: Path to POST (``/analyze`` or ``/submit``).
             **kwargs: Additional fields for the UnifiedAnalyzeRequest body.
 
         Returns:
@@ -477,9 +510,23 @@ class RootCozClient:
             body["labels"] = labels
         return self._request(
             "POST",
-            "/analyze",
+            endpoint,
             json=body,
             accept_statuses=(202,),
+        )
+
+    def submit_file(
+        self,
+        raw_xml: str,
+        *,
+        name: str = "",
+        tags: list[str] | None = None,
+        labels: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Queue JUnit XML ingest without AI. POST /submit with type=file"""
+        return self.analyze_file(
+            raw_xml, name=name, tags=tags, labels=labels, endpoint="/submit", **kwargs
         )
 
     def re_analyze(self, job_id: str) -> dict[str, Any]:
@@ -494,6 +541,15 @@ class RootCozClient:
         return self._request(
             "POST",
             f"/re-analyze/{job_id}",
+            json={},
+            accept_statuses=(202,),
+        )
+
+    def analyze_submitted(self, job_id: str) -> dict[str, Any]:
+        """Run AI on a submitted job in place. POST /results/{job_id}/analyze"""
+        return self._request(
+            "POST",
+            f"/results/{job_id}/analyze",
             json={},
             accept_statuses=(202,),
         )

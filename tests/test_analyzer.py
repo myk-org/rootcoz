@@ -1217,6 +1217,55 @@ class TestConsoleOnlyPeerAnalysis:
         assert dumped["failed_count"] == 1
         assert "test_entry_scopes" not in dumped
 
+    @pytest.mark.anyio
+    async def test_child_job_ingest_only_skips_ai(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ingest_only stores test failures without calling the AI group analyzer."""
+        mock_client = MagicMock()
+        mock_client.get_build_info_safe.return_value = {
+            "result": "FAILURE",
+            "building": False,
+            "url": "https://jenkins.example.com/job/leaf/9/",
+        }
+        mock_client.get_build_console.return_value = "fail log"
+        mock_client.get_test_report.return_value = {
+            "suites": [
+                {
+                    "cases": [
+                        {
+                            "className": "pkg",
+                            "name": "test_fail",
+                            "status": "FAILED",
+                            "errorDetails": "boom",
+                            "errorStackTrace": "trace",
+                            "duration": 0.5,
+                        },
+                    ]
+                }
+            ]
+        }
+        mock_client.get_running_builds = MagicMock(return_value=[])
+        _patch_jenkins_client(monkeypatch, mock_client)
+        mock_afg = AsyncMock()
+        monkeypatch.setattr(
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            mock_afg,
+        )
+
+        bundle = await analyze_child_job(
+            job_name="leaf",
+            build_number=9,
+            settings=_make_jenkins_settings(),
+            ingest_only=True,
+        )
+
+        mock_afg.assert_not_called()
+        assert bundle.analysis.failed_count == 1
+        assert bundle.analysis.failures[0].test_name.endswith("test_fail")
+        assert not bundle.analysis.failures[0].analysis.details
+        assert "AI analysis has not run" in (bundle.analysis.summary or "")
+
 
 class TestResolveAdditionalRepos:
     """Tests for resolve_additional_repos."""

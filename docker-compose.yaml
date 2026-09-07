@@ -46,7 +46,6 @@ services:
       # - ./src:/app/src
       # - ./frontend:/app/frontend
 
-
     # Restart policy: container restarts unless explicitly stopped
     restart: unless-stopped
 

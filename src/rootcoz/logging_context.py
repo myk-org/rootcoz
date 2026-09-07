@@ -39,10 +39,15 @@ def get_log_file() -> str | None:
     The log directory is derived from the ``DB_PATH`` environment variable
     (default ``/data/results.db``) by placing a ``logs/`` directory next
     to the database file.  The directory is created if it does not exist.
+    Returns ``None`` if the directory or log file cannot be written (for
+    example a bind-mounted ``/data`` owned by another user).
     """
     log_dir = Path(os.getenv("DB_PATH", "/data/results.db")).parent / "logs"
+    log_path = log_dir / "rootcoz.log"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        return str(log_dir / "rootcoz.log")
+        with log_path.open("a", encoding="utf-8"):
+            pass
+        return str(log_path)
     except OSError:
         return None

@@ -193,6 +193,9 @@ export interface AnalysisResult {
   passed_count?: number
   skipped_count?: number
   failed_count?: number
+  analysis_state?: 'submitted' | 'analyzed'
+  analyzed_by?: string
+  analyzed_at?: string
 }
 
 // -- Dashboard ------------------------------------------------------
@@ -218,9 +221,11 @@ export interface DashboardJob {
   error?: string
   tags?: string[]
   submitted_by?: string
+  analyzed_by?: string
   passed_count?: number
   skipped_count?: number
   failed_count?: number
+  analysis_state?: 'submitted' | 'analyzed'
 }
 
 export interface TestEntry {
