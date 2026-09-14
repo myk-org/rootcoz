@@ -8656,29 +8656,6 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
     # used consistently for all AI-originated actions (auto-review, classification).
     is_ai_caller = body.source == "ai"
 
-    # Guard: AI cannot override user classifications.
-    if is_ai_caller:
-        existing = await storage.get_test_classifications(
-            test_name=test_name,
-        )
-        user_classifications = [
-            c for c in existing if c.get("created_by", "") != AI_SYSTEM_USERNAME
-        ]
-        if user_classifications:
-            logger.info(
-                "POST /history/classify: AI classification blocked — user %s already classified test %r",
-                user_classifications[0]["created_by"],
-                test_name,
-            )
-            return JSONResponse(
-                content={
-                    "id": None,
-                    "skipped": True,
-                    "reason": "User classification exists",
-                },
-                status_code=200,
-            )
-
     # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
     # regardless of the authenticated session username.
     # Human callers must have an authenticated username — reject if missing

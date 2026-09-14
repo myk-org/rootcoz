@@ -37,14 +37,12 @@ Call `get_classification_history` with `test_name`.
 
 If already classified, reference the existing classification and explain if your assessment agrees or differs.
 
-### User Override Protection (STRICT — NEVER VIOLATE)
+### Human Root-Cause Classifications
 
 When checking existing classifications, look at the `created_by` field:
-- If `created_by` is a **username** (not `"rootcoz-ai"`), this is a **user classification** — a deliberate human decision.
-- **You MUST NOT override user classifications.** Do not call `classify_test_pattern` for tests that have a user classification.
-- If you disagree with a user's classification, note your disagreement in the analysis details only — the user's classification stands.
-- If a user has classified a test, do NOT mark that test as reviewed — leave it for the user to review.
-- Only override classifications where `created_by` is `"rootcoz-ai"` (from a previous AI analysis).
+- If `created_by` is a **username** (not `"rootcoz-ai"`), its root-cause classification is a deliberate human decision. Respect it; do not contradict or change it.
+- Record the current analysis's pattern with `classify_test_pattern` regardless. Pattern and root cause are independent axes.
+- If you disagree with a user's root-cause classification, note your disagreement in the analysis details only. Do not mark that test as reviewed; leave it for the user to review.
 
 ## Step 4: Check Job Statistics (MANDATORY — once per job)
 
@@ -53,8 +51,6 @@ Call `get_job_history_stats` with `job_name` once to understand overall job heal
 ## Step 5: Classify EVERY Test's Pattern (MANDATORY for EVERY test — NO EXCEPTIONS)
 
 After completing your analysis, you MUST call `classify_test_pattern` for EVERY test you analyzed. This is NOT optional. Every test gets a pattern classification.
-
-**EXCEPTION — User Override Protection:** If Step 3 revealed that a **user** (not AI) has already classified this test, **skip** `classify_test_pattern` for that test. User classifications are sacrosanct — never override them. You may note your assessment in the analysis output, but do not write a competing classification.
 
 **IMPORTANT:** This step sets the **pattern** axis (how the failure manifests), NOT the root cause axis (classification). The root cause (CODE ISSUE / PRODUCT BUG / INFRASTRUCTURE) was already determined in the initial analysis. Do NOT change the root cause here — only determine the pattern.
 

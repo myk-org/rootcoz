@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
+import aiosqlite
 import httpx
 import jenkins
 import pytest
@@ -3508,65 +3509,63 @@ class TestClassifyEndpoint:
         assert resp.status_code == 400
         assert "bad value" in resp.json()["detail"]
 
-    def test_ai_cannot_override_user_classification(self, test_client, monkeypatch):
-        """AI classification is blocked when a user has already classified the test.
-
-        Verifies: (1) source="ai" triggers the guard when user classifications exist,
-        (2) the guard returns a non-error skip response, (3) authenticated requests
-        without source="ai" can still classify the same test.
-        """
-
-        async def _fake_get_classifications(**kwargs):
-            return [
-                {
-                    "id": 1,
-                    "test_name": "test_user_override",
-                    "job_name": "",
-                    "parent_job_name": "parent-job",
-                    "classification": "CODE ISSUE",
-                    "reason": "User override",
-                    "references_info": "",
-                    "created_by": "rnetser",
-                    "job_id": "job-user-cls",
-                    "child_build_number": 0,
-                    "created_at": "2025-01-01 00:00:00",
-                }
-            ]
-
-        monkeypatch.setattr(
-            "rootcoz.main.storage.get_test_classifications",
-            _fake_get_classifications,
+    @pytest.mark.asyncio
+    async def test_ai_pattern_classification_preserves_human_primary_override(
+        self, test_client
+    ):
+        """AI records its hidden pattern without replacing a human root-cause override."""
+        job_id = "job-ai-pattern-with-override"
+        test_name = "test_user_override"
+        await storage.save_result(
+            job_id,
+            "http://jenkins",
+            "completed",
+            {
+                "status": "completed",
+                "summary": "",
+                "failures": [
+                    {
+                        "test_name": test_name,
+                        "error": "err",
+                        "analysis": {"classification": "PRODUCT BUG"},
+                    }
+                ],
+            },
         )
+        override = test_client.put(
+            f"/results/{job_id}/override-classification",
+            json={"test_name": test_name, "classification": "CODE ISSUE"},
+        )
+        assert override.status_code == 200
 
-        # AI caller (source="ai") should be blocked
-        resp = test_client.post(
+        response = test_client.post(
             "/history/classify",
             json={
-                "test_name": "test_user_override",
+                "test_name": test_name,
                 "classification": "FLAKY",
-                "reason": "AI thinks this is flaky",
-                "job_id": "job-ai-reanalysis",
+                "reason": "Repeated intermittent failure",
+                "job_id": job_id,
                 "source": "ai",
             },
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["skipped"] is True
-        assert data["id"] is None
-        assert "User classification exists" in data["reason"]
+        assert response.status_code == 201
+        assert response.json()["id"] is not None
 
-        # Authenticated request without source="ai" should NOT be blocked
-        resp2 = test_client.post(
-            "/history/classify",
-            json={
-                "test_name": "test_user_override",
-                "classification": "REGRESSION",
-                "reason": "User reclassifies",
-                "job_id": "job-user-reclassify",
-            },
+        assert (
+            await storage.get_effective_classification(job_id, test_name)
+            == "CODE ISSUE"
         )
-        assert resp2.status_code == 201
-        assert resp2.json()["id"] is not None
+        assert await storage.get_history_classification(job_id, test_name) == ""
+
+        async with aiosqlite.connect(storage.DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT classification, pattern, created_by, visible "
+                "FROM test_classifications WHERE job_id = ? ORDER BY id",
+                (job_id,),
+            )
+            classifications = await cursor.fetchall()
+        assert ("CODE ISSUE", "", "admin", 1) in classifications
+        assert ("", "FLAKY", "rootcoz-ai", 0) in classifications
 
 
 class TestWaitForJenkinsCompletion:
