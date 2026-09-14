@@ -376,9 +376,9 @@ def build_analysis_history_tools(
         {
             "name": "classify_test_pattern",
             "description": (
-                "MANDATORY for every analyzed test (unless a human user already "
-                "classified it). Records pattern only (NEW/REGRESSION/FLAKY/"
-                "INTERMITTENT/KNOWN_BUG/PERSISTENT). source is always ai."
+                "MANDATORY for every analyzed test, including tests with human "
+                "root-cause classifications. Records pattern only (NEW/REGRESSION/"
+                "FLAKY/INTERMITTENT/KNOWN_BUG/PERSISTENT). source is always ai."
             ),
             "parameters": {
                 "type": "object",

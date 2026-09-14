@@ -125,6 +125,14 @@ class TestBuildAnalysisHistoryTools:
         classify = next(t for t in tools if t["name"] == "classify_test_pattern")
         assert classify["http"]["body_template"]["job_id"] == "exclude-me"
         assert classify["http"]["body_template"]["source"] == "ai"
+        assert "MANDATORY for every analyzed test" in classify["description"]
+        assert (
+            "including tests with human root-cause classifications"
+            in classify["description"]
+        )
+        assert (
+            "unless a human user already classified it" not in classify["description"]
+        )
 
     def test_shared_history_url_and_auth_shape_with_chat(self):
         """Chat and analysis share the same endpoint + bearer header shape."""
