@@ -69,3 +69,6 @@ values.generated.yaml
 
 # Local tool downloads (optional helm binary for dev)
 .tools/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
