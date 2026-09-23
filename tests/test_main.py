@@ -5461,6 +5461,25 @@ class TestLiveResultTokenUsage:
         assert len(usage["calls"]) == 1
 
     @pytest.mark.asyncio
+    async def test_aborted_null_usage_loads_recorded_details(self, test_client):
+        await storage.save_result(
+            "aborted-null-usage", "", "aborted", {"token_usage": None}
+        )
+        await storage.record_token_usage(
+            job_id="aborted-null-usage",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=3,
+            output_tokens=1,
+        )
+        response = test_client.get("/results/aborted-null-usage")
+        assert response.status_code == 200
+        usage = response.json()["result"]["token_usage"]
+        assert usage["total_tokens"] == 4
+        assert len(usage["calls"]) == 1
+
+    @pytest.mark.asyncio
     async def test_missing_usage_metadata_never_creates_badge(self, test_client):
         from pi_sidecar_client import AIResult
 

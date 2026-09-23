@@ -4729,7 +4729,10 @@ async def get_job_result(
         status = result.get("status")
         if status in IN_PROGRESS_STATUSES:
             await _attach_token_usage(job_id, result["result"], detailed=False)
-        elif status in ("failed", "aborted") and "token_usage" not in result["result"]:
+        elif (
+            status in ("failed", "aborted")
+            and result["result"].get("token_usage") is None
+        ):
             await _attach_token_usage(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)

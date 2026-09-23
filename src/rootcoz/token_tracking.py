@@ -73,13 +73,15 @@ async def build_token_usage_summary(
     Returns None if no usage records exist.
     """
     try:
-        totals = await storage.get_job_token_usage_totals(job_id)
+        if detailed:
+            totals, records = await storage.get_job_token_usage_details(job_id)
+        else:
+            totals = await storage.get_job_token_usage_totals(job_id)
         if not totals:
             return None
         if not detailed:
             return TokenUsageSummary(**totals)
 
-        records = await storage.get_token_usage_for_job(job_id)
         calls = [
             TokenUsageEntry(
                 provider=rec["ai_provider"],

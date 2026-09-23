@@ -182,9 +182,9 @@ class TestBuildTokenUsageSummary:
                 return_value=totals,
             ) as mock_totals,
             patch(
-                "rootcoz.token_tracking.storage.get_token_usage_for_job",
+                "rootcoz.token_tracking.storage.get_job_token_usage_details",
                 new_callable=AsyncMock,
-                return_value=[record],
+                return_value=(totals, [record]),
             ) as mock_calls,
         ):
             detailed = await build_token_usage_summary("job-123")
@@ -197,16 +197,16 @@ class TestBuildTokenUsageSummary:
         )
         assert len(detailed.calls) == 1
         assert aggregate.calls == []
-        assert mock_totals.await_count == 2
+        mock_totals.assert_awaited_once_with("job-123")
         mock_calls.assert_awaited_once_with("job-123")
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_records(self) -> None:
         """Returns None when no records exist."""
         with patch(
-            "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+            "rootcoz.token_tracking.storage.get_job_token_usage_details",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=(None, []),
         ):
             result = await build_token_usage_summary("job-123")
             assert result is None
@@ -242,23 +242,21 @@ class TestBuildTokenUsageSummary:
         ]
         with (
             patch(
-                "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+                "rootcoz.token_tracking.storage.get_job_token_usage_details",
                 new_callable=AsyncMock,
-                return_value={
-                    "total_calls": 2,
-                    "total_input_tokens": 300,
-                    "total_output_tokens": 130,
-                    "total_cache_read_tokens": 10,
-                    "total_cache_write_tokens": 5,
-                    "total_tokens": 430,
-                    "total_cost_usd": 0.08,
-                    "total_duration_ms": 2000,
-                },
-            ),
-            patch(
-                "rootcoz.token_tracking.storage.get_token_usage_for_job",
-                new_callable=AsyncMock,
-                return_value=records,
+                return_value=(
+                    {
+                        "total_calls": 2,
+                        "total_input_tokens": 300,
+                        "total_output_tokens": 130,
+                        "total_cache_read_tokens": 10,
+                        "total_cache_write_tokens": 5,
+                        "total_tokens": 430,
+                        "total_cost_usd": 0.08,
+                        "total_duration_ms": 2000,
+                    },
+                    records,
+                ),
             ),
         ):
             summary = await build_token_usage_summary("job-123")
@@ -307,23 +305,21 @@ class TestBuildTokenUsageSummary:
         ]
         with (
             patch(
-                "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+                "rootcoz.token_tracking.storage.get_job_token_usage_details",
                 new_callable=AsyncMock,
-                return_value={
-                    "total_calls": 2,
-                    "total_input_tokens": 300,
-                    "total_output_tokens": 130,
-                    "total_cache_read_tokens": 0,
-                    "total_cache_write_tokens": 0,
-                    "total_tokens": 430,
-                    "total_cost_usd": None,
-                    "total_duration_ms": 1500,
-                },
-            ),
-            patch(
-                "rootcoz.token_tracking.storage.get_token_usage_for_job",
-                new_callable=AsyncMock,
-                return_value=records,
+                return_value=(
+                    {
+                        "total_calls": 2,
+                        "total_input_tokens": 300,
+                        "total_output_tokens": 130,
+                        "total_cache_read_tokens": 0,
+                        "total_cache_write_tokens": 0,
+                        "total_tokens": 430,
+                        "total_cost_usd": None,
+                        "total_duration_ms": 1500,
+                    },
+                    records,
+                ),
             ),
         ):
             summary = await build_token_usage_summary("job-123")
@@ -337,7 +333,7 @@ class TestBuildTokenUsageSummary:
     async def test_returns_none_on_storage_error(self) -> None:
         """Returns None when storage raises an exception."""
         with patch(
-            "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+            "rootcoz.token_tracking.storage.get_job_token_usage_details",
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB error"),
         ):
@@ -363,23 +359,21 @@ class TestBuildTokenUsageSummary:
         ]
         with (
             patch(
-                "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+                "rootcoz.token_tracking.storage.get_job_token_usage_details",
                 new_callable=AsyncMock,
-                return_value={
-                    "total_calls": 1,
-                    "total_input_tokens": 50,
-                    "total_output_tokens": 20,
-                    "total_cache_read_tokens": 0,
-                    "total_cache_write_tokens": 0,
-                    "total_tokens": 70,
-                    "total_cost_usd": 0.01,
-                    "total_duration_ms": 0,
-                },
-            ),
-            patch(
-                "rootcoz.token_tracking.storage.get_token_usage_for_job",
-                new_callable=AsyncMock,
-                return_value=records,
+                return_value=(
+                    {
+                        "total_calls": 1,
+                        "total_input_tokens": 50,
+                        "total_output_tokens": 20,
+                        "total_cache_read_tokens": 0,
+                        "total_cache_write_tokens": 0,
+                        "total_tokens": 70,
+                        "total_cost_usd": 0.01,
+                        "total_duration_ms": 0,
+                    },
+                    records,
+                ),
             ),
         ):
             summary = await build_token_usage_summary("job-123")
