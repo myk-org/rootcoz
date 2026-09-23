@@ -5400,6 +5400,241 @@ class TestReAnalyzeEndpoint:
         assert "origin_job_name" not in data
 
 
+class TestLiveResultTokenUsage:
+    @pytest.mark.asyncio
+    async def test_active_replaces_persisted_usage_with_sql_totals(self, test_client):
+        await storage.save_result(
+            "active-stale", "", "running", {"token_usage": {"total_tokens": 999}}
+        )
+        await storage.record_token_usage(
+            job_id="active-stale",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=3,
+            output_tokens=1,
+        )
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job", new_callable=AsyncMock
+        ) as mock_calls:
+            response = test_client.get("/results/active-stale")
+        assert response.status_code == 202
+        assert response.json()["result"]["token_usage"]["total_tokens"] == 4
+        assert response.json()["result"]["token_usage"]["calls"] == []
+        mock_calls.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "aborted"])
+    async def test_terminal_persisted_usage_is_not_reloaded(self, test_client, status):
+        persisted = {
+            "total_calls": 1,
+            "total_tokens": 4,
+            "calls": [{"input_tokens": 4}],
+        }
+        await storage.save_result(
+            "persisted-usage", "", status, {"token_usage": persisted}
+        )
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job", new_callable=AsyncMock
+        ) as mock_calls:
+            response = test_client.get("/results/persisted-usage")
+        mock_calls.assert_not_awaited()
+        assert response.status_code == 200
+        assert response.json()["result"]["token_usage"] == persisted
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "aborted"])
+    async def test_terminal_without_usage_loads_details(self, test_client, status):
+        await storage.save_result("legacy-usage", "", status, {"summary": "error"})
+        await storage.record_token_usage(
+            job_id="legacy-usage",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=3,
+            output_tokens=1,
+        )
+        response = test_client.get("/results/legacy-usage")
+        assert response.status_code == 200
+        usage = response.json()["result"]["token_usage"]
+        assert usage["total_tokens"] == 4
+        assert len(usage["calls"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_aborted_null_usage_loads_recorded_details(self, test_client):
+        await storage.save_result(
+            "aborted-null-usage", "", "aborted", {"token_usage": None}
+        )
+        await storage.record_token_usage(
+            job_id="aborted-null-usage",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=3,
+            output_tokens=1,
+        )
+        response = test_client.get("/results/aborted-null-usage")
+        assert response.status_code == 200
+        usage = response.json()["result"]["token_usage"]
+        assert usage["total_tokens"] == 4
+        assert len(usage["calls"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_usage_metadata_never_creates_badge(self, test_client):
+        from pi_sidecar_client import AIResult
+
+        from rootcoz.token_tracking import record_ai_usage
+
+        await storage.save_result("missing-usage", "", "failed", {"summary": "error"})
+        await record_ai_usage(
+            "missing-usage", AIResult(success=False, text="error"), "analysis"
+        )
+        assert await storage.get_token_usage_for_job("missing-usage") == []
+        response = test_client.get("/results/missing-usage")
+        assert "token_usage" not in response.json()["result"]
+
+    @pytest.mark.asyncio
+    async def test_active_aggregate_and_terminal_details(self, test_client):
+        await storage.save_result("usage-live", "", "running", {"summary": "analysis"})
+        assert (
+            "token_usage" not in test_client.get("/results/usage-live").json()["result"]
+        )
+        for index, cost in enumerate((0.05, 0.0, None), start=1):
+            await storage.record_token_usage(
+                job_id="usage-live",
+                ai_provider="gemini",
+                ai_model="test",
+                call_type="analysis",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=cost,
+            )
+            current = test_client.get("/results/usage-live").json()["result"][
+                "token_usage"
+            ]
+            assert current["total_calls"] == index
+            assert current["calls"] == []
+            assert current["total_cost_usd"] == (0.05 if index < 3 else None)
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job",
+            side_effect=AssertionError("loaded calls"),
+        ):
+            live = test_client.get("/results/usage-live")
+        assert live.status_code == 202
+        usage = live.json()["result"]["token_usage"]
+        assert usage["total_calls"] == 3
+        assert usage["total_tokens"] == 360
+        assert usage["total_input_tokens"] == 300
+        assert usage["total_output_tokens"] == 60
+        assert usage["total_cost_usd"] is None
+        assert usage["calls"] == []
+        await storage.save_result("usage-live", "", "failed", {"summary": "analysis"})
+        terminal = test_client.get("/results/usage-live").json()["result"][
+            "token_usage"
+        ]
+        assert len(terminal["calls"]) == 3
+        assert terminal["total_cost_usd"] is None
+
+    @pytest.mark.asyncio
+    async def test_usage_write_notifies_only_its_job_without_progress(
+        self, test_client
+    ):
+        from pi_sidecar_client import AIResult, AITokenUsage
+
+        from rootcoz.main import _job_status_listeners, _make_sse_stream
+        from rootcoz.token_tracking import record_ai_usage
+
+        await storage.save_result("usage-event", "", "running", {"summary": "analysis"})
+        other = asyncio.Event()
+        _job_status_listeners["another-job"] = {other}
+        request = AsyncMock()
+        request.is_disconnected.return_value = False
+        stream = _make_sse_stream(
+            request,
+            set(),
+            "status-changed",
+            per_key_listeners=_job_status_listeners,
+            listener_key="usage-event",
+        ).body_iterator
+        event = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)  # register the listener before writing usage
+        try:
+            await record_ai_usage(
+                "usage-event",
+                AIResult(
+                    success=True,
+                    text="ok",
+                    usage=AITokenUsage(
+                        input_tokens=10,
+                        output_tokens=5,
+                        cost_usd=0.25,
+                    ),
+                ),
+                "analysis",
+            )
+            assert await asyncio.wait_for(event, timeout=1) == (
+                "event: status-changed\ndata: refresh\n\n"
+            )
+            assert not other.is_set()
+            usage = test_client.get("/results/usage-event").json()["result"][
+                "token_usage"
+            ]
+            assert usage["total_cost_usd"] == 0.25
+            assert usage["calls"] == []
+        finally:
+            await stream.aclose()
+            _job_status_listeners.pop("another-job", None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["running", "failed", "aborted"])
+    async def test_result_exposes_recorded_usage(self, test_client, status):
+        await storage.save_result("usage-job", "", status, {"summary": "analysis"})
+        await storage.record_token_usage(
+            job_id="usage-job",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            cost_usd=0.0,
+            duration_ms=100,
+            prompt_chars=0,
+            response_chars=0,
+        )
+        response = test_client.get("/results/usage-job")
+        assert response.status_code == (202 if status == "running" else 200)
+        assert response.json()["result"]["token_usage"]["total_cost_usd"] == 0.0
+        assert response.json()["result"]["token_usage"]["total_tokens"] == 120
+
+    @pytest.mark.asyncio
+    async def test_result_preserves_unavailable_cost_and_empty_usage(self, test_client):
+        await storage.save_result(
+            "unknown-cost", "", "running", {"summary": "analysis"}
+        )
+        assert (
+            "token_usage"
+            not in test_client.get("/results/unknown-cost").json()["result"]
+        )
+        await storage.record_token_usage(
+            job_id="unknown-cost",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            cost_usd=None,
+            duration_ms=100,
+            prompt_chars=0,
+            response_chars=0,
+        )
+        response = test_client.get("/results/unknown-cost")
+        assert response.json()["result"]["token_usage"]["total_cost_usd"] is None
+
+
 class TestGetFailureByUUID:
     """Tests for GET /api/failures/{failure_uuid}."""
 
