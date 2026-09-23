@@ -21,13 +21,15 @@ FROM registry.access.redhat.com/ubi9/nodejs-22-minimal AS sidecar-builder
 
 USER 0
 WORKDIR /sidecar
+# tree-sitter-kotlin falls back to node-gyp when no matching prebuild exists.
+RUN microdnf install -y python3 make gcc-c++ && microdnf clean all
 
 COPY sidecar-helper/package.json sidecar-helper/package-lock.json* ./
 # pi-sidecar@>=4.2.0 requires Node >=22.19.0 (engines field); fail early if base image lags.
 RUN node -e "const [maj,min]=process.versions.node.split('.').map(Number); if (maj<22||(maj===22&&min<19)) { console.error('Need Node >=22.19.0, got', process.versions.node); process.exit(1); }"
 # --foreground-scripts: nested pi-sidecar/pi-coding-agent trees make parallel reify
 # delete package dirs while their postinstall runs (ENOENT uv_cwd). Sequential scripts avoid it.
-RUN npm ci --foreground-scripts
+RUN DO_NOT_TRACK=1 npm ci --foreground-scripts
 
 COPY sidecar-helper/ .
 RUN npx tsc
@@ -129,6 +131,9 @@ COPY --chown=appuser:0 --from=frontend-builder /frontend/dist /app/frontend/dist
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar-helper/dist
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/node_modules /app/sidecar-helper/node_modules
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/package.json /app/sidecar-helper/package.json
+COPY --chown=appuser:0 third_party/graft-LICENSE /app/third_party/graft-LICENSE
+# npm creates the graft bin link in /sidecar/node_modules/.bin, copied above.
+RUN test -x /app/sidecar-helper/node_modules/.bin/graft
 
 # Copy entrypoint script
 COPY --chown=appuser:0 entrypoint.sh /app/entrypoint.sh
@@ -149,9 +154,10 @@ RUN find /home/appuser -type d -exec chmod g=u {} + \
 USER appuser
 
 # Ensure CLIs are in PATH
-ENV PATH="/home/appuser/.local/bin:/home/appuser/.npm-global/bin:${PATH}"
+ENV PATH="/app/sidecar-helper/node_modules/.bin:/home/appuser/.local/bin:/home/appuser/.npm-global/bin:${PATH}"
 # Set HOME for OpenShift compatibility (random UID has no passwd entry)
 ENV HOME="/home/appuser"
+ENV DO_NOT_TRACK=1
 
 EXPOSE 8000
 

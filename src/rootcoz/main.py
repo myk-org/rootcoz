@@ -3728,6 +3728,7 @@ async def _process_ci_source_analysis(
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
+    repo_path: Path | None = None
     source: CISource | None = None  # set after source creation; used by cleanup
     source_result = None  # set after source.fetch(); used by _stamp_source_warnings
     metadata_job_name = display_name  # updated from source_result.identity after fetch
@@ -3944,6 +3945,9 @@ async def _process_ci_source_analysis(
         # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, repo_path)
+            from rootcoz.engine.graft import index_repositories
+
+            await asyncio.to_thread(index_repositories, repo_path, cloned_repos)
 
         custom_prompt = append_repo_context(
             (body.raw_prompt or "").strip(), ws_result.repo_context
@@ -4296,6 +4300,12 @@ async def _process_ci_source_analysis(
     finally:
         logger.debug(f"Cleaning up workspace for job_id={job_id}")
         if repo_manager is not None:
+            from rootcoz.engine.graft import cleanup_graph
+            from rootcoz.engine.graft_http import unregister_workspace
+
+            if repo_path is not None:
+                unregister_workspace(repo_path)
+                cleanup_graph(repo_path)
             repo_manager.cleanup()
         if source is not None:
             source.cleanup()
@@ -4844,6 +4854,7 @@ async def _reanalyze_failure_background(
     job_id_var.set(job_id)
     auth_header = ""
     repo_manager: RepositoryManager | None = None
+    repo_path: Path | None = None
     source: CISource | None = None
 
     try:
@@ -4948,6 +4959,9 @@ async def _reanalyze_failure_background(
         # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, repo_path)
+            from rootcoz.engine.graft import index_repositories
+
+            await asyncio.to_thread(index_repositories, repo_path, cloned_repos)
 
         # Re-download console output and artifacts from the original CI source
         console_context = ""
@@ -5128,6 +5142,12 @@ async def _reanalyze_failure_background(
         await _cleanup_ai_session(auth_header)
         if repo_manager:
             try:
+                from rootcoz.engine.graft import cleanup_graph
+                from rootcoz.engine.graft_http import unregister_workspace
+
+                if repo_path is not None:
+                    unregister_workspace(repo_path)
+                    cleanup_graph(repo_path)
                 repo_manager.cleanup()
             except Exception:
                 logger.warning("Failed to cleanup repos", exc_info=True)
@@ -11205,6 +11225,13 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
     repos_available = await clone_chat_repos(
         workspace, decrypted_params, user_repo_token=github_token
     )
+    if repos_available:
+        from rootcoz.engine.graft import index_repositories
+        from rootcoz.engine.graft_http import cloned_graph_roots
+
+        await asyncio.to_thread(
+            index_repositories, workspace, cloned_graph_roots(workspace)
+        )
     _raise_if_chat_job_deleted(job_id)
     ci_build_data_available = await setup_ci_build_workspace(
         workspace,
@@ -11236,6 +11263,9 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             )
 
         _raise_if_chat_job_deleted(job_id)
+        from rootcoz.engine.chat import graph_http_tools
+
+        custom_tools.extend(graph_http_tools(workspace))
         session_id = await init_chat_session(
             job_id=job_id,
             job_name=result_data.get("job_name", "unknown"),
@@ -11789,6 +11819,15 @@ async def _process_chat_message(
                         repos_available = await clone_chat_repos(
                             workspace, decrypted_params, user_repo_token=github_token
                         )
+                        if repos_available:
+                            from rootcoz.engine.graft import index_repositories
+                            from rootcoz.engine.graft_http import cloned_graph_roots
+
+                            await asyncio.to_thread(
+                                index_repositories,
+                                workspace,
+                                cloned_graph_roots(workspace),
+                            )
 
                         settings = get_settings()
 
@@ -11821,6 +11860,9 @@ async def _process_chat_message(
                                 username,
                             )
 
+                        from rootcoz.engine.chat import graph_http_tools
+
+                        custom_tools.extend(graph_http_tools(workspace))
                         await install_http_tools_mcp_best_effort_async(
                             workspace, custom_tools
                         )
