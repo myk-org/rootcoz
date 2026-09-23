@@ -1,5 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { ProfileForm } from '@/components/shared/ProfileForm'
+import { AiCredentials } from '@/components/shared/AiCredentials'
 import { useAuth } from '@/lib/auth'
 import { Shield } from 'lucide-react'
 
@@ -22,6 +23,7 @@ export function SettingsPage() {
         onSaved={async () => { await refreshAuth(); navigate('/') }}
         readOnlyUsername
       />
+      <AiCredentials />
       <p className="mt-4 text-center text-xs text-text-tertiary">
         Tokens are stored locally and synced to the server (encrypted at rest) for cross-browser access.
       </p>
