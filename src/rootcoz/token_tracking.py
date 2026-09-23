@@ -5,6 +5,7 @@ and build token usage summaries for analysis results.
 """
 
 import os
+from collections.abc import Callable
 
 from pi_sidecar_client import AIResult
 from simple_logger.logger import get_logger
@@ -13,6 +14,14 @@ from rootcoz import storage
 from rootcoz.models import TokenUsageEntry, TokenUsageSummary
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+
+_on_usage_recorded: Callable[[str], None] | None = None
+
+
+def set_usage_callback(callback: Callable[[str], None]) -> None:
+    """Register the job-scoped SSE notifier for successful usage writes."""
+    global _on_usage_recorded
+    _on_usage_recorded = callback
 
 
 async def record_ai_usage(
@@ -51,16 +60,24 @@ async def record_ai_usage(
             prompt_chars=prompt_chars,
             response_chars=len(result.text),
         )
+        if _on_usage_recorded:
+            _on_usage_recorded(job_id)
     except Exception:
         logger.debug("Failed to record token usage for job %s", job_id, exc_info=True)
 
 
-async def build_token_usage_summary(job_id: str) -> TokenUsageSummary | None:
-    """Build a TokenUsageSummary from all recorded usage for a job.
+async def build_token_usage_summary(
+    job_id: str, *, detailed: bool = True
+) -> TokenUsageSummary | None:
+    """Build usage totals, including per-call details only when requested.
 
     Returns None if no usage records exist.
     """
     try:
+        if not detailed:
+            totals = await storage.get_job_token_usage_totals(job_id)
+            return TokenUsageSummary(**totals) if totals else None
+
         records = await storage.get_token_usage_for_job(job_id)
         if not records:
             return None

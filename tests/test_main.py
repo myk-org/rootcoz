@@ -5402,6 +5402,98 @@ class TestReAnalyzeEndpoint:
 
 class TestLiveResultTokenUsage:
     @pytest.mark.asyncio
+    async def test_active_aggregate_and_terminal_details(self, test_client):
+        await storage.save_result("usage-live", "", "running", {"summary": "analysis"})
+        assert (
+            "token_usage" not in test_client.get("/results/usage-live").json()["result"]
+        )
+        for index, cost in enumerate((0.05, 0.0, None), start=1):
+            await storage.record_token_usage(
+                job_id="usage-live",
+                ai_provider="gemini",
+                ai_model="test",
+                call_type="analysis",
+                input_tokens=100,
+                output_tokens=20,
+                cost_usd=cost,
+            )
+            current = test_client.get("/results/usage-live").json()["result"][
+                "token_usage"
+            ]
+            assert current["total_calls"] == index
+            assert current["calls"] == []
+            assert current["total_cost_usd"] == (0.05 if index < 3 else None)
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job",
+            side_effect=AssertionError("loaded calls"),
+        ):
+            live = test_client.get("/results/usage-live")
+        assert live.status_code == 202
+        usage = live.json()["result"]["token_usage"]
+        assert usage["total_calls"] == 3
+        assert usage["total_tokens"] == 360
+        assert usage["total_input_tokens"] == 300
+        assert usage["total_output_tokens"] == 60
+        assert usage["total_cost_usd"] is None
+        assert usage["calls"] == []
+        await storage.save_result("usage-live", "", "failed", {"summary": "analysis"})
+        terminal = test_client.get("/results/usage-live").json()["result"][
+            "token_usage"
+        ]
+        assert len(terminal["calls"]) == 3
+        assert terminal["total_cost_usd"] is None
+
+    @pytest.mark.asyncio
+    async def test_usage_write_notifies_only_its_job_without_progress(
+        self, test_client
+    ):
+        from pi_sidecar_client import AIResult, AITokenUsage
+
+        from rootcoz.main import _job_status_listeners, _make_sse_stream
+        from rootcoz.token_tracking import record_ai_usage
+
+        await storage.save_result("usage-event", "", "running", {"summary": "analysis"})
+        other = asyncio.Event()
+        _job_status_listeners["another-job"] = {other}
+        request = AsyncMock()
+        request.is_disconnected.return_value = False
+        stream = _make_sse_stream(
+            request,
+            set(),
+            "status-changed",
+            per_key_listeners=_job_status_listeners,
+            listener_key="usage-event",
+        ).body_iterator
+        event = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)  # register the listener before writing usage
+        try:
+            await record_ai_usage(
+                "usage-event",
+                AIResult(
+                    success=True,
+                    text="ok",
+                    usage=AITokenUsage(
+                        input_tokens=10,
+                        output_tokens=5,
+                        cost_usd=0.25,
+                    ),
+                ),
+                "analysis",
+            )
+            assert await asyncio.wait_for(event, timeout=1) == (
+                "event: status-changed\ndata: refresh\n\n"
+            )
+            assert not other.is_set()
+            usage = test_client.get("/results/usage-event").json()["result"][
+                "token_usage"
+            ]
+            assert usage["total_cost_usd"] == 0.25
+            assert usage["calls"] == []
+        finally:
+            await stream.aclose()
+            _job_status_listeners.pop("another-job", None)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("status", ["running", "failed", "aborted"])
     async def test_result_exposes_recorded_usage(self, test_client, status):
         await storage.save_result("usage-job", "", status, {"summary": "analysis"})

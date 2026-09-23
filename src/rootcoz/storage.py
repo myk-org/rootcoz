@@ -5623,6 +5623,25 @@ async def get_token_usage_for_job(job_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in await cursor.fetchall()]
 
 
+async def get_job_token_usage_totals(job_id: str) -> dict[str, Any] | None:
+    """Aggregate one job's usage without loading individual calls."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) AS total_calls, "
+            "SUM(input_tokens) AS total_input_tokens, "
+            "SUM(output_tokens) AS total_output_tokens, "
+            "SUM(cache_read_tokens) AS total_cache_read_tokens, "
+            "SUM(cache_write_tokens) AS total_cache_write_tokens, "
+            "SUM(total_tokens) AS total_tokens, "
+            "CASE WHEN COUNT(cost_usd) = COUNT(*) THEN SUM(cost_usd) END AS total_cost_usd, "
+            "COALESCE(SUM(duration_ms), 0) AS total_duration_ms "
+            "FROM ai_token_usage WHERE job_id = ?",
+            (job_id,),
+        )
+        totals = dict(await cursor.fetchone())
+        return totals if totals["total_calls"] else None
+
+
 async def get_token_usage_summary(
     start_date: str | None = None,
     end_date: str | None = None,
