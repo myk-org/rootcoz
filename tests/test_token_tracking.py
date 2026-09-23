@@ -55,36 +55,28 @@ class TestRecordAiUsage:
             )
 
     @pytest.mark.asyncio
-    async def test_records_zeros_when_usage_is_none(self) -> None:
-        """Records with zero token fields when usage is None."""
-        result = AIResult(success=True, text="output")
+    async def test_skips_result_without_usage_metadata(self) -> None:
+        result = AIResult(success=False, text="error")
         assert result.usage is None
 
         with patch(
             "rootcoz.token_tracking.storage.record_token_usage",
             new_callable=AsyncMock,
         ) as mock_record:
-            await record_ai_usage(
-                job_id="job-123",
-                result=result,
-                call_type="analysis",
-                ai_provider="claude",
-                ai_model="opus-4",
-            )
-            mock_record.assert_called_once_with(
-                job_id="job-123",
-                ai_provider="claude",
-                ai_model="opus-4",
-                call_type="analysis",
-                input_tokens=0,
-                output_tokens=0,
-                cache_read_tokens=0,
-                cache_write_tokens=0,
-                cost_usd=None,
-                duration_ms=None,
-                prompt_chars=0,
-                response_chars=len("output"),
-            )
+            await record_ai_usage("job-123", result, "analysis")
+            mock_record.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_records_genuine_zero_usage(self) -> None:
+        result = AIResult(success=True, text="", usage=AITokenUsage())
+        with patch(
+            "rootcoz.token_tracking.storage.record_token_usage",
+            new_callable=AsyncMock,
+        ) as mock_record:
+            await record_ai_usage("job-123", result, "analysis")
+            mock_record.assert_called_once()
+            assert mock_record.call_args.kwargs["input_tokens"] == 0
+            assert mock_record.call_args.kwargs["output_tokens"] == 0
 
     @pytest.mark.asyncio
     async def test_skips_when_job_id_empty(self) -> None:
@@ -160,12 +152,61 @@ class TestBuildTokenUsageSummary:
     """Tests for build_token_usage_summary."""
 
     @pytest.mark.asyncio
+    async def test_detailed_totals_come_from_storage_not_calls(self) -> None:
+        totals = {
+            "total_calls": 7,
+            "total_input_tokens": 900,
+            "total_output_tokens": 100,
+            "total_cache_read_tokens": 8,
+            "total_cache_write_tokens": 4,
+            "total_tokens": 1000,
+            "total_cost_usd": None,
+            "total_duration_ms": 12,
+        }
+        record = {
+            "ai_provider": "gemini",
+            "ai_model": "test",
+            "call_type": "analysis",
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 3,
+            "cost_usd": 0.01,
+            "duration_ms": 5,
+        }
+        with (
+            patch(
+                "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+                new_callable=AsyncMock,
+                return_value=totals,
+            ) as mock_totals,
+            patch(
+                "rootcoz.token_tracking.storage.get_token_usage_for_job",
+                new_callable=AsyncMock,
+                return_value=[record],
+            ) as mock_calls,
+        ):
+            detailed = await build_token_usage_summary("job-123")
+            aggregate = await build_token_usage_summary("job-123", detailed=False)
+        assert detailed is not None and aggregate is not None
+        assert (
+            detailed.model_dump(exclude={"calls"})
+            == aggregate.model_dump(exclude={"calls"})
+            == totals
+        )
+        assert len(detailed.calls) == 1
+        assert aggregate.calls == []
+        assert mock_totals.await_count == 2
+        mock_calls.assert_awaited_once_with("job-123")
+
+    @pytest.mark.asyncio
     async def test_returns_none_when_no_records(self) -> None:
         """Returns None when no records exist."""
         with patch(
-            "rootcoz.token_tracking.storage.get_token_usage_for_job",
+            "rootcoz.token_tracking.storage.get_job_token_usage_totals",
             new_callable=AsyncMock,
-            return_value=[],
+            return_value=None,
         ):
             result = await build_token_usage_summary("job-123")
             assert result is None
@@ -199,10 +240,26 @@ class TestBuildTokenUsageSummary:
                 "duration_ms": 800,
             },
         ]
-        with patch(
-            "rootcoz.token_tracking.storage.get_token_usage_for_job",
-            new_callable=AsyncMock,
-            return_value=records,
+        with (
+            patch(
+                "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+                new_callable=AsyncMock,
+                return_value={
+                    "total_calls": 2,
+                    "total_input_tokens": 300,
+                    "total_output_tokens": 130,
+                    "total_cache_read_tokens": 10,
+                    "total_cache_write_tokens": 5,
+                    "total_tokens": 430,
+                    "total_cost_usd": 0.08,
+                    "total_duration_ms": 2000,
+                },
+            ),
+            patch(
+                "rootcoz.token_tracking.storage.get_token_usage_for_job",
+                new_callable=AsyncMock,
+                return_value=records,
+            ),
         ):
             summary = await build_token_usage_summary("job-123")
 
@@ -248,10 +305,26 @@ class TestBuildTokenUsageSummary:
                 "duration_ms": 500,
             },
         ]
-        with patch(
-            "rootcoz.token_tracking.storage.get_token_usage_for_job",
-            new_callable=AsyncMock,
-            return_value=records,
+        with (
+            patch(
+                "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+                new_callable=AsyncMock,
+                return_value={
+                    "total_calls": 2,
+                    "total_input_tokens": 300,
+                    "total_output_tokens": 130,
+                    "total_cache_read_tokens": 0,
+                    "total_cache_write_tokens": 0,
+                    "total_tokens": 430,
+                    "total_cost_usd": None,
+                    "total_duration_ms": 1500,
+                },
+            ),
+            patch(
+                "rootcoz.token_tracking.storage.get_token_usage_for_job",
+                new_callable=AsyncMock,
+                return_value=records,
+            ),
         ):
             summary = await build_token_usage_summary("job-123")
 
@@ -264,7 +337,7 @@ class TestBuildTokenUsageSummary:
     async def test_returns_none_on_storage_error(self) -> None:
         """Returns None when storage raises an exception."""
         with patch(
-            "rootcoz.token_tracking.storage.get_token_usage_for_job",
+            "rootcoz.token_tracking.storage.get_job_token_usage_totals",
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB error"),
         ):
@@ -288,10 +361,26 @@ class TestBuildTokenUsageSummary:
                 "duration_ms": None,
             },
         ]
-        with patch(
-            "rootcoz.token_tracking.storage.get_token_usage_for_job",
-            new_callable=AsyncMock,
-            return_value=records,
+        with (
+            patch(
+                "rootcoz.token_tracking.storage.get_job_token_usage_totals",
+                new_callable=AsyncMock,
+                return_value={
+                    "total_calls": 1,
+                    "total_input_tokens": 50,
+                    "total_output_tokens": 20,
+                    "total_cache_read_tokens": 0,
+                    "total_cache_write_tokens": 0,
+                    "total_tokens": 70,
+                    "total_cost_usd": 0.01,
+                    "total_duration_ms": 0,
+                },
+            ),
+            patch(
+                "rootcoz.token_tracking.storage.get_token_usage_for_job",
+                new_callable=AsyncMock,
+                return_value=records,
+            ),
         ):
             summary = await build_token_usage_summary("job-123")
 

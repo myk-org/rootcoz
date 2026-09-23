@@ -5402,6 +5402,79 @@ class TestReAnalyzeEndpoint:
 
 class TestLiveResultTokenUsage:
     @pytest.mark.asyncio
+    async def test_active_replaces_persisted_usage_with_sql_totals(self, test_client):
+        await storage.save_result(
+            "active-stale", "", "running", {"token_usage": {"total_tokens": 999}}
+        )
+        await storage.record_token_usage(
+            job_id="active-stale",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=3,
+            output_tokens=1,
+        )
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job", new_callable=AsyncMock
+        ) as mock_calls:
+            response = test_client.get("/results/active-stale")
+        assert response.status_code == 202
+        assert response.json()["result"]["token_usage"]["total_tokens"] == 4
+        assert response.json()["result"]["token_usage"]["calls"] == []
+        mock_calls.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "aborted"])
+    async def test_terminal_persisted_usage_is_not_reloaded(self, test_client, status):
+        persisted = {
+            "total_calls": 1,
+            "total_tokens": 4,
+            "calls": [{"input_tokens": 4}],
+        }
+        await storage.save_result(
+            "persisted-usage", "", status, {"token_usage": persisted}
+        )
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job", new_callable=AsyncMock
+        ) as mock_calls:
+            response = test_client.get("/results/persisted-usage")
+        mock_calls.assert_not_awaited()
+        assert response.status_code == 200
+        assert response.json()["result"]["token_usage"] == persisted
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "aborted"])
+    async def test_terminal_without_usage_loads_details(self, test_client, status):
+        await storage.save_result("legacy-usage", "", status, {"summary": "error"})
+        await storage.record_token_usage(
+            job_id="legacy-usage",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=3,
+            output_tokens=1,
+        )
+        response = test_client.get("/results/legacy-usage")
+        assert response.status_code == 200
+        usage = response.json()["result"]["token_usage"]
+        assert usage["total_tokens"] == 4
+        assert len(usage["calls"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_usage_metadata_never_creates_badge(self, test_client):
+        from pi_sidecar_client import AIResult
+
+        from rootcoz.token_tracking import record_ai_usage
+
+        await storage.save_result("missing-usage", "", "failed", {"summary": "error"})
+        await record_ai_usage(
+            "missing-usage", AIResult(success=False, text="error"), "analysis"
+        )
+        assert await storage.get_token_usage_for_job("missing-usage") == []
+        response = test_client.get("/results/missing-usage")
+        assert "token_usage" not in response.json()["result"]
+
+    @pytest.mark.asyncio
     async def test_active_aggregate_and_terminal_details(self, test_client):
         await storage.save_result("usage-live", "", "running", {"summary": "analysis"})
         assert (
