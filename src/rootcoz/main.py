@@ -9507,7 +9507,10 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
     """List supported provider IDs and configured flags; never return keys."""
     username = await _credential_user(request)
     supported = await supported_key_providers()
-    configured = await storage.get_user_ai_credentials(username)
+    try:
+        configured = await storage.get_user_ai_credentials(username)
+    except storage.UnreadableAiCredentialsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return JSONResponse(
         content={
             "providers": [
@@ -9548,12 +9551,22 @@ async def set_user_ai_credential(
         )
     key = body.api_key.get_secret_value()
     try:
-        valid = bool(key.strip()) and len(key.encode("utf-16-le")) // 2 <= 1024
+        valid = (
+            bool(
+                key.strip(
+                    "\ufeff\u0009\u000a\u000b\u000c\u000d \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+                )
+            )
+            and len(key.encode("utf-16-le")) // 2 <= 1024
+        )
     except UnicodeEncodeError:
         valid = False
     if not valid:
         raise HTTPException(status_code=400, detail="API key must be 1-1024 characters")
-    sessions = await storage.update_user_ai_credential(username, provider, key)
+    try:
+        sessions = await storage.update_user_ai_credential(username, provider, key)
+    except storage.UnreadableAiCredentialsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _revoke_ai_sessions(sessions)
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
 
@@ -9568,7 +9581,10 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
         raise HTTPException(
             status_code=400, detail="Provider does not support session API keys"
         )
-    sessions = await storage.update_user_ai_credential(username, provider, None)
+    try:
+        sessions = await storage.update_user_ai_credential(username, provider, None)
+    except storage.UnreadableAiCredentialsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _revoke_ai_sessions(sessions)
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
 
@@ -11078,16 +11094,20 @@ async def preview_feedback(
         )
     ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
     ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
+    token = ai_username.set(request.state.username)
     try:
-        return await generate_feedback_preview(
-            body, settings, ai_provider=ai_provider, ai_model=ai_model
-        )
-    except Exception as exc:  # non-fatal feedback preview
-        logger.exception("Failed to generate feedback preview")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to generate feedback preview",
-        ) from exc
+        try:
+            return await generate_feedback_preview(
+                body, settings, ai_provider=ai_provider, ai_model=ai_model
+            )
+        except Exception as exc:  # non-fatal feedback preview
+            logger.exception("Failed to generate feedback preview")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate feedback preview",
+            ) from exc
+    finally:
+        ai_username.reset(token)
 
 
 @app.post(
@@ -11330,6 +11350,9 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             )
 
         _raise_if_chat_job_deleted(job_id)
+        credential_generation = await storage.get_user_ai_credential_generation(
+            username
+        )
         token = ai_username.set(username)
         try:
             session_id = await init_chat_session(
@@ -11347,7 +11370,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             ai_username.reset(token)
         _raise_if_chat_job_deleted(job_id)
         if session_id:
-            await storage.add_chat_message(
+            saved = await storage.add_chat_message(
                 job_id=job_id,
                 role="assistant",
                 content="",
@@ -11356,7 +11379,11 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
                 ai_model=ai_model,
                 session_id=session_id,
                 status="completed",
+                credential_generation=credential_generation,
             )
+            if not saved:
+                await _revoke_ai_sessions([session_id])
+                session_id = None
         welcome_text = build_welcome_message(
             job_name=result_data.get("job_name", "unknown"),
             build_number=resolve_display_build_id(result_data),
@@ -12012,19 +12039,28 @@ async def _process_chat_message(
                         )
                         return
 
-                    await storage.update_chat_message_content(
-                        assistant_msg_id, response_text
-                    )
-                    await storage.update_chat_message_status(
-                        assistant_msg_id, "completed"
-                    )
-                    await storage.update_chat_message_ai_fields(
+                    saved = await storage.complete_chat_message_if_generation(
                         assistant_msg_id,
+                        content=response_text,
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         session_id=new_session_id or "",
                         credential_generation=credential_generation,
                     )
+                    if not saved:
+                        if new_session_id:
+                            await _revoke_ai_sessions([new_session_id])
+                        logger.info(
+                            "Chat: discarded response for message %d after credential change",
+                            assistant_msg_id,
+                        )
+                        await _fail_chat_assistant_placeholder(
+                            assistant_msg_id,
+                            job_id,
+                            username,
+                            "AI credentials changed during processing. Please try again.",
+                        )
+                        return
                     logger.info(
                         "Chat: message %d processed for job %s (session=%s)",
                         assistant_msg_id,
@@ -12228,6 +12264,9 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
 
+            credential_generation = await storage.get_user_ai_credential_generation(
+                username
+            )
             token = ai_username.set(username)
             try:
                 session_id = await init_admin_chat_session(
@@ -12239,7 +12278,7 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
             finally:
                 ai_username.reset(token)
             if session_id:
-                await storage.add_chat_message(
+                saved = await storage.add_chat_message(
                     job_id=ADMIN_CHAT_JOB_ID,
                     role="assistant",
                     content="",
@@ -12248,7 +12287,11 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                     ai_model=ai_model,
                     session_id=session_id,
                     status="completed",
+                    credential_generation=credential_generation,
                 )
+                if not saved:
+                    await _revoke_ai_sessions([session_id])
+                    session_id = None
     logger.info("Admin chat init: workspace=%s, session=%s", workspace, session_id)
     return {"ready": True, "session_id": session_id or ""}
 
@@ -12506,15 +12549,28 @@ async def _process_admin_chat_message(
                 )
                 return
 
-            await storage.update_chat_message_content(assistant_msg_id, response_text)
-            await storage.update_chat_message_status(assistant_msg_id, "completed")
-            await storage.update_chat_message_ai_fields(
+            saved = await storage.complete_chat_message_if_generation(
                 assistant_msg_id,
+                content=response_text,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 session_id=new_session_id or "",
                 credential_generation=credential_generation,
             )
+            if not saved:
+                if new_session_id:
+                    await _revoke_ai_sessions([new_session_id])
+                logger.info(
+                    "Admin chat: discarded response for message %d after credential change",
+                    assistant_msg_id,
+                )
+                await storage.update_chat_message_content(
+                    assistant_msg_id,
+                    "AI credentials changed during processing. Please try again.",
+                )
+                await storage.update_chat_message_status(assistant_msg_id, "failed")
+                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+                return
             logger.info(
                 "Admin chat: message %d processed (session=%s)",
                 assistant_msg_id,

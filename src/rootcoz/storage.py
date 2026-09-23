@@ -5240,6 +5240,26 @@ async def get_user_tokens(username: str) -> dict[str, str]:
         }
 
 
+class UnreadableAiCredentialsError(ValueError):
+    """Stored user AI credentials cannot be read safely."""
+
+
+def _decode_ai_credentials(value: str | None) -> dict[str, str]:
+    """Decode credentials or refuse access without exposing stored secrets."""
+    if not value:
+        return {}
+    try:
+        data = json.loads(decrypt_value(value))
+        if isinstance(data, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in data.items()
+        ):
+            return data
+    except (ValueError, TypeError):
+        pass
+    logger.warning("Unreadable user AI credentials; refusing access")
+    raise UnreadableAiCredentialsError("Stored AI credentials are unreadable")
+
+
 async def get_user_ai_credentials(username: str) -> dict[str, str]:
     """Read the encrypted, provider-ID-keyed credential map for a DB user."""
     async with _connect_db() as db:
@@ -5248,7 +5268,7 @@ async def get_user_ai_credentials(username: str) -> dict[str, str]:
                 "SELECT ai_credentials_enc FROM users WHERE username = ?", (username,)
             )
         ).fetchone()
-    return json.loads(decrypt_value(row[0])) if row and row[0] else {}
+    return _decode_ai_credentials(row[0]) if row else {}
 
 
 async def get_user_ai_credential_generation(username: str) -> int | None:
@@ -5266,7 +5286,7 @@ async def get_user_ai_credential_generation(username: str) -> int | None:
 async def update_user_ai_credential(
     username: str, provider: str, key: str | None
 ) -> list[str]:
-    """Save a credential and invalidate its chat sessions; return IDs to delete."""
+    """Save a credential and invalidate its chat sessions; refuse unreadable maps."""
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         row = await (
@@ -5276,7 +5296,7 @@ async def update_user_ai_credential(
         ).fetchone()
         if row is None:
             raise LookupError("User has no credential store")
-        credentials = json.loads(decrypt_value(row[0])) if row[0] else {}
+        credentials = _decode_ai_credentials(row[0])
         if key is None:
             credentials.pop(provider, None)
         else:
@@ -6195,11 +6215,14 @@ async def add_chat_message(
     ai_model: str = "",
     session_id: str = "",
     status: str = "completed",
+    credential_generation: int | None = None,
 ) -> int:
-    """Add a chat message and return its id."""
+    """Add a chat message and return its id, or zero if credentials rotated."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ? IS NULL OR EXISTS "
+            "(SELECT 1 FROM users WHERE username = ? AND ai_credential_generation = ?)",
             (
                 job_id,
                 role,
@@ -6209,10 +6232,13 @@ async def add_chat_message(
                 ai_model,
                 session_id,
                 status,
+                credential_generation,
+                username,
+                credential_generation,
             ),
         )
         await db.commit()
-        return cursor.lastrowid or 0
+        return (cursor.lastrowid or 0) if cursor.rowcount else 0
 
 
 async def add_chat_message_pair(
@@ -6396,6 +6422,41 @@ async def update_chat_message_ai_fields(
         if not cursor.rowcount:
             logger.info(
                 "Chat session discarded after credential change for message %d", msg_id
+            )
+        return bool(cursor.rowcount)
+
+
+async def complete_chat_message_if_generation(
+    msg_id: int,
+    *,
+    content: str,
+    ai_provider: str,
+    ai_model: str,
+    session_id: str,
+    credential_generation: int | None,
+) -> bool:
+    """Complete a pending reply only while its user's credentials are current."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE chat_messages SET content = ?, status = 'completed', "
+            "ai_provider = ?, ai_model = ?, session_id = ? "
+            "WHERE id = ? AND status = 'pending' AND "
+            "(? IS NULL OR EXISTS (SELECT 1 FROM users "
+            "WHERE username = chat_messages.username AND ai_credential_generation = ?))",
+            (
+                content,
+                ai_provider,
+                ai_model,
+                session_id,
+                msg_id,
+                credential_generation,
+                credential_generation,
+            ),
+        )
+        await db.commit()
+        if not cursor.rowcount:
+            logger.info(
+                "Chat completion skipped for message %d (stale or missing)", msg_id
             )
         return bool(cursor.rowcount)
 
