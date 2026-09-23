@@ -921,6 +921,13 @@ async def init_db() -> None:
         for col in ("github_token_enc", "jira_email_enc", "jira_token_enc"):
             await _migrate_add_column(db, "users", col, "TEXT NOT NULL DEFAULT ''")
 
+        await _migrate_add_column(
+            db, "users", "ai_credentials_enc", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "users", "ai_credential_generation", "INTEGER NOT NULL DEFAULT 0"
+        )
+
         # Migration: add status column to users table (for admin approval flow)
         await _migrate_add_column(
             db, "users", "status", "TEXT NOT NULL DEFAULT 'active'"
@@ -5233,6 +5240,74 @@ async def get_user_tokens(username: str) -> dict[str, str]:
         }
 
 
+async def get_user_ai_credentials(username: str) -> dict[str, str]:
+    """Read the encrypted, provider-ID-keyed credential map for a DB user."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_credentials_enc FROM users WHERE username = ?", (username,)
+            )
+        ).fetchone()
+    return json.loads(decrypt_value(row[0])) if row and row[0] else {}
+
+
+async def get_user_ai_credential_generation(username: str) -> int | None:
+    """Read the credential generation before starting a chat AI call."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_credential_generation FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+    return row[0] if row else None
+
+
+async def update_user_ai_credential(
+    username: str, provider: str, key: str | None
+) -> list[str]:
+    """Save a credential and invalidate its chat sessions; return IDs to delete."""
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT ai_credentials_enc FROM users WHERE username = ?", (username,)
+            )
+        ).fetchone()
+        if row is None:
+            raise LookupError("User has no credential store")
+        credentials = json.loads(decrypt_value(row[0])) if row[0] else {}
+        if key is None:
+            credentials.pop(provider, None)
+        else:
+            credentials[provider] = key
+        await db.execute(
+            "UPDATE users SET ai_credentials_enc = ?, ai_credential_generation = ai_credential_generation + 1 WHERE username = ?",
+            (encrypt_value(json.dumps(credentials)), username),
+        )
+        # A session retains its creation-time key in the sidecar. Drop references
+        # atomically with the credential so later turns start fresh.
+        sessions = await (
+            await db.execute(
+                "SELECT DISTINCT session_id FROM chat_messages "
+                "WHERE username = ? AND ai_provider = ? AND session_id != ''",
+                (username, provider),
+            )
+        ).fetchall()
+        await db.execute(
+            "UPDATE chat_messages SET session_id = '' "
+            "WHERE username = ? AND ai_provider = ? AND session_id != ''",
+            (username, provider),
+        )
+        await db.commit()
+    logger.info(
+        "Updated AI credential configuration for user=%s provider=%s",
+        username,
+        provider,
+    )
+    return [row[0] for row in sessions]
+
+
 # --- Job Metadata ---
 
 
@@ -6298,14 +6373,31 @@ async def update_chat_message_ai_fields(
     ai_provider: str = "",
     ai_model: str = "",
     session_id: str = "",
-) -> None:
-    """Update AI-related fields on a chat message."""
+    credential_generation: int | None = None,
+) -> bool:
+    """Persist a session only if the user's credentials have not changed."""
     async with _connect_db() as db:
-        await db.execute(
-            "UPDATE chat_messages SET ai_provider = ?, ai_model = ?, session_id = ? WHERE id = ?",
-            (ai_provider, ai_model, session_id, msg_id),
+        cursor = await db.execute(
+            "UPDATE chat_messages SET ai_provider = ?, ai_model = ?, session_id = ? "
+            "WHERE id = ? AND ("
+            "(? IS NULL AND NOT EXISTS (SELECT 1 FROM users WHERE username = chat_messages.username)) "
+            "OR EXISTS (SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND ai_credential_generation = ?))",
+            (
+                ai_provider,
+                ai_model,
+                session_id,
+                msg_id,
+                credential_generation,
+                credential_generation,
+            ),
         )
         await db.commit()
+        if not cursor.rowcount:
+            logger.info(
+                "Chat session discarded after credential change for message %d", msg_id
+            )
+        return bool(cursor.rowcount)
 
 
 # ─── Reports queries ────────────────────────────────────────────────────────
