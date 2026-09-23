@@ -540,8 +540,13 @@ async def analyze_failure_group_with_peers(
         server_url=server_url,
         job_id=job_id,
         auth_header=auth_header,
+        workspace=peer_workspace,
     )
     await install_http_tools_mcp_best_effort_async(peer_workspace, peer_custom_tools)
+    if any(tool["name"].startswith("graft_") for tool in peer_custom_tools):
+        from rootcoz.engine.graft_http import graph_guidance
+
+        system_prompt = (system_prompt + "\n\n" + graph_guidance()).strip()
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,

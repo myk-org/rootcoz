@@ -4,6 +4,12 @@ AI-powered CI failure analysis -- classifies test failures as code issues or pro
 
 **[Documentation](https://myk-org.github.io/rootcoz/)** -- configuration, API reference, integrations, and more.
 
+## Graft dependency decision
+
+The image includes `@nanonets/graft@0.19.0` as an exact, lockfile-integrity-pinned sidecar dependency; its CLI is on `PATH` from the copied `node_modules/.bin`, with no runtime `npx` install. We do not run `graft init` in the image or change its normal `.gitignore`/`.ignore` behavior with `--no-gitignore`, `--no-ignore`, or their environment equivalents. Graft's MIT notice is in [`third_party/graft-LICENSE`](third_party/graft-LICENSE) and copied into the image.
+
+The published package's `postinstall` records an install event and spawns a telemetry flush; `DO_NOT_TRACK=1` is set before the sidecar `npm ci` and in the runtime image. The package's `prepare` (build and telemetry-key stamping) is for publishing, not a registry-tarball install. Graft adds tree-sitter grammar/native bindings, including Kotlin's local node-gyp build when no prebuild matches, plus OpenAI/Anthropic SDKs; the installed Graft subtree measured about 157 MB on Linux x64. Existing sidecar dependencies also run install scripts: `tree-sitter-cli` downloads a versioned GitHub binary and `onnxruntime-node` downloads versioned NuGet GPU libraries. Those are build-time downloads outside npm lockfile integrity, not new Graft runtime downloads. Avoid `graft upgrade` or `npx @nanonets/graft` at runtime: either would fetch an unpinned release. Graft's own optional npm version check/network calls are not needed to run the pinned CLI.
+
 ## Prerequisites
 
 Provider IDs and models are discovered from Pi-sidecar. Install and authenticate the corresponding provider CLI or API credentials; see [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details.
