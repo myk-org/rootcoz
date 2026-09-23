@@ -1,5 +1,6 @@
 """In-flight chat results cannot restore a session after credential rotation."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -159,6 +160,98 @@ async def test_chat_call_rotated_mid_flight_cannot_publish_session(
 
 
 @pytest.mark.asyncio
+async def test_credential_failure_only_changes_pending_message(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "pending-only.db")
+    await storage.init_db()
+    _, pending = await storage.add_chat_message_pair("job", "hello", username="alice")
+    assert await storage.fail_pending_chat_message(pending, "Aborted by user.")
+    assert not await storage.fail_pending_chat_message(pending, "Credentials changed")
+    message = (await storage.get_chat_messages("job", username="alice"))[-1]
+    assert (message["content"], message["status"]) == ("Aborted by user.", "failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admin", [False, True])
+async def test_abort_between_status_check_and_completion_preserves_reason(
+    tmp_path, monkeypatch, admin
+):
+    from rootcoz.engine import chat
+    from rootcoz.sources import chat_workspace
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "abort.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    job_id = main.ADMIN_CHAT_JOB_ID if admin else "job"
+    if not admin:
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {"status": "completed", "summary": "test", "failures": []},
+        )
+        monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
+        )
+        monkeypatch.setattr(
+            chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+        )
+        monkeypatch.setattr(
+            main,
+            "_resolve_chat_credentials",
+            AsyncMock(return_value=("", "", "", "", "")),
+        )
+    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+    monkeypatch.setattr(
+        chat,
+        "admin_chat_with_ai" if admin else "chat_with_ai",
+        AsyncMock(return_value=(True, "reply", "new-session")),
+    )
+    user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="p", ai_model="m"
+    )
+    reached = asyncio.Event()
+    resume = asyncio.Event()
+    complete = storage.complete_chat_message_if_generation
+
+    async def paused_complete(*args, **kwargs):
+        reached.set()
+        await resume.wait()
+        return await complete(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "complete_chat_message_if_generation", paused_complete)
+    monkeypatch.setattr(main, "_revoke_ai_sessions", revoked := AsyncMock())
+    process = main._process_admin_chat_message if admin else main._process_chat_message
+    task = asyncio.create_task(
+        process(
+            **({} if admin else {"job_id": job_id}),
+            user_msg_id=user_id,
+            assistant_msg_id=assistant_id,
+            message="hello",
+            ai_provider_override="p",
+            ai_model_override="m",
+            username="alice",
+        )
+    )
+    try:
+        await asyncio.wait_for(reached.wait(), 10)
+        # The abort request wins after the handler's status read but before its UPDATE.
+        await storage.update_chat_message_content(assistant_id, "Aborted by user.")
+        await storage.update_chat_message_status(assistant_id, "failed")
+    finally:
+        resume.set()
+        await task
+    message = (await storage.get_chat_messages(job_id, username="alice"))[-1]
+    assert (message["status"], message["content"], message["session_id"]) == (
+        "failed",
+        "Aborted by user.",
+        "",
+    )
+    revoked.assert_awaited_once_with(["new-session"])
+
+
+@pytest.mark.asyncio
 async def test_initial_session_rotation_discards_and_revokes(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "init.db")
     await storage.init_db()
@@ -194,7 +287,7 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
     monkeypatch.setattr(main, "_revoke_ai_sessions", revoked := AsyncMock())
 
-    async def rotate_during_init(**kwargs):
+    async def rotate_during_init(**_kwargs):
         await storage.update_user_ai_credential("alice", "p", "new-key")
         return "stale-session"
 

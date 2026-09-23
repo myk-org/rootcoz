@@ -12051,15 +12051,14 @@ async def _process_chat_message(
                         if new_session_id:
                             await _revoke_ai_sessions([new_session_id])
                         logger.info(
-                            "Chat: discarded response for message %d after credential change",
+                            "Chat: discarded response for message %d (stale credentials or closed placeholder)",
                             assistant_msg_id,
                         )
-                        await _fail_chat_assistant_placeholder(
+                        if await storage.fail_pending_chat_message(
                             assistant_msg_id,
-                            job_id,
-                            username,
                             "AI credentials changed during processing. Please try again.",
-                        )
+                        ):
+                            notify_chat_changed(job_id, username=username)
                         return
                     logger.info(
                         "Chat: message %d processed for job %s (session=%s)",
@@ -12561,15 +12560,14 @@ async def _process_admin_chat_message(
                 if new_session_id:
                     await _revoke_ai_sessions([new_session_id])
                 logger.info(
-                    "Admin chat: discarded response for message %d after credential change",
+                    "Admin chat: discarded response for message %d (stale credentials or closed placeholder)",
                     assistant_msg_id,
                 )
-                await storage.update_chat_message_content(
+                if await storage.fail_pending_chat_message(
                     assistant_msg_id,
                     "AI credentials changed during processing. Please try again.",
-                )
-                await storage.update_chat_message_status(assistant_msg_id, "failed")
-                notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+                ):
+                    notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
                 return
             logger.info(
                 "Admin chat: message %d processed (session=%s)",

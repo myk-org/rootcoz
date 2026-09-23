@@ -6426,6 +6426,21 @@ async def update_chat_message_ai_fields(
         return bool(cursor.rowcount)
 
 
+async def fail_pending_chat_message(msg_id: int, content: str) -> bool:
+    """Atomically fail a pending reply without replacing an existing failure."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE chat_messages SET content = ?, status = 'failed' "
+            "WHERE id = ? AND status = 'pending'",
+            (content, msg_id),
+        )
+        await db.commit()
+        logger.info(
+            "Pending chat message %d failed: updated=%s", msg_id, bool(cursor.rowcount)
+        )
+        return bool(cursor.rowcount)
+
+
 async def complete_chat_message_if_generation(
     msg_id: int,
     *,
