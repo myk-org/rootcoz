@@ -6,7 +6,7 @@ AI-powered CI failure analysis -- classifies test failures as code issues or pro
 
 ## Prerequisites
 
-Provider IDs and models are discovered from Pi-sidecar. Install and authenticate the corresponding provider CLI or API credentials; see [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details.
+Provider IDs and models are discovered from Pi-sidecar. Install and authenticate the corresponding provider CLI or API credentials; see [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details. Users can manage their own session-scoped API keys in Settings → AI provider keys or via `rootcoz auth ai-keys list|set|delete` (use `set --stdin` for piped input). Keys are encrypted at rest, never displayed again, and override server credentials only for a matching provider; without a user key, server authentication still applies. Only providers explicitly advertising session API-key capability appear. Vertex ADC/service accounts, OAuth, and CLI/browser logins remain server-managed. This feature requires pi-sidecar 4.6.0 or newer for session-key support and provider capability metadata ([pi-config #830](https://github.com/myk-org/pi-config/issues/830)); when that metadata is unavailable, key configuration fails closed.
 
 ## Quick Start
 

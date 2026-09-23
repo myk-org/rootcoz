@@ -2,6 +2,7 @@
 
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -152,6 +153,24 @@ class RootCozClient:
     def auth_me(self) -> dict[str, Any]:
         """Get current user info including can_view_reports. GET /api/auth/me"""
         return self._request("GET", "/api/auth/me")
+
+    def list_ai_credentials(self) -> dict[str, Any]:
+        """List configured AI credential providers without exposing keys."""
+        return self._request("GET", "/api/user/ai-credentials")
+
+    def set_ai_credential(self, provider: str, api_key: str) -> dict[str, Any]:
+        """Save an AI provider key for the current user."""
+        return self._request(
+            "PUT",
+            f"/api/user/ai-credentials/{quote(provider, safe='')}",
+            json={"api_key": api_key},
+        )
+
+    def delete_ai_credential(self, provider: str) -> dict[str, Any]:
+        """Remove an AI provider key for the current user."""
+        return self._request(
+            "DELETE", f"/api/user/ai-credentials/{quote(provider, safe='')}"
+        )
 
     # -- Admin ----------------------------------------------------------------
 
