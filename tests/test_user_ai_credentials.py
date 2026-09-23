@@ -91,17 +91,32 @@ async def test_key_lookup_checks_only_selected_provider(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_catalog_excludes_cli_provider_even_with_capability(monkeypatch):
+async def test_cli_providers_follow_sidecar_capability(monkeypatch):
     monkeypatch.setattr(
         ai_client,
         "list_models",
-        AsyncMock(return_value=[{"provider": "cli-hidden"}, {"provider": "acpx/a"}]),
+        AsyncMock(
+            return_value=[{"provider": "cli-keyed"}, {"provider": "cli-ambient"}]
+        ),
     )
     client = AsyncMock()
-    client.get_model_provider_status.return_value = {"supportsSessionApiKey": True}
+    client.get_model_provider_status.side_effect = lambda provider: {
+        "supportsSessionApiKey": provider == "cli-keyed"
+    }
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
-    assert await ai_client.supported_key_providers() == ["acpx/a"]
-    client.get_model_provider_status.assert_awaited_once_with("acpx/a")
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(return_value={"cli-keyed": "key", "cli-ambient": "other"}),
+    )
+    assert await ai_client.supported_key_providers() == ["cli-keyed"]
+    token = ai_client.ai_username.set("alice")
+    try:
+        assert await ai_client.session_key("cli-keyed") == "key"
+        with pytest.raises(ValueError, match="capability unavailable"):
+            await ai_client.session_key("cli-ambient")
+    finally:
+        ai_client.ai_username.reset(token)
 
 
 @pytest.mark.asyncio
@@ -293,7 +308,7 @@ async def test_preview_binds_user_for_content_and_resets(
     monkeypatch.setattr(main, "_resolve_github_repo_url", lambda settings: "")
     monkeypatch.setattr(main, "_jira_issue_creation_enabled", lambda settings: True)
 
-    async def generate(**kwargs):
+    async def generate(**_kwargs):
         assert ai_client.ai_username.get() == "alice"
         return {"title": "test", "body": "test"}
 
@@ -390,7 +405,7 @@ async def test_feedback_preview_uses_requester_context_and_resets(monkeypatch):
         main, "_validate_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
 
-    async def generate(*args, **kwargs):
+    async def generate(*_args, **_kwargs):
         assert ai_client.ai_username.get() == "alice"
         return object()
 
@@ -425,7 +440,7 @@ async def test_js_blank_key_rejected_before_storage(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_session_creation_logs_frames_not_secret(monkeypatch, caplog):
+async def test_session_creation_logs_frames_not_secret(monkeypatch):
     client = AsyncMock()
     secret = "do-not-log-key"  # pragma: allowlist secret
     client.create_session.side_effect = ValueError(secret)
