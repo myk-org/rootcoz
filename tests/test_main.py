@@ -5400,6 +5400,57 @@ class TestReAnalyzeEndpoint:
         assert "origin_job_name" not in data
 
 
+class TestLiveResultTokenUsage:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["running", "failed", "aborted"])
+    async def test_result_exposes_recorded_usage(self, test_client, status):
+        await storage.save_result("usage-job", "", status, {"summary": "analysis"})
+        await storage.record_token_usage(
+            job_id="usage-job",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            cost_usd=0.0,
+            duration_ms=100,
+            prompt_chars=0,
+            response_chars=0,
+        )
+        response = test_client.get("/results/usage-job")
+        assert response.status_code == (202 if status == "running" else 200)
+        assert response.json()["result"]["token_usage"]["total_cost_usd"] == 0.0
+        assert response.json()["result"]["token_usage"]["total_tokens"] == 120
+
+    @pytest.mark.asyncio
+    async def test_result_preserves_unavailable_cost_and_empty_usage(self, test_client):
+        await storage.save_result(
+            "unknown-cost", "", "running", {"summary": "analysis"}
+        )
+        assert (
+            "token_usage"
+            not in test_client.get("/results/unknown-cost").json()["result"]
+        )
+        await storage.record_token_usage(
+            job_id="unknown-cost",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            cost_usd=None,
+            duration_ms=100,
+            prompt_chars=0,
+            response_chars=0,
+        )
+        response = test_client.get("/results/unknown-cost")
+        assert response.json()["result"]["token_usage"]["total_cost_usd"] is None
+
+
 class TestGetFailureByUUID:
     """Tests for GET /api/failures/{failure_uuid}."""
 

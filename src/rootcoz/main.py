@@ -4723,6 +4723,8 @@ async def get_job_result(
     # Apply user classification overrides so the UI shows effective classifications
     if result.get("result"):
         await _apply_effective_classifications(job_id, result["result"])
+        if result.get("status") in (*IN_PROGRESS_STATUSES, "failed", "aborted"):
+            await _attach_token_usage(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)
     # Attach tracked-in data per failure
