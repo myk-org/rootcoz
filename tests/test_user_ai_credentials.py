@@ -1,12 +1,13 @@
 """Per-user AI credential storage and sidecar boundary checks."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
 
-from rootcoz import ai_client, main, storage
+from rootcoz import ai_client, encryption, main, storage
 from rootcoz.ai_client import call_ai as real_call_ai
 from rootcoz.engine import chat
 
@@ -40,6 +41,7 @@ async def test_capability_fails_closed_and_exact_key(monkeypatch):
             return_value=[
                 {"provider": "unknown", "id": "m"},
                 {"provider": "supported", "id": "m"},
+                {"provider": "cli-hidden", "id": "m"},
             ]
         ),
     )
@@ -65,6 +67,41 @@ async def test_capability_fails_closed_and_exact_key(monkeypatch):
     finally:
         ai_client.ai_username.reset(token)
     assert await ai_client.session_key("supported") is None
+
+
+@pytest.mark.asyncio
+async def test_key_lookup_checks_only_selected_provider(monkeypatch):
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={"acpx/a": "key"})
+    )
+    client = AsyncMock()
+    client.get_model_provider_status.return_value = {"supportsSessionApiKey": True}
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(
+        ai_client,
+        "list_models",
+        AsyncMock(return_value=[{"provider": "acpx/a"}, {"provider": "other"}]),
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        assert await ai_client.session_key("acpx/a") == "key"
+    finally:
+        ai_client.ai_username.reset(token)
+    client.get_model_provider_status.assert_awaited_once_with("acpx/a")
+
+
+@pytest.mark.asyncio
+async def test_catalog_excludes_cli_provider_even_with_capability(monkeypatch):
+    monkeypatch.setattr(
+        ai_client,
+        "list_models",
+        AsyncMock(return_value=[{"provider": "cli-hidden"}, {"provider": "acpx/a"}]),
+    )
+    client = AsyncMock()
+    client.get_model_provider_status.return_value = {"supportsSessionApiKey": True}
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    assert await ai_client.supported_key_providers() == ["acpx/a"]
+    client.get_model_provider_status.assert_awaited_once_with("acpx/a")
 
 
 @pytest.mark.asyncio
@@ -277,6 +314,137 @@ async def test_preview_binds_user_for_content_and_resets(
         assert ai_client.ai_username.get() == "prior"
     finally:
         ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["corrupt", "wrong_key", "malformed_map"])
+async def test_unreadable_credential_map_refuses_list_set_delete_and_preserves_data(
+    tmp_path, monkeypatch, caplog, failure
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "corrupt.db")
+    monkeypatch.setenv("ROOTCOZ_ENCRYPTION_KEY", "original-key")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "p", "stored-secret")
+    if failure == "corrupt":
+        ciphertext = "enc:corrupt-secret"
+    elif failure == "malformed_map":
+        ciphertext = encryption.encrypt_value('["not a map"]')
+    else:
+        async with storage._connect_db() as db:
+            ciphertext = (
+                await (
+                    await db.execute(
+                        "SELECT ai_credentials_enc FROM users WHERE username = 'alice'"
+                    )
+                ).fetchone()
+            )[0]
+        monkeypatch.setenv("ROOTCOZ_ENCRYPTION_KEY", "different-key")
+    if failure != "wrong_key":
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE users SET ai_credentials_enc = ? WHERE username = ?",
+                (ciphertext, "alice"),
+            )
+            await db.commit()
+    monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
+    request = SimpleNamespace(state=SimpleNamespace(username="alice"))
+    new_key = "new"  # pragma: allowlist secret
+    with caplog.at_level(logging.WARNING):
+        for operation in (
+            lambda: main.get_user_ai_credentials(request),
+            lambda: main.set_user_ai_credential(
+                "p", main.AiCredentialInput(api_key=new_key), request
+            ),
+            lambda: main.delete_user_ai_credential("p", request),
+        ):
+            with pytest.raises(HTTPException) as exc:
+                await operation()
+            assert exc.value.status_code == 409
+            assert "stored-secret" not in exc.value.detail
+    async with storage._connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_credentials_enc, ai_credential_generation FROM users WHERE username = 'alice'"
+            )
+        ).fetchone()
+    assert row[0] == ciphertext
+    assert row[1] == 1
+    assert "stored-secret" not in caplog.text
+    assert "corrupt-secret" not in caplog.text
+    if failure == "wrong_key":
+        monkeypatch.setenv("ROOTCOZ_ENCRYPTION_KEY", "original-key")
+        assert await storage.get_user_ai_credentials("alice") == {"p": "stored-secret"}
+
+
+@pytest.mark.asyncio
+async def test_feedback_preview_uses_requester_context_and_resets(monkeypatch):
+    monkeypatch.setattr(main, "_check_allow_list", lambda request: None)
+    monkeypatch.setattr(
+        main, "get_settings", lambda: SimpleNamespace(feedback_enabled=True)
+    )
+    monkeypatch.setattr(
+        main, "_resolve_ai_config_values", lambda *args, **kwargs: ("p", "m")
+    )
+    monkeypatch.setattr(
+        main, "_validate_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+
+    async def generate(*args, **kwargs):
+        assert ai_client.ai_username.get() == "alice"
+        return object()
+
+    monkeypatch.setattr(main, "generate_feedback_preview", generate)
+    token = ai_client.ai_username.set("prior")
+    try:
+        await main.preview_feedback(
+            SimpleNamespace(state=SimpleNamespace(username="alice")), object()
+        )
+        assert ai_client.ai_username.get() == "prior"
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_js_blank_key_rejected_before_storage(monkeypatch):
+    monkeypatch.setattr(main, "_credential_user", AsyncMock(return_value="alice"))
+    monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
+    update = AsyncMock()
+    monkeypatch.setattr(storage, "update_user_ai_credential", update)
+    for blank in ("\ufeff", " \ufeff\u00a0"):
+        with pytest.raises(HTTPException) as exc:
+            await main.set_user_ai_credential(
+                "p", main.AiCredentialInput(api_key=blank), object()
+            )
+        assert exc.value.status_code == 400
+    update.assert_not_awaited()
+    await main.set_user_ai_credential(
+        "p", main.AiCredentialInput(api_key="\u200b\ufeff"), object()
+    )
+    update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_session_creation_logs_frames_not_secret(monkeypatch, caplog):
+    client = AsyncMock()
+    secret = "do-not-log-key"  # pragma: allowlist secret
+    client.create_session.side_effect = ValueError(secret)
+    monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(
+        chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    messages = []
+    monkeypatch.setattr(
+        chat.logger, "warning", lambda fmt, *args: messages.append(fmt % args)
+    )
+    assert (
+        await chat._create_chat_session(system_prompt="", ai_provider="p", ai_model="m")
+        is None
+    )
+    assert "_create_chat_session" in messages[0]
+    assert secret not in messages[0]
 
 
 def test_provider_with_encoded_slash_routes():

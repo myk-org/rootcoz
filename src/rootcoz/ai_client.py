@@ -26,6 +26,7 @@ async def supported_key_providers() -> list[str]:
         entry["provider"]
         for entry in await list_models()
         if isinstance(entry.get("provider"), str)
+        and not entry["provider"].startswith("cli-")
     }
     client = get_sidecar_client()
     supported = []
@@ -50,7 +51,15 @@ async def session_key(provider: str) -> str | None:
 
     key = (await get_user_ai_credentials(username)).get(provider)
     if key is not None:
-        if provider not in await supported_key_providers():
+        if provider.startswith("cli-") or provider not in {
+            entry.get("provider") for entry in await list_models()
+        }:
+            raise ValueError("Provider session API-key capability unavailable")
+        try:
+            status = await get_sidecar_client().get_model_provider_status(provider)
+        except Exception as exc:
+            raise ValueError("Provider session API-key capability unavailable") from exc
+        if status.get("supportsSessionApiKey") is not True:
             raise ValueError("Provider session API-key capability unavailable")
         logger.info("Using user AI credential for provider=%s", provider)
     return key
