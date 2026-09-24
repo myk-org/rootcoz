@@ -10,22 +10,23 @@ import shutil
 import signal
 import stat
 import subprocess
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from itertools import islice
 from pathlib import Path
 from typing import Any
+
+from rootcoz.engine.http_mcp import _workspace_install_lock
 
 MAX_FILES = 2000
 MAX_BYTES = 20 * 1024 * 1024
 MAX_SECONDS = 30
 BUILD_SECONDS = 120
-QUERY_SECONDS = 15
+QUERY_SECONDS = 45
+MAX_REPOSITORIES = 10  # includes the primary test repository
 MAX_OUTPUT = 1024 * 1024
 MAX_GRAPH_BYTES = 40 * 1024 * 1024
 GRAFT = "/app/sidecar-helper/node_modules/.bin/graft"
-# ponytail: one lock per process serializes simultaneous builds of the same workspace.
-_lock = threading.RLock()
 
 
 class _Limit(ValueError):
@@ -37,10 +38,12 @@ def _root(workspace: Path) -> Path:
     return workspace.parent / f".{workspace.name}.rootcoz-graft"
 
 
-def _disk_size(path: Path) -> int:
+def _disk_size(path: Path, deadline: float | None = None) -> int:
     total = 0
     for directory, dirs, files in os.walk(path, followlinks=False):
         for file in dirs + files:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("graph deadline")
             entry = Path(directory) / file
             if entry.is_symlink():
                 raise ValueError("graph contains symlink")
@@ -74,7 +77,7 @@ def _bounded(
             while selector.get_map() or process.poll() is None:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("subprocess timed out")
-                if disk is not None and _disk_size(disk) > MAX_GRAPH_BYTES:
+                if disk is not None and _disk_size(disk, deadline) > MAX_GRAPH_BYTES:
                     raise _Limit("graph disk limit")
                 for key, _ in selector.select(
                     timeout=min(0.1, max(0.001, deadline - time.monotonic()))
@@ -135,12 +138,19 @@ def _safe_file(repo: Path, relative: Path) -> Path | None:
         return None
 
 
-def _sources(repo: Path) -> dict[str, str]:
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("graph deadline")
+    return remaining
+
+
+def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
     """Git-visible files only; hash actual content, including ignored-file changes in the listing."""
     listing = _bounded(
         ["git", "ls-files", "-co", "--exclude-standard", "-z"],
         cwd=repo,
-        timeout=MAX_SECONDS,
+        timeout=min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS,
     )
     if len(listing) > MAX_OUTPUT or len(listing.split(b"\0")) - 1 > MAX_FILES:
         raise _Limit("file listing limit")
@@ -148,7 +158,9 @@ def _sources(repo: Path) -> dict[str, str]:
     total = 0
     started = time.monotonic()
     for raw in listing.split(b"\0"):
-        if time.monotonic() - started > MAX_SECONDS:
+        if time.monotonic() - started > MAX_SECONDS or (
+            deadline and time.monotonic() >= deadline
+        ):
             raise TimeoutError("source scan timed out")
         if not raw:
             continue
@@ -173,7 +185,11 @@ def _sources(repo: Path) -> dict[str, str]:
             data = src.read(MAX_BYTES + 1)
             if len(data) != info.st_size:
                 raise ValueError("source changed")
+            if deadline is not None:
+                _remaining(deadline)
             result[str(relative)] = hashlib.sha256(data).hexdigest()
+    if deadline is not None:
+        _remaining(deadline)
     return result
 
 
@@ -293,23 +309,77 @@ def _index_one(
 def index_repositories(
     workspace: Path, cloned_repos: dict[str, Path]
 ) -> dict[str, Any]:
-    """Build at most two isolated repositories simultaneously, deduplicating exact content."""
+    """Build up to ten repositories per workspace, with two concurrent builds."""
     workspace = Path(workspace).resolve()
-    with _lock, ThreadPoolExecutor(max_workers=2) as pool:
-        names = list(cloned_repos)
-        futures = [
-            pool.submit(
+    names = iter(cloned_repos)
+    selected = list(islice(names, MAX_REPOSITORIES))
+    with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {
+            name: pool.submit(
                 _index_one, workspace, _root(workspace), name, cloned_repos[name]
             )
-            for name in names
-        ]
-        return {name: future.result() for name, future in zip(names, futures)}
+            for name in selected
+        }
+        results = {}
+        for name, future in futures.items():
+            try:
+                results[name] = future.result()
+            except Exception as exc:  # noqa: BLE001 - isolate and sanitize unexpected worker failures
+                results[name] = {"status": "failed", "reason": type(exc).__name__}
+    results.update(
+        {name: {"status": "skipped", "reason": "repository limit"} for name in names}
+    )
+    return results
 
 
-def _validate_paths(value: Any, snapshot: Path, repo: Path, allowed: set[str]) -> Any:
+def log_index_outcomes(outcomes: dict[str, Any]) -> None:
+    """Log only safe repository scope and known result categories, never paths or output."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+    for name, result in outcomes.items():
+        # Only log the name when it matches the safe clone naming convention.
+        scope = (
+            name
+            if name.isascii()
+            and name.replace("-", "").replace("_", "").replace(".", "").isalnum()
+            else "invalid"
+        )
+        status = result.get("status", "failed")
+        reason = result.get("reason", "")
+        if status not in {"indexed", "unchanged", "skipped", "failed"}:
+            status = "failed"
+        if reason not in {
+            "repository limit",
+            "invalid repository",
+            "no eligible files",
+            "invalid graph root",
+            "invalid graph directory",
+            "TimeoutError",
+            "FileNotFoundError",
+            "CalledProcessError",
+            "_Limit",
+        }:
+            reason = "error" if status == "failed" else "none"
+        if result.get("truncated"):
+            reason = "limit"
+        logger.info("graft_index scope=%s status=%s category=%s", scope, status, reason)
+
+
+def _validate_paths(
+    value: Any,
+    snapshot: Path,
+    repo: Path,
+    allowed: set[str],
+    deadline: float | None = None,
+) -> Any:
     """All location-bearing fields must stay inside the indexed snapshot."""
+    if deadline is not None:
+        _remaining(deadline)
     if isinstance(value, list):
-        return [_validate_paths(item, snapshot, repo, allowed) for item in value]
+        return [
+            _validate_paths(item, snapshot, repo, allowed, deadline) for item in value
+        ]
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
@@ -324,9 +394,11 @@ def _validate_paths(value: Any, snapshot: Path, repo: Path, allowed: set[str]) -
             ):
                 if not isinstance(item, str):
                     raise ValueError("invalid pointer")
-                text, sep, suffix = (
-                    item.partition(":") if not item.startswith("/") else (item, "", "")
-                )
+                text, sep, suffix = item, "", ""
+                if not item.startswith("/") and item not in allowed:
+                    prefix, separator, line = item.rpartition(":")
+                    if separator and prefix in allowed and line.isdecimal():
+                        text, sep, suffix = prefix, separator, line
                 candidate = Path(text)
                 if candidate.is_absolute():
                     try:
@@ -338,15 +410,21 @@ def _validate_paths(value: Any, snapshot: Path, repo: Path, allowed: set[str]) -
                     raise ValueError("invalid pointer")
                 out[key] = str(relative) + sep + suffix
             else:
-                out[key] = _validate_paths(item, snapshot, repo, allowed)
+                out[key] = _validate_paths(item, snapshot, repo, allowed, deadline)
         return out
     return value
 
 
 def query_repo(
-    workspace: Path, scope: str, tool: str, params: dict[str, Any]
+    workspace: Path,
+    scope: str,
+    tool: str,
+    params: dict[str, Any],
+    *,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Query only current indexed content. Never return stale graph data."""
+    deadline = deadline if deadline is not None else time.monotonic() + QUERY_SECONDS
     workspace = Path(workspace).resolve()
     if (
         not isinstance(scope, str)
@@ -381,12 +459,32 @@ def query_repo(
     if not _valid_repo(workspace, scope, repo):
         return {"status": "skipped", "reason": "invalid repository"}
     try:
+        with _workspace_install_lock(workspace, deadline=deadline):
+            return _query_locked(
+                repo, destination, snapshot, graph, tool, params, deadline
+            )
+    except TimeoutError:
+        return {"status": "failed", "reason": "TimeoutError", "truncated": False}
+
+
+def _query_locked(
+    repo: Path,
+    destination: Path,
+    snapshot: Path,
+    graph: Path,
+    tool: str,
+    params: dict[str, Any],
+    deadline: float,
+) -> dict[str, Any]:
+    """Read and validate one graph under the same lock as its writers."""
+    try:
+        _remaining(deadline)
         manifest = _manifest(destination)
         if manifest is None:
             return {"status": "skipped", "reason": "repository not indexed"}
-        if _sources(repo) != manifest:
+        if _sources(repo, deadline) != manifest:
             return {"status": "stale", "reason": "source changed; use read/grep"}
-        if _disk_size(destination) > MAX_GRAPH_BYTES:
+        if _disk_size(destination, deadline) > MAX_GRAPH_BYTES:
             raise _Limit("graph disk limit")
         if tool == "find_code":
             argv = ["ask", "--json", params["query"]]
@@ -443,15 +541,19 @@ def query_repo(
                 str(snapshot),
             ],
             cwd=snapshot,
-            timeout=QUERY_SECONDS,
+            timeout=_remaining(deadline),
         ).stdout
         if len(output.encode()) > MAX_OUTPUT:
             raise _Limit("query output limit")
-        data = _validate_paths(json.loads(output), snapshot, repo, set(manifest))
-        if _disk_size(destination) > MAX_GRAPH_BYTES:
+        _remaining(deadline)
+        data = _validate_paths(
+            json.loads(output), snapshot, repo, set(manifest), deadline
+        )
+        if _disk_size(destination, deadline) > MAX_GRAPH_BYTES:
             raise _Limit("graph disk limit")
-        if _sources(repo) != manifest:
+        if _sources(repo, deadline) != manifest:
             return {"status": "stale", "reason": "source changed; use read/grep"}
+        _remaining(deadline)
         return {"status": "ok", "result": data}
     except (
         OSError,
@@ -459,6 +561,7 @@ def query_repo(
         KeyError,
         TypeError,
         UnicodeError,
+        TimeoutError,
         subprocess.SubprocessError,
     ) as exc:
         return {
@@ -472,19 +575,20 @@ def indexed_roots(workspace: Path) -> dict[str, Path]:
     """Return direct cloned roots with completed graphs; queries recheck freshness."""
     workspace = Path(workspace)
     root = _root(workspace)
-    if not root.is_dir() or root.is_symlink() or not workspace.is_dir():
-        return {}
-    return {
-        item.name: workspace / item.name
-        for item in root.iterdir()
-        if _manifest(item) is not None
-        and _valid_repo(workspace.resolve(), item.name, workspace / item.name)
-    }
+    with _workspace_install_lock(workspace.resolve()):
+        if not root.is_dir() or root.is_symlink() or not workspace.is_dir():
+            return {}
+        return {
+            item.name: workspace / item.name
+            for item in root.iterdir()
+            if _manifest(item) is not None
+            and _valid_repo(workspace.resolve(), item.name, workspace / item.name)
+        }
 
 
 def cleanup_graph(workspace: Path) -> None:
     """Delete graphs and snapshots outside the AI-visible workspace."""
     root = _root(workspace)
-    with _lock:
+    with _workspace_install_lock(Path(workspace).resolve()):
         if root.is_dir() and not root.is_symlink():
             shutil.rmtree(root, ignore_errors=True)

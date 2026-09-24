@@ -445,10 +445,9 @@ def analysis_http_tools(
     server_url: str,
     job_id: str,
     auth_header: str,
-    workspace: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Read-only graph tools plus optional authenticated history tools."""
-    tools = graph_http_tools(workspace)
+    """Optional authenticated history tools for analysis sessions."""
+    tools: list[dict[str, Any]] = []
     if not (server_url and job_id and auth_header):
         return tools
     token = auth_header.removeprefix("Bearer ").strip()

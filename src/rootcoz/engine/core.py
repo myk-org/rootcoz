@@ -1463,7 +1463,6 @@ async def _call_ai_with_retry(
         server_url=server_url,
         job_id=job_id,
         auth_header=auth_header,
-        workspace=workspace_dir,
     )
     await install_http_tools_mcp_best_effort_async(workspace_dir, custom_tools)
 
@@ -1476,12 +1475,6 @@ async def _call_ai_with_retry(
     }
     if system_prompt:
         call_kwargs["system_prompt"] = system_prompt
-    if any(tool["name"].startswith("graft_") for tool in custom_tools):
-        from rootcoz.engine.graft_http import graph_guidance
-
-        call_kwargs["system_prompt"] = (
-            call_kwargs.get("system_prompt", "") + "\n\n" + graph_guidance()
-        ).strip()
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
 

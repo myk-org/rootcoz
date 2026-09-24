@@ -12,6 +12,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self) -> None:
+        from rootcoz.engine.graft import QUERY_SECONDS
+
+        deadline = time.monotonic() + QUERY_SECONDS
         if self.path not in {f"/query/{name}" for name in _FIELDS}:
             self._reply(404, {"error": "not found"})
             return
@@ -87,6 +91,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._reply(400, {"error": "invalid body"})
             return
         try:
+            self.connection.settimeout(max(0.001, deadline - time.monotonic()))
             body = json.loads(self.rfile.read(int(length)))
             name = self.path.removeprefix("/query/")
             fields = _FIELDS[name]
@@ -98,7 +103,10 @@ class _Handler(BaseHTTPRequestHandler):
                     not isinstance(body[field], str) or len(body[field]) > 2048
                     for field in fields
                 )
-                or any(not body[field].strip() for field in _REQUIRED.get(name, ()))
+                or any(
+                    not body[field].strip() or body[field] == "{" + field + "}"
+                    for field in _REQUIRED.get(name, ())
+                )
             ):
                 raise ValueError
             for field in fields:
@@ -127,7 +135,7 @@ class _Handler(BaseHTTPRequestHandler):
                     )
                 ):
                     raise ValueError
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, TimeoutError):
             self._reply(400, {"error": "invalid request"})
             return
         try:
@@ -138,13 +146,23 @@ class _Handler(BaseHTTPRequestHandler):
                 if field in params:
                     params[field] = int(params[field])
             result = graft.query_repo(
-                session[0], body["repo"], name.removeprefix("graft_"), params
+                session[0],
+                body["repo"],
+                name.removeprefix("graft_"),
+                params,
+                deadline=deadline,
             )
             self._reply(200, result)
         except (ValueError, TypeError):
             self._reply(400, {"error": "invalid request"})
         except Exception:  # noqa: BLE001 - never expose graph errors containing source text or host paths
             self._reply(500, {"error": "graph query failed"})
+
+
+def _query_http_timeout_ms() -> int:
+    from rootcoz.engine.graft import QUERY_SECONDS
+
+    return (QUERY_SECONDS + 15) * 1000
 
 
 def build_graph_tools(
@@ -178,7 +196,7 @@ def build_graph_tools(
                         "repo": "{repo}",
                         **{field: "{" + field + "}" for field in fields},
                     },
-                    "timeout_ms": 10000,
+                    "timeout_ms": _query_http_timeout_ms(),
                 },
             }
         )

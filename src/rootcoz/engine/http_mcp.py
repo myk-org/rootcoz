@@ -14,6 +14,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -510,12 +511,17 @@ def _best_effort_install(
 
 
 def _install_lock_path(workspace: Path) -> Path:
-    """Lock file next to the tools dump; serializes installs per workspace."""
-    return workspace.parent / f".{workspace.name}.rootcoz-http-mcp.lock"
+    """Stable lock outside removable workspaces, including nested chat workspaces."""
+    import hashlib
+
+    key = hashlib.sha256(str(workspace.absolute()).encode()).hexdigest()
+    return Path(tempfile.gettempdir()) / f"rootcoz-locks-{os.getuid()}" / f"{key}.lock"
 
 
 @contextmanager
-def _workspace_install_lock(workspace: Path) -> Iterator[None]:
+def _workspace_install_lock(
+    workspace: Path, *, deadline: float | None = None
+) -> Iterator[None]:
     """Serialize MCP installs per workspace across threads and processes.
 
     Install rollback restores snapshot contents, so overlapping installs on
@@ -531,13 +537,49 @@ def _workspace_install_lock(workspace: Path) -> Iterator[None]:
     try:
         import fcntl
     except ImportError:  # pragma: no cover - non-POSIX platforms only
-        with _fallback_workspace_lock(workspace):
+        lock = _fallback_workspace_lock(workspace)
+        acquired = (
+            lock.acquire(timeout=max(0, deadline - time.monotonic()))
+            if deadline is not None
+            else lock.acquire()
+        )
+        if not acquired:
+            raise TimeoutError("workspace lock deadline")
+        try:
             yield
+        finally:
+            lock.release()
         return
     path = _install_lock_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    info = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise OSError("unsafe workspace lock directory")
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "a+") as fh:
+        file_info = os.fstat(fh.fileno())
+        if (
+            not stat.S_ISREG(file_info.st_mode)
+            or file_info.st_uid != os.getuid()
+            or file_info.st_nlink != 1
+            or file_info.st_mode & 0o077
+        ):
+            raise OSError("unsafe workspace lock file")
+        if deadline is None:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("workspace lock deadline") from None
+                    time.sleep(min(0.01, deadline - time.monotonic()))
         try:
             yield
         finally:
