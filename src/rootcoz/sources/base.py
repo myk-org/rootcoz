@@ -484,10 +484,7 @@ async def setup_analysis_workspace(
         Tuple of ``(WorkspaceSetupResult, effective_artifacts_context)``.
         ``artifacts_context`` may be cleared if artifact linking fails.
     """
-    from rootcoz.engine.core import (
-        clone_additional_repos,
-        copy_rootcoz_pi_resources,
-    )
+    from rootcoz.engine.core import copy_rootcoz_pi_resources
     from rootcoz.repository import derive_test_repo_name, redact_url
 
     repo_path = repo_manager.create_workspace()
@@ -529,12 +526,8 @@ async def setup_analysis_workspace(
             )
             repo_context = "\nFailed to clone repository (details redacted)"
 
-    if additional_repos:
-        additional_repos_cloned, repo_path = await clone_additional_repos(
-            repo_manager, additional_repos, repo_path
-        )
-        cloned_repos.update(additional_repos_cloned)
-
+    # Additional repositories are resolved after reading the test repo's settings.
+    # Cloning here can leave nine obsolete clones ahead of the effective nine.
     if cloned_repos:
         copy_rootcoz_pi_resources(cloned_repos, repo_path)
 

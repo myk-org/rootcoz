@@ -25,13 +25,16 @@ def test_graph_bridge(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         graft,
         "query_repo",
-        lambda workspace, scope, name, params: (
+        lambda workspace, scope, name, params, **kwargs: (
             calls.append((workspace, scope, name, params)) or {"ok": True}
         ),
     )
     tools = register_workspace(ws, {"source": repo})
     assert len(tools) == 6
     assert all(tool["http"]["method"] == "POST" for tool in tools)
+    assert all(
+        tool["http"]["timeout_ms"] > graft.QUERY_SECONDS * 1000 for tool in tools
+    )
     skill_paths = [
         ws / location / "skills" / "rootcoz-graft" / "SKILL.md"
         for location in (".pi", ".agents", ".cursor", ".claude", ".gemini")
@@ -60,6 +63,17 @@ def test_graph_bridge(tmp_path: Path, monkeypatch) -> None:
     try:
         body = {"repo": "source", "query": "hello", "limit": "", "path": ""}
         assert post(url, body) == 200
+        assert post(url, {**body, "query": "{query}"}) == 400
+        assert post(url, {**body, "query": ""}) == 400
+        assert post(url, {**body, "repo": "{repo}"}) == 400
+        for tool in ("graft_find_all", "graft_file_api", "graft_trace_calls"):
+            fields = next(t for t in tools if t["name"] == tool)["http"][
+                "body_template"
+            ]
+            assert (
+                post(url.replace("graft_find_code", tool), {**fields, "repo": "source"})
+                == 400
+            )
         assert calls == [(ws.resolve(), "source", "find_code", {"query": "hello"})]
         assert post(url, body, "Bearer invalid") == 401
         assert post(url + "?query=hello", body) == 404
@@ -80,6 +94,45 @@ def test_graph_bridge(tmp_path: Path, monkeypatch) -> None:
     finally:
         unregister_workspace(ws)
         unregister_workspace(other)
+
+
+def test_http_deadline_starts_before_query_dispatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import time
+
+    from rootcoz.engine import graft
+
+    ws = tmp_path / "work"
+    repo = ws / "source"
+    repo.mkdir(parents=True)
+    monkeypatch.setattr(graft, "QUERY_SECONDS", 0.1)
+    deadlines = []
+
+    def query(workspace, scope, name, params, *, deadline):
+        deadlines.append(deadline)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(graft, "query_repo", query)
+    tools = register_workspace(ws, {"source": repo})
+    try:
+        url = next(t for t in tools if t["name"] == "graft_find_code")["http"]["url"]
+        token = tools[0]["http"]["headers"]["Authorization"]
+        request = Request(
+            url,
+            json.dumps(
+                {"repo": "source", "query": "x", "limit": "", "path": ""}
+            ).encode(),
+            {"Authorization": token},
+            method="POST",
+        )
+        started = time.monotonic()
+        with urlopen(request, timeout=2) as response:
+            assert response.status == 200
+        assert started < deadlines[0] <= time.monotonic() + graft.QUERY_SECONDS
+        assert tools[0]["http"]["timeout_ms"] >= 1000 * (graft.QUERY_SECONDS + 15)
+    finally:
+        unregister_workspace(ws)
 
 
 def test_scope_change_revokes_old_token(tmp_path: Path) -> None:

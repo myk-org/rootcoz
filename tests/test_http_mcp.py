@@ -53,6 +53,17 @@ def test_install_skips_missing_binary(tmp_path: Path, monkeypatch) -> None:
     assert not (workspace / ".mcp.json").exists()
 
 
+def test_analysis_tools_do_not_include_graph(tmp_path: Path) -> None:
+    assert all(
+        not tool["name"].startswith("graft_")
+        for tool in analysis_http_tools(
+            server_url="http://localhost:8000",
+            job_id="job-1",
+            auth_header="Bearer token",
+        )
+    )
+
+
 def test_install_writes_cursor_claude_gemini_configs(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -486,6 +497,37 @@ def test_best_effort_install_swallows_errors(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", boom)
     # Must not raise — analysis/chat continue without MCP.
     http_mcp_mod._best_effort_install(tmp_path, [])
+
+
+def test_install_lock_survives_parent_workspace_cleanup(tmp_path: Path) -> None:
+    import fcntl
+    import shutil
+
+    parent = tmp_path / "job"
+    child = parent / "user"
+    child.mkdir(parents=True)
+    with http_mcp_mod._workspace_install_lock(child):
+        path = http_mcp_mod._install_lock_path(child)
+        inode = path.stat().st_ino
+        shutil.rmtree(parent)
+        assert path.exists() and path.stat().st_ino == inode
+        with open(path, "a+") as another, pytest.raises(BlockingIOError):
+            fcntl.flock(another.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_install_lock_rejects_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    path = http_mcp_mod._install_lock_path(workspace)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    target = tmp_path / "untouched"
+    target.write_text("secret")
+    path.symlink_to(target)
+    try:
+        with pytest.raises(OSError), http_mcp_mod._workspace_install_lock(workspace):
+            pass
+        assert target.read_text() == "secret"
+    finally:
+        path.unlink()
 
 
 def test_best_effort_install_noop_on_none_workspace(monkeypatch) -> None:

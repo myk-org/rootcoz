@@ -250,6 +250,7 @@ class BaseAnalysisRequest(BaseModel):
     )
     additional_repos: list[AdditionalRepo] | None = Field(
         default=None,
+        max_length=9,
         description=(
             "Additional repository URLs for AI analysis context. "
             "Each entry has a name (used as subdirectory name) and URL. "

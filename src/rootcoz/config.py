@@ -83,6 +83,8 @@ def parse_additional_repos(raw: str) -> list[dict[str, Any]]:
         return []
     result = []
     for i, entry in enumerate(raw.split(",")):
+        if i >= 9:
+            raise ValueError("additional_repos exceeds the nine repository limit")
         entry = entry.strip()
         if not entry:
             raise ValueError(f"Empty entry at position {i + 1} in additional repos")
