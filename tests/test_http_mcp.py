@@ -3,9 +3,13 @@
 import asyncio
 import builtins
 import json
+import multiprocessing as mp
+import multiprocessing.util
 import os
 import stat
+import tempfile
 import time
+from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 
 import pytest
@@ -34,6 +38,21 @@ def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _lock_in_child(
+    workspace: Path,
+    lock_root: Path,
+    entered: ProcessEvent | None = None,
+    release: ProcessEvent | None = None,
+) -> None:
+    tempfile.tempdir = str(lock_root)
+    with http_mcp_mod._workspace_install_lock(workspace):
+        if entered is None:
+            os._exit(0)
+        entered.set()
+        assert release is not None
+        release.wait(10)
+
+
 def test_install_skips_empty_tools(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -51,6 +70,17 @@ def test_install_skips_missing_binary(tmp_path: Path, monkeypatch) -> None:
     tools = [{"name": "get_job_result", "http": {"method": "GET", "url": "http://x"}}]
     assert install_http_tools_mcp(workspace, tools) is None
     assert not (workspace / ".mcp.json").exists()
+
+
+def test_analysis_tools_do_not_include_graph(tmp_path: Path) -> None:
+    assert all(
+        not tool["name"].startswith("graft_")
+        for tool in analysis_http_tools(
+            server_url="http://localhost:8000",
+            job_id="job-1",
+            auth_header="Bearer token",
+        )
+    )
 
 
 def test_install_writes_cursor_claude_gemini_configs(tmp_path: Path) -> None:
@@ -486,6 +516,271 @@ def test_best_effort_install_swallows_errors(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr(http_mcp_mod, "install_http_tools_mcp", boom)
     # Must not raise — analysis/chat continue without MCP.
     http_mcp_mod._best_effort_install(tmp_path, [])
+
+
+def test_install_lock_survives_parent_workspace_cleanup(tmp_path: Path) -> None:
+    import fcntl
+    import shutil
+
+    parent = tmp_path / "job"
+    child = parent / "user"
+    child.mkdir(parents=True)
+    with http_mcp_mod._workspace_install_lock(child):
+        path = http_mcp_mod._install_lock_path(child)
+        inode = path.stat().st_ino
+        shutil.rmtree(parent)
+        assert path.exists() and path.stat().st_ino == inode
+        with open(path, "a+") as another, pytest.raises(BlockingIOError):
+            fcntl.flock(another.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_analysis_does_not_index_unusable_graphs() -> None:
+    import inspect
+
+    from rootcoz import main
+
+    for analysis in (
+        main._process_ci_source_analysis,
+        main._reanalyze_failure_background,
+    ):
+        assert "index_repositories" not in inspect.getsource(analysis)
+        assert "copy_rootcoz_pi_resources" in inspect.getsource(analysis)
+    assert "index_repositories" in inspect.getsource(main._init_chat_under_barrier)
+
+
+def test_install_lock_reaps_short_lived_workspaces(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    for n in range(20):
+        workspace = tmp_path / f"workspace-{n}"
+        with http_mcp_mod._workspace_install_lock(workspace):
+            assert http_mcp_mod._install_lock_path(workspace).exists()
+    assert (
+        list(
+            (tmp_path / f"rootcoz-locks-{os.getuid()}").glob("[0-9a-f]" * 64 + ".lock")
+        )
+        == []
+    )
+
+
+def test_install_lock_reaps_after_process_exit(tmp_path: Path, monkeypatch) -> None:
+    mp.util.get_temp_dir()  # Keep forkserver's AF_UNIX socket outside the long pytest path.
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    workspace = tmp_path / "abandoned"
+    path = http_mcp_mod._install_lock_path(workspace)
+
+    process = mp.get_context("forkserver").Process(
+        target=_lock_in_child, args=(workspace, tmp_path)
+    )
+    process.start()
+    process.join(5)
+    assert process.exitcode == 0
+    assert path.exists()
+    with http_mcp_mod._workspace_install_lock(tmp_path / "next"):
+        assert path.exists()
+    assert not path.exists()
+
+
+def test_install_lock_reaping_preserves_holder_and_waiter(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import threading
+
+    mp.util.get_temp_dir()
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    workspace = tmp_path / "held"
+    path = http_mcp_mod._install_lock_path(workspace)
+    context = mp.get_context("forkserver")
+    entered = context.Event()
+    release = context.Event()
+
+    holder = context.Process(
+        target=_lock_in_child, args=(workspace, tmp_path, entered, release)
+    )
+    holder.start()
+    try:
+        assert entered.wait(5)
+        inode = path.stat().st_ino
+        waiting = threading.Event()
+        acquired = threading.Event()
+
+        def wait_for_lock() -> None:
+            waiting.set()
+            with http_mcp_mod._workspace_install_lock(workspace):
+                assert path.stat().st_ino == inode
+                acquired.set()
+
+        waiter = threading.Thread(target=wait_for_lock)
+        waiter.start()
+        assert waiting.wait(5)
+        reaped = threading.Event()
+        other_entered = threading.Event()
+
+        def run_other() -> None:
+            with http_mcp_mod._workspace_install_lock(tmp_path / "other"):
+                assert path.stat().st_ino == inode
+                other_entered.set()
+            reaped.set()
+
+        other = threading.Thread(target=run_other)
+        other.start()
+        assert other_entered.wait(5)
+        assert not acquired.is_set()
+        release.set()
+        holder.join(5)
+        waiter.join(5)
+        other.join(5)
+        assert reaped.is_set()
+        assert holder.exitcode == 0
+        assert acquired.is_set()
+        assert not path.exists()
+    finally:
+        release.set()
+        holder.join(5)
+
+
+def test_install_lock_cleanup_does_not_wait_for_other_waiters(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fcntl
+    import threading
+
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    workspace = tmp_path / "ws"
+    gate_path = http_mcp_mod._install_lock_path(workspace).parent / ".directory.lock"
+    with http_mcp_mod._workspace_install_lock(workspace):
+        pass
+    finished = threading.Event()
+    errors: list[Exception] = []
+    with open(gate_path, "a+") as gate:
+        fcntl.flock(gate, fcntl.LOCK_SH)
+
+        def run() -> None:
+            try:
+                with http_mcp_mod._workspace_install_lock(
+                    workspace, deadline=time.monotonic() + 0.1
+                ):
+                    pass
+            except OSError as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        try:
+            assert finished.wait(0.5), "cleanup waited on a shared gate past deadline"
+            assert not errors
+        finally:
+            fcntl.flock(gate, fcntl.LOCK_UN)
+            worker.join(2)
+
+
+def test_install_lock_deadline_does_not_scan_after_release(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    workspace = tmp_path / "ws"
+    directory = http_mcp_mod._install_lock_path(workspace).parent
+    directory.mkdir(mode=0o700)
+    stale = directory / ("c" * 64 + ".lock")
+    stale.touch(mode=0o600)
+
+    with http_mcp_mod._workspace_install_lock(workspace, deadline=time.monotonic() + 1):
+        pass
+    assert stale.exists(), "deadline operation should not run best-effort scan"
+    with http_mcp_mod._workspace_install_lock(tmp_path / "other"):
+        pass
+    assert not stale.exists()
+
+
+def test_install_lock_cleanup_skips_contended_gate_without_deadline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fcntl
+    import threading
+
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    workspace = tmp_path / "ws"
+    with http_mcp_mod._workspace_install_lock(workspace):
+        pass
+    gate_path = http_mcp_mod._install_lock_path(workspace).parent / ".directory.lock"
+    finished = threading.Event()
+    with open(gate_path, "a+") as gate:
+        fcntl.flock(gate, fcntl.LOCK_SH)
+
+        def run() -> None:
+            with http_mcp_mod._workspace_install_lock(workspace):
+                pass
+            finished.set()
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        try:
+            assert finished.wait(0.5), "best-effort cleanup blocked the caller"
+        finally:
+            fcntl.flock(gate, fcntl.LOCK_UN)
+            worker.join(2)
+
+
+def test_install_lock_reaper_skips_unsafe_candidates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    workspace = tmp_path / "ws"
+    directory = http_mcp_mod._install_lock_path(workspace).parent
+    directory.mkdir(mode=0o700)
+    target = tmp_path / "target"
+    target.write_text("keep")
+    link = directory / ("a" * 64 + ".lock")
+    link.symlink_to(target)
+    fifo = directory / ("b" * 64 + ".lock")
+    os.mkfifo(fifo, mode=0o600)
+    stale = directory / ("c" * 64 + ".lock")
+    stale.touch(mode=0o600)
+
+    with http_mcp_mod._workspace_install_lock(workspace):
+        pass
+    assert link.is_symlink() and target.read_text() == "keep"
+    assert stat.S_ISFIFO(fifo.lstat().st_mode)
+    assert not stale.exists()
+
+
+def test_install_lock_reaper_opens_candidates_nonblocking(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
+    workspace = tmp_path / "ws"
+    directory = http_mcp_mod._install_lock_path(workspace).parent
+    directory.mkdir(mode=0o700)
+    fifo = directory / ("b" * 64 + ".lock")
+    os.mkfifo(fifo, mode=0o600)
+    real_open = http_mcp_mod.os.open
+
+    def guarded_open(path, flags, *args, **kwargs):
+        if path == fifo:
+            assert flags & os.O_NONBLOCK
+            assert flags & os.O_NOFOLLOW
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(http_mcp_mod.os, "open", guarded_open)
+    with http_mcp_mod._workspace_install_lock(workspace):
+        pass
+    assert fifo.exists()
+
+
+def test_install_lock_rejects_symlink(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    path = http_mcp_mod._install_lock_path(workspace)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    target = tmp_path / "untouched"
+    target.write_text("secret")
+    path.symlink_to(target)
+    try:
+        with pytest.raises(OSError), http_mcp_mod._workspace_install_lock(workspace):
+            pass
+        assert target.read_text() == "secret"
+    finally:
+        path.unlink()
 
 
 def test_best_effort_install_noop_on_none_workspace(monkeypatch) -> None:

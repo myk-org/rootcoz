@@ -131,7 +131,9 @@ class RootcozRepoSettings(BaseModel):
     max_concurrent_ai_calls: int | None = Field(default=None, gt=0)
     peer_ai_configs: list[RootcozPeerConfig] | None = None
     peer_analysis_max_rounds: int | None = Field(default=None, ge=1, le=10)
-    additional_repos: list[RootcozAdditionalRepo] | None = None
+    additional_repos: list[RootcozAdditionalRepo] | None = Field(
+        default=None, max_length=9
+    )
 
     @field_validator("ai_model")
     @classmethod
@@ -432,6 +434,9 @@ def apply_rootcoz_repo_settings(
     else:
         parsed = parse_additional_repos(settings.additional_repos)
         resolved_additional = [AdditionalRepo(**r) for r in parsed] if parsed else []
+
+    if len(resolved_additional) > 9:
+        raise ValueError("additional_repos exceeds the nine repository limit")
 
     merged = settings
     if overrides:
