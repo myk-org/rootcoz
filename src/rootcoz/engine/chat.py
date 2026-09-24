@@ -18,6 +18,7 @@ from simple_logger.logger import get_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     call_ai,
+    create_session_safely,
     resolve_catalog_pair,
 )
 from rootcoz.engine.http_mcp import (
@@ -1180,12 +1181,16 @@ async def _create_chat_session(
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
-        from rootcoz.ai_client import session_key
+        from rootcoz.ai_client import _selected_credential_source, session_key
 
-        key = await session_key(sidecar_provider)
+        key = (
+            await session_key(sidecar_provider)
+            if _selected_credential_source.get() == "user"
+            else None
+        )
         if key is not None:
             create_kwargs["api_key"] = key
-        session_id = await client.create_session(**create_kwargs)
+        session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
     except Exception as exc:  # noqa: BLE001 - chat session failure is reported to caller

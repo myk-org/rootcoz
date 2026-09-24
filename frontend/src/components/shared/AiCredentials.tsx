@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api } from '@/lib/api'
+import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -41,6 +42,7 @@ export function AiCredentials() {
     setError('')
     try {
       await api.put(`/api/user/ai-credentials/${encodeURIComponent(provider)}`, { api_key: value })
+      resetProviderCatalogCache()
       setProviders((current) => current?.map((item) => item.provider === provider ? { ...item, configured: true } : item) ?? null)
       setEditing(null)
       setSelected('')
@@ -59,6 +61,7 @@ export function AiCredentials() {
     setError('')
     try {
       await api.delete(`/api/user/ai-credentials/${encodeURIComponent(provider)}`)
+      resetProviderCatalogCache()
       setProviders((current) => current?.map((item) => item.provider === provider ? { ...item, configured: false } : item) ?? null)
       if (editing === provider) setEditing(null)
       setSelected('')
