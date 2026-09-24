@@ -16,6 +16,8 @@ interface ModelComboboxProps {
   options: ModelOption[]
   placeholder?: string
   className?: string
+  ariaLabel?: string
+  disabled?: boolean
 }
 
 interface DropdownCoords {
@@ -30,6 +32,8 @@ export function ModelCombobox({
   options,
   placeholder = 'Default model',
   className,
+  ariaLabel,
+  disabled = false,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const [highlightIndex, setHighlightIndex] = useState(-1)
@@ -46,7 +50,7 @@ export function ModelCombobox({
     return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
   })
 
-  const showDropdown = open && filtered.length > 0
+  const showDropdown = !disabled && open && filtered.length > 0
 
   // Position dropdown from trigger (portal to body — outside dialog transform /
   // RemoveScroll) and keep it aligned on scroll/resize.
@@ -230,6 +234,8 @@ export function ModelCombobox({
           className="flex h-9 w-full rounded-full border border-border-default bg-surface-elevated px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
           placeholder={placeholder}
           value={value}
+          aria-label={ariaLabel}
+          disabled={disabled}
           onChange={(e) => {
             onChange(e.target.value)
             if (!open) setOpen(true)
@@ -261,7 +267,8 @@ export function ModelCombobox({
               return next
             })
           }}
-          aria-label="Toggle model list"
+          aria-label={ariaLabel ? `Toggle ${ariaLabel} list` : 'Toggle model list'}
+          disabled={disabled}
         >
           <ChevronDown
             className={cn(
