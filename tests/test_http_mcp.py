@@ -3,9 +3,13 @@
 import asyncio
 import builtins
 import json
+import multiprocessing as mp
+import multiprocessing.util
 import os
 import stat
+import tempfile
 import time
+from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 
 import pytest
@@ -32,6 +36,21 @@ def _mcp_js(tmp_path: Path) -> Path:
 
 def _read(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _lock_in_child(
+    workspace: Path,
+    lock_root: Path,
+    entered: ProcessEvent | None = None,
+    release: ProcessEvent | None = None,
+) -> None:
+    tempfile.tempdir = str(lock_root)
+    with http_mcp_mod._workspace_install_lock(workspace):
+        if entered is None:
+            os._exit(0)
+        entered.set()
+        assert release is not None
+        release.wait(10)
 
 
 def test_install_skips_empty_tools(tmp_path: Path) -> None:
@@ -544,17 +563,14 @@ def test_install_lock_reaps_short_lived_workspaces(tmp_path: Path, monkeypatch) 
 
 
 def test_install_lock_reaps_after_process_exit(tmp_path: Path, monkeypatch) -> None:
-    import multiprocessing as mp
-
+    mp.util.get_temp_dir()  # Keep forkserver's AF_UNIX socket outside the long pytest path.
     monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
     workspace = tmp_path / "abandoned"
     path = http_mcp_mod._install_lock_path(workspace)
 
-    def abandon() -> None:
-        with http_mcp_mod._workspace_install_lock(workspace):
-            os._exit(0)
-
-    process = mp.Process(target=abandon)
+    process = mp.get_context("forkserver").Process(
+        target=_lock_in_child, args=(workspace, tmp_path)
+    )
     process.start()
     process.join(5)
     assert process.exitcode == 0
@@ -567,21 +583,19 @@ def test_install_lock_reaps_after_process_exit(tmp_path: Path, monkeypatch) -> N
 def test_install_lock_reaping_preserves_holder_and_waiter(
     tmp_path: Path, monkeypatch
 ) -> None:
-    import multiprocessing as mp
     import threading
 
+    mp.util.get_temp_dir()
     monkeypatch.setattr(http_mcp_mod.tempfile, "gettempdir", lambda: str(tmp_path))
     workspace = tmp_path / "held"
     path = http_mcp_mod._install_lock_path(workspace)
-    entered = mp.Event()
-    release = mp.Event()
+    context = mp.get_context("forkserver")
+    entered = context.Event()
+    release = context.Event()
 
-    def hold() -> None:
-        with http_mcp_mod._workspace_install_lock(workspace):
-            entered.set()
-            release.wait(10)
-
-    holder = mp.Process(target=hold)
+    holder = context.Process(
+        target=_lock_in_child, args=(workspace, tmp_path, entered, release)
+    )
     holder.start()
     try:
         assert entered.wait(5)
