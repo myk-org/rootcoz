@@ -1,23 +1,16 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { useProviderModels } from '@/lib/useProviderModels'
 import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectTrigger,
-  SelectContent,
-  SelectItem,
-  SelectValue,
-} from '@/components/ui/select'
 import { api } from '@/lib/api'
 import { toIntInRange, PROW_JOB_NAME_RE, PROW_BUILD_ID_RE } from '@/lib/utils'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
-import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { useProviderOptions } from '@/lib/useProviderOptions'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { isAnalysisAiAvailable } from '@/lib/analysisAi'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
@@ -56,6 +49,7 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('')
   const [aiModel, setAiModel] = useState('')
+  const [forceServerCredentials, setForceServerCredentials] = useState(false)
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -150,8 +144,7 @@ export function NewAnalysisPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const availableModels = useProviderModels(aiProvider)
-  const providerOptions = useProviderOptions(aiProvider)
+  const { providers, providerStatus } = useProviderCatalog()
   const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
@@ -163,6 +156,9 @@ export function NewAnalysisPage() {
       : inputMode === 'prow'
       ? PROW_JOB_NAME_RE.test(prowJobName.trim()) && PROW_BUILD_ID_RE.test(prowBuildId.trim())
       : rawXml.trim() !== ''
+
+  const aiUnavailable = !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, forceServerCredentials) ||
+    (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, forceServerCredentials))))
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')
@@ -188,11 +184,16 @@ export function NewAnalysisPage() {
 
   const handleSubmit = useCallback(async () => {
     if (!canSubmit) return
+    if (aiUnavailable) {
+      setError('Select an available AI provider and model.')
+      return
+    }
     setSubmitting(true)
     setError('')
     try {
       const commonFields: Record<string, unknown> = {
         // Always include user-entered fields
+        force_server_credentials: forceServerCredentials,
         ...(aiProvider && { ai_provider: aiProvider }),
         ...(aiModel && { ai_model: aiModel }),
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
@@ -272,6 +273,8 @@ export function NewAnalysisPage() {
     buildNumber,
     aiProvider,
     aiModel,
+    forceServerCredentials,
+    aiUnavailable,
     tags,
     waitForCompletion,
     pollInterval,
@@ -552,24 +555,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select
-                  value={aiProvider || undefined}
-                  onValueChange={(v) => {
-                    setAiProvider(v)
-                    setAiModel('')
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select provider..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {providerOptions.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={forceServerCredentials} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -584,12 +570,11 @@ export function NewAnalysisPage() {
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <ModelCombobox
-                value={aiModel}
-                onChange={setAiModel}
-                options={availableModels}
-                placeholder="Default model"
-              />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={forceServerCredentials} />
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text-secondary">Use server credentials</span>
+              <Toggle checked={forceServerCredentials} onChange={setForceServerCredentials} label="Use server credentials" />
             </div>
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
@@ -611,7 +596,7 @@ export function NewAnalysisPage() {
               <Toggle checked={enablePeers} onChange={(v) => {
                 setEnablePeers(v)
                 if (v && peerConfigs.length === 0) {
-                  setPeerConfigs([{ id: crypto.randomUUID(), ai_provider: 'claude', ai_model: '' }])
+                  setPeerConfigs([{ id: crypto.randomUUID(), ai_provider: '', ai_model: '' }])
                 }
               }} label="Enable peer review" />
             </div>
@@ -622,6 +607,8 @@ export function NewAnalysisPage() {
                 peerModels={peerModels}
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
+                strict
+                forceServer={forceServerCredentials}
               />
             )}
           </Section>
@@ -777,7 +764,7 @@ export function NewAnalysisPage() {
             <Button variant="outline" onClick={() => navigate('/')} disabled={submitting}>
               Cancel
             </Button>
-            <Button onClick={handleSubmit} disabled={submitting || !canSubmit} className="gap-1.5">
+            <Button onClick={handleSubmit} disabled={submitting || !canSubmit || !!aiUnavailable} className="gap-1.5">
               <Send className={`h-3.5 w-3.5 ${submitting ? 'animate-pulse' : ''}`} />
               {submitting ? 'Submitting…' : 'Submit Analysis'}
             </Button>

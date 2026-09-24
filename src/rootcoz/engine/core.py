@@ -1483,9 +1483,10 @@ async def _call_ai_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             result = await call_ai_once(prompt, **call_kwargs)
-        except Exception:
-            logger.exception(
-                "AI call raised exception: provider=%s, model=%s, attempt=%d",
+        except Exception as exc:  # noqa: BLE001 - retry failed AI calls
+            logger.error(
+                "AI call raised %s: provider=%s, model=%s, attempt=%d",
+                type(exc).__name__,
                 ai_provider,
                 ai_model,
                 attempt,

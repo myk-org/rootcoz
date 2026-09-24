@@ -52,6 +52,7 @@ class TestRecordAiUsage:
                 duration_ms=1200,
                 prompt_chars=500,
                 response_chars=len("analysis output"),
+                credential_source="unknown",
             )
 
     @pytest.mark.asyncio
@@ -64,19 +65,10 @@ class TestRecordAiUsage:
             new_callable=AsyncMock,
         ) as mock_record:
             await record_ai_usage("job-123", result, "analysis")
-            mock_record.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_records_genuine_zero_usage(self) -> None:
-        result = AIResult(success=True, text="", usage=AITokenUsage())
-        with patch(
-            "rootcoz.token_tracking.storage.record_token_usage",
-            new_callable=AsyncMock,
-        ) as mock_record:
-            await record_ai_usage("job-123", result, "analysis")
             mock_record.assert_called_once()
             assert mock_record.call_args.kwargs["input_tokens"] == 0
             assert mock_record.call_args.kwargs["output_tokens"] == 0
+            assert mock_record.call_args.kwargs["credential_source"] == "unknown"
 
     @pytest.mark.asyncio
     async def test_skips_when_job_id_empty(self) -> None:

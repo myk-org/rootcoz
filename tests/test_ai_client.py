@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from rootcoz import ai_client
+from rootcoz.ai_client import AIResult, normalize_provider
 from rootcoz.ai_client import call_ai as call_ai_under_test
-from rootcoz.ai_client import normalize_provider
 
 
 @pytest.fixture(autouse=True)
@@ -70,13 +70,15 @@ async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
         "_list_models_raw",
         AsyncMock(return_value=[{"provider": provider, "id": model}]),
     )
-    call = AsyncMock(return_value="result")
+    result = AIResult(success=True, text="result")
+    call = AsyncMock(return_value=result)
     monkeypatch.setattr(ai_client, "_call_ai", call)
 
     assert (
         await call_ai_under_test("prompt", ai_provider=provider, ai_model=model)
-        == "result"
+        is result
     )
+    assert result.credential_source == "server"
     call.assert_awaited_once_with("prompt", ai_provider=provider, ai_model=model)
 
 
