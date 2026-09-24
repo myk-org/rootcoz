@@ -27,7 +27,7 @@ import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, Ro
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
-import { TokenUsageBadge } from './report/TokenUsageBadge'
+import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { reviewKey } from './report/ReportContext'

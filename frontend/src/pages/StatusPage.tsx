@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { AlertTriangle, Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
 import { StatusChip } from '@/components/shared/StatusChip'
+import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
@@ -463,6 +464,13 @@ export function StatusPage() {
               />
               {mainAi && (
                 <Row label="MAIN AI" value={mainAi} mono />
+              )}
+              {data?.result?.token_usage && (
+                <Row label="USAGE / COST" value={
+                  <TooltipProvider>
+                    <TokenUsageBadge usage={data.result.token_usage} />
+                  </TooltipProvider>
+                } />
               )}
               {hasPeers && (
                 <Row
