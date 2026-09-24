@@ -3942,11 +3942,6 @@ async def _process_ci_source_analysis(
         # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, repo_path)
-            from rootcoz.engine.graft import index_repositories, log_index_outcomes
-
-            log_index_outcomes(
-                await asyncio.to_thread(index_repositories, repo_path, cloned_repos)
-            )
 
         custom_prompt = append_repo_context(
             (body.raw_prompt or "").strip(), ws_result.repo_context
@@ -4950,11 +4945,6 @@ async def _reanalyze_failure_background(
         # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, repo_path)
-            from rootcoz.engine.graft import index_repositories, log_index_outcomes
-
-            log_index_outcomes(
-                await asyncio.to_thread(index_repositories, repo_path, cloned_repos)
-            )
 
         # Re-download console output and artifacts from the original CI source
         console_context = ""
