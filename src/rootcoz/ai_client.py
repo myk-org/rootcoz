@@ -21,24 +21,20 @@ ai_username: ContextVar[str] = ContextVar("ai_username", default="")
 
 
 async def supported_key_providers() -> list[str]:
-    """Require affirmative sidecar capability for each catalog provider (fail closed)."""
-    providers = {
-        entry["provider"]
-        for entry in await list_models()
-        if isinstance(entry.get("provider"), str)
-    }
-    client = get_sidecar_client()
-    supported = []
-    for provider in sorted(providers):
-        try:
-            status = await client.get_model_provider_status(provider)
-            if status.get("supportsSessionApiKey") is True:
-                supported.append(provider)
-        except Exception:  # noqa: BLE001 - unavailable status must fail closed
-            logger.warning(
-                "Unable to verify session-key capability for provider=%s", provider
-            )
-    return supported
+    """List registered providers with affirmative session-key capability."""
+    try:
+        providers = await get_sidecar_client().get_providers()
+    except Exception:  # noqa: BLE001 - unavailable discovery must fail closed
+        logger.warning("Unable to discover session-key providers")
+        return []
+    return sorted(
+        {
+            entry["provider"]
+            for entry in providers
+            if isinstance(entry.get("provider"), str)
+            and entry.get("supportsSessionApiKey") is True
+        }
+    )
 
 
 async def session_key(provider: str) -> str | None:
@@ -50,13 +46,7 @@ async def session_key(provider: str) -> str | None:
 
     key = (await get_user_ai_credentials(username)).get(provider)
     if key is not None:
-        if provider not in {entry.get("provider") for entry in await list_models()}:
-            raise ValueError("Provider session API-key capability unavailable")
-        try:
-            status = await get_sidecar_client().get_model_provider_status(provider)
-        except Exception as exc:
-            raise ValueError("Provider session API-key capability unavailable") from exc
-        if status.get("supportsSessionApiKey") is not True:
+        if provider not in await supported_key_providers():
             raise ValueError("Provider session API-key capability unavailable")
         logger.info("Using user AI credential for provider=%s", provider)
     return key
