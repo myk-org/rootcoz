@@ -2,6 +2,7 @@
 
 import csv
 import json as json_mod
+import logging
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,7 @@ classifications_app = typer.Typer(
 )
 config_app = typer.Typer(help="Manage rootcoz configuration.")
 auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
+ai_keys_app = typer.Typer(help="Manage your AI provider keys.", no_args_is_help=True)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
@@ -67,6 +69,7 @@ app.add_typer(chat_app, name="chat")
 app.add_typer(reports_app, name="reports")
 app.add_typer(config_app, name="config")
 app.add_typer(auth_app, name="auth")
+auth_app.add_typer(ai_keys_app, name="ai-keys")
 app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
 admin_app.add_typer(admin_settings_app, name="settings")
@@ -2805,6 +2808,68 @@ def analyze_comment_intent_cmd(
 
 
 # -- Auth ---------------------------------------------------------------------
+
+
+@ai_keys_app.command("list")
+def ai_keys_list(json_output: bool = _JSON_OPTION) -> None:
+    """List AI providers and whether your key is configured."""
+    data = _run_client_command(
+        json_output,
+        lambda c: {
+            "providers": [
+                {"provider": p["provider"], "configured": p["configured"]}
+                for p in c.list_ai_credentials()["providers"]
+            ]
+        },
+        emit_output=False,
+    )
+    logging.getLogger(__name__).info("Listed AI credential providers")
+    if not _state.get("json", False):
+        print_output(data["providers"], columns=["provider", "configured"])
+
+
+@ai_keys_app.command("set")
+def ai_keys_set(
+    provider: str = typer.Argument(help="Exact AI provider ID."),
+    stdin: bool = typer.Option(False, "--stdin", help="Read key from standard input."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Set your AI key securely via hidden prompt or standard input."""
+    if stdin:
+        api_key = sys.stdin.readline().rstrip("\r\n")
+    else:
+        api_key = typer.prompt("AI API key", hide_input=True)
+    if not api_key:
+        typer.echo("Error: AI API key cannot be empty.", err=True)
+        raise typer.Exit(1)
+    _set_json(json_output)
+    try:
+        _get_client().set_ai_credential(provider, api_key)
+    except RootCozError as err:
+        _handle_error(
+            RootCozError(err.status_code, err.detail.replace(api_key, "[REDACTED]"))
+        )
+    logging.getLogger(__name__).info("Saved AI credential for provider %s", provider)
+    print_output(
+        {"status": "saved"}, columns=["status"], as_json=_state.get("json", False)
+    )
+
+
+@ai_keys_app.command("delete")
+def ai_keys_delete(
+    provider: str = typer.Argument(help="Exact AI provider ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Delete your AI key for a provider."""
+    _set_json(json_output)
+    try:
+        _get_client().delete_ai_credential(provider)
+    except RootCozError as err:
+        _handle_error(err)
+    logging.getLogger(__name__).info("Deleted AI credential for provider %s", provider)
+    print_output(
+        {"status": "deleted"}, columns=["status"], as_json=_state.get("json", False)
+    )
 
 
 @auth_app.command("login")

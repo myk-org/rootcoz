@@ -1180,11 +1180,29 @@ async def _create_chat_session(
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
+        from rootcoz.ai_client import session_key
+
+        key = await session_key(sidecar_provider)
+        if key is not None:
+            create_kwargs["api_key"] = key
         session_id = await client.create_session(**create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
-    except Exception:
-        logger.warning("%s: failed to create session", log_prefix, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - chat session failure is reported to caller
+        # Exception messages may include the user key; log frames without values.
+        frames = []
+        tb = exc.__traceback__
+        while tb:
+            frames.append(
+                f"{tb.tb_frame.f_code.co_filename}:{tb.tb_lineno} in {tb.tb_frame.f_code.co_name}"
+            )
+            tb = tb.tb_next
+        logger.warning(
+            "%s: failed to create session (%s)\n%s",
+            log_prefix,
+            type(exc).__name__,
+            "\n".join(frames),
+        )
         return None
 
 

@@ -5,15 +5,62 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from contextvars import ContextVar
 from typing import Any
 
-from pi_sidecar_client import AIResult, set_usage_recorder
+from pi_sidecar_client import AIResult, get_sidecar_client, set_usage_recorder
 from pi_sidecar_client import call_ai as _call_ai
 from pi_sidecar_client import call_ai_once as _call_ai_once
 from pi_sidecar_client import list_models as _list_models_raw
 from simple_logger.logger import get_logger
 
 logger = get_logger(name=__name__)
+
+# Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
+ai_username: ContextVar[str] = ContextVar("ai_username", default="")
+
+
+async def supported_key_providers() -> list[str]:
+    """Require affirmative sidecar capability for each catalog provider (fail closed)."""
+    providers = {
+        entry["provider"]
+        for entry in await list_models()
+        if isinstance(entry.get("provider"), str)
+    }
+    client = get_sidecar_client()
+    supported = []
+    for provider in sorted(providers):
+        try:
+            status = await client.get_model_provider_status(provider)
+            if status.get("supportsSessionApiKey") is True:
+                supported.append(provider)
+        except Exception:  # noqa: BLE001 - unavailable status must fail closed
+            logger.warning(
+                "Unable to verify session-key capability for provider=%s", provider
+            )
+    return supported
+
+
+async def session_key(provider: str) -> str | None:
+    """Resolve the current initiator's exact provider key; missing means server auth."""
+    username = ai_username.get()
+    if not username:
+        return None
+    from rootcoz.storage import get_user_ai_credentials
+
+    key = (await get_user_ai_credentials(username)).get(provider)
+    if key is not None:
+        if provider not in {entry.get("provider") for entry in await list_models()}:
+            raise ValueError("Provider session API-key capability unavailable")
+        try:
+            status = await get_sidecar_client().get_model_provider_status(provider)
+        except Exception as exc:
+            raise ValueError("Provider session API-key capability unavailable") from exc
+        if status.get("supportsSessionApiKey") is not True:
+            raise ValueError("Provider session API-key capability unavailable")
+        logger.info("Using user AI credential for provider=%s", provider)
+    return key
+
 
 # Pi-sidecar's catalog is the provider/model contract.  These aliases only
 # preserve unambiguous legacy spelling; friendly provider names are resolved
@@ -382,6 +429,12 @@ async def call_ai(
 ) -> AIResult:
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
+    if not kwargs.get("session_id"):
+        key = await session_key(provider)
+        if key is not None:
+            kwargs["api_key"] = key
+    else:
+        kwargs.pop("api_key", None)
     return await _call_ai(*args, ai_provider=provider, ai_model=model, **kwargs)
 
 
@@ -390,6 +443,9 @@ async def call_ai_once(
 ) -> AIResult:
     """Call Pi-sidecar once with a validated, unchanged catalog pair."""
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
+    key = await session_key(provider)
+    if key is not None:
+        kwargs["api_key"] = key
     return await _call_ai_once(*args, ai_provider=provider, ai_model=model, **kwargs)
 
 
