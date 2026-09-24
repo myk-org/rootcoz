@@ -131,6 +131,18 @@
       "default": null,
       "title": "Peer Analysis Max Rounds"
     },
+    "force_server_credentials": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Force Server Credentials"
+    },
     "additional_repos": {
       "anyOf": [
         {

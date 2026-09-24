@@ -250,6 +250,7 @@ class Settings(BaseSettings):
     max_concurrent_ai_calls: int = Field(default=3, gt=0)
 
     # Default AI provider (server-level default, can be overridden per-request)
+    force_server_credentials: bool = False
     ai_provider: str = ""
     # Default AI model (server-level default, can be overridden per-request)
     ai_model: str = ""

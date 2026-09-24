@@ -726,7 +726,7 @@ async def analyze_failure_group_with_peers(
                     exc_config = peer_ai_configs[i]
                     logger.error(
                         f"Peer {exc_config.ai_provider}/{exc_config.ai_model} "
-                        f"raised exception: {result}"
+                        f"raised exception: {type(result).__name__}"
                     )
                     entry = PeerRound(
                         round=round_num,
@@ -734,7 +734,7 @@ async def analyze_failure_group_with_peers(
                         ai_model=exc_config.ai_model,
                         role="peer",
                         classification="",
-                        details=str(result),
+                        details=f"AI call raised {type(result).__name__}",
                         agrees_with_orchestrator=None,
                     )
                     round_peer_entries.append(entry)
@@ -918,7 +918,7 @@ async def analyze_failure_group_with_peers(
                     TypeError,
                 ) as exc:
                     logger.warning(
-                        f"Revision round {round_num} raised {type(exc).__name__}: {exc}; keeping prior analysis"
+                        f"Revision round {round_num} raised {type(exc).__name__}; keeping prior analysis"
                     )
                     parsed_analysis = previous_analysis
                     continue
@@ -1031,9 +1031,11 @@ async def analyze_failure_group_with_peers(
     finally:
         # Clean up all peer sessions
         client = get_sidecar_client()
+        from rootcoz.ai_client import delete_ai_session
+
         for peer_sid in peer_sessions.values():
             try:
-                await client.delete_session(peer_sid)
+                await delete_ai_session(client, peer_sid)
             except Exception:
                 logger.debug(
                     "Failed to delete peer session %s", peer_sid, exc_info=True

@@ -170,6 +170,13 @@ def admin_login(
 
 
 @pytest.fixture
+async def initialized_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use an isolated, schema-initialized DB for tests exercising AI persistence."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "results.db")
+    await storage.init_db()
+
+
+@pytest.fixture
 def temp_db_path() -> Generator[Path, None, None]:
     """Create a temporary database path for testing."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:

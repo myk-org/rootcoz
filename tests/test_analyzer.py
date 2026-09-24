@@ -1845,7 +1845,7 @@ class TestAnalyzeFailuresWorkspacePattern:
     async def test_analyze_failures_workspace_via_http(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path,
+        initialized_db: None,
     ) -> None:
         """POST /analyze with type=raw and tests_repo_url dispatches to background task."""
 
@@ -1906,7 +1906,7 @@ class TestWorkspaceAlwaysCreated:
     async def test_analyze_failures_creates_workspace_without_repos(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path,
+        initialized_db: None,
     ) -> None:
         """POST /analyze with type=raw (no repos) dispatches background task."""
 

@@ -1510,6 +1510,17 @@ class TestAiModelsCommand:
         assert result.exit_code == 0
         assert "No models found" in result.output
 
+    def test_ai_models_unverified_manual(self, mock_client):
+        mock_client.list_ai_models.return_value = {
+            "provider": "xai",
+            "models": [],
+            "modelListingSupported": False,
+        }
+        result = runner.invoke(app, ["ai-models", "--provider", "xai"])
+        assert result.exit_code == 0
+        assert "Enter a model ID manually" in result.output
+        assert "unverified" in result.output
+
     def test_ai_models_empty_all(self, mock_client):
         mock_client.list_ai_models.return_value = {"providers": {}}
         result = runner.invoke(app, ["ai-models"])
