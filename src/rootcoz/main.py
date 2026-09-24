@@ -56,15 +56,19 @@ from starlette.middleware.gzip import GZipMiddleware
 from rootcoz import storage
 from rootcoz.ai_client import (
     _setup_usage_recorder,
-    build_friendly_catalog,
+    ai_username,
     call_ai_once,
     clear_cursor_auth_cache,
+    force_server_credentials,
     format_chat_ai_user_error,
     is_cursor_provider,
     list_models,
+    model_listing_status,
     normalize_provider,
     probe_cursor_auth,
     resolve_catalog_pair,
+    scoped_models,
+    supported_key_providers,
     update_model_catalog,
 )
 from rootcoz.bug_creation import (
@@ -319,6 +323,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "AI": [
         "ai_provider",
         "ai_model",
+        "force_server_credentials",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "peer_ai_configs",
@@ -928,6 +933,7 @@ def _validate_decrypted_sensitive_fields(decrypted_params: dict[str, Any]) -> No
 _ANALYSIS_SETTINGS_FIELDS = (
     "ai_provider",
     "ai_model",
+    "force_server_credentials",
     "raw_prompt",
     "issue_prompt",
     "tests_repo_url",
@@ -1015,6 +1021,7 @@ def _reconstruct_from_params(
         "name": params.get("name") or None,
         "ai_provider": params.get("ai_provider", ""),
         "ai_model": params.get("ai_model", ""),
+        "force_server_credentials": params.get("force_server_credentials"),
         "wait_for_completion": params.get("wait_for_completion", True),
         "poll_interval_minutes": params.get("poll_interval_minutes", 2),
         "max_wait_minutes": params.get("max_wait_minutes", 0),
@@ -1064,6 +1071,7 @@ def _reconstruct_from_params(
         "jira_max_results",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
+        "force_server_credentials",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
         "peer_analysis_max_rounds",
@@ -1285,7 +1293,12 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
                 job["job_id"],
             )
 
-        ai_provider, ai_model = await _resolve_ai_config_allow_defer(body, merged)
+        token = ai_username.set(resumed_username)
+        try:
+            ai_provider, ai_model = await _resolve_ai_config_allow_defer(body, merged)
+            resolved_peers = await _validate_peer_configs(body, merged)
+        finally:
+            ai_username.reset(token)
         tests_repo_url_raw = resolve_tests_repo_url(body, merged)
         tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
         resolved_tests_repo_token = (
@@ -1298,7 +1311,6 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
             or body.job_name
             or ""
         )
-        resolved_peers = await _validate_peer_configs(body, merged)
 
         task = asyncio.create_task(
             _process_ci_source_analysis(
@@ -1826,7 +1838,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if blocked is not None:
                 return blocked
 
-        response = await call_next(request)
+        username_token = ai_username.set(username)
+        force_token = force_server_credentials.set(settings.force_server_credentials)
+        try:
+            response = await call_next(request)
+        finally:
+            ai_username.reset(username_token)
+            force_server_credentials.reset(force_token)
 
         # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
         if getattr(request.state, "set_proxy_cookie", None):
@@ -1878,7 +1896,7 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
-            "/api/chat/"
+            ("/api/chat/", "/api/user/ai-credentials")
         ):
             return await call_next(request)
         if logger.isEnabledFor(logging.DEBUG) and request.method in (
@@ -2122,6 +2140,11 @@ async def _resolve_ai_config_allow_defer(
     Unsupported providers fail immediately even when model is missing (defer
     only applies to incomplete config, not invalid providers).
     """
+    force_server_credentials.set(
+        body.force_server_credentials
+        if body.force_server_credentials is not None
+        else settings.force_server_credentials
+    )
     provider, model = _resolve_ai_provider_model(
         body.ai_provider, body.ai_model, settings=settings
     )
@@ -2250,6 +2273,7 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "jira_max_results",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
+        "force_server_credentials",
         "enable_jira",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
@@ -3012,6 +3036,7 @@ def _apply_base_analysis_overrides(
     unified ``/analyze`` endpoint and the file/raw re-analyze path need.
     Mutates *params* in place.
     """
+    params["force_server_credentials"] = merged.force_server_credentials
     params["enable_jira"] = _resolve_enable_jira(body, merged)
     params["jira_url"] = (
         body.jira_url if body.jira_url is not None else (merged.jira_url or "")
@@ -3221,9 +3246,13 @@ async def _enqueue_ci_source_analysis(
         merged = merged.model_copy(update={"get_job_artifacts": False})
         resolved_peers = None
     else:
-        ai_provider, ai_model = await _resolve_ai_config_allow_defer(
-            body, persist_merged, request=None
-        )
+        token = ai_username.set(username)
+        try:
+            ai_provider, ai_model = await _resolve_ai_config_allow_defer(
+                body, persist_merged, request=None
+            )
+        finally:
+            ai_username.reset(token)
 
     # Resolve repos
     tests_repo_url_raw = resolve_tests_repo_url(body, persist_merged)
@@ -3722,6 +3751,8 @@ async def _process_ci_source_analysis(
 ) -> None:
     """Background task for CISource plugin analysis (file/raw/prow/jenkins)."""
     job_id_var.set(job_id)
+    ai_username.set(username)
+    force_server_credentials.set(merged.force_server_credentials)
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
@@ -3899,6 +3930,7 @@ async def _process_ci_source_analysis(
         peer_ai_configs = effective.peer_ai_configs
         additional_repos_list = effective.additional_repos
         merged = effective.settings
+        force_server_credentials.set(merged.force_server_credentials)
 
         tests_dir_name = (
             tests_cloned_path.name if tests_cloned_path is not None else None
@@ -4331,11 +4363,15 @@ async def analyze(
     _check_allow_list(request)
     base_url = _extract_base_url()
 
-    await _resolve_ai_config_allow_defer(body, settings, request)
+    token = ai_username.set(request.state.username)
+    try:
+        await _resolve_ai_config_allow_defer(body, settings, request)
+        merged = _merge_settings(body, settings)
+        resolved_peers = await _validate_peer_configs(body, merged)
+    finally:
+        ai_username.reset(token)
 
     display_name = _resolve_request_display_name(body)
-    merged = _merge_settings(body, settings)
-    resolved_peers = await _validate_peer_configs(body, merged)
     return await _enqueue_ci_source_analysis(
         body=body,
         merged=merged,
@@ -4831,6 +4867,13 @@ async def _reanalyze_failure_background(
 ) -> None:
     """Background task: re-analyze a single failure in-place."""
     job_id_var.set(job_id)
+    ai_username.set(username)
+    force_server_credentials.set(
+        (source_params or {}).get(
+            "force_server_credentials",
+            (settings or get_settings()).force_server_credentials,
+        )
+    )
     auth_header = ""
     repo_manager: RepositoryManager | None = None
     source: CISource | None = None
@@ -4877,6 +4920,13 @@ async def _reanalyze_failure_background(
             shim_data["ai_call_timeout"] = ai_call_timeout
         if peer_ai_configs is not None:
             shim_data["peer_ai_configs"] = peer_ai_configs
+        if (
+            source_params is not None
+            and source_params.get("force_server_credentials") is not None
+        ):
+            shim_data["force_server_credentials"] = source_params[
+                "force_server_credentials"
+            ]
         # Stored/override concurrency + peer rounds are request-tier
         shim_data["peer_analysis_max_rounds"] = peer_analysis_max_rounds
         shim_data["max_concurrent_ai_calls"] = max_concurrent_ai_calls
@@ -4899,6 +4949,7 @@ async def _reanalyze_failure_background(
             ai_model = effective.ai_model
             peer_ai_configs = effective.peer_ai_configs
             additional_repos_list = effective.additional_repos
+            force_server_credentials.set(effective.settings.force_server_credentials)
             # Request-tier values win; effective mirrors shim for these fields
             peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
             if ai_call_timeout is None:
@@ -5230,15 +5281,26 @@ async def re_analyze_failure(
     # Defer AI validation when a tests repo can supply .rootcoz/settings.json
     # (same as submit-time deferred AI). Background applies settings.json after clone.
     settings = get_settings()
-    ai_provider, ai_model = await _resolve_ai_config_allow_defer(
-        BaseAnalysisRequest(
-            ai_provider=ai_provider or None,
-            ai_model=ai_model or None,
-            tests_repo_url=tests_repo_url or None,
-        ),
-        settings,
-        request=request,
-    )
+    token = ai_username.set(request.state.username)
+    try:
+        ai_provider, ai_model = await _resolve_ai_config_allow_defer(
+            BaseAnalysisRequest(
+                ai_provider=ai_provider or None,
+                ai_model=ai_model or None,
+                tests_repo_url=tests_repo_url or None,
+                force_server_credentials=(
+                    overrides.force_server_credentials
+                    if overrides.force_server_credentials is not None
+                    else decrypted_params.get("force_server_credentials")
+                ),
+            ),
+            settings,
+            request=request,
+        )
+        for peer in peer_ai_configs or []:
+            await _validate_catalog_pair(*_peer_catalog_pair(peer))
+    finally:
+        ai_username.reset(token)
 
     if "additional_repos" not in decrypted_params:
         additional_repos_list: list[AdditionalRepo] | None = None
@@ -5303,7 +5365,16 @@ async def re_analyze_failure(
             username=request.state.username,
             max_concurrent_ai_calls=max_concurrent_ai_calls,
             analysis_type=decrypted_params.get("analysis_type", "jenkins"),
-            source_params=decrypted_params,
+            source_params={
+                **decrypted_params,
+                "force_server_credentials": (
+                    overrides.force_server_credentials
+                    if overrides.force_server_credentials is not None
+                    else decrypted_params.get(
+                        "force_server_credentials", settings.force_server_credentials
+                    )
+                ),
+            },
             settings=get_settings(),
             child_job_name=match.get("child_job_name", ""),
             child_build_number=match.get("child_build_number", 0),
@@ -6084,16 +6155,20 @@ async def preview_github_issue(
     )
 
     issue_prompt = (body.issue_prompt or "").strip()
-    content = await generate_github_issue_content(
-        failure=failure,
-        report_url=report_url,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        jenkins_url=jenkins_url,
-        include_links=effective_include_links,
-        job_id=job_id,
-        issue_prompt=issue_prompt,
-    )
+    token = ai_username.set(request.state.username)
+    try:
+        content = await generate_github_issue_content(
+            failure=failure,
+            report_url=report_url,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            jenkins_url=jenkins_url,
+            include_links=effective_include_links,
+            job_id=job_id,
+            issue_prompt=issue_prompt,
+        )
+    finally:
+        ai_username.reset(token)
 
     # Duplicate detection (best-effort: failures must not break preview)
     # Uses only user-provided token — no server token fallback.
@@ -6163,16 +6238,20 @@ async def preview_jira_bug(
     )
 
     issue_prompt = (body.issue_prompt or "").strip()
-    content = await generate_jira_bug_content(
-        failure=failure,
-        report_url=report_url,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        jenkins_url=jenkins_url,
-        include_links=effective_include_links,
-        job_id=job_id,
-        issue_prompt=issue_prompt,
-    )
+    token = ai_username.set(request.state.username)
+    try:
+        content = await generate_jira_bug_content(
+            failure=failure,
+            report_url=report_url,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            jenkins_url=jenkins_url,
+            include_links=effective_include_links,
+            job_id=job_id,
+            issue_prompt=issue_prompt,
+        )
+    finally:
+        ai_username.reset(token)
 
     # Duplicate detection (best-effort: failures must not break preview)
     # Uses only user-provided token — no server token fallback.
@@ -6210,14 +6289,18 @@ async def preview_jira_bug(
             )
             if candidates and ai_provider and ai_model:
                 try:
-                    matches = await filter_matches_with_ai(
-                        bug_title=content["title"],
-                        bug_description=content["body"],
-                        candidates=candidates,
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        job_id=job_id,
-                    )
+                    token = ai_username.set(request.state.username)
+                    try:
+                        matches = await filter_matches_with_ai(
+                            bug_title=content["title"],
+                            bug_description=content["body"],
+                            candidates=candidates,
+                            ai_provider=ai_provider,
+                            ai_model=ai_model,
+                            job_id=job_id,
+                        )
+                    finally:
+                        ai_username.reset(token)
                     # Merge AI score into original candidate data to preserve all fields
                     candidate_by_key = {c["key"]: c for c in candidates}
                     similar = [
@@ -8762,6 +8845,19 @@ def _cursor_status_from_model_count(model_count: int) -> dict[str, Any]:
     }
 
 
+async def scoped_models_for_request(
+    request: Request,
+) -> dict[str, list[dict[str, Any]]]:
+    """Discover models using the authenticated caller's credential scope."""
+    token = ai_username.set(request.state.username)
+    force_token = force_server_credentials.set(get_settings().force_server_credentials)
+    try:
+        return await scoped_models()
+    finally:
+        force_server_credentials.reset(force_token)
+        ai_username.reset(token)
+
+
 @app.get("/api/ai-models", operation_id="listAiModels")
 async def list_ai_models(
     request: Request,
@@ -8783,15 +8879,21 @@ async def list_ai_models(
     logger.debug("GET /api/ai-models provider=%s", provider)
     is_admin = bool(getattr(request.state, "is_admin", False))
     try:
+        scoped = await scoped_models_for_request(request)
+        listing_status = model_listing_status.get() or {}
         if provider:
             provider = normalize_provider(provider)
-            models = await list_models(provider)
-            if not models:
+            models = scoped.get(provider, [])
+            if not models and provider not in listing_status:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Unknown Pi-sidecar provider: {provider}",
                 )
             payload: dict[str, Any] = {"provider": provider, "models": models}
+            if provider in listing_status:
+                payload["modelListingSupported"] = listing_status[provider][
+                    "modelListingSupported"
+                ]
             if is_cursor_provider(provider):
                 if is_admin:
                     cursor_raw = await probe_cursor_auth(model_count=len(models))
@@ -8802,11 +8904,7 @@ async def list_ai_models(
             return strip_sensitive_from_response(payload)
 
         # No provider specified — use the shared successful sidecar catalog.
-        try:
-            all_models = build_friendly_catalog(await list_models())
-        except Exception:
-            logger.warning("Failed to list models for all providers", exc_info=True)
-            all_models = {}
+        all_models = scoped
         cursor_count = sum(
             len(models)
             for provider_id, models in all_models.items()
@@ -8822,11 +8920,13 @@ async def list_ai_models(
         return strip_sensitive_from_response(
             {
                 "providers": all_models,
-                "provider_status": {"cursor": cursor_status},
+                "provider_status": {"cursor": cursor_status, **listing_status},
             }
         )
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     except Exception:
         logger.warning(
             "Failed to list AI models for provider=%s", provider, exc_info=True
@@ -9470,6 +9570,128 @@ async def pending_status(request: Request) -> JSONResponse:
     }
     _maybe_add_custom_approval_msg(content, settings)
     return JSONResponse(content=content)
+
+
+# --- User AI credentials ---
+
+
+async def _credential_user(request: Request) -> str:
+    _require_authenticated(request)
+    username = request.state.username
+    if not await storage.get_user_by_username(username):
+        raise HTTPException(
+            status_code=403,
+            detail="AI credentials require a database user; bootstrap admin has no credential store.",
+        )
+    return username
+
+
+@app.get("/api/user/ai-credentials", operation_id="getUserAiCredentials")
+async def get_user_ai_credentials(request: Request) -> JSONResponse:
+    """List supported provider IDs and configured flags; never return keys."""
+    username = await _credential_user(request)
+    supported = await supported_key_providers()
+    try:
+        configured = await storage.get_user_ai_credentials(username)
+    except storage.UnreadableAiCredentialsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(
+        content={
+            "providers": [
+                {"provider": p, "configured": p in configured} for p in supported
+            ]
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _discard_unsaved_chat_response(
+    message_id: int, job_id: str, username: str, session_id: str | None, label: str
+) -> None:
+    """Revoke an unsaved response and fail only an open placeholder."""
+    if session_id:
+        await _revoke_ai_sessions([session_id])
+    logger.info(
+        "%s: discarded response for message %d (stale credentials or closed placeholder)",
+        label,
+        message_id,
+    )
+    if await storage.fail_pending_chat_message(
+        message_id, "AI credentials changed during processing. Please try again."
+    ):
+        notify_chat_changed(job_id, username=username)
+
+
+async def _revoke_ai_sessions(sessions: list[str]) -> None:
+    """Delete revoked sessions without racing a replacement using the same ID."""
+    from pi_sidecar_client import get_sidecar_client
+
+    for session_id in sessions:
+        try:
+            await storage.delete_revoked_ai_session(
+                session_id,
+                get_sidecar_client().delete_session,
+            )
+        except Exception:  # noqa: BLE001 - tombstone remains if sidecar is unavailable
+            logger.warning("Failed to delete revoked AI session")
+    if sessions:
+        logger.info("Revoked %d AI sessions after credential change", len(sessions))
+
+
+class AiCredentialInput(BaseModel):
+    api_key: SecretStr
+
+
+@app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
+async def set_user_ai_credential(
+    provider: str, body: AiCredentialInput, request: Request
+) -> JSONResponse:
+    """Encrypt and save a key for a sidecar-confirmed provider."""
+    _require_reviewer(request)
+    username = await _credential_user(request)
+    if provider not in await supported_key_providers():
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    key = body.api_key.get_secret_value()
+    try:
+        valid = (
+            bool(
+                key.strip(
+                    "\ufeff\u0009\u000a\u000b\u000c\u000d \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+                )
+            )
+            and len(key.encode("utf-16-le")) // 2 <= 1024
+        )
+    except UnicodeEncodeError:
+        valid = False
+    if not valid:
+        raise HTTPException(status_code=400, detail="API key must be 1-1024 characters")
+    try:
+        sessions = await storage.update_user_ai_credential(username, provider, key)
+    except storage.UnreadableAiCredentialsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await _revoke_ai_sessions(sessions)
+    return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+
+
+@app.delete(
+    "/api/user/ai-credentials/{provider:path}", operation_id="deleteUserAiCredential"
+)
+async def delete_user_ai_credential(provider: str, request: Request) -> JSONResponse:
+    """Remove one credential; do not reveal whether a key was present."""
+    _require_reviewer(request)
+    username = await _credential_user(request)
+    if provider not in await supported_key_providers():
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    try:
+        sessions = await storage.update_user_ai_credential(username, provider, None)
+    except storage.UnreadableAiCredentialsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await _revoke_ai_sessions(sessions)
+    return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
 
 
 # --- User token endpoints ---
@@ -10889,7 +11111,11 @@ async def analyze_comment_intent(
     ai_provider, ai_model = _resolve_ai_config_values(
         ai_provider, ai_model, request=request
     )
-    ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
+    token = ai_username.set(request.state.username)
+    try:
+        ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
+    finally:
+        ai_username.reset(token)
 
     prompt = """You are analyzing a comment left on a test failure report.
 Does this comment imply the failure has been reviewed or resolved?
@@ -10919,13 +11145,17 @@ Respond with ONLY a JSON object:
         ai_provider,
         ai_model,
     )
-    result = await call_ai_once(
-        prompt,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        ai_call_timeout=None,
-        tools=[],
-    )
+    token = ai_username.set(request.state.username)
+    try:
+        result = await call_ai_once(
+            prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=None,
+            tools=[],
+        )
+    finally:
+        ai_username.reset(token)
 
     await result.record_usage(
         request_id="comment-intent",
@@ -10972,17 +11202,21 @@ async def preview_feedback(
             status_code=503, detail="Feedback submission is disabled on this server"
         )
     ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
-    ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
+    token = ai_username.set(request.state.username)
     try:
-        return await generate_feedback_preview(
-            body, settings, ai_provider=ai_provider, ai_model=ai_model
-        )
-    except Exception as exc:  # non-fatal feedback preview
-        logger.exception("Failed to generate feedback preview")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to generate feedback preview",
-        ) from exc
+        ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)
+        try:
+            return await generate_feedback_preview(
+                body, settings, ai_provider=ai_provider, ai_model=ai_model
+            )
+        except Exception as exc:  # non-fatal feedback preview
+            logger.exception("Failed to generate feedback preview")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate feedback preview",
+            ) from exc
+    finally:
+        ai_username.reset(token)
 
 
 @app.post(
@@ -11170,6 +11404,11 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         logger.warning("Failed to decrypt request_params for chat init", exc_info=True)
 
     _settings = get_settings()
+    force_server_credentials.set(
+        params.get("force_server_credentials")
+        if params.get("force_server_credentials") is not None
+        else getattr(_settings, "force_server_credentials", False)
+    )
     ai_provider = (
         result_data.get("ai_provider", "")
         or params.get("ai_provider", "")
@@ -11225,20 +11464,27 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             )
 
         _raise_if_chat_job_deleted(job_id)
-        session_id = await init_chat_session(
-            job_id=job_id,
-            job_name=result_data.get("job_name", "unknown"),
-            build_number=resolve_display_build_id(result_data),
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            repo_path=workspace,
-            custom_tools=custom_tools,
-            repos_available=repos_available,
-            ci_build_data_available=ci_build_data_available,
+        credential_generation = await storage.get_user_ai_credential_generation(
+            username, ai_provider
         )
+        token = ai_username.set(username)
+        try:
+            session_id = await init_chat_session(
+                job_id=job_id,
+                job_name=result_data.get("job_name", "unknown"),
+                build_number=resolve_display_build_id(result_data),
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                repo_path=workspace,
+                custom_tools=custom_tools,
+                repos_available=repos_available,
+                ci_build_data_available=ci_build_data_available,
+            )
+        finally:
+            ai_username.reset(token)
         _raise_if_chat_job_deleted(job_id)
         if session_id:
-            await storage.add_chat_message(
+            saved = await storage.add_chat_message(
                 job_id=job_id,
                 role="assistant",
                 content="",
@@ -11247,7 +11493,11 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
                 ai_model=ai_model,
                 session_id=session_id,
                 status="completed",
+                credential_generation=credential_generation,
             )
+            if not saved:
+                await _revoke_ai_sessions([session_id])
+                session_id = None
         welcome_text = build_welcome_message(
             job_name=result_data.get("job_name", "unknown"),
             build_number=resolve_display_build_id(result_data),
@@ -11674,6 +11924,7 @@ async def _process_chat_message(
     is_admin: bool = False,
 ) -> None:
     """Background task: process a single chat message with AI."""
+    ai_username.set(username)
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         chat_with_ai,
@@ -11713,6 +11964,11 @@ async def _process_chat_message(
                         params = result_data.get("request_params", {})
 
                         _chat_settings = get_settings()
+                        force_server_credentials.set(
+                            params.get("force_server_credentials")
+                            if params.get("force_server_credentials") is not None
+                            else _chat_settings.force_server_credentials
+                        )
                         ai_provider, ai_model = _resolve_chat_ai_config(
                             override_provider=ai_provider_override,
                             override_model=ai_model_override,
@@ -11723,6 +11979,11 @@ async def _process_chat_message(
                             is_admin=is_admin,
                         )
 
+                        credential_generation = (
+                            await storage.get_user_ai_credential_generation(
+                                username, ai_provider
+                            )
+                        )
                         # Get conversation history
                         msg_count = await storage.count_chat_messages(
                             job_id, username=username
@@ -11899,18 +12160,19 @@ async def _process_chat_message(
                         )
                         return
 
-                    await storage.update_chat_message_content(
-                        assistant_msg_id, response_text
-                    )
-                    await storage.update_chat_message_status(
-                        assistant_msg_id, "completed"
-                    )
-                    await storage.update_chat_message_ai_fields(
+                    saved = await storage.complete_chat_message_if_generation(
                         assistant_msg_id,
+                        content=response_text,
                         ai_provider=ai_provider,
                         ai_model=ai_model,
                         session_id=new_session_id or "",
+                        credential_generation=credential_generation,
                     )
+                    if not saved:
+                        await _discard_unsaved_chat_response(
+                            assistant_msg_id, job_id, username, new_session_id, "Chat"
+                        )
+                        return
                     logger.info(
                         "Chat: message %d processed for job %s (session=%s)",
                         assistant_msg_id,
@@ -12114,14 +12376,21 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
 
-            session_id = await init_admin_chat_session(
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                repo_path=workspace,
-                custom_tools=custom_tools,
+            credential_generation = await storage.get_user_ai_credential_generation(
+                username, ai_provider
             )
+            token = ai_username.set(username)
+            try:
+                session_id = await init_admin_chat_session(
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    repo_path=workspace,
+                    custom_tools=custom_tools,
+                )
+            finally:
+                ai_username.reset(token)
             if session_id:
-                await storage.add_chat_message(
+                saved = await storage.add_chat_message(
                     job_id=ADMIN_CHAT_JOB_ID,
                     role="assistant",
                     content="",
@@ -12130,7 +12399,11 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                     ai_model=ai_model,
                     session_id=session_id,
                     status="completed",
+                    credential_generation=credential_generation,
                 )
+                if not saved:
+                    await _revoke_ai_sessions([session_id])
+                    session_id = None
     logger.info("Admin chat init: workspace=%s, session=%s", workspace, session_id)
     return {"ready": True, "session_id": session_id or ""}
 
@@ -12268,6 +12541,7 @@ async def _process_admin_chat_message(
     is_admin: bool = True,
 ) -> None:
     """Background task: process a single admin chat message with AI."""
+    ai_username.set(username)
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
         build_admin_custom_tools,
@@ -12287,6 +12561,9 @@ async def _process_admin_chat_message(
                 is_admin=is_admin,
             )
 
+            credential_generation = await storage.get_user_ai_credential_generation(
+                username, ai_provider
+            )
             msg_count = await storage.count_chat_messages(
                 ADMIN_CHAT_JOB_ID, username=username
             )
@@ -12384,14 +12661,23 @@ async def _process_admin_chat_message(
                 )
                 return
 
-            await storage.update_chat_message_content(assistant_msg_id, response_text)
-            await storage.update_chat_message_status(assistant_msg_id, "completed")
-            await storage.update_chat_message_ai_fields(
+            saved = await storage.complete_chat_message_if_generation(
                 assistant_msg_id,
+                content=response_text,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 session_id=new_session_id or "",
+                credential_generation=credential_generation,
             )
+            if not saved:
+                await _discard_unsaved_chat_response(
+                    assistant_msg_id,
+                    ADMIN_CHAT_JOB_ID,
+                    username,
+                    new_session_id,
+                    "Admin chat",
+                )
+                return
             logger.info(
                 "Admin chat: message %d processed (session=%s)",
                 assistant_msg_id,

@@ -8,6 +8,8 @@ export interface ModelOption {
   name: string
   /** Model source under the friendly provider: acpx | cli | api */
   source?: string
+  credential_sources?: Array<'user' | 'server'>
+  verified?: boolean
 }
 
 interface ModelComboboxProps {
@@ -16,6 +18,10 @@ interface ModelComboboxProps {
   options: ModelOption[]
   placeholder?: string
   className?: string
+  ariaLabel?: string
+  disabled?: boolean
+  strict?: boolean
+  forceServer?: boolean
 }
 
 interface DropdownCoords {
@@ -30,6 +36,10 @@ export function ModelCombobox({
   options,
   placeholder = 'Default model',
   className,
+  ariaLabel,
+  disabled = false,
+  strict = false,
+  forceServer = false,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const [highlightIndex, setHighlightIndex] = useState(-1)
@@ -41,12 +51,12 @@ export function ModelCombobox({
 
   // Fuzzy filter: case-insensitive substring match on id or name
   const filtered = options.filter((m) => {
-    if (!value) return true
+    if (strict || !value || options.some((m) => m.id === value)) return true
     const q = value.toLowerCase()
     return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
   })
 
-  const showDropdown = open && filtered.length > 0
+  const showDropdown = !disabled && open && filtered.length > 0
 
   // Position dropdown from trigger (portal to body — outside dialog transform /
   // RemoveScroll) and keep it aligned on scroll/resize.
@@ -205,6 +215,12 @@ export function ModelCombobox({
               >
                 <span>{model.id}</span>
                 <span className="flex shrink-0 items-center gap-2">
+                  {model.verified === false && <span className="text-xs text-signal-amber">UNVERIFIED</span>}
+                  {model.verified !== false && model.credential_sources?.length ? (
+                    <span className="text-xs text-text-tertiary">
+                      {forceServer ? 'Server' : model.credential_sources.includes('user') && model.credential_sources.includes('server') ? 'User + Server' : model.credential_sources.includes('user') ? 'User' : 'Server'}
+                    </span>
+                  ) : null}
                   {model.source && (
                     <span className="rounded border border-border-default px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-tertiary">
                       {model.source}
@@ -229,8 +245,12 @@ export function ModelCombobox({
           type="text"
           className="flex h-9 w-full rounded-full border border-border-default bg-surface-elevated px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
           placeholder={placeholder}
-          value={value}
+          value={strict && value && !options.some((m) => m.id === value) ? `${value} (unavailable)` : value}
+          readOnly={strict}
+          aria-label={ariaLabel}
+          disabled={disabled}
           onChange={(e) => {
+            if (strict) return
             onChange(e.target.value)
             if (!open) setOpen(true)
           }}
@@ -261,7 +281,8 @@ export function ModelCombobox({
               return next
             })
           }}
-          aria-label="Toggle model list"
+          aria-label={ariaLabel ? `Toggle ${ariaLabel} list` : 'Toggle model list'}
+          disabled={disabled}
         >
           <ChevronDown
             className={cn(

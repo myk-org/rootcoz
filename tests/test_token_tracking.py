@@ -52,6 +52,7 @@ class TestRecordAiUsage:
                 duration_ms=1200,
                 prompt_chars=500,
                 response_chars=len("analysis output"),
+                credential_source="unknown",
             )
 
     @pytest.mark.asyncio
@@ -84,6 +85,7 @@ class TestRecordAiUsage:
                 duration_ms=None,
                 prompt_chars=0,
                 response_chars=len("output"),
+                credential_source="unknown",
             )
 
     @pytest.mark.asyncio

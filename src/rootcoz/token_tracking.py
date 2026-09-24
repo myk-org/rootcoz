@@ -5,6 +5,7 @@ and build token usage summaries for analysis results.
 """
 
 import os
+from typing import Any
 
 from pi_sidecar_client import AIResult
 from simple_logger.logger import get_logger
@@ -50,6 +51,7 @@ async def record_ai_usage(
             duration_ms=usage.duration_ms if usage else None,
             prompt_chars=prompt_chars,
             response_chars=len(result.text),
+            credential_source=getattr(result, "credential_source", "unknown"),
         )
     except Exception:
         logger.debug("Failed to record token usage for job %s", job_id, exc_info=True)
@@ -65,54 +67,60 @@ async def build_token_usage_summary(job_id: str) -> TokenUsageSummary | None:
         if not records:
             return None
 
-        calls = []
-        total_input = 0
-        total_output = 0
-        total_cache_read = 0
-        total_cache_write = 0
-        total_cost: float | None = 0.0
-        total_duration = 0
-
-        for rec in records:
-            calls.append(
-                TokenUsageEntry(
-                    provider=rec["ai_provider"],
-                    model=rec["ai_model"],
-                    call_type=rec["call_type"],
-                    input_tokens=rec["input_tokens"],
-                    output_tokens=rec["output_tokens"],
-                    cache_read_tokens=rec["cache_read_tokens"],
-                    cache_write_tokens=rec["cache_write_tokens"],
-                    total_tokens=rec["total_tokens"],
-                    cost_usd=rec["cost_usd"],
-                    duration_ms=rec["duration_ms"],
-                )
-            )
-            total_input += rec["input_tokens"]
-            total_output += rec["output_tokens"]
-            total_cache_read += rec["cache_read_tokens"]
-            total_cache_write += rec["cache_write_tokens"]
-            if rec["cost_usd"] is not None:
-                if total_cost is not None:
-                    total_cost += rec["cost_usd"]
-            else:
-                total_cost = None  # If any call lacks cost, total is None
-            if rec["duration_ms"] is not None:
-                total_duration += rec["duration_ms"]
-
-        return TokenUsageSummary(
-            total_input_tokens=total_input,
-            total_output_tokens=total_output,
-            total_cache_read_tokens=total_cache_read,
-            total_cache_write_tokens=total_cache_write,
-            total_tokens=total_input + total_output,
-            total_cost_usd=total_cost,
-            total_duration_ms=total_duration,
-            total_calls=len(calls),
-            calls=calls,
-        )
+        return summarize_token_usage(records)
     except Exception:
         logger.debug(
             "Failed to build token usage summary for job %s", job_id, exc_info=True
         )
         return None
+
+
+def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
+    """Summarize stored per-call usage without reading or writing the database."""
+    calls = []
+    total_input = 0
+    total_output = 0
+    total_cache_read = 0
+    total_cache_write = 0
+    total_cost: float | None = 0.0
+    total_duration = 0
+
+    for rec in records:
+        calls.append(
+            TokenUsageEntry(
+                provider=rec["ai_provider"],
+                model=rec["ai_model"],
+                call_type=rec["call_type"],
+                credential_source=rec.get("credential_source", "unknown"),
+                input_tokens=rec["input_tokens"],
+                output_tokens=rec["output_tokens"],
+                cache_read_tokens=rec["cache_read_tokens"],
+                cache_write_tokens=rec["cache_write_tokens"],
+                total_tokens=rec["total_tokens"],
+                cost_usd=rec["cost_usd"],
+                duration_ms=rec["duration_ms"],
+            )
+        )
+        total_input += rec["input_tokens"]
+        total_output += rec["output_tokens"]
+        total_cache_read += rec["cache_read_tokens"]
+        total_cache_write += rec["cache_write_tokens"]
+        if rec["cost_usd"] is not None:
+            if total_cost is not None:
+                total_cost += rec["cost_usd"]
+        else:
+            total_cost = None  # If any call lacks cost, total is None
+        if rec["duration_ms"] is not None:
+            total_duration += rec["duration_ms"]
+
+    return TokenUsageSummary(
+        total_input_tokens=total_input,
+        total_output_tokens=total_output,
+        total_cache_read_tokens=total_cache_read,
+        total_cache_write_tokens=total_cache_write,
+        total_tokens=total_input + total_output,
+        total_cost_usd=total_cost,
+        total_duration_ms=total_duration,
+        total_calls=len(calls),
+        calls=calls,
+    )

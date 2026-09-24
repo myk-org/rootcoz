@@ -255,8 +255,8 @@ async def _generate_issue_content_via_ai(
             ai_call_timeout=ai_call_timeout,
             tools=[],
         )
-    except Exception:
-        logger.exception("AI call raised for %s issue", issue_type)
+    except Exception as exc:  # noqa: BLE001 - issue preview falls back on AI errors
+        logger.error("AI call raised %s for %s issue", type(exc).__name__, issue_type)
         return None
 
     if job_id:

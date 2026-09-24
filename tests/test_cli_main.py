@@ -1510,6 +1510,17 @@ class TestAiModelsCommand:
         assert result.exit_code == 0
         assert "No models found" in result.output
 
+    def test_ai_models_unverified_manual(self, mock_client):
+        mock_client.list_ai_models.return_value = {
+            "provider": "xai",
+            "models": [],
+            "modelListingSupported": False,
+        }
+        result = runner.invoke(app, ["ai-models", "--provider", "xai"])
+        assert result.exit_code == 0
+        assert "Enter a model ID manually" in result.output
+        assert "unverified" in result.output
+
     def test_ai_models_empty_all(self, mock_client):
         mock_client.list_ai_models.return_value = {"providers": {}}
         result = runner.invoke(app, ["ai-models"])
@@ -3773,6 +3784,72 @@ class TestExportersCommand:
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed[0]["name"] == "reportportal"
+
+
+class TestAiKeysCommands:
+    def test_list_redacts_unexpected_keys(self, mock_client):
+        mock_client.list_ai_credentials.return_value = {
+            "providers": [
+                {
+                    "provider": "acpx/a",
+                    "configured": True,
+                    "api_key": "secret-key",  # pragma: allowlist secret
+                }
+            ]
+        }
+        result = runner.invoke(app, ["auth", "ai-keys", "list", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {
+            "providers": [{"provider": "acpx/a", "configured": True}]
+        }
+        assert "secret-key" not in result.output
+
+    def test_set_stdin_and_redaction(self, mock_client):
+        mock_client.set_ai_credential.return_value = {
+            "api_key": "secret-key"  # pragma: allowlist secret
+        }
+        result = runner.invoke(
+            app,
+            ["auth", "ai-keys", "set", "acpx/a", "--stdin", "--json"],
+            input="secret-key\n",
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"status": "saved"}
+        assert "secret-key" not in result.output
+        mock_client.set_ai_credential.assert_called_once_with("acpx/a", "secret-key")
+
+    def test_set_interactive_hidden(self, mock_client):
+        result = runner.invoke(
+            app, ["auth", "ai-keys", "set", "vertex"], input="secret-key\n"
+        )
+        assert result.exit_code == 0
+        assert "secret-key" not in result.output
+        mock_client.set_ai_credential.assert_called_once_with("vertex", "secret-key")
+
+    def test_set_rejects_empty_key(self, mock_client):
+        result = runner.invoke(
+            app, ["auth", "ai-keys", "set", "vertex", "--stdin"], input="\n"
+        )
+        assert result.exit_code == 1
+        mock_client.set_ai_credential.assert_not_called()
+
+    def test_set_error_redacts_key(self, mock_client):
+        mock_client.set_ai_credential.side_effect = RootCozError(400, "Bad secret-key")
+        result = runner.invoke(
+            app, ["auth", "ai-keys", "set", "vertex", "--stdin"], input="secret-key\n"
+        )
+        assert result.exit_code == 1
+        assert "secret-key" not in result.output
+        assert "[REDACTED]" in result.output
+
+    def test_delete(self, mock_client):
+        mock_client.delete_ai_credential.return_value = {
+            "api_key": "secret-key"  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["auth", "ai-keys", "delete", "acpx/a"])
+        assert result.exit_code == 0
+        assert "secret-key" not in result.output
+        mock_client.delete_ai_credential.assert_called_once_with("acpx/a")
 
 
 class TestAuthLoginCommand:

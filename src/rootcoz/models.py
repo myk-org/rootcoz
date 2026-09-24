@@ -181,6 +181,10 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="AI model to use (overrides env var default)",
     )
+    force_server_credentials: bool | None = Field(
+        default=None,
+        description="Use server AI credentials even when a user key exists",
+    )
     enable_jira: bool | None = Field(
         default=None,
         description="Enable Jira bug search (default: true when Jira is configured, set false to skip)",
@@ -630,6 +634,7 @@ class TokenUsageEntry(BaseModel):
     provider: str = ""
     model: str = ""
     call_type: str = ""
+    credential_source: str = "unknown"
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -1184,6 +1189,7 @@ class ReAnalyzeFailureRequest(BaseModel):
 
     ai_provider: str | None = None
     ai_model: str | None = None
+    force_server_credentials: bool | None = None
     ai_call_timeout: int | None = None
     raw_prompt: str | None = None
     peer_ai_configs: list[dict[str, Any]] | None = None

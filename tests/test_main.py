@@ -217,6 +217,7 @@ def test_client(mock_settings, temp_db_path: Path):
             [
                 {"provider": "claude", "id": "test-model"},
                 {"provider": "claude", "id": "opus"},
+                {"provider": "gemini", "id": "pro"},
             ]
         )
         with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
