@@ -34,36 +34,39 @@ async def test_credential_map_encrypted_atomic_and_isolated(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_capability_fails_closed_and_exact_key(monkeypatch):
-    monkeypatch.setattr(
-        ai_client,
-        "list_models",
-        AsyncMock(
-            return_value=[
-                {"provider": "unknown", "id": "m"},
-                {"provider": "supported", "id": "m"},
-                {"provider": "cli-hidden", "id": "m"},
-            ]
-        ),
-    )
+    monkeypatch.setattr(ai_client, "list_models", AsyncMock(return_value=[]))
     client = AsyncMock()
-    client.get_model_provider_status.side_effect = lambda p: (
-        {"supportsSessionApiKey": p == "supported"}
-    )
+    client.get_providers.return_value = [
+        {"provider": "unknown", "supportsSessionApiKey": False},
+        {"provider": "supported", "supportsSessionApiKey": True},
+        {"provider": "cli-hidden", "supportsSessionApiKey": False},
+    ]
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     assert await ai_client.supported_key_providers() == ["supported"]
-    client.get_model_provider_status.side_effect = lambda p: {}
+    client.get_providers.return_value = [
+        {"provider": "supported", "supportsSessionApiKey": False}
+    ]
     assert await ai_client.supported_key_providers() == []
 
     monkeypatch.setattr(
         storage,
         "get_user_ai_credentials",
-        AsyncMock(return_value={"supported": "wrong-key"}),
+        AsyncMock(
+            return_value={
+                "supported": "wrong-key",
+                "unknown": "bad-key",
+                "unregistered": "bad-key",
+            }
+        ),
     )
     token = ai_client.ai_username.set("alice")
     try:
         with pytest.raises(ValueError, match="capability unavailable"):
             await ai_client.session_key("supported")
-        assert await ai_client.session_key("unknown") is None
+        with pytest.raises(ValueError, match="capability unavailable"):
+            await ai_client.session_key("unknown")
+        with pytest.raises(ValueError, match="capability unavailable"):
+            await ai_client.session_key("unregistered")
     finally:
         ai_client.ai_username.reset(token)
     assert await ai_client.session_key("supported") is None
@@ -75,34 +78,27 @@ async def test_key_lookup_checks_only_selected_provider(monkeypatch):
         storage, "get_user_ai_credentials", AsyncMock(return_value={"acpx/a": "key"})
     )
     client = AsyncMock()
-    client.get_model_provider_status.return_value = {"supportsSessionApiKey": True}
+    client.get_providers.return_value = [
+        {"provider": "acpx/a", "supportsSessionApiKey": True},
+        {"provider": "other", "supportsSessionApiKey": False},
+    ]
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
-    monkeypatch.setattr(
-        ai_client,
-        "list_models",
-        AsyncMock(return_value=[{"provider": "acpx/a"}, {"provider": "other"}]),
-    )
+    monkeypatch.setattr(ai_client, "list_models", AsyncMock(return_value=[]))
     token = ai_client.ai_username.set("alice")
     try:
         assert await ai_client.session_key("acpx/a") == "key"
     finally:
         ai_client.ai_username.reset(token)
-    client.get_model_provider_status.assert_awaited_once_with("acpx/a")
+    client.get_providers.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
 async def test_cli_providers_follow_sidecar_capability(monkeypatch):
-    monkeypatch.setattr(
-        ai_client,
-        "list_models",
-        AsyncMock(
-            return_value=[{"provider": "cli-keyed"}, {"provider": "cli-ambient"}]
-        ),
-    )
     client = AsyncMock()
-    client.get_model_provider_status.side_effect = lambda provider: {
-        "supportsSessionApiKey": provider == "cli-keyed"
-    }
+    client.get_providers.return_value = [
+        {"provider": "cli-keyed", "supportsSessionApiKey": True},
+        {"provider": "cli-ambient", "supportsSessionApiKey": False},
+    ]
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
         storage,
@@ -115,6 +111,23 @@ async def test_cli_providers_follow_sidecar_capability(monkeypatch):
         assert await ai_client.session_key("cli-keyed") == "key"
         with pytest.raises(ValueError, match="capability unavailable"):
             await ai_client.session_key("cli-ambient")
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_fails_closed(monkeypatch):
+    client = AsyncMock()
+    client.get_providers.side_effect = RuntimeError("unavailable")
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "key"})
+    )
+    assert await ai_client.supported_key_providers() == []
+    token = ai_client.ai_username.set("alice")
+    try:
+        with pytest.raises(ValueError, match="capability unavailable"):
+            await ai_client.session_key("openai")
     finally:
         ai_client.ai_username.reset(token)
 
@@ -141,6 +154,39 @@ async def test_api_status_redacts_and_rejects_unsupported(tmp_path, monkeypatch)
     assert (
         await main.get_user_ai_credentials(request)
     ).body == b'{"providers":[{"provider":"custom","configured":false}]}'
+
+
+@pytest.mark.asyncio
+async def test_openai_key_without_server_auth_or_catalog_models(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "openai.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    client = AsyncMock()
+    client.get_providers.return_value = [
+        {"provider": "openai", "supportsSessionApiKey": True}
+    ]
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "list_models", AsyncMock(return_value=[]))
+    request = SimpleNamespace(state=SimpleNamespace(username="alice"))
+    assert (await main.get_user_ai_credentials(request)).body == (
+        b'{"providers":[{"provider":"openai","configured":false}]}'
+    )
+    await main.set_user_ai_credential(
+        "openai",
+        main.AiCredentialInput(api_key="user-key"),  # pragma: allowlist secret
+        request,
+    )
+    assert (await main.get_user_ai_credentials(request)).body == (
+        b'{"providers":[{"provider":"openai","configured":true}]}'
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        assert (
+            await ai_client.session_key("openai") == "user-key"
+        )  # pragma: allowlist secret
+    finally:
+        ai_client.ai_username.reset(token)
+    ai_client.list_models.assert_not_awaited()
 
 
 @pytest.mark.asyncio
