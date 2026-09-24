@@ -401,6 +401,42 @@ def test_indexed_roots_waits_for_reindex(tmp_path, monkeypatch):
         assert reader.result(timeout=2) == {"code": repo}
 
 
+def test_query_lock_deadline_boundary_returns_timeout(tmp_path, monkeypatch):
+    import fcntl
+
+    from rootcoz.engine import http_mcp
+
+    workspace = tmp_path / "workspace"
+    (workspace / "code").mkdir(parents=True)
+    git(workspace / "code", "init")
+    graft._root(workspace).mkdir()
+    monkeypatch.setattr(http_mcp.tempfile, "gettempdir", lambda: str(tmp_path))
+    path = http_mcp._install_lock_path(workspace)
+    path.parent.mkdir(mode=0o700)
+    with path.open("a+") as holder:
+        path.chmod(0o600)
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        calls = 0
+
+        def clock():
+            nonlocal calls
+            calls += 1
+            return 99.99 if calls == 1 else 100.01
+
+        def sleep(seconds):
+            if seconds < 0:
+                raise ValueError("sleep length must be non-negative")
+
+        monkeypatch.setattr(http_mcp.time, "monotonic", clock)
+        monkeypatch.setattr(http_mcp.time, "sleep", sleep)
+        assert graft.query_repo(workspace, "code", "repo_map", {}, deadline=100.0) == {
+            "status": "failed",
+            "reason": "TimeoutError",
+            "truncated": False,
+        }
+        assert calls == 2
+
+
 def test_query_lock_wait_is_bounded(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 

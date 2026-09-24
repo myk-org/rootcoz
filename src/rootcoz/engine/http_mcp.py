@@ -541,9 +541,10 @@ def _flock_until(fd: int, deadline: float | None, *, shared: bool = False) -> No
             fcntl.flock(fd, mode | fcntl.LOCK_NB)
             return
         except BlockingIOError:
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise TimeoutError("workspace lock deadline") from None
-            time.sleep(min(0.01, deadline - time.monotonic()))
+            time.sleep(min(0.01, remaining))
 
 
 def _reap_install_locks(directory: Path) -> None:
