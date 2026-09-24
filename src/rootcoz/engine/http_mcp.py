@@ -14,6 +14,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -510,12 +511,68 @@ def _best_effort_install(
 
 
 def _install_lock_path(workspace: Path) -> Path:
-    """Lock file next to the tools dump; serializes installs per workspace."""
-    return workspace.parent / f".{workspace.name}.rootcoz-http-mcp.lock"
+    """Stable lock outside removable workspaces, including nested chat workspaces."""
+    import hashlib
+
+    key = hashlib.sha256(str(workspace.absolute()).encode()).hexdigest()
+    return Path(tempfile.gettempdir()) / f"rootcoz-locks-{os.getuid()}" / f"{key}.lock"
+
+
+def _check_lock_file(fd: int) -> None:
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & 0o077
+    ):
+        raise OSError("unsafe workspace lock file")
+
+
+def _flock_until(fd: int, deadline: float | None, *, shared: bool = False) -> None:
+    import fcntl
+
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+    if deadline is None:
+        fcntl.flock(fd, mode)
+        return
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("workspace lock deadline") from None
+            time.sleep(min(0.01, remaining))
+
+
+def _reap_install_locks(directory: Path) -> None:
+    """Called under the stable exclusive directory gate; never unlink a held inode."""
+    import fcntl
+
+    for candidate in directory.glob("[0-9a-f]" * 64 + ".lock"):
+        try:
+            fd = os.open(candidate, os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except OSError:
+            continue
+        try:
+            _check_lock_file(fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            on_disk = candidate.stat(follow_symlinks=False)
+            opened = os.fstat(fd)
+            if (on_disk.st_dev, on_disk.st_ino) == (opened.st_dev, opened.st_ino):
+                candidate.unlink()
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
 
 
 @contextmanager
-def _workspace_install_lock(workspace: Path) -> Iterator[None]:
+def _workspace_install_lock(
+    workspace: Path, *, deadline: float | None = None
+) -> Iterator[None]:
     """Serialize MCP installs per workspace across threads and processes.
 
     Install rollback restores snapshot contents, so overlapping installs on
@@ -531,17 +588,63 @@ def _workspace_install_lock(workspace: Path) -> Iterator[None]:
     try:
         import fcntl
     except ImportError:  # pragma: no cover - non-POSIX platforms only
-        with _fallback_workspace_lock(workspace):
-            yield
-        return
-    path = _install_lock_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        lock = _fallback_workspace_lock(workspace)
+        acquired = (
+            lock.acquire(timeout=max(0, deadline - time.monotonic()))
+            if deadline is not None
+            else lock.acquire()
+        )
+        if not acquired:
+            raise TimeoutError("workspace lock deadline")
         try:
             yield
         finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            lock.release()
+        return
+    path = _install_lock_path(workspace)
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    info = path.parent.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise OSError("unsafe workspace lock directory")
+    # Readers hold the stable gate while opening/waiting for a workspace inode.
+    # A reaper cannot unlink an inode that a waiter has already opened.
+    gate_path = path.parent / ".directory.lock"
+    gate_fd = os.open(gate_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(gate_fd, "a+") as gate:
+        _check_lock_file(gate.fileno())
+        _flock_until(gate.fileno(), deadline, shared=True)
+        acquired = False
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "a+") as fh:
+                _check_lock_file(fh.fileno())
+                _flock_until(fh.fileno(), deadline)
+                acquired = True
+                fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
+            if acquired and deadline is None:
+                # ponytail: skip cleanup when the global gate is busy; retry on
+                # the next release rather than delay callers (including queries).
+                try:
+                    fcntl.flock(gate.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    try:
+                        _reap_install_locks(path.parent)
+                    except OSError:
+                        logger.warning("Workspace lock reaping failed", exc_info=True)
+                    finally:
+                        fcntl.flock(gate.fileno(), fcntl.LOCK_UN)
 
 
 # Process-local fallback locks for platforms without :mod:`fcntl` (Windows).

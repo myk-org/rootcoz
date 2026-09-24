@@ -429,23 +429,37 @@ def build_analysis_history_tools(
     ]
 
 
+def graph_http_tools(workspace: Path | None) -> list[dict[str, Any]]:
+    """Use only previously indexed clones in this AI session's own workspace."""
+    if workspace is None:
+        return []
+    from rootcoz.engine.graft import indexed_roots
+    from rootcoz.engine.graft_http import register_workspace
+
+    roots = indexed_roots(workspace)
+    return register_workspace(workspace, roots) if roots else []
+
+
 def analysis_http_tools(
     *,
     server_url: str,
     job_id: str,
     auth_header: str,
 ) -> list[dict[str, Any]]:
-    """HTTP history tools for analysis when server, job, and Bearer token exist."""
+    """Optional authenticated history tools for analysis sessions."""
+    tools: list[dict[str, Any]] = []
     if not (server_url and job_id and auth_header):
-        return []
+        return tools
     token = auth_header.removeprefix("Bearer ").strip()
-    if not token:
-        return []
-    return build_analysis_history_tools(
-        server_url=server_url,
-        auth_token=token,
-        job_id=job_id,
-    )
+    if token:
+        tools.extend(
+            build_analysis_history_tools(
+                server_url=server_url,
+                auth_token=token,
+                job_id=job_id,
+            )
+        )
+    return tools
 
 
 def build_chat_custom_tools(
@@ -887,6 +901,12 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     if not workspace.exists():
         return
 
+    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft_http import unregister_workspace
+
+    unregister_workspace(workspace)
+    cleanup_graph(workspace)
+
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():
         if item.name.startswith("."):
@@ -916,6 +936,11 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
     """Delete the entire chat workspace including sessions."""
     workspace = get_chat_workspace(job_id, username)
     targets = _chat_mcp_lock_targets(workspace)
+    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft_http import unregister_workspace
+
+    unregister_workspace(workspace)
+    cleanup_graph(workspace)
     # Hold each workspace's MCP install lock for the whole rmtree + dump
     # unlink so an in-flight installer cannot recreate credentials after
     # the job (or nested user dir) was removed.
@@ -1026,6 +1051,11 @@ def build_system_prompt(
     """Build a system prompt that scopes the AI to a specific analyzed job."""
     tools_section = _build_tools_section(custom_tools)
     unavailable_section = _build_unavailable_section(custom_tools)
+    graph_note = ""
+    if any(tool["name"].startswith("graft_") for tool in custom_tools):
+        from rootcoz.engine.graft_http import graph_guidance
+
+        graph_note = "\n\n" + graph_guidance()
 
     repos_note = ""
     if repos_available:
@@ -1061,7 +1091,7 @@ You have structured tools that you can call directly:
 - You MUST only discuss this specific job and its failures
 - If the user asks something unrelated to this job (e.g., "what's the time?", general coding questions, weather, anything not about this analysis), respond ONLY with: "I can only discuss the analysis results for this job. How can I help you understand the failures?"
 - Do NOT answer off-topic questions. Do NOT be helpful about non-job topics. Reject them immediately.
-{_COMMON_RULES}
+{_COMMON_RULES}{graph_note}
 """
 
 
