@@ -3,11 +3,13 @@ import { api } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { ModelCombobox } from './ModelCombobox'
 
 type Provider = { provider: string; configured: boolean }
 
 export function AiCredentials() {
   const [providers, setProviders] = useState<Provider[] | null>(null)
+  const [selected, setSelected] = useState('')
   const [key, setKey] = useState('')
   const keyRef = useRef('')
   const [editing, setEditing] = useState<string | null>(null)
@@ -17,8 +19,8 @@ export function AiCredentials() {
   useEffect(() => {
     let active = true
     api.get<{ providers: Provider[] }>('/api/user/ai-credentials')
-      .then((result) => { if (active) { setProviders(result.providers); console.info('AI credential status loaded') } })
-      .catch((err) => { if (active) { setError('Could not load AI credentials'); console.error('Failed to load AI credentials:', err) } })
+      .then((result) => { if (active) setProviders(result.providers) })
+      .catch(() => { if (active) setError('Could not load AI credentials') })
     return () => { active = false; keyRef.current = '' }
   }, [])
 
@@ -27,10 +29,13 @@ export function AiCredentials() {
     setKey('')
   }
 
-  async function save(event: FormEvent, provider: string) {
+  const available = providers?.filter((item) => !item.configured) ?? []
+  const provider = editing ?? available.find((item) => item.provider === selected)?.provider
+
+  async function save(event: FormEvent) {
     event.preventDefault()
     const value = keyRef.current.trim()
-    if (!value || busy) return
+    if (!provider || !value || busy) return
     clearKey()
     setBusy(provider)
     setError('')
@@ -38,10 +43,9 @@ export function AiCredentials() {
       await api.put(`/api/user/ai-credentials/${encodeURIComponent(provider)}`, { api_key: value })
       setProviders((current) => current?.map((item) => item.provider === provider ? { ...item, configured: true } : item) ?? null)
       setEditing(null)
-      console.info('AI credential saved for provider:', provider)
+      setSelected('')
     } catch {
       setError('Could not save API key')
-      console.error('Failed to save AI credential for provider:', provider)
     } finally {
       clearKey()
       setBusy(null)
@@ -57,10 +61,9 @@ export function AiCredentials() {
       await api.delete(`/api/user/ai-credentials/${encodeURIComponent(provider)}`)
       setProviders((current) => current?.map((item) => item.provider === provider ? { ...item, configured: false } : item) ?? null)
       if (editing === provider) setEditing(null)
-      console.info('AI credential removed for provider:', provider)
+      setSelected('')
     } catch {
       setError('Could not remove API key')
-      console.error('Failed to remove AI credential for provider:', provider)
     } finally {
       setBusy(null)
     }
@@ -75,29 +78,48 @@ export function AiCredentials() {
         </div>
         {error && <p role="alert" className="text-xs text-signal-red">{error}</p>}
         {providers?.length === 0 && <p className="text-sm text-text-tertiary">No API-key providers available.</p>}
-        {providers?.map(({ provider, configured }) => (
-          <div key={provider} className="space-y-2 border-t border-border-muted pt-4">
-            <div className="flex items-center justify-between gap-3">
-              <span className="font-mono text-sm text-text-primary break-all">{provider}</span>
-              <span className="shrink-0 text-xs text-text-tertiary">{configured ? 'Configured' : 'Not configured'}</span>
-            </div>
-            <form onSubmit={(event) => save(event, provider)} className="flex gap-2">
-              <label htmlFor={`ai-key-${provider}`} className="sr-only">{provider} API key</label>
-              <Input
-                id={`ai-key-${provider}`}
-                type="password"
-                autoComplete="off"
-                value={editing === provider ? key : ''}
-                disabled={busy !== null}
-                onChange={(event) => { setEditing(provider); keyRef.current = event.target.value; setKey(event.target.value) }}
-                onFocus={() => { if (editing !== provider) { clearKey(); setEditing(provider) } }}
-                placeholder={configured ? 'Replace key' : 'Enter key'}
-              />
-              <Button type="submit" size="sm" disabled={busy !== null || editing !== provider || !key.trim()} aria-label={`Save ${provider} key`}>Save</Button>
+        {providers && <>
+          {providers.some((item) => item.configured) && (
+            <ul aria-label="Configured AI providers" className="divide-y divide-border-muted border-t border-border-muted">
+              {providers.filter((item) => item.configured).map(({ provider: id }) => (
+                <li key={id} className="flex flex-wrap items-center gap-2 py-3">
+                  <span className="mr-auto font-mono text-sm text-text-primary break-all">{id}</span>
+                  <span className="text-xs text-text-tertiary">Configured</span>
+                  <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setEditing(id); setError('') }} aria-label={`Replace ${id} key`}>Replace</Button>
+                  <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => remove(id)} aria-label={`Remove ${id} key`}>Remove key</Button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {(available.length > 0 || editing) && (
+            <form onSubmit={save} className="space-y-3 border-t border-border-muted pt-4">
+              {editing ? (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm text-text-primary">Replace {editing} key</span>
+                  <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setEditing(null) }}>Cancel</Button>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <span className="block text-xs text-text-tertiary">AI provider</span>
+                  <ModelCombobox value={selected} onChange={(value) => { clearKey(); setSelected(value) }} options={available.map((item) => ({ id: item.provider, name: item.provider }))} placeholder="Find a provider" ariaLabel="AI provider" disabled={busy !== null} />
+                </div>
+              )}
+              <div className="flex gap-2">
+                <label htmlFor="ai-provider-key" className="sr-only">API key</label>
+                <Input
+                  id="ai-provider-key"
+                  type="password"
+                  autoComplete="off"
+                  value={key}
+                  disabled={busy !== null}
+                  onChange={(event) => { keyRef.current = event.target.value; setKey(event.target.value) }}
+                  placeholder={editing ? 'New API key' : 'Enter API key'}
+                />
+                <Button type="submit" size="sm" disabled={busy !== null || !provider || !key.trim()}>{editing ? 'Replace key' : '+ Add key'}</Button>
+              </div>
             </form>
-            {configured && <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => remove(provider)} aria-label={`Remove ${provider} key`}>Remove key</Button>}
-          </div>
-        ))}
+          )}
+        </>}
       </CardContent>
     </Card>
   )
