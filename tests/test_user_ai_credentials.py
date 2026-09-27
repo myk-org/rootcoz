@@ -792,6 +792,12 @@ async def test_resumed_success_redacts_current_key_and_denies_rotated_key(
 @pytest.mark.asyncio
 async def test_resumed_chat_lost_session_still_retries(monkeypatch):
     monkeypatch.setattr(
+        storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        storage, "get_ai_session_source", AsyncMock(return_value="server")
+    )
+    monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))

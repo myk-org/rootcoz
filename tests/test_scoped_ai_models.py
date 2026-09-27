@@ -51,6 +51,7 @@ async def test_scoped_discovery_and_call_fail_closed(monkeypatch):
                 "name": "Shared",
                 "source": "api",
                 "credential_sources": ["user", "server"],
+                "can_use_server_providers": False,
                 "verified": True,
             },
             {
@@ -59,6 +60,7 @@ async def test_scoped_discovery_and_call_fail_closed(monkeypatch):
                 "name": "User only",
                 "source": "api",
                 "credential_sources": ["user"],
+                "can_use_server_providers": False,
                 "verified": True,
             },
         ]

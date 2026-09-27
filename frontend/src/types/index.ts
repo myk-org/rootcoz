@@ -21,6 +21,7 @@ export interface AuthUser {
   is_admin: boolean
   /** Effective reports access (true for admins; otherwise the stored DB flag). */
   can_view_reports: boolean
+  can_use_server_providers: boolean
 }
 
 export interface AdminUser {
@@ -31,12 +32,14 @@ export interface AdminUser {
   last_seen: string | null
   /** Stored DB flag for reports access (orthogonal to role; admins ignore this). */
   can_view_reports: boolean
+  can_use_server_providers: boolean
 }
 
 export interface CreateUserRequest {
   username: string
   role: string
   can_view_reports?: boolean
+  can_use_server_providers?: boolean
 }
 
 export interface CreateUserResponse {

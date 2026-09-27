@@ -10,6 +10,7 @@ interface AuthState {
   isOperator: boolean
   /** Effective reports access from /me (true for admins; otherwise stored flag). */
   canViewReports: boolean
+  canUseServerProviders: boolean
   role: string
   loading: boolean
   authenticated: boolean
@@ -36,6 +37,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsernameState] = useState(getUsername())
   const [isAdmin, setIsAdminState] = useState(getIsAdmin())
   const [canViewReports, setCanViewReports] = useState(false)
+  const [canUseServerProviders, setCanUseServerProviders] = useState(false)
   const [role, setRoleState] = useState('reviewer')
   const [loading, setLoading] = useState(true)
   const [authenticated, setAuthenticated] = useState(false)
@@ -43,6 +45,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   function clearPrivileges() {
     setIsAdminState(false)
     setCanViewReports(false)
+    setCanUseServerProviders(false)
     setRoleState('reviewer')
     setIsAdmin(false)
     setRole('reviewer')
@@ -53,6 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsernameState(user.username)
     setIsAdminState(user.is_admin)
     setCanViewReports(!!user.can_view_reports)
+    setCanUseServerProviders(!!user.can_use_server_providers)
     setRoleState(user.role)
     setIsAdmin(user.is_admin)
     setRole(user.role)
@@ -67,6 +71,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const me = await api.get<AuthUser>('/api/auth/me')
       applyAuthUser(me)
       await syncTokensFromServer(me.username)
+      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+      resetProviderCatalogCache()
     } catch (err) {
       // 401 means not authenticated — clear identity and require login
       if (err instanceof ApiError && err.status === 401) {
@@ -133,6 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAdmin,
       isOperator: role === 'operator' || role === 'admin',
       canViewReports,
+      canUseServerProviders,
       role,
       loading,
       authenticated,

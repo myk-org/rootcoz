@@ -222,6 +222,9 @@ async def test_chat_session_uses_selected_server_pair(init, monkeypatch, tmp_pat
             }
         ),
     )
+    monkeypatch.setattr(
+        storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+    )
     monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     created = AsyncMock(return_value="sid")
     monkeypatch.setattr(chat, "create_session_safely", created)
