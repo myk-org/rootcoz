@@ -160,6 +160,7 @@ class _Handler(BaseHTTPRequestHandler):
             # Count successful query invocations, not confirmed delivery or unique
             # queries. These are estimates, not actual tokens saved or billed;
             # HTTP retries count again.
+            estimate = 0
             try:
                 saved = (
                     result.get("result", {}).get("saved")
@@ -184,25 +185,24 @@ class _Handler(BaseHTTPRequestHandler):
                             (saved["baselineChars"] + 2) // 4
                             - (len(response_json) + 2) // 4,
                         )
-                        if estimate:
-                            # Lease serializes writes with revocation for this workspace.
-                            # Never hold the process-wide lock across disk I/O.
-                            with session[4]:
-                                with _lock:
-                                    active = _sessions.get(session[0]) is session[5]
-                                if active:
-                                    from rootcoz.storage import (
-                                        add_graft_estimated_tokens_saved,
-                                    )
-
-                                    asyncio.run(
-                                        add_graft_estimated_tokens_saved(
-                                            session[3], estimate
-                                        )
-                                    )
-            except Exception:  # noqa: BLE001 - metrics must not break retrieval
-                logger.warning("Unable to store Graft estimate")
+            except Exception:  # metrics must not break retrieval
+                logger.warning("Unable to calculate Graft estimate", exc_info=True)
             self._reply(200, result)
+            if estimate and session[3]:
+                try:
+                    # Reply before SQLite I/O; the lease still serializes writes
+                    # with revocation, and the registry check prevents stale credit.
+                    with session[4]:
+                        with _lock:
+                            active = _sessions.get(session[0]) is session[5]
+                        if active:
+                            from rootcoz.storage import add_graft_estimated_tokens_saved
+
+                            asyncio.run(
+                                add_graft_estimated_tokens_saved(session[3], estimate)
+                            )
+                except Exception:  # metrics must not break retrieval
+                    logger.warning("Unable to store Graft estimate", exc_info=True)
         except (ValueError, TypeError):
             self._reply(400, {"error": "invalid request"})
         except Exception:  # noqa: BLE001 - never expose graph errors containing source text or host paths

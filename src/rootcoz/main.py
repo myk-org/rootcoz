@@ -11492,6 +11492,18 @@ async def get_chat_history(
     return {"messages": messages, "total": total}
 
 
+async def _index_chat_repositories(
+    workspace: Path, repos: dict[str, Path] | None = None
+) -> None:
+    """Index cloned chat roots off the event loop and record outcomes."""
+    from rootcoz.engine.graft import index_repositories, log_index_outcomes
+    from rootcoz.engine.graft_http import cloned_graph_roots
+
+    if repos is None:
+        repos = await asyncio.to_thread(cloned_graph_roots, workspace)
+    log_index_outcomes(await asyncio.to_thread(index_repositories, workspace, repos))
+
+
 async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]:
     """Initialize chat workspace; hold the lifecycle barrier only for short checks.
 
@@ -11506,6 +11518,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         ensure_chat_workspace,
         init_chat_session,
     )
+    from rootcoz.engine.graft_http import cloned_graph_roots
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
     async with _get_chat_job_barrier(job_id):
@@ -11550,18 +11563,10 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
 
     session_id: str | None = ""
     _raise_if_chat_job_deleted(job_id)
-    repos_available = await clone_chat_repos(
-        workspace, decrypted_params, user_repo_token=github_token
-    )
+    await clone_chat_repos(workspace, decrypted_params, user_repo_token=github_token)
+    repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
     if repos_available:
-        from rootcoz.engine.graft import index_repositories, log_index_outcomes
-        from rootcoz.engine.graft_http import cloned_graph_roots
-
-        log_index_outcomes(
-            await asyncio.to_thread(
-                index_repositories, workspace, cloned_graph_roots(workspace)
-            )
-        )
+        await _index_chat_repositories(workspace)
     _raise_if_chat_job_deleted(job_id)
     ci_build_data_available = await setup_ci_build_workspace(
         workspace,
@@ -12173,20 +12178,17 @@ async def _process_chat_message(
                         repos_available = await clone_chat_repos(
                             workspace, decrypted_params, user_repo_token=github_token
                         )
-                        if repos_available:
-                            from rootcoz.engine.graft import (
-                                index_repositories,
-                                log_index_outcomes,
-                            )
-                            from rootcoz.engine.graft_http import cloned_graph_roots
+                        from rootcoz.engine.graft import roots_needing_index
+                        from rootcoz.engine.graft_http import cloned_graph_roots
 
-                            log_index_outcomes(
-                                await asyncio.to_thread(
-                                    index_repositories,
-                                    workspace,
-                                    cloned_graph_roots(workspace),
-                                )
-                            )
+                        cloned_roots = await asyncio.to_thread(
+                            cloned_graph_roots, workspace
+                        )
+                        stale_roots = await asyncio.to_thread(
+                            roots_needing_index, workspace, cloned_roots
+                        )
+                        if stale_roots:
+                            await _index_chat_repositories(workspace, stale_roots)
 
                         settings = get_settings()
 

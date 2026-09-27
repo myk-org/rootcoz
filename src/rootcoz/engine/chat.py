@@ -102,7 +102,7 @@ async def clone_chat_repos(
     """Clone repos into the chat workspace.
 
     Skips repos already present in the workspace.
-    Returns True if any repos are available.
+    Returns True only when a repository was newly cloned.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
@@ -139,7 +139,6 @@ async def clone_chat_repos(
                         logger.debug(
                             "Chat: repo %s already cloned in %s", repo_name, workspace
                         )
-                        cloned_any = True
                     else:
                         logger.info(
                             "Chat: cloning repo %s into %s", repo_name, workspace
@@ -178,7 +177,6 @@ async def clone_chat_repos(
                         logger.debug(
                             "Chat: repo %s already cloned in %s", safe_name, workspace
                         )
-                        cloned_any = True
                         continue
                     logger.info("Chat: cloning repo %s into %s", safe_name, workspace)
                     token = getattr(repo, "token", None) or ""
@@ -899,14 +897,13 @@ def _safe_remove_symlink(link: Path) -> None:
 def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     """Delete cloned repos and artifacts from chat workspace but keep session files."""
     workspace = get_chat_workspace(job_id, username)
-    if not workspace.exists():
-        return
-
     from rootcoz.engine.graft import cleanup_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
     cleanup_graph(workspace)
+    if not workspace.exists():
+        return
 
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():
