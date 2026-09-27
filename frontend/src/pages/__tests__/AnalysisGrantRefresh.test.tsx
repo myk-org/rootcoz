@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, expect, it, vi } from 'vitest'
 import { AuthProvider } from '@/lib/auth'
+import { ApiError } from '@/lib/api'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
@@ -107,6 +108,54 @@ it('ignores an older granted /me after a newer revocation on mounted analysis fo
   expect(within(newForm).getByRole('button', { name: 'Submit Analysis', hidden: true })).toBeDisabled()
   expect(within(reForm).getByRole('button', { name: 'Re-Analyze' })).toBeDisabled()
   expect(get.mock.calls.filter(([p]) => p.startsWith('/api/ai-models'))).toHaveLength(catalogCalls)
+})
+
+it('keeps both active analysis forms enabled on focus network failure, then revokes on 401 and recovers', async () => {
+  setup()
+  granted = true
+  const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true } } as unknown as AnalysisResult
+  const page = (showDialog: boolean) => <AuthProvider><MemoryRouter>
+    <section aria-label="New analysis"><NewAnalysisPage /></section>
+    {showDialog && <ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" />}
+  </MemoryRouter></AuthProvider>
+  const { container, rerender } = render(page(false))
+  const newForm = within(container.querySelector('section')!)
+  const user = userEvent.setup()
+  await user.click(await newForm.findByRole('button', { name: 'AI Configuration' }))
+  await user.click(newForm.getByRole('button', { name: 'Paste XML' }))
+  await user.type(newForm.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+  rerender(page(true))
+  const reForm = within(await screen.findByRole('dialog'))
+  const submit = () => newForm.getByRole('button', { name: 'Submit Analysis', hidden: true })
+  const reanalyze = () => reForm.getByRole('button', { name: 'Re-Analyze' })
+  await waitFor(() => expect(submit()).toBeEnabled())
+  await waitFor(() => expect(reanalyze()).toBeEnabled())
+
+  for (const error of [new Error('offline'), new ApiError(503, 'unavailable', null)]) {
+    get.mockImplementation((path: string) => path === '/api/auth/me'
+      ? Promise.reject(error)
+      : path === '/api/user/tokens' ? Promise.resolve({ github_token: '', jira_email: '', jira_token: '' })
+        : path.startsWith('/api/ai-models') ? Promise.resolve({ providers: { claude: [serverModel], openai: [userModel] }, provider_status: {} })
+          : Promise.resolve(defaults))
+    await act(async () => { window.dispatchEvent(new Event('focus')) })
+    expect(submit()).toBeEnabled()
+    expect(reanalyze()).toBeEnabled()
+  }
+
+  granted = false
+  setup()
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+  await waitFor(() => expect(submit()).toBeDisabled())
+  expect(reanalyze()).toBeDisabled()
+  granted = true
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+  await waitFor(() => expect(submit()).toBeEnabled())
+  expect(reanalyze()).toBeEnabled()
+  get.mockImplementation((path: string) => path === '/api/auth/me'
+    ? Promise.reject(new ApiError(401, 'unauthorized', null)) : Promise.resolve(defaults))
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+  await waitFor(() => expect(submit()).toBeDisabled())
+  expect(reanalyze()).toBeDisabled()
 })
 
 it('updates mounted re-analysis primary and peer eligibility on visibility grant changes', async () => {

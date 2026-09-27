@@ -45,6 +45,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const serverGrant = useRef<boolean | null>(null)
   const authGeneration = useRef(0)
   const authTransition = useRef(0)
+  const pendingTransitions = useRef(0)
+  const pendingRefresh = useRef(false)
   const mounted = useRef(false)
 
   function clearPrivileges() {
@@ -76,6 +78,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshAuth = useCallback(async () => {
     if (!mounted.current) return
+    if (pendingTransitions.current) {
+      pendingRefresh.current = true
+      return
+    }
     const generation = ++authGeneration.current
     const isCurrent = () => mounted.current && generation === authGeneration.current
     try {
@@ -96,9 +102,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUsernameState('')
         clearTokens()
         clearUsername()
-      } else {
-        // Network/server errors — fall back to cookie identity for display only
-        clearPrivileges()
+      } else if (serverGrant.current === null) {
+        // No verified session yet: cookie identity is for display only.
         const cookieUsername = getUsername()
         setUsernameState(cookieUsername)
         await syncTokensFromServer(cookieUsername, isCurrent)
@@ -107,6 +112,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (isCurrent()) setLoading(false)
     }
   }, [])
+
+  const beginTransition = useCallback(() => {
+    if (!mounted.current) return null
+    const transition = ++authTransition.current
+    let generation = ++authGeneration.current
+    pendingTransitions.current++
+    const isCurrent = () => mounted.current && generation === authGeneration.current && transition === authTransition.current
+    return {
+      isCurrent,
+      advance: () => { generation = ++authGeneration.current },
+      finish: () => {
+        pendingTransitions.current--
+        if (!mounted.current) return
+        if (!isCurrent()) pendingRefresh.current = true
+        if (!pendingTransitions.current && pendingRefresh.current) {
+          pendingRefresh.current = false
+          void refreshAuth()
+        }
+      },
+    }
+  }, [refreshAuth])
 
   useEffect(() => {
     const generation = authGeneration
@@ -120,64 +146,70 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('focus', onReturn)
       document.removeEventListener('visibilitychange', onReturn)
       mounted.current = false
+      pendingRefresh.current = false
       generation.current++
       transition.current++
     }
   }, [refreshAuth])
 
   const login = useCallback(async (loginUsername: string, apiKey: string) => {
-    if (!mounted.current) return
-    const transition = ++authTransition.current
-    let generation = ++authGeneration.current
-    const isCurrent = () => mounted.current && generation === authGeneration.current && transition === authTransition.current
-    const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
-    if (!isCurrent()) return
-    resetProviderCatalogCache()
-    const result = await api.post<AuthUser>(
-      '/api/auth/login',
-      { username: loginUsername, api_key: apiKey }
-    )
-    if (!isCurrent()) return
-    // Apply login payload (includes can_view_reports) immediately — do not wait on /me
-    generation = ++authGeneration.current
-    applyAuthUser(result)
-    await syncTokensFromServer(result.username, isCurrent)
-    if (!isCurrent()) return
-    // Optional /me refresh for other session fields; keep login values if it fails
+    const guard = beginTransition()
+    if (!guard) return
+    const { isCurrent } = guard
     try {
-      const me = await api.get<AuthUser>('/api/auth/me')
+      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
       if (!isCurrent()) return
-      applyAuthUser(me)
-    } catch (err) {
-      if (!isCurrent()) return
-      console.warn(
-        'Post-login /api/auth/me refresh failed; keeping login response values:',
-        err instanceof Error ? err.message : err,
+      resetProviderCatalogCache()
+      const result = await api.post<AuthUser>(
+        '/api/auth/login',
+        { username: loginUsername, api_key: apiKey }
       )
+      if (!isCurrent()) return
+      // Apply login payload (includes can_view_reports) immediately — do not wait on /me
+      guard.advance()
+      applyAuthUser(result)
+      await syncTokensFromServer(result.username, isCurrent)
+      if (!isCurrent()) return
+      // Optional /me refresh for other session fields; keep login values if it fails
+      try {
+        const me = await api.get<AuthUser>('/api/auth/me')
+        if (!isCurrent()) return
+        applyAuthUser(me)
+      } catch (err) {
+        if (!isCurrent()) return
+        console.warn(
+          'Post-login /api/auth/me refresh failed; keeping login response values:',
+          err instanceof Error ? err.message : err,
+        )
+      }
+    } finally {
+      guard.finish()
     }
-  }, [])
+  }, [beginTransition])
 
   const logout = useCallback(async () => {
-    if (!mounted.current) return
-    const transition = ++authTransition.current
-    let generation = ++authGeneration.current
-    const isCurrent = () => mounted.current && generation === authGeneration.current && transition === authTransition.current
+    const guard = beginTransition()
+    if (!guard) return
+    const { isCurrent } = guard
     try {
-      await api.post('/api/auth/logout')
-    } catch {
-      // ignore
+      try {
+        await api.post('/api/auth/logout')
+      } catch {
+        // ignore
+      }
+      if (!isCurrent()) return
+      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+      if (!isCurrent()) return
+      guard.advance()
+      resetProviderCatalogCache()
+      clearPrivileges()
+      clearTokens()
+      clearUsername()
+      setUsernameState('')
+    } finally {
+      guard.finish()
     }
-    if (!isCurrent()) return
-    const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
-    if (!isCurrent()) return
-    generation = ++authGeneration.current
-    resetProviderCatalogCache()
-    clearPrivileges()
-    clearTokens()
-    clearUsername()
-    // Reset username state to empty
-    setUsernameState('')
-  }, [])
+  }, [beginTransition])
 
   return (
     <AuthContext.Provider value={{
