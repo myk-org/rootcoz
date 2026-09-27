@@ -56,8 +56,8 @@ class TestRecordAiUsage:
             )
 
     @pytest.mark.asyncio
-    async def test_skips_result_without_usage_metadata(self) -> None:
-        result = AIResult(success=False, text="error")
+    async def test_records_zero_usage_without_metadata(self) -> None:
+        result = AIResult(success=True, text="output")
         assert result.usage is None
 
         with patch(
