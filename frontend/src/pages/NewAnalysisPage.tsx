@@ -9,7 +9,7 @@ import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
-import { isAnalysisAiAvailable } from '@/lib/analysisAi'
+import { isAnalysisFormAiUnavailable } from '@/lib/analysisAi'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -97,7 +97,7 @@ export function NewAnalysisPage() {
       if (cancelled || resolved) return
       if (defaults.ai_provider) setAiProvider(normalizeProvider(defaults.ai_provider))
       if (defaults.ai_model) setAiModel(defaults.ai_model)
-      setForceServerCredentials(defaults.force_server_credentials && canUseServerProviders)
+      setForceServerCredentials(defaults.force_server_credentials)
       setAiCallTimeout(defaults.ai_call_timeout)
       setTestsRepoUrl(defaults.tests_repo_url)
       if (defaults.tests_repo_ref) setTestsRepoRef(defaults.tests_repo_ref)
@@ -143,7 +143,7 @@ export function NewAnalysisPage() {
       if (!cancelled) setDefaultsLoading(false)
     })
     return () => { cancelled = true; clearTimeout(timeoutId) }
-  }, [canUseServerProviders])
+  }, [])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -162,8 +162,7 @@ export function NewAnalysisPage() {
       : rawXml.trim() !== ''
 
   const deferAiToTestsRepo = !!testsRepoUrl.trim() && !aiProvider && !aiModel
-  const aiUnavailable = (!deferAiToTestsRepo && !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders)) ||
-    (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, effectiveForceServer, canUseServerProviders))))
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, deferAiToTestsRepo)
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')

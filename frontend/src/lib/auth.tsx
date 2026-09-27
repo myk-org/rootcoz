@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { api, ApiError } from './api'
 import { getUsername, setUsername, getIsAdmin, setIsAdmin, setRole, clearTokens, clearUsername, setGithubToken, setJiraEmail, setJiraToken } from './cookies'
 import type { AuthUser } from '@/types'
@@ -21,10 +21,11 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null)
 
-async function syncTokensFromServer(forUsername: string) {
+async function syncTokensFromServer(forUsername: string, isCurrent: () => boolean) {
   if (!forUsername) return
   try {
     const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string }>('/api/user/tokens')
+    if (!isCurrent()) return
     setGithubToken(tokens.github_token)
     setJiraEmail(tokens.jira_email)
     setJiraToken(tokens.jira_token)
@@ -41,11 +42,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [role, setRoleState] = useState('reviewer')
   const [loading, setLoading] = useState(true)
   const [authenticated, setAuthenticated] = useState(false)
+  const serverGrant = useRef<boolean | null>(null)
+  const authGeneration = useRef(0)
+  const authTransition = useRef(0)
+  const mounted = useRef(false)
 
   function clearPrivileges() {
     setIsAdminState(false)
     setCanViewReports(false)
     setCanUseServerProviders(false)
+    serverGrant.current = null
     setRoleState('reviewer')
     setIsAdmin(false)
     setRole('reviewer')
@@ -56,7 +62,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsernameState(user.username)
     setIsAdminState(user.is_admin)
     setCanViewReports(!!user.can_view_reports)
-    setCanUseServerProviders(user.is_admin || user.role === 'admin' || !!user.can_use_server_providers)
+    const grant = user.is_admin || user.role === 'admin' || !!user.can_use_server_providers
+    setCanUseServerProviders(grant)
+    serverGrant.current = grant
     setRoleState(user.role)
     setIsAdmin(user.is_admin)
     setRole(user.role)
@@ -67,13 +75,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const refreshAuth = useCallback(async () => {
+    if (!mounted.current) return
+    const generation = ++authGeneration.current
+    const isCurrent = () => mounted.current && generation === authGeneration.current
     try {
       const me = await api.get<AuthUser>('/api/auth/me')
+      if (!isCurrent()) return
+      const previousGrant = serverGrant.current
       applyAuthUser(me)
-      await syncTokensFromServer(me.username)
-      const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
-      resetProviderCatalogCache()
+      if (previousGrant !== null && previousGrant !== serverGrant.current) {
+        const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+        if (isCurrent()) resetProviderCatalogCache()
+      }
+      if (isCurrent()) await syncTokensFromServer(me.username, isCurrent)
     } catch (err) {
+      if (!isCurrent()) return
       // 401 means not authenticated — clear identity and require login
       if (err instanceof ApiError && err.status === 401) {
         clearPrivileges()
@@ -85,32 +101,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearPrivileges()
         const cookieUsername = getUsername()
         setUsernameState(cookieUsername)
-        await syncTokensFromServer(cookieUsername)
+        await syncTokensFromServer(cookieUsername, isCurrent)
       }
     } finally {
-      setLoading(false)
+      if (isCurrent()) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
+    const generation = authGeneration
+    const transition = authTransition
+    mounted.current = true
     refreshAuth()
+    const onReturn = () => { if (document.visibilityState === 'visible') void refreshAuth() }
+    window.addEventListener('focus', onReturn)
+    document.addEventListener('visibilitychange', onReturn)
+    return () => {
+      window.removeEventListener('focus', onReturn)
+      document.removeEventListener('visibilitychange', onReturn)
+      mounted.current = false
+      generation.current++
+      transition.current++
+    }
   }, [refreshAuth])
 
   const login = useCallback(async (loginUsername: string, apiKey: string) => {
+    if (!mounted.current) return
+    const transition = ++authTransition.current
+    let generation = ++authGeneration.current
+    const isCurrent = () => mounted.current && generation === authGeneration.current && transition === authTransition.current
     const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+    if (!isCurrent()) return
     resetProviderCatalogCache()
     const result = await api.post<AuthUser>(
       '/api/auth/login',
       { username: loginUsername, api_key: apiKey }
     )
+    if (!isCurrent()) return
     // Apply login payload (includes can_view_reports) immediately — do not wait on /me
+    generation = ++authGeneration.current
     applyAuthUser(result)
-    await syncTokensFromServer(result.username)
+    await syncTokensFromServer(result.username, isCurrent)
+    if (!isCurrent()) return
     // Optional /me refresh for other session fields; keep login values if it fails
     try {
       const me = await api.get<AuthUser>('/api/auth/me')
+      if (!isCurrent()) return
       applyAuthUser(me)
     } catch (err) {
+      if (!isCurrent()) return
       console.warn(
         'Post-login /api/auth/me refresh failed; keeping login response values:',
         err instanceof Error ? err.message : err,
@@ -119,12 +158,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const logout = useCallback(async () => {
+    if (!mounted.current) return
+    const transition = ++authTransition.current
+    let generation = ++authGeneration.current
+    const isCurrent = () => mounted.current && generation === authGeneration.current && transition === authTransition.current
     try {
       await api.post('/api/auth/logout')
     } catch {
       // ignore
     }
+    if (!isCurrent()) return
     const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
+    if (!isCurrent()) return
+    generation = ++authGeneration.current
     resetProviderCatalogCache()
     clearPrivileges()
     clearTokens()
