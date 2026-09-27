@@ -571,6 +571,32 @@ def _query_locked(
         }
 
 
+def roots_needing_index(
+    workspace: Path, cloned_repos: dict[str, Path]
+) -> dict[str, Path]:
+    """Find missing or changed graphs using the same content hashes as queries."""
+    workspace = Path(workspace).resolve()
+    root = _root(workspace)
+    with _workspace_install_lock(workspace):
+        result = {}
+        for name, repo in islice(cloned_repos.items(), MAX_REPOSITORIES):
+            if not _valid_repo(workspace, name, repo):
+                continue
+            manifest = (
+                _manifest(root / name)
+                if root.is_dir() and not root.is_symlink()
+                else None
+            )
+            try:
+                if manifest is None or _sources(repo) != manifest:
+                    result[name] = repo
+            except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                result[name] = (
+                    repo  # Let indexing report the failure; never expose a stale graph.
+                )
+        return result
+
+
 def indexed_roots(workspace: Path) -> dict[str, Path]:
     """Return direct cloned roots with completed graphs; queries recheck freshness."""
     workspace = Path(workspace)

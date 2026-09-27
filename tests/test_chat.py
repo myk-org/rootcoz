@@ -1275,13 +1275,14 @@ async def test_process_chat_cancel_while_waiting_barrier_marks_failed(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "graph_state, expected_indexes", [("indexed", 0), ("new", 1), ("missing", 1)]
+    "graph_state, expected_indexes",
+    [("indexed", 0), ("changed", 1), ("new", 1), ("missing", 1)],
 )
 async def test_followup_indexes_only_new_or_missing_graph(
     setup_test_db, tmp_path, monkeypatch, graph_state, expected_indexes
 ):
     """An existing graph must not delay AI, but new clones and lost graphs need indexing."""
-    import json
+    import subprocess
 
     from rootcoz import main as main_mod
     from rootcoz.engine import graft
@@ -1291,16 +1292,37 @@ async def test_followup_indexes_only_new_or_missing_graph(
     workspace.mkdir()
     repo = workspace / "repo"
     repo.mkdir()
-    (repo / ".git").mkdir()
-    destination = graft._root(workspace) / "repo"
-    (destination / "snapshot").mkdir(parents=True)
-    (destination / "graph").mkdir()
-    (destination / "manifest.json").write_text(json.dumps({"a.py": "0" * 64}))
+    await asyncio.to_thread(
+        subprocess.run, ["git", "init", "-q", str(repo)], check=True
+    )
+    (repo / "a.py").write_text("old")
+    builds = []
+
+    def fake_run(argv, **kwargs):
+        builds.append(argv)
+        (Path(argv[-1]).parent / "graph").mkdir()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", fake_run)
+    assert (
+        graft.index_repositories(workspace, {"repo": repo})["repo"]["status"]
+        == "indexed"
+    )
+    assert len(builds) == 1
+    scans = []
+    original_sources = graft._sources
+
+    def tracked_sources(path, *args, **kwargs):
+        scans.append(path)
+        return original_sources(path, *args, **kwargs)
+
+    monkeypatch.setattr(graft, "_sources", tracked_sources)
 
     class Manager:
         def clone_into(self, url, target, **kwargs):
             target.mkdir()
-            (target / ".git").mkdir()
+            subprocess.run(["git", "init", "-q", str(target)], check=True)
+            (target / "a.py").write_text("other")
 
     monkeypatch.setattr("rootcoz.repository.RepositoryManager", Manager)
     params = {"additional_repos": [{"name": "repo", "url": "https://example.com/repo"}]}
@@ -1309,13 +1331,16 @@ async def test_followup_indexes_only_new_or_missing_graph(
         params["additional_repos"].append(
             {"name": "other", "url": "https://example.com/other"}
         )
+    elif graph_state == "changed":
+        (repo / "a.py").write_text("new")
     elif graph_state == "missing":
         (graft._root(workspace) / "repo" / "manifest.json").unlink()
 
     indexes = []
 
-    async def fake_index(path):
-        indexes.append(path)
+    async def fake_index(path, repos=None):
+        indexes.append((path, repos))
+        graft.index_repositories(path, repos or {})
 
     monkeypatch.setattr(main_mod, "_index_chat_repositories", fake_index)
     monkeypatch.setattr(
@@ -1367,9 +1392,21 @@ async def test_followup_indexes_only_new_or_missing_graph(
         ai_model_override="sonnet-4",
         username="alice",
     )
-    assert indexes == [workspace] * expected_indexes
+    assert len(indexes) == expected_indexes
+    if indexes:
+        assert set(indexes[0][1]) == ({"other"} if graph_state == "new" else {"repo"})
+    assert len(builds) == (1 if graph_state == "indexed" else 2)
+    if graph_state == "indexed":
+        assert scans == [repo]
+    if graph_state == "changed":
+        assert (
+            graft._root(workspace) / "repo" / "snapshot" / "a.py"
+        ).read_text() == "new"
     if graph_state == "new":
         assert (workspace / "other" / ".git").is_dir()
+        assert (
+            graft._root(workspace) / "other" / "snapshot" / "a.py"
+        ).read_text() == "other"
     assert await storage.get_chat_message_status(assistant_id) == "completed"
 
 
