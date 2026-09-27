@@ -50,6 +50,15 @@ class TestInitDb:
             await storage.init_db()  # Should not raise
 
 
+async def test_graft_estimate_rejects_missing_job(setup_test_db: Path) -> None:
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        with pytest.raises(LookupError):
+            await storage.add_graft_estimated_tokens_saved("deleted", 100)
+        await storage.save_result("live", "https://example.test", "pending")
+        await storage.add_graft_estimated_tokens_saved("live", 100)
+        assert (await storage.get_result("live"))["graft_estimated_tokens_saved"] == 100
+
+
 class TestSaveResult:
     """Tests for the save_result function."""
 

@@ -11503,7 +11503,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         )
         from rootcoz.engine.chat import graph_http_tools
 
-        custom_tools.extend(graph_http_tools(workspace))
+        custom_tools.extend(graph_http_tools(workspace, job_id))
         token = ai_username.set(username)
         try:
             session_id = await init_chat_session(
@@ -12124,7 +12124,7 @@ async def _process_chat_message(
 
                         from rootcoz.engine.chat import graph_http_tools
 
-                        custom_tools.extend(graph_http_tools(workspace))
+                        custom_tools.extend(graph_http_tools(workspace, job_id))
                         await install_http_tools_mcp_best_effort_async(
                             workspace, custom_tools
                         )

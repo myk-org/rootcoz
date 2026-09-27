@@ -226,6 +226,20 @@ class TestResultsCommands:
         assert "abc-123" in result.output
         mock_client.get_result.assert_called_with("abc-123", fields=None)
 
+    def test_results_show_graft_estimate_default_and_json(self, mock_client):
+        mock_client.get_result.return_value = {
+            "job_id": "abc-123",
+            "status": "completed",
+            "graft_estimated_tokens_saved": 42,
+            "result": {"summary": "done"},
+        }
+        result = runner.invoke(app, ["results", "show", "abc-123"])
+        assert result.exit_code == 0
+        assert "graft estimated tokens saved" in result.output.lower()
+        assert "42" in result.output
+        result = runner.invoke(app, ["--json", "results", "show", "abc-123"])
+        assert json.loads(result.output)["graft_estimated_tokens_saved"] == 42
+
     def test_results_show_with_fields(self, mock_client):
         mock_client.get_result.return_value = {
             "status": "completed",

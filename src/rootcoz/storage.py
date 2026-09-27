@@ -563,7 +563,8 @@ async def init_db() -> None:
                 job_name TEXT NOT NULL DEFAULT '',
                 build_number INTEGER NOT NULL DEFAULT 0,
                 build_id TEXT NOT NULL DEFAULT '',
-                analysis_state TEXT NOT NULL DEFAULT 'analyzed'
+                analysis_state TEXT NOT NULL DEFAULT 'analyzed',
+                graft_estimated_tokens_saved INTEGER NOT NULL DEFAULT 0
             )
         """)
         await db.execute("""
@@ -707,6 +708,9 @@ async def init_db() -> None:
 
         # Migrations: add columns to results table
         await _migrate_add_column(db, "results", "completed_at", "TIMESTAMP")
+        await _migrate_add_column(
+            db, "results", "graft_estimated_tokens_saved", "INTEGER NOT NULL DEFAULT 0"
+        )
         await _migrate_add_column(db, "results", "analysis_started_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "error", "TEXT NOT NULL DEFAULT ''")
         await _migrate_add_column(db, "results", "job_name", "TEXT NOT NULL DEFAULT ''")
@@ -2217,10 +2221,28 @@ async def get_result(
                     "created_at": row_data["created_at"],
                     "completed_at": row_data.get("completed_at"),
                     "analysis_started_at": row_data.get("analysis_started_at"),
+                    "graft_estimated_tokens_saved": row_data[
+                        "graft_estimated_tokens_saved"
+                    ],
                 }
             )
         logger.debug(f"get_result: job_id={job_id}, found=False")
         return None
+
+
+async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
+    """Add one successful graph query invocation estimate to its existing job."""
+    if tokens <= 0:
+        return
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE results SET graft_estimated_tokens_saved = "
+            "graft_estimated_tokens_saved + ? WHERE job_id = ?",
+            (tokens, job_id),
+        )
+        if cursor.rowcount != 1:
+            raise LookupError("Graft estimate job no longer exists")
+        await db.commit()
 
 
 async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
