@@ -199,19 +199,7 @@ _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
 
 async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
     """Ask Pi for key-scoped models and listing capability; never retain the key."""
-    client = get_sidecar_client()
-    # The released client has no public keyed discovery method yet. Reuse its
-    # configured HTTP transport rather than making a second, unauthenticated client.
-    method = getattr(client, "get_models_for_api_key", None)
-    if method is not None:
-        response = await method(provider, api_key)
-    else:
-        resp = await client._client.post(
-            "/models/for-api-key", json={"provider": provider, "api_key": api_key}
-        )
-        if resp.status_code >= 400:
-            raise RuntimeError("Key-scoped model discovery failed") from None
-        response = resp.json()
+    response = await get_sidecar_client().get_models_for_api_key(provider, api_key)
     if (
         not isinstance(response, dict)
         or type(response.get("modelListingSupported")) is not bool

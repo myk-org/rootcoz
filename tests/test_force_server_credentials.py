@@ -1,9 +1,11 @@
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from pi_sidecar_client import SidecarClient
 
 from rootcoz import ai_client, main, storage
 from rootcoz.config import Settings
@@ -295,11 +297,12 @@ async def test_reanalysis_validates_with_parent_force(
 
 
 @pytest.mark.asyncio
-async def test_keyed_adapter_contract(monkeypatch):
+async def test_keyed_adapter_contract(monkeypatch, caplog):
+    secret = "review/key"  # pragma: allowlist secret
     requests = []
 
-    async def post(path, json):
-        requests.append((path, json))
+    def handle(request):
+        requests.append(request)
         return httpx.Response(
             200,
             json={
@@ -311,16 +314,28 @@ async def test_keyed_adapter_contract(monkeypatch):
             },
         )
 
-    monkeypatch.setattr(
-        ai_client,
-        "get_sidecar_client",
-        lambda: SimpleNamespace(_client=SimpleNamespace(post=post)),
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
     )
-    # A cross-provider model poisons the entire response rather than being selectable.
-    with pytest.raises(ValueError, match="Invalid key-scoped"):
-        await ai_client.models_for_api_key("openai", "secret")
-    expected = {"provider": "openai", "api_key": "secret"}  # pragma: allowlist secret
-    assert requests == [("/models/for-api-key", expected)]
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    try:
+        # A cross-provider model poisons the entire response rather than being selectable.
+        with (
+            caplog.at_level(logging.DEBUG),
+            pytest.raises(ValueError, match="Invalid key-scoped"),
+        ):
+            await ai_client.models_for_api_key("openai", secret)
+        assert len(requests) == 1
+        assert requests[0].url.path == "/models/for-api-key"
+        assert json.loads(requests[0].content) == {
+            "provider": "openai",
+            "api_key": secret,
+        }
+        assert secret not in caplog.text
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio
