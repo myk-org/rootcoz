@@ -118,6 +118,39 @@ async def test_user_session_generation_and_chat_deletion_retry(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_keyed_session_lookup_binds_owner_and_provider_independent_of_role(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "keyed-resume.db")
+    await storage.init_db()
+    for username, provider, role in (
+        ("alice", "openai", "viewer"),
+        ("openai", "alice", "reviewer"),
+    ):
+        await storage.create_user(username, role=role)
+        await storage.update_user_ai_credential(username, provider, "valid-key-value")
+        if username == "openai":
+            # Unequal generations expose swapped bindings even when both users exist.
+            await storage.update_user_ai_credential(username, provider, "new-key-value")
+        await storage.create_ai_session_with_source(
+            AsyncMock(return_value=username), username, provider, "user"
+        )
+        assert (
+            await storage.get_ai_session_source(username, username, provider) == "user"
+        )
+
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("alice", "openai", "openai")
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("alice", "alice", "alice")
+
+    await storage.update_user_ai_credential("alice", "openai", "rotated-key-value")
+    with pytest.raises(ValueError, match="revoked"):
+        await storage.get_ai_session_source("alice", "alice", "openai")
+    assert await storage.get_ai_session_source("openai", "openai", "alice") == "user"
+
+
+@pytest.mark.asyncio
 async def test_stale_provider_status_and_delete_without_discovery(
     tmp_path, monkeypatch
 ):

@@ -5771,9 +5771,9 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
         ).fetchone()
         generation = await (
             await db.execute(
-                "SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) "
-                "FROM users WHERE username = ?",
-                (provider, username),
+                "SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(:provider)), 0) "
+                "FROM users WHERE username = :username",
+                {"username": username, "provider": provider},
             )
         ).fetchone()
     if row and (
