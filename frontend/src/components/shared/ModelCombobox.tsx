@@ -10,6 +10,7 @@ export interface ModelOption {
   source?: string
   credential_sources?: Array<'user' | 'server'>
   verified?: boolean
+  serverLocked?: boolean
 }
 
 interface ModelComboboxProps {
@@ -22,6 +23,7 @@ interface ModelComboboxProps {
   disabled?: boolean
   strict?: boolean
   forceServer?: boolean
+  canUseServer?: boolean
 }
 
 interface DropdownCoords {
@@ -40,6 +42,7 @@ export function ModelCombobox({
   disabled = false,
   strict = false,
   forceServer = false,
+  canUseServer = true,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const [highlightIndex, setHighlightIndex] = useState(-1)
@@ -155,7 +158,7 @@ export function ModelCombobox({
           break
         case 'Enter':
           e.preventDefault()
-          if (highlightIndex >= 0 && highlightIndex < filtered.length) {
+          if (highlightIndex >= 0 && highlightIndex < filtered.length && !filtered[highlightIndex].serverLocked) {
             selectModel(filtered[highlightIndex].id)
           } else {
             setOpen(false)
@@ -206,19 +209,22 @@ export function ModelCombobox({
                     ? 'bg-surface-hover text-text-primary'
                     : 'text-text-primary hover:bg-surface-hover',
                   model.id === value && 'font-medium',
+                  model.serverLocked && 'opacity-50 cursor-not-allowed',
                 )}
                 onMouseEnter={() => setHighlightIndex(i)}
+                aria-disabled={model.serverLocked || undefined}
                 onMouseDown={(e) => {
                   e.preventDefault() // prevent input blur
-                  selectModel(model.id)
+                  if (!model.serverLocked) selectModel(model.id)
                 }}
               >
                 <span>{model.id}</span>
                 <span className="flex shrink-0 items-center gap-2">
+                  {model.serverLocked && <span className="text-xs text-text-tertiary">Server locked · ask an admin for access</span>}
                   {model.verified === false && <span className="text-xs text-signal-amber">UNVERIFIED</span>}
                   {model.verified !== false && model.credential_sources?.length ? (
                     <span className="text-xs text-text-tertiary">
-                      {forceServer ? 'Server' : model.credential_sources.includes('user') && model.credential_sources.includes('server') ? 'User + Server' : model.credential_sources.includes('user') ? 'User' : 'Server'}
+                      {forceServer ? 'Server' : model.credential_sources.includes('user') && model.credential_sources.includes('server') ? canUseServer ? 'User + Server' : 'User + Server locked' : model.credential_sources.includes('user') ? 'User' : 'Server'}
                     </span>
                   ) : null}
                   {model.source && (

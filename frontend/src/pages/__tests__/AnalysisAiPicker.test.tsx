@@ -11,7 +11,8 @@ import type { AnalysisResult, AiModelsResponse } from '@/types'
 const get = vi.fn()
 const post = vi.fn()
 vi.mock('@/lib/api', () => ({ api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args) } }))
-vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: false, authenticated: true }) }))
+let grant = true
+vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: false, authenticated: true, canUseServerProviders: grant }) }))
 
 const catalog: AiModelsResponse = {
   providers: {
@@ -47,7 +48,7 @@ function setup() {
   post.mockResolvedValue({ job_id: 'next' })
 }
 
-afterEach(() => { act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset() })
+afterEach(() => { grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset() })
 
 describe('analysis credential-scoped pickers', () => {
   it('shows only catalog-backed sources, and submits explicit server override on new analysis', async () => {
@@ -231,6 +232,92 @@ describe('analysis credential-scoped pickers', () => {
     expect(screen.getByRole('combobox', { name: 'Peer 1 model' })).toHaveValue('manual-peer')
     await user.click(screen.getByRole('button', { name: 'Re-Analyze' }))
     await waitFor(() => expect(post).toHaveBeenCalledWith('/re-analyze/job', expect.objectContaining({ ai_provider: 'openrouter', ai_model: 'suggested', force_server_credentials: false, peer_ai_configs: [{ ai_provider: 'mistral', ai_model: 'manual-peer' }] })))
+  })
+
+  it('shows locked server choices, keeps own-key models usable, and blocks stale server reanalysis and peers', async () => {
+    setup()
+    grant = false
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
+    expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    expect(screen.getByRole('option', { name: /Claude · Server locked/ })).toHaveAttribute('data-disabled')
+    expect(screen.getByRole('option', { name: /Gemini · User \+ Server locked/ })).not.toHaveAttribute('data-disabled')
+    await user.click(screen.getByRole('option', { name: /Gemini · User \+ Server locked/ }))
+    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
+    const shared = screen.getByRole('option', { name: /shared.*User \+ Server locked/ })
+    expect(shared).not.toHaveAttribute('aria-disabled', 'true')
+    await user.click(shared)
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    await user.click(screen.getByRole('option', { name: /Anthropic · User \+ Server locked/ }))
+    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
+    const serverOnly = screen.getByRole('option', { name: /server-model.*Server locked/ })
+    expect(serverOnly).toHaveAttribute('aria-disabled', 'true')
+    await user.click(serverOnly)
+    expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('')
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    await user.click(screen.getByRole('option', { name: /Gemini · User \+ Server locked/ }))
+    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
+    await user.click(screen.getByRole('option', { name: /shared.*User \+ Server locked/ }))
+    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
+    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+    await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'gemini', ai_model: 'shared', force_server_credentials: false })))
+    await user.click(screen.getByRole('button', { name: 'Peer Analysis' }))
+    await user.click(screen.getByRole('switch', { name: 'Enable peer review' }))
+    await user.click(screen.getByRole('combobox', { name: 'Peer 1 provider' }))
+    expect(screen.getAllByRole('option', { name: /Claude · Server locked/ })[0]).toHaveAttribute('data-disabled')
+    const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true, peer_ai_configs: [] } } as unknown as AnalysisResult
+    render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
+    expect(await screen.findByRole('button', { name: 'Re-Analyze' })).toBeDisabled()
+  })
+
+  it('uses own-key choices for a saved server-forced job after access is revoked', async () => {
+    setup()
+    grant = false
+    const user = userEvent.setup()
+    const result = { request_params: { ai_provider: 'gemini', ai_model: 'shared', force_server_credentials: true, peer_ai_configs: [{ ai_provider: 'openai', ai_model: 'gpt' }] } } as unknown as AnalysisResult
+    render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
+    const submit = await screen.findByRole('button', { name: 'Re-Analyze' })
+    await waitFor(() => expect(submit).toBeEnabled())
+    expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
+    expect(screen.getByRole('switch', { name: 'Use server credentials' })).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByText(/original analysis used server credentials.*no longer have access/i)).toBeInTheDocument()
+    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
+    expect(screen.getByRole('option', { name: /user-extra.*User/i })).not.toHaveAttribute('aria-disabled', 'true')
+    await user.click(screen.getByRole('option', { name: /user-extra.*User/i }))
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    expect(screen.getByRole('option', { name: /Claude · Server locked/ })).toHaveAttribute('data-disabled')
+    await user.keyboard('{Escape}')
+    await user.click(screen.getByRole('combobox', { name: 'Peer 1 provider' }))
+    expect(screen.getByRole('option', { name: /Claude · Server locked/ })).toHaveAttribute('data-disabled')
+    await user.keyboard('{Escape}')
+    await user.click(submit)
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/re-analyze/job', expect.objectContaining({ ai_provider: 'gemini', ai_model: 'user-extra', force_server_credentials: false, peer_ai_configs: [{ ai_provider: 'openai', ai_model: 'gpt' }] })))
+  })
+
+  it('blocks a saved server-forced job with no own key after access is revoked', async () => {
+    grant = false
+    get.mockImplementation(async (path: string) => path === '/api/ai-models' ? { providers: { claude: catalog.providers.claude }, provider_status: {} } : defaults)
+    const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true, peer_ai_configs: [] } } as unknown as AnalysisResult
+    render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
+    expect(await screen.findByRole('button', { name: 'Re-Analyze' })).toBeDisabled()
+    expect(screen.getByText(/original analysis used server credentials.*no longer have access/i)).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(/Add your own key or ask an admin/)
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('blocks analysis with no own key or grant and explains why', async () => {
+    grant = false
+    get.mockImplementation(async (path: string) => path === '/api/ai-models' ? { providers: { claude: catalog.providers.claude } } : { ...defaults, ai_provider: 'claude', ai_model: 'sonnet' })
+    const user = userEvent.setup()
+    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
+    await user.click(await screen.findByRole('button', { name: 'Paste XML' }))
+    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+    expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent(/Add your own key or ask an admin/)
+    expect(post).not.toHaveBeenCalled()
   })
 
   it('requires a valid selection when server defaults and catalog are empty', async () => {

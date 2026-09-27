@@ -26,6 +26,7 @@ import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 import { RotateCw } from 'lucide-react'
 import { normalizeProvider } from '@/lib/aiProviders'
+import { useAuth } from '@/lib/auth'
 
 interface ReAnalyzeDialogProps {
   open: boolean
@@ -70,6 +71,7 @@ function initFormState(p: AnalysisResult['request_params']) {
 
 export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid, inPlaceAnalyze }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
+  const { canUseServerProviders } = useAuth()
   const params = result.request_params
   const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
@@ -125,8 +127,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
 
+  const effectiveForceServer = forceServerCredentials && canUseServerProviders
+  const aiUnavailable = !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders) || (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, effectiveForceServer, canUseServerProviders))))
+
   const handleSubmit = useCallback(async () => {
-    if (!isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, forceServerCredentials) || (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, forceServerCredentials))))) {
+    if (aiUnavailable) {
       setError('Select an available AI provider and model.')
       return
     }
@@ -136,7 +141,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
       const body: Record<string, unknown> = {
         ai_provider: aiProvider,
         ai_model: aiModel,
-        force_server_credentials: forceServerCredentials,
+        force_server_credentials: effectiveForceServer,
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(enableJira !== undefined && { enable_jira: enableJira }),
         ...(jiraUrl && { jira_url: jiraUrl }),
@@ -175,9 +180,8 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   }, [
     aiProvider,
     aiModel,
-    forceServerCredentials,
-    providers,
-    providerStatus,
+    effectiveForceServer,
+    aiUnavailable,
     aiCallTimeout,
     rawPrompt,
     enablePeers,
@@ -256,7 +260,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={forceServerCredentials} />
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -271,12 +275,13 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={forceServerCredentials} />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Use server credentials</span>
-              <Toggle checked={forceServerCredentials} onChange={setForceServerCredentials} label="Use server credentials" />
+              <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
             </div>
+            {!canUseServerProviders && <p className="text-xs text-text-tertiary">{params?.force_server_credentials ? 'The original analysis used server credentials, but you no longer have access. Select a model available with your own AI key or ask an admin for access.' : 'Server credentials are locked. Ask an admin for access, or use your own AI key.'}</p>}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea
@@ -313,7 +318,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
                 strict
-                forceServer={forceServerCredentials}
+                forceServer={effectiveForceServer}
               />
             )}
           </Section>
@@ -408,10 +413,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
 
         <DialogFooter className="px-6 py-4 border-t border-border-default flex-shrink-0">
           {error && <p className="text-signal-red text-xs mr-auto">{error}</p>}
+          {aiUnavailable && <p role="alert" className="text-signal-amber text-xs mr-auto">Select an available AI provider and model. Add your own key or ask an admin for server access.</p>}
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={submitting || !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, forceServerCredentials) || (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, forceServerCredentials))))} className="gap-1.5">
+          <Button onClick={handleSubmit} disabled={submitting || aiUnavailable} className="gap-1.5">
             <RotateCw className={`h-3.5 w-3.5 ${submitting ? 'animate-spin' : ''}`} />
             {inPlaceAnalyze ? 'Analyze' : 'Re-Analyze'}
           </Button>

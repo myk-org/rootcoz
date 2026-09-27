@@ -162,6 +162,7 @@ from rootcoz.models import (
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
     ReportPortalPushResult,
+    SetCanUseServerProvidersRequest,
     SetCanViewReportsRequest,
     SetReviewedRequest,
     SetTrackedInRequest,
@@ -1624,6 +1625,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.is_admin = False
             request.state.role = "reviewer"
             request.state.can_view_reports = False
+            request.state.can_use_server_providers = False
             origin = request.headers.get("origin", "*")
             return Response(
                 status_code=200,
@@ -1648,6 +1650,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.is_admin = False
         request.state.role = "reviewer"
         request.state.can_view_reports = False
+        request.state.can_use_server_providers = False
 
         # Public paths and static assets — pass through
         # (but /login may need SSO redirect, handled below;
@@ -1802,6 +1805,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
         else:
             request.state.can_view_reports = False
+
+        if has_valid_session and username:
+            if username == "admin" and authenticated_admin:
+                request.state.can_use_server_providers = True
+            else:
+                try:
+                    db_user = await storage.get_user_by_username(username)
+                    request.state.can_use_server_providers = bool(
+                        db_user and db_user.get("can_use_server_providers")
+                    )
+                except Exception:  # noqa: BLE001 - grant lookup must fail closed
+                    logger.warning("Unable to load server provider grant")
 
         # Track user activity only for authenticated identities
         if has_valid_session and username:
@@ -9278,6 +9293,7 @@ async def login(request: Request) -> JSONResponse:
     resolved_role = "reviewer"
     authenticated = False
     can_view_reports = False
+    can_use_server_providers = False
 
     # Check admin_key — username must be "admin"
     if (
@@ -9289,6 +9305,7 @@ async def login(request: Request) -> JSONResponse:
         resolved_role = "admin"
         authenticated = True
         can_view_reports = effective_can_view_reports(True)
+        can_use_server_providers = True
     else:
         # Check user API key
         user = await storage.get_user_by_key(api_key)
@@ -9300,6 +9317,7 @@ async def login(request: Request) -> JSONResponse:
             can_view_reports = effective_can_view_reports(
                 is_admin, bool(user.get("can_view_reports"))
             )
+            can_use_server_providers = bool(user.get("can_use_server_providers"))
 
     if not authenticated:
         logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
@@ -9322,6 +9340,7 @@ async def login(request: Request) -> JSONResponse:
             "role": resolved_role,
             "is_admin": is_admin,
             "can_view_reports": can_view_reports,
+            "can_use_server_providers": can_use_server_providers,
         }
     )
     response.set_cookie(
@@ -9388,6 +9407,9 @@ async def auth_me(request: Request) -> JSONResponse:
             "role": request.state.role,
             "is_admin": request.state.is_admin,
             "can_view_reports": bool(getattr(request.state, "can_view_reports", False)),
+            "can_use_server_providers": bool(
+                getattr(request.state, "can_use_server_providers", False)
+            ),
         }
     )
 
@@ -10035,11 +10057,14 @@ async def admin_create_user_endpoint(
     # Store the request flag as-is (do not force True for admins — demotion
     # must not leave an accidental grant). Response uses effective value.
     stored_can_view_reports = body.can_view_reports
+    server_grant = body.can_use_server_providers
 
     try:
         if role == "admin":
             username, raw_key = await storage.create_admin_user(
-                username, can_view_reports=stored_can_view_reports
+                username,
+                can_view_reports=stored_can_view_reports,
+                can_use_server_providers=server_grant,
             )
         else:
             _, raw_key = await storage.create_user(
@@ -10047,6 +10072,7 @@ async def admin_create_user_endpoint(
                 status="active",
                 role=role,
                 can_view_reports=stored_can_view_reports,
+                can_use_server_providers=server_grant,
             )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -10056,13 +10082,14 @@ async def admin_create_user_endpoint(
 
     logger.info(
         f"[AUDIT] Admin '{request.state.username}' created {role} user '{username}'"
-        f" (can_view_reports={stored_can_view_reports})"
+        f" (can_view_reports={stored_can_view_reports}, can_use_server_providers={server_grant})"
     )
     return JSONResponse(
         content={
             "username": username,
             "api_key": raw_key,
             "role": role,
+            "can_use_server_providers": server_grant,
             "can_view_reports": effective_can_view_reports(
                 role == "admin", stored_can_view_reports
             ),
@@ -10154,6 +10181,37 @@ async def set_user_can_view_reports_endpoint(
     )
 
 
+@app.put(
+    "/api/admin/users/{username}/can-use-server-providers",
+    operation_id="setUserCanUseServerProviders",
+)
+async def set_user_can_use_server_providers(
+    request: Request, username: str, body: SetCanUseServerProvidersRequest
+) -> JSONResponse:
+    """Grant or revoke access to server AI credentials."""
+    _require_admin(request)
+    try:
+        updated = await storage.set_user_can_use_server_providers(
+            username, body.can_use_server_providers
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    logger.info(
+        "[AUDIT] Admin '%s' set can_use_server_providers=%s for user '%s'",
+        request.state.username,
+        body.can_use_server_providers,
+        username,
+    )
+    return JSONResponse(
+        content={
+            "username": username,
+            "can_use_server_providers": body.can_use_server_providers,
+        }
+    )
+
+
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
 async def list_users_endpoint(request: Request) -> dict[str, Any]:
     """List all users (admin and regular)."""
@@ -10171,22 +10229,30 @@ async def list_pending_users_endpoint(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/admin/users/{username}/approve", operation_id="approveUser")
-async def approve_user(username: str, request: Request) -> dict[str, Any]:
+async def approve_user(
+    username: str, request: Request, body: SetCanUseServerProvidersRequest | None = None
+) -> dict[str, Any]:
     """Approve a pending user registration."""
     _require_admin(request)
-    status = await storage.get_user_status(username)
-    if status is None:
-        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
-    if status != "pending":
+    grant = body.can_use_server_providers if body else False
+    if not await storage.approve_pending_user(username, grant):
+        status = await storage.get_user_status(username)
+        if status is None:
+            raise HTTPException(status_code=404, detail=f"User '{username}' not found")
         raise HTTPException(
             status_code=400,
             detail=f"User '{username}' is not pending (current status: {status})",
         )
-    await storage.set_user_status(username, "active")
-    logger.info(f"[AUDIT] Admin '{request.state.username}' approved user '{username}'")
+    logger.info(
+        "[AUDIT] Admin '%s' approved user '%s' (can_use_server_providers=%s)",
+        request.state.username,
+        username,
+        grant,
+    )
     return {
         "username": username,
         "status": "active",
+        "can_use_server_providers": grant,
         "message": f"User '{username}' has been approved.",
     }
 

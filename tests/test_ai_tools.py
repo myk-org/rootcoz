@@ -62,7 +62,10 @@ class TestChatSessionTools:
     async def test_create_chat_session_passes_tools(
         self, _mock_sidecar_calls, initialized_db
     ):
+        from rootcoz import ai_client
         from rootcoz.engine.chat import _create_chat_session
+
+        ai_client.ai_username.set("admin")
 
         mock_client = _mock_sidecar_calls
         mock_client.create_session = AsyncMock(return_value="sess-123")
@@ -79,7 +82,10 @@ class TestChatSessionTools:
             )
 
         assert session_id == "sess-123"
-        assert await storage.get_ai_session_source("sess-123", "", "gemini") == "server"
+        assert (
+            await storage.get_ai_session_source("sess-123", "admin", "gemini")
+            == "server"
+        )
         passed_kwargs = mock_client.create_session.call_args.kwargs
         assert passed_kwargs.get("tools") == list(CHAT_BUILTIN_TOOLS)
 
@@ -87,7 +93,10 @@ class TestChatSessionTools:
     async def test_create_chat_session_no_restrict(
         self, _mock_sidecar_calls, initialized_db
     ):
+        from rootcoz import ai_client
         from rootcoz.engine.chat import _create_chat_session
+
+        ai_client.ai_username.set("admin")
 
         mock_client = _mock_sidecar_calls
         mock_client.create_session = AsyncMock(return_value="sess-456")
@@ -103,7 +112,10 @@ class TestChatSessionTools:
                 restrict_tools=False,
             )
 
-        assert await storage.get_ai_session_source("sess-456", "", "gemini") == "server"
+        assert (
+            await storage.get_ai_session_source("sess-456", "admin", "gemini")
+            == "server"
+        )
         passed_kwargs = mock_client.create_session.call_args.kwargs
         assert "tools" not in passed_kwargs
 

@@ -59,6 +59,19 @@ async def supported_key_providers() -> list[str]:
     )
 
 
+async def require_server_provider_grant() -> None:
+    """Recheck the initiator on every server AI operation, including resumed turns."""
+    from rootcoz.storage import can_user_use_server_providers
+
+    username = ai_username.get()
+    try:
+        allowed = bool(username) and await can_user_use_server_providers(username)
+    except Exception as exc:
+        raise ValueError("Server provider access unavailable") from exc
+    if not allowed:
+        raise ValueError("Server provider access requires an administrator grant")
+
+
 async def session_key(provider: str) -> str | None:
     """Resolve the current initiator's exact provider key; missing means server auth."""
     username = ai_username.get()
@@ -231,12 +244,23 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     catalog = await _get_model_catalog()
     status: dict[str, dict[str, bool]] = {}
     model_listing_status.set(status)
+    from rootcoz.storage import can_user_use_server_providers
+
+    try:
+        allowed = (
+            await can_user_use_server_providers(ai_username.get())
+            if ai_username.get()
+            else False
+        )
+    except Exception:  # noqa: BLE001 - metadata must never imply permission on DB failure
+        allowed = False
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
     for provider, entries in build_friendly_catalog(catalog).items():
         for entry in entries:
             pairs[(provider, entry["id"])] = {
                 **entry,
                 "credential_sources": ["server"],
+                "can_use_server_providers": allowed,
                 "verified": True,
             }
     if ai_username.get() and not force_server_credentials.get():
@@ -279,6 +303,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                         **entry,
                         "source": _source_for_sidecar(provider),
                         "credential_sources": ["user"],
+                        "can_use_server_providers": allowed,
                         "verified": listing,
                     }
     result: dict[str, list[dict[str, Any]]] = {}
@@ -304,6 +329,12 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
                     if force_server_credentials.get()
                     else entry["credential_sources"][0]
                 )
+                if source not in entry["credential_sources"]:
+                    raise ValueError(
+                        f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
+                    )
+                if source == "server":
+                    await require_server_provider_grant()
                 _selected_credential_source.set(source)
                 return provider, model
         if provider in status and status[provider]["modelListingSupported"]:
@@ -313,6 +344,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
         # Manual IDs require an affirmative no-listing response for this key.
         if (
             model
+            and not force_server_credentials.get()
             and provider in status
             and not status[provider]["modelListingSupported"]
         ):
@@ -322,6 +354,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     catalog = await _get_model_catalog()
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
+        await require_server_provider_grant()
         _selected_credential_source.set("server")
         return provider, model
 
@@ -330,6 +363,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     catalog = await _get_model_catalog(refresh=True)
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
+        await require_server_provider_grant()
         _selected_credential_source.set("server")
         return provider, model
 
@@ -344,6 +378,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     providers_for_model = {p for p, m in pairs if p and m == model}
     matches = [p for p in providers_for_model if target and target(p)]
     if len(providers_for_model) == 1 and len(matches) == 1:
+        await require_server_provider_grant()
         _selected_credential_source.set("server")
         return matches[0], model
     raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
@@ -817,8 +852,16 @@ async def call_ai(
                 text="AI session unavailable",
                 error="AI session unavailable",
             )
+        if source == "unknown":
+            return AIResult(
+                success=False,
+                text="AI session unavailable",
+                error="AI session unavailable",
+            )
     else:
         source = "user" if key is not None else "server"
+    if source == "server":
+        await require_server_provider_grant()
     if session_id and source == "user":
         # Only the current owner's provider key can redact a keyed session.
         key = await session_key(provider)
@@ -871,6 +914,8 @@ async def call_ai_once(
     if key is not None:
         kwargs["api_key"] = key
     sidecar_call = _call_user_session if key is not None else _call_ai_once
+    if key is None:
+        await require_server_provider_grant()
     if key is not None:
         kwargs["once"] = True
     result = await _call_with_safe_error(

@@ -73,6 +73,7 @@ async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
     result = AIResult(success=True, text="result")
     call = AsyncMock(return_value=result)
     monkeypatch.setattr(ai_client, "_call_ai", call)
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
 
     assert (
         await call_ai_under_test("prompt", ai_provider=provider, ai_model=model)
@@ -93,6 +94,7 @@ async def test_resolve_catalog_pair_maps_unambiguous_legacy_gemini(
         AsyncMock(return_value=[{"provider": "google", "id": "gemini-2.5"}]),
     )
 
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("gemini", "gemini-2.5") == (
         "google",
         "gemini-2.5",
@@ -127,6 +129,7 @@ async def test_resolve_catalog_pair_uses_warm_catalog_when_refresh_fails(
     fetch = AsyncMock(side_effect=RuntimeError("temporary sidecar failure"))
     monkeypatch.setattr(ai_client, "_list_models_raw", fetch)
 
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("openai", "gpt-5") == (
         "openai",
         "gpt-5",
@@ -210,6 +213,7 @@ async def test_resolve_catalog_pair_rejects_model_from_another_provider(
         ),
     )
 
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
     assert await ai_client.resolve_catalog_pair("openai", "shared-model") == (
         "openai",
         "shared-model",

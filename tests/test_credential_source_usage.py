@@ -23,6 +23,9 @@ async def test_mixed_calls_resume_and_legacy(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="secret"))
     monkeypatch.setattr(
+        storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
         ai_client,
         "_call_user_session",
         AsyncMock(return_value=AIResult(True, "ok", session_id="user-sid")),
