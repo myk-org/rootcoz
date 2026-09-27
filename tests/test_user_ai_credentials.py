@@ -1,15 +1,29 @@
 """Per-user AI credential storage and sidecar boundary checks."""
 
+import base64
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
+import httpx
+import pi_sidecar_client
 import pytest
 from fastapi import HTTPException
+from pi_sidecar_client import AIResult, SidecarClient
+from pi_sidecar_client import call_ai as sidecar_real_call_ai
 
-from rootcoz import ai_client, encryption, main, storage
+from rootcoz import ai_client, encryption, issue_matching, main, storage
 from rootcoz.ai_client import call_ai as real_call_ai
+from rootcoz.ai_client import call_ai_once as real_call_ai_once
 from rootcoz.engine import chat
+
+
+@pytest.fixture(autouse=True)
+async def session_provenance_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "provenance.db")
+    await storage.init_db()
+    await storage.save_ai_session_source("existing", "alice", "p", "user")
 
 
 @pytest.mark.asyncio
@@ -140,7 +154,7 @@ async def test_api_status_redacts_and_rejects_unsupported(tmp_path, monkeypatch)
     monkeypatch.setattr(
         main, "supported_key_providers", AsyncMock(return_value=["custom"])
     )
-    request = SimpleNamespace(state=SimpleNamespace(username="alice"))
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     body = main.AiCredentialInput(api_key="private-value")
     response = await main.set_user_ai_credential("custom", body, request)
     assert response.headers["cache-control"] == "no-store"
@@ -167,7 +181,7 @@ async def test_openai_key_without_server_auth_or_catalog_models(tmp_path, monkey
     ]
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "list_models", AsyncMock(return_value=[]))
-    request = SimpleNamespace(state=SimpleNamespace(username="alice"))
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     assert (await main.get_user_ai_credentials(request)).body == (
         b'{"providers":[{"provider":"openai","configured":false}]}'
     )
@@ -190,18 +204,808 @@ async def test_openai_key_without_server_auth_or_catalog_models(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_call_ai_uses_key_only_for_new_sessions(monkeypatch):
+@pytest.mark.parametrize("sidecar_name", ["_call_ai", "_call_ai_once"])
+@pytest.mark.parametrize("session_id", [None, "existing"])
+async def test_sidecar_exception_never_exposes_user_key(
+    monkeypatch, caplog, sidecar_name, session_id
+):
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(
+        ai_client, "session_key", AsyncMock(return_value="secret-value")
+    )
+
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(return_value={"p": "secret-value"}),
+    )
+    token = ai_client.ai_username.set("alice")
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("sidecar secret-value failed")
+
+    monkeypatch.setattr(ai_client, "_call_user_session", fail)
+    with caplog.at_level(logging.ERROR):
+        try:
+            await (real_call_ai if sidecar_name == "_call_ai" else real_call_ai_once)(
+                "prompt", ai_provider="p", ai_model="m", session_id=session_id
+            )
+        except Exception as exc:
+            assert exc.__context__ is None
+            logging.getLogger(__name__).exception("Caller logged sidecar failure")
+            import traceback
+
+            rendered = traceback.format_exc()
+    assert "secret-value" not in rendered + caplog.text
+    assert "RuntimeError" in rendered
+    ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sidecar_name", ["_call_ai", "_call_ai_once"])
+@pytest.mark.parametrize("session_id", [None, "existing"])
+@pytest.mark.asyncio
+async def test_failed_sidecar_result_redacted_before_chat_logging(
+    monkeypatch, caplog, sidecar_name, session_id
+):
+    secret = "user-test-key"  # pragma: allowlist secret
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    original = AIResult(
+        success=False, text=f"sidecar rejected {secret}", error=f"error: {secret}"
+    )
+    monkeypatch.setattr(
+        ai_client, "_call_user_session", AsyncMock(return_value=original)
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        with caplog.at_level(logging.ERROR):
+            result = await (
+                real_call_ai if sidecar_name == "_call_ai" else real_call_ai_once
+            )("prompt", ai_provider="p", ai_model="m", session_id=session_id)
+            logging.getLogger(__name__).error(
+                "AI failure: %s / %s", result.text, result.error
+            )
+        assert not result.success
+        assert secret not in result.text + (result.error or "") + caplog.text
+        assert result.text and result.error
+        assert original.text == f"sidecar rejected {secret}"
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "existing"])
+@pytest.mark.parametrize("failure", ["response", "exception"])
+async def test_real_sidecar_http_error_never_logs_user_key(
+    monkeypatch, caplog, capsys, session_id, failure
+):
+    secret = "rotated-secret-test"  # pragma: allowlist secret
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.url.path.endswith("/prompt"):
+            if failure == "exception":
+                raise RuntimeError(f"HTTP failure: {secret}")
+            return httpx.Response(400, json={"error": f"sidecar rejected {secret}"})
+        return httpx.Response(204)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(pi_sidecar_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    monkeypatch.setattr(ai_client, "_call_ai", pi_sidecar_client.call_ai)
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    token = ai_client.ai_username.set("alice")
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai(
+                "prompt", ai_provider="p", ai_model="m", session_id=session_id
+            )
+            assert not result.success
+            logging.getLogger(__name__).error("AI failed: %s", result.text)
+        assert secret not in caplog.text + capsys.readouterr().err + result.text + (
+            result.error or ""
+        )
+        if failure == "response":
+            assert result.text == "AI call failed"
+        assert len([r for r in requests if r.url.path == "/sessions"]) == (
+            0 if session_id else 1
+        )
+        if session_id:
+            assert all(b"api_key" not in r.content for r in requests)
+            assert [r.method for r in requests] == ["POST"]
+        else:
+            assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "detail, expected",
+    [
+        ("session not found: review%2Fkey", "session not found"),
+        ("not authenticated: review%2Fkey", "authentication required"),
+    ],
+)
+async def test_keyed_failure_preserves_safe_retry_and_auth_signal(
+    monkeypatch, detail, expected
+):
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="review/key"))
+    monkeypatch.setattr(
+        ai_client,
+        "_call_user_session",
+        AsyncMock(return_value=AIResult(success=False, text=detail, error=detail)),
+    )
+    result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+    assert result.text == result.error == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", ["url", "json", "base64"])
+async def test_real_sidecar_encoded_prompt_error_never_logs_user_key(
+    monkeypatch, caplog, encoded
+):
+    import base64
+
+    secret = "review/key"  # pragma: allowlist secret
+    variants = {
+        "url": quote(secret, safe=""),
+        "json": r"review\/key",
+        "base64": base64.b64encode(secret.encode()).decode(),
+    }
+
+    def handle(request):
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(400, json={"error": f"rejected {variants[encoded]}"})
+        return httpx.Response(204)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+            logging.getLogger(__name__).error(
+                "AI failed: %s / %s", result.text, result.error
+            )
+        assert not result.success
+        assert result.text == result.error == "AI call failed"
+        assert secret not in caplog.text
+        assert variants[encoded] not in caplog.text + result.text + result.error
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_initial_creation_encoded_error_never_logs_user_key(
+    monkeypatch, caplog
+):
+    secret = "review/key"  # pragma: allowlist secret
+    encoded = base64.b64encode(secret.encode()).decode()
+
+    def handle(request):
+        assert request.url.path == "/sessions"
+        assert request.content and secret.encode() in request.content
+        return httpx.Response(400, json={"error": f"rejected {encoded}"})
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            assert (
+                await chat._create_chat_session(
+                    system_prompt="system", ai_provider="p", ai_model="m"
+                )
+                is None
+            )
+        assert encoded not in caplog.text
+        assert secret not in caplog.text
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "existing"])
+async def test_keyed_prompt_empty_text_usage_never_logs_encoded_key(
+    monkeypatch, caplog, session_id
+):
+    secret = "review/key"  # pragma: allowlist secret
+    encoded = base64.b64encode(secret.encode()).decode()
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(
+                200, json={"text": "", "usage": {"input_tokens": 7, "note": encoded}}
+            )
+        return httpx.Response(204)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    token = ai_client.ai_username.set("alice")
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai(
+                "prompt", ai_provider="p", ai_model="m", session_id=session_id
+            )
+        assert result.success and result.text == ""
+        assert result.usage.input_tokens == 7
+        assert result.session_id == (session_id or "created")
+        assert len([r for r in requests if r.url.path == "/sessions"]) == (
+            0 if session_id else 1
+        )
+        assert encoded not in caplog.text
+        assert secret not in caplog.text
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_keyed_prompt_http_200_error_keeps_usage_without_logging_response(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "error.db")
+    await storage.init_db()
+    await storage.save_ai_session_source("existing", "alice", "p", "user")
+    secret = "review/key"  # pragma: allowlist secret
+    encoded = base64.b64encode(secret.encode()).decode()
+
+    def handle(request):
+        assert request.url.path == "/sessions/existing/prompt"
+        return httpx.Response(
+            200,
+            json={
+                "text": "",
+                "error": f"authentication required: {encoded}",
+                "usage": {"output_tokens": 3, "note": encoded},
+            },
+        )
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    token = ai_client.ai_username.set("alice")
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai(
+                "prompt", ai_provider="p", ai_model="m", session_id="existing"
+            )
+        assert (result.success, result.text, result.error, result.session_id) == (
+            False,
+            "authentication required",
+            "authentication required",
+            "existing",
+        )
+        assert result.usage.output_tokens == 3
+        assert encoded not in caplog.text
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_sidecar_creation_encoded_error_never_logs_user_key(
+    monkeypatch, caplog
+):
+    import base64
+
+    secret = "review/key"  # pragma: allowlist secret
+    encoded = base64.b64encode(secret.encode()).decode()
+
+    def handle(request):
+        return httpx.Response(400, json={"error": f"rejected {encoded}"})
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+        assert not result.success
+        assert result.text == result.error == "AI call failed"
+        assert encoded not in caplog.text
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["response", "exception"])
+async def test_real_sidecar_creation_error_never_logs_user_key(
+    monkeypatch, caplog, failure
+):
+    secret = "new-user-secret"  # pragma: allowlist secret
+
+    def handle(request):
+        if failure == "exception":
+            raise RuntimeError(f"session failed: {secret}")
+        return httpx.Response(400, json={"error": f"session failed: {secret}"})
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
+            logging.getLogger(__name__).error(
+                "AI failed: %s / %s", result.text, result.error
+            )
+        assert (result.success, result.text, result.error, result.session_id) == (
+            False,
+            "AI call failed",
+            "AI call failed",
+            None,
+        )
+        assert secret not in caplog.text
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_sidecar_keyed_once_preserves_usage_and_cleans_up(monkeypatch):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/sessions":
+            assert (
+                b'"api_key":"user-key"' in request.content  # pragma: allowlist secret
+            )
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(
+                200,
+                json={"text": "reply", "usage": {"input_tokens": 7}},
+            )
+        return httpx.Response(204)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="user-key"))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    try:
+        result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+        assert (result.success, result.text, result.session_id) == (True, "reply", None)
+        assert result.usage.input_tokens == 7
+        assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_sidecar_wrapper_logs_raw_resumed_exception(monkeypatch, caplog):
+    secret = "rotated-secret-test"  # pragma: allowlist secret
+
+    def handle(request):
+        raise RuntimeError(f"HTTP failure: {secret}")
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(pi_sidecar_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
+    try:
+        with caplog.at_level(logging.ERROR):
+            await sidecar_real_call_ai("prompt", session_id="existing")
+        assert secret in caplog.text  # raw wrapper is unsafe for resumed sessions
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_issue_filter_result_does_not_log_key(monkeypatch):
+    secret = "user-test-key"  # pragma: allowlist secret
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client,
+        "_call_user_session",
+        AsyncMock(
+            return_value=AIResult(
+                success=False,
+                text=f"sidecar rejected {secret}",
+                error=f"error: {secret}",
+            )
+        ),
+    )
+    monkeypatch.setattr(issue_matching, "call_ai_once", real_call_ai_once)
+    warnings = []
+    monkeypatch.setattr(
+        issue_matching.logger, "warning", lambda fmt, *args: warnings.append(fmt % args)
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        assert (
+            await issue_matching.filter_issue_matches_with_ai(
+                "bug", "description", [{"key": "TEST-1"}], "p", "m"
+            )
+            == []
+        )
+        assert secret not in str(warnings)
+        assert "AI call failed" in str(warnings)
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_resumed_chat_failure_hides_rotated_key_from_log_and_response(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "echo.db")
+    await storage.init_db()
+    await storage.save_ai_session_source("sid", "alice", "p", "user")
+    old_key = "rotated-user-key"  # pragma: allowlist secret
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "_call_user_session",
+        AsyncMock(
+            return_value=AIResult(
+                success=False,
+                text=f"sidecar rejected {old_key}",
+                error=f"error: {old_key}",
+            )
+        ),
+    )
+    monkeypatch.setattr(chat, "call_ai", real_call_ai)
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=old_key))
+    token = ai_client.ai_username.set("alice")
+    try:
+        with caplog.at_level(logging.ERROR):
+            ok, text, sid = await chat._chat_with_ai_impl(
+                message="next",
+                history=[],
+                ai_provider="p",
+                ai_model="m",
+                build_prompt_fn=lambda: "system",
+                session_id="sid",
+                install_mcp=False,
+            )
+        assert (ok, text, sid) == (False, "AI call failed", None)
+        assert old_key not in caplog.text
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_resumed_success_redacts_current_key_and_denies_rotated_key(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "resume-echo.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    old = "old-resume-key"  # pragma: allowlist secret
+    await storage.update_user_ai_credential("alice", "p", old)
+    await storage.save_ai_session_source("sid", "alice", "p", "user")
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=old))
+    prompt = AsyncMock(return_value=AIResult(success=True, text=f"echo {old}"))
+    monkeypatch.setattr(ai_client, "_call_user_session", prompt)
+    token = ai_client.ai_username.set("alice")
+    try:
+        result = await real_call_ai(
+            "next", ai_provider="p", ai_model="m", session_id="sid"
+        )
+        assert result.text == "echo [REDACTED]"
+        await storage.update_user_ai_credential("alice", "p", "new-resume-key")
+        denied = await real_call_ai(
+            "next", ai_provider="p", ai_model="m", session_id="sid"
+        )
+        assert not denied.success
+        assert old not in denied.text
+        assert prompt.await_count == 1
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_resumed_chat_lost_session_still_retries(monkeypatch):
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
+    sidecar = AsyncMock(
+        side_effect=[
+            AIResult(success=False, text="Session not found: old key"),
+            AIResult(success=True, text="reply", session_id="new"),
+        ]
+    )
+    monkeypatch.setattr(ai_client, "_call_user_session", sidecar)
+    monkeypatch.setattr(ai_client, "_call_ai", sidecar)
+    monkeypatch.setattr(chat, "call_ai", real_call_ai)
+    token = ai_client.ai_username.set("alice")
+    try:
+        ok, text, sid = await chat._chat_with_ai_impl(
+            message="next",
+            history=[],
+            ai_provider="p",
+            ai_model="m",
+            build_prompt_fn=lambda: "system",
+            session_id="sid",
+            install_mcp=False,
+        )
+        assert (ok, text, sid) == (True, "reply", "new")
+        assert sidecar.await_count == 2
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_successful_sidecar_result_keeps_analysis_text(monkeypatch):
+    secret = "user-test-key"  # pragma: allowlist secret
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    original = AIResult(success=True, text=f"analysis mentions {secret}")
+    monkeypatch.setattr(
+        ai_client, "_call_user_session", AsyncMock(return_value=original)
+    )
+    result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+    assert result.text == "analysis mentions [REDACTED]"
+    assert original.text == f"analysis mentions {secret}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["raw", "url", "base64", "urlsafe", "json"])
+async def test_real_sidecar_success_echo_is_not_logged_or_persisted(
+    monkeypatch, tmp_path, caplog, encoding
+):
+    secret = "review/key+é"  # pragma: allowlist secret
+    encoded = {
+        "raw": secret,
+        "url": quote(secret, safe=""),
+        "base64": base64.b64encode(secret.encode()).decode(),
+        "urlsafe": base64.urlsafe_b64encode(secret.encode()).decode(),
+        "json": "review\\/key+\\u00e9",
+    }[encoding]
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(200, json={"text": f"analysis: {encoded} done"})
+        return httpx.Response(204)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+            logging.getLogger(__name__).info("Analysis: %s", result.text)
+        stored = tmp_path / "analysis.txt"
+        stored.write_text(result.text)
+        assert result.success
+        assert result.text == "analysis: [REDACTED] done"
+        assert encoded not in caplog.text + stored.read_text()
+        assert secret not in caplog.text + stored.read_text()
+        assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_real_sidecar_failed_new_chat_prompt_deletes_session(monkeypatch, caplog):
+    secret = "user-test-key"  # pragma: allowlist secret
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(400, json={"error": f"rejected {secret}"})
+        return httpx.Response(204)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(chat, "call_ai", real_call_ai)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            ok, text, sid = await chat._chat_with_ai_impl(
+                message="hello",
+                history=[],
+                ai_provider="p",
+                ai_model="m",
+                build_prompt_fn=lambda: "system",
+                install_mcp=False,
+            )
+        assert (ok, text, sid) == (False, "AI call failed", None)
+        assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+        assert secret not in caplog.text + text
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_prompt_cleanup_error_keeps_session_without_logging(
+    monkeypatch, caplog
+):
+    secret = "user-test-key"  # pragma: allowlist secret
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.method == "DELETE":
+            raise RuntimeError(f"cleanup failed: {secret}")
+        return httpx.Response(400, json={"error": "prompt failed"})
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    try:
+        with caplog.at_level(logging.DEBUG):
+            result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
+        assert not result.success
+        assert result.session_id == "created"
+        assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+        assert secret not in caplog.text + result.text
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_credential_mutations_require_reviewer(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "roles.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
+    for role in ("viewer", "reviewer", "operator", "admin"):
+        request = SimpleNamespace(state=SimpleNamespace(username="alice", role=role))
+        await main.get_user_ai_credentials(request)
+        for mutation in (
+            lambda request=request: main.set_user_ai_credential(
+                "p",
+                main.AiCredentialInput(api_key="value"),  # pragma: allowlist secret
+                request,
+            ),
+            lambda request=request: main.delete_user_ai_credential("p", request),
+        ):
+            if role == "viewer":
+                with pytest.raises(HTTPException) as exc:
+                    await mutation()
+                assert exc.value.status_code == 403
+            else:
+                assert (await mutation()).status_code == 200
+
+
+async def test_call_ai_uses_key_only_for_new_sessions(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "resume.db")
+    await storage.init_db()
+    await storage.save_ai_session_source("sid", "alice", "p", "user")
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="secret"))
-    sidecar_call = AsyncMock(return_value=object())
-    monkeypatch.setattr(ai_client, "_call_ai", sidecar_call)
-    await real_call_ai("first", ai_provider="p", ai_model="m", session_id=None)
-    expected_key = "secret"  # pragma: allowlist secret
-    assert sidecar_call.await_args.kwargs["api_key"] == expected_key
-    await real_call_ai("second", ai_provider="p", ai_model="m", session_id="sid")
-    assert "api_key" not in sidecar_call.await_args.kwargs
+    sidecar_call = AsyncMock(return_value=AIResult(success=True, text="ok"))
+    monkeypatch.setattr(ai_client, "_call_user_session", sidecar_call)
+    token = ai_client.ai_username.set("alice")
+    try:
+        await real_call_ai("first", ai_provider="p", ai_model="m", session_id=None)
+        expected_key = "secret"  # pragma: allowlist secret
+        assert sidecar_call.await_args.kwargs["api_key"] == expected_key
+        await real_call_ai("second", ai_provider="p", ai_model="m", session_id="sid")
+        assert "api_key" not in sidecar_call.await_args.kwargs
+    finally:
+        ai_client.ai_username.reset(token)
 
 
 @pytest.mark.asyncio
@@ -209,6 +1013,8 @@ async def test_rotating_credential_deletes_sidecar_session(tmp_path, monkeypatch
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "revoke.db")
     await storage.init_db()
     await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "p", "old")
+    await storage.save_ai_session_source("sid", "alice", "p", "user")
     await storage.add_chat_message(
         job_id="job",
         role="assistant",
@@ -221,12 +1027,15 @@ async def test_rotating_credential_deletes_sidecar_session(tmp_path, monkeypatch
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
     sidecar = AsyncMock()
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
-    request = SimpleNamespace(state=SimpleNamespace(username="alice"))
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     new_key = "new"  # pragma: allowlist secret
     await main.set_user_ai_credential(
         "p", main.AiCredentialInput(api_key=new_key), request
     )
     sidecar.delete_session.assert_awaited_once_with("sid")
+    assert (await storage.get_chat_messages("job", username="alice"))[0][
+        "session_id"
+    ] == ""
 
 
 @pytest.mark.asyncio
@@ -236,8 +1045,8 @@ async def test_invalid_user_key_does_not_fall_back_to_server(monkeypatch):
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="invalid"))
     sidecar_call = AsyncMock(side_effect=ValueError("invalid key"))
-    monkeypatch.setattr(ai_client, "_call_ai", sidecar_call)
-    with pytest.raises(ValueError, match="invalid key"):
+    monkeypatch.setattr(ai_client, "_call_user_session", sidecar_call)
+    with pytest.raises(ValueError, match="ValueError: sidecar call failed"):
         await real_call_ai("prompt", ai_provider="p", ai_model="m")
     sidecar_call.assert_awaited_once()
     expected_key = "invalid"  # pragma: allowlist secret
@@ -245,14 +1054,26 @@ async def test_invalid_user_key_does_not_fall_back_to_server(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_session_creation_and_resumed_turn(monkeypatch):
-    client = AsyncMock()
-    client.create_session.return_value = "sid"
+async def test_chat_session_creation_and_resumed_turn(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
+    await storage.init_db()
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json={"session_id": "sid"})
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
     monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
         chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="secret"))
+    ai_client._selected_credential_source.set("user")
     monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     assert (
         await chat._create_chat_session(
@@ -261,7 +1082,7 @@ async def test_chat_session_creation_and_resumed_turn(monkeypatch):
         == "sid"
     )
     expected_key = "secret"  # pragma: allowlist secret
-    assert client.create_session.await_args.kwargs["api_key"] == expected_key
+    assert expected_key.encode() in requests[0].content
 
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
@@ -271,12 +1092,10 @@ async def test_chat_session_creation_and_resumed_turn(monkeypatch):
     async def respond(*args, **kwargs):
         assert kwargs["session_id"] == "sid"
         assert "api_key" not in kwargs
-        return SimpleNamespace(
-            success=True, text="reply", session_id="sid", record_usage=AsyncMock()
-        )
+        return AIResult(success=True, text="reply", session_id="sid")
 
     sidecar_call.side_effect = respond
-    monkeypatch.setattr(ai_client, "_call_ai", sidecar_call)
+    monkeypatch.setattr(ai_client, "_call_user_session", sidecar_call)
     monkeypatch.setattr(chat, "call_ai", real_call_ai)
     ok, text, sid = await chat._chat_with_ai_impl(
         message="next",
@@ -288,6 +1107,7 @@ async def test_chat_session_creation_and_resumed_turn(monkeypatch):
         install_mcp=False,
     )
     assert (ok, text, sid) == (True, "reply", "sid")
+    await client.close()
 
 
 @pytest.mark.asyncio
@@ -317,10 +1137,53 @@ async def test_rotating_key_invalidates_only_owners_provider_sessions(
     assert (await storage.get_chat_messages("job", username="bob"))[0][
         "session_id"
     ] == "sid"
-    assert await storage.update_user_ai_credential("alice", "other", None) == ["sid"]
+    assert await storage.update_user_ai_credential("alice", "other", "key") == ["sid"]
+    assert await storage.update_user_ai_credential("alice", "other", None) == []
     assert all(
         not m["session_id"]
         for m in await storage.get_chat_messages("job", username="alice")
+    )
+
+
+@pytest.mark.asyncio
+async def test_noop_rotation_keeps_provider_session_and_generation(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "noop.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "p.with/slash", "key")
+    generation = await storage.get_user_ai_credential_generation(
+        "alice", "p.with/slash"
+    )
+    await storage.add_chat_message(
+        "job",
+        "assistant",
+        "hello",
+        username="alice",
+        ai_provider="p.with/slash",
+        session_id="sid",
+    )
+    assert await storage.update_user_ai_credential("alice", "p.with/slash", "key") == []
+    assert (
+        await storage.get_user_ai_credential_generation("alice", "p.with/slash")
+        == generation
+    )
+    assert (await storage.get_chat_messages("job", username="alice"))[0][
+        "session_id"
+    ] == "sid"
+    assert await storage.update_user_ai_credential("alice", "absent", None) == []
+    assert (
+        await storage.get_user_ai_credential_generation("alice", "p.with/slash")
+        == generation
+    )
+    assert await storage.add_chat_message(
+        "job",
+        "assistant",
+        "next",
+        username="alice",
+        ai_provider="p.with/slash",
+        credential_generation=generation,
     )
 
 
@@ -409,7 +1272,7 @@ async def test_unreadable_credential_map_refuses_list_set_delete_and_preserves_d
             )
             await db.commit()
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
-    request = SimpleNamespace(state=SimpleNamespace(username="alice"))
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     new_key = "new"  # pragma: allowlist secret
     with caplog.at_level(logging.WARNING):
         for operation in (
@@ -475,12 +1338,16 @@ async def test_js_blank_key_rejected_before_storage(monkeypatch):
     for blank in ("\ufeff", " \ufeff\u00a0"):
         with pytest.raises(HTTPException) as exc:
             await main.set_user_ai_credential(
-                "p", main.AiCredentialInput(api_key=blank), object()
+                "p",
+                main.AiCredentialInput(api_key=blank),
+                SimpleNamespace(state=SimpleNamespace(username="alice", role="admin")),
             )
         assert exc.value.status_code == 400
     update.assert_not_awaited()
     await main.set_user_ai_credential(
-        "p", main.AiCredentialInput(api_key="\u200b\ufeff"), object()
+        "p",
+        main.AiCredentialInput(api_key="\u200b\ufeff"),
+        SimpleNamespace(state=SimpleNamespace(username="alice", role="admin")),
     )
     update.assert_awaited_once()
 

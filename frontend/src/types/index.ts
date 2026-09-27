@@ -181,6 +181,7 @@ export interface AnalysisResult {
   progress_log?: Array<{ phase: string; timestamp: number }>
   progress_phase?: string
   request_params?: {
+    force_server_credentials?: boolean
     ai_provider: string
     ai_model: string
     peer_ai_configs?: AiConfig[]
@@ -355,14 +356,17 @@ export interface AiModel {
   provider: string
   /** acpx | cli | api — catalog metadata only; not sent on analyze */
   source?: string
+  credential_sources?: Array<'user' | 'server'>
+  verified?: boolean
 }
 
 /** Response shape from GET /api/ai-models (no provider filter) */
 export interface ProviderStatus {
-  ok: boolean
+  ok?: boolean
   reason?: string | null
   hint?: string | null
   has_api_key?: boolean
+  modelListingSupported?: boolean
   model_count?: number
 }
 
@@ -432,6 +436,7 @@ export interface TokenUsageEntry {
   provider: string
   model: string
   call_type: string
+  credential_source?: 'user' | 'server' | 'unknown'
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
@@ -476,6 +481,7 @@ export interface TokenUsageRecord {
   ai_provider: string
   ai_model: string
   call_type: string
+  credential_source?: 'user' | 'server' | 'unknown'
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number

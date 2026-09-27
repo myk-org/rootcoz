@@ -5,7 +5,6 @@ import os
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
-import click
 import pytest
 import typer.main
 from typer.testing import CliRunner
@@ -25,7 +24,7 @@ def _extract_envvar_names(command_name: str) -> tuple[str, ...]:
     """
     # Resolve the underlying Click command via the typer-created Click Group
     click_group = typer.main.get_command(app)
-    assert isinstance(click_group, click.Group)
+    assert hasattr(click_group, "commands")
     cmd = click_group.commands.get(command_name)
     if not cmd:
         raise AssertionError(
@@ -34,7 +33,7 @@ def _extract_envvar_names(command_name: str) -> tuple[str, ...]:
         )
     names: list[str] = []
     for param in cmd.params:
-        if isinstance(param, click.Option) and param.envvar:
+        if param.envvar:
             names.extend(
                 param.envvar if isinstance(param.envvar, list) else [param.envvar]
             )
@@ -1509,6 +1508,17 @@ class TestAiModelsCommand:
         result = runner.invoke(app, ["ai-models", "--provider", "cursor"])
         assert result.exit_code == 0
         assert "No models found" in result.output
+
+    def test_ai_models_unverified_manual(self, mock_client):
+        mock_client.list_ai_models.return_value = {
+            "provider": "xai",
+            "models": [],
+            "modelListingSupported": False,
+        }
+        result = runner.invoke(app, ["ai-models", "--provider", "xai"])
+        assert result.exit_code == 0
+        assert "Enter a model ID manually" in result.output
+        assert "unverified" in result.output
 
     def test_ai_models_empty_all(self, mock_client):
         mock_client.list_ai_models.return_value = {"providers": {}}

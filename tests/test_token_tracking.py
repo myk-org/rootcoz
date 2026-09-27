@@ -52,6 +52,7 @@ class TestRecordAiUsage:
                 duration_ms=1200,
                 prompt_chars=500,
                 response_chars=len("analysis output"),
+                credential_source="unknown",
             )
 
     @pytest.mark.asyncio
@@ -77,6 +78,7 @@ class TestRecordAiUsage:
             mock_record.assert_called_once()
             assert mock_record.call_args.kwargs["input_tokens"] == 0
             assert mock_record.call_args.kwargs["output_tokens"] == 0
+            assert mock_record.call_args.kwargs["credential_source"] == "unknown"
 
     @pytest.mark.asyncio
     async def test_skips_when_job_id_empty(self) -> None:

@@ -8,12 +8,13 @@ export type { ProviderStatus }
 
 type CatalogState = {
   providerKeys: string[]
+  providers: AiModelsResponse['providers']
   /** @deprecated Use providerKeys. */
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>
 }
 
-const EMPTY_CATALOG: CatalogState = { providerKeys: [], enabled: [], providerStatus: {} }
+const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {} }
 
 /** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
 let catalogInflight: Promise<CatalogState> | null = null
@@ -44,6 +45,7 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
       const providerKeys = Object.keys(providers)
       const next: CatalogState = {
         providerKeys,
+        providers,
         enabled: providerKeys.filter((p) => (providers[p] ?? []).length > 0),
         providerStatus: res.provider_status ?? {},
       }
@@ -95,6 +97,7 @@ export function useEnabledProviders(): string[] {
 /** Models catalog + provider_status (e.g. cursor auth). */
 export function useProviderCatalog(): {
   providerKeys: string[]
+  providers: AiModelsResponse['providers']
   /** @deprecated Use providerKeys. */
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>

@@ -2149,8 +2149,13 @@ def _print_ai_model_rows(models: list[dict[str, Any]]) -> None:
     """Render an id/name table for AI model rows."""
     print_output(
         models,
-        columns=["id", "name"],
-        labels={"id": "MODEL ID", "name": "DISPLAY NAME"},
+        columns=["id", "name", "verified", "credential_sources"],
+        labels={
+            "id": "MODEL ID",
+            "name": "DISPLAY NAME",
+            "verified": "VERIFIED",
+            "credential_sources": "CREDENTIALS",
+        },
         as_json=False,
     )
 
@@ -2179,10 +2184,19 @@ def ai_models_cmd(
         if provider:
             models = data.get("models", [])
             if not models:
-                typer.echo(f"No models found for provider '{provider}'.")
+                if data.get("modelListingSupported") is False:
+                    typer.echo(
+                        "This provider cannot list models for your key. Enter a model ID manually; it is unverified and may fail."
+                    )
+                else:
+                    typer.echo(f"No models found for provider '{provider}'.")
                 raise typer.Exit()
             typer.echo(f"Models for {provider}:")
             _print_ai_model_rows(models)
+            if data.get("modelListingSupported") is False:
+                typer.echo(
+                    "Suggestions are unverified. You may enter a model ID manually; the AI call may fail."
+                )
         else:
             providers_data = data.get("providers", {})
             if not providers_data:
@@ -3310,7 +3324,8 @@ def _print_job_token_usage(data: dict[str, Any]) -> None:
     for rec in records:
         typer.echo(
             f"\n  [{rec.get('call_type', '')}] "
-            f"{rec.get('ai_provider', '')}/{rec.get('ai_model', '')}"
+            f"{rec.get('ai_provider', '')}/{rec.get('ai_model', '')} "
+            f"({rec.get('credential_source') or 'unknown'})"
         )
         typer.echo(
             f"    Input: {rec.get('input_tokens', 0):,}  "
