@@ -36,6 +36,13 @@ function setup() {
   post.mockResolvedValue({ job_id: 'next' })
 }
 
+function page(result: AnalysisResult, showDialog: boolean) {
+  return <AuthProvider><MemoryRouter>
+    <section aria-label="New analysis"><NewAnalysisPage /></section>
+    {showDialog && <ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" />}
+  </MemoryRouter></AuthProvider>
+}
+
 // Radix requires pointer APIs absent from jsdom.
 HTMLElement.prototype.hasPointerCapture = () => false
 HTMLElement.prototype.setPointerCapture = () => {}
@@ -71,18 +78,14 @@ it('ignores an older granted /me after a newer revocation on mounted analysis fo
   setup()
   granted = true
   const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true } } as unknown as AnalysisResult
-  const page = (showDialog: boolean) => <AuthProvider><MemoryRouter>
-    <section aria-label="New analysis"><NewAnalysisPage /></section>
-    {showDialog && <ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" />}
-  </MemoryRouter></AuthProvider>
-  const { container, rerender } = render(page(false))
+  const { container, rerender } = render(page(result, false))
   const newForm = container.querySelector('section')!
   const user = userEvent.setup()
   await user.click(await within(newForm).findByRole('button', { name: 'AI Configuration' }))
   await user.click(within(newForm).getByRole('button', { name: 'Paste XML' }))
   await user.type(within(newForm).getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
   await waitFor(() => expect(within(newForm).getByRole('button', { name: 'Submit Analysis' })).toBeEnabled())
-  rerender(page(true))
+  rerender(page(result, true))
   const reForm = await screen.findByRole('dialog')
   await waitFor(() => expect(within(reForm).getByRole('button', { name: 'Re-Analyze' })).toBeEnabled())
 
@@ -114,17 +117,13 @@ it('keeps both active analysis forms enabled on focus network failure, then revo
   setup()
   granted = true
   const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true } } as unknown as AnalysisResult
-  const page = (showDialog: boolean) => <AuthProvider><MemoryRouter>
-    <section aria-label="New analysis"><NewAnalysisPage /></section>
-    {showDialog && <ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" />}
-  </MemoryRouter></AuthProvider>
-  const { container, rerender } = render(page(false))
+  const { container, rerender } = render(page(result, false))
   const newForm = within(container.querySelector('section')!)
   const user = userEvent.setup()
   await user.click(await newForm.findByRole('button', { name: 'AI Configuration' }))
   await user.click(newForm.getByRole('button', { name: 'Paste XML' }))
   await user.type(newForm.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
-  rerender(page(true))
+  rerender(page(result, true))
   const reForm = within(await screen.findByRole('dialog'))
   const submit = () => newForm.getByRole('button', { name: 'Submit Analysis', hidden: true })
   const reanalyze = () => reForm.getByRole('button', { name: 'Re-Analyze' })

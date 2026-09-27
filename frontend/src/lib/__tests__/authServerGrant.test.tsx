@@ -1,5 +1,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
+import { ProtectedRoute } from '@/components/shared/ProtectedRoute'
 import { AuthProvider, useAuth } from '@/lib/auth'
 import { ApiError } from '@/lib/api'
 import { getUsername, setUsername, clearUsername } from '@/lib/cookies'
@@ -32,6 +34,81 @@ it('treats admins as granted despite a false stored flag, but not ungranted non-
   render(<AuthProvider><Grant /></AuthProvider>)
   await waitFor(() => expect(get).toHaveBeenCalledWith('/api/user/tokens'))
   expect(screen.getByText('Denied')).toBeInTheDocument()
+})
+
+it.each(['before', 'after', 'without focus'] as const)('shows a protected page after login despite an initial /me 401 settling %s login', async (order) => {
+  let rejectInitial!: (error: Error) => void
+  let resolveLogin!: (value: unknown) => void
+  let resolvePostLoginMe!: (value: unknown) => void
+  let meCalls = 0
+  const bob = { username: 'bob', role: 'reviewer', is_admin: false, can_use_server_providers: true }
+  get.mockImplementation((path: string) => path === '/api/auth/me'
+    ? ++meCalls === 1 ? new Promise((_resolve, reject) => { rejectInitial = reject })
+      : meCalls === 2 ? new Promise((resolve) => { resolvePostLoginMe = resolve }) : Promise.resolve(bob)
+    : Promise.resolve({ github_token: '', jira_email: '', jira_token: '' }))
+  post.mockImplementation(() => new Promise((resolve) => { resolveLogin = resolve }))
+  function Page() {
+    const { login } = useAuth()
+    return <><button onClick={() => void login('bob', 'key')}>Login</button><ProtectedRoute><span>Protected content</span></ProtectedRoute></>
+  }
+  render(<AuthProvider><MemoryRouter><Page /></MemoryRouter></AuthProvider>)
+  expect(screen.queryByText('Protected content')).not.toBeInTheDocument()
+  act(() => screen.getByRole('button', { name: 'Login' }).click())
+  await waitFor(() => expect(resolveLogin).toBeDefined())
+  if (order !== 'without focus') act(() => window.dispatchEvent(new Event('focus')))
+  expect(meCalls).toBe(1)
+  if (order === 'before') await act(async () => { rejectInitial(new ApiError(401, 'old session', null)) })
+  await act(async () => { resolveLogin(bob) })
+  await waitFor(() => expect(resolvePostLoginMe).toBeDefined())
+  await act(async () => { resolvePostLoginMe(bob) })
+  if (order !== 'before') await act(async () => { rejectInitial(new ApiError(401, 'old session', null)) })
+  expect(await screen.findByText('Protected content')).toBeInTheDocument()
+  expect(get.mock.calls.filter(([path]) => path === '/api/auth/me')).toHaveLength(3)
+})
+
+it('ignores an in-flight focus /me 401 after a successful login', async () => {
+  let rejectFocus!: (error: Error) => void
+  const alice = { username: 'alice', role: 'reviewer', is_admin: false }
+  const bob = { username: 'bob', role: 'reviewer', is_admin: false }
+  let meCalls = 0
+  get.mockImplementation((path: string) => path === '/api/auth/me'
+    ? ++meCalls === 2 ? new Promise((_resolve, reject) => { rejectFocus = reject }) : Promise.resolve(meCalls === 1 ? alice : bob)
+    : Promise.resolve({ github_token: '', jira_email: '', jira_token: '' }))
+  post.mockResolvedValue(bob)
+  function Page() {
+    const { login, username } = useAuth()
+    return <><button onClick={() => void login('bob', 'key')}>Login</button><ProtectedRoute><span>{username} is protected</span></ProtectedRoute></>
+  }
+  render(<AuthProvider><MemoryRouter><Page /></MemoryRouter></AuthProvider>)
+  await screen.findByText('alice is protected')
+  act(() => window.dispatchEvent(new Event('focus')))
+  await waitFor(() => expect(rejectFocus).toBeDefined())
+  await act(async () => { screen.getByRole('button', { name: 'Login' }).click() })
+  await screen.findByText('bob is protected')
+  await act(async () => { rejectFocus(new ApiError(401, 'old session', null)) })
+  expect(screen.getByText('bob is protected')).toBeInTheDocument()
+})
+
+it('reconciles a failed login after an invalidated initial refresh', async () => {
+  let rejectLogin!: (error: Error) => void
+  let rejectInitial!: (error: Error) => void
+  let meCalls = 0
+  get.mockImplementation((path: string) => path === '/api/auth/me'
+    ? ++meCalls === 1 ? new Promise((_resolve, reject) => { rejectInitial = reject })
+      : Promise.reject(new ApiError(401, 'unauthorized', null))
+    : Promise.resolve({ github_token: '', jira_email: '', jira_token: '' }))
+  post.mockImplementation(() => new Promise((_resolve, reject) => { rejectLogin = reject }))
+  function Page() {
+    const { login, loading } = useAuth()
+    return <><button onClick={() => void login('bob', 'bad').catch(() => {})}>Login</button><span>{loading ? 'loading' : 'ready'}</span></>
+  }
+  render(<AuthProvider><Page /></AuthProvider>)
+  act(() => screen.getByRole('button', { name: 'Login' }).click())
+  await waitFor(() => expect(rejectLogin).toBeDefined())
+  await act(async () => { rejectLogin(new ApiError(401, 'bad key', null)) })
+  await waitFor(() => expect(screen.getByText('ready')).toBeInTheDocument())
+  await act(async () => { rejectInitial(new ApiError(401, 'old session', null)) })
+  expect(meCalls).toBe(2)
 })
 
 it('does not let a pending refresh overwrite a new login', async () => {
