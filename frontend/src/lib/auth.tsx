@@ -156,6 +156,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const guard = beginTransition()
     if (!guard) return
     const { isCurrent } = guard
+    // Beginning login invalidated the initial refresh that would clear loading.
+    if (loading) pendingRefresh.current = true
     try {
       const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
       if (!isCurrent()) return
@@ -185,7 +187,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       guard.finish()
     }
-  }, [beginTransition])
+  }, [beginTransition, loading])
 
   const logout = useCallback(async () => {
     const guard = beginTransition()
@@ -206,6 +208,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       clearTokens()
       clearUsername()
       setUsernameState('')
+      setLoading(false)
     } finally {
       guard.finish()
     }
