@@ -1154,7 +1154,7 @@ def _create_user_with_role(client, username, role, admin_cookies=None):
         admin_cookies = _admin_login(client)
     resp = client.post(
         "/api/admin/users/create",
-        json={"username": username, "role": role},
+        json={"username": username, "role": role, "can_use_server_providers": True},
         cookies=admin_cookies,
     )
     assert resp.status_code == 200

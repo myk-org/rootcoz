@@ -936,6 +936,10 @@ async def init_db() -> None:
             db, "users", "status", "TEXT NOT NULL DEFAULT 'active'"
         )
 
+        await _migrate_add_column(
+            db, "users", "can_use_server_providers", "INTEGER NOT NULL DEFAULT 0"
+        )
+
         # Migration: can_view_reports flag (orthogonal to role; admins always have access)
         await _migrate_add_column(
             db, "users", "can_view_reports", "INTEGER NOT NULL DEFAULT 0"
@@ -4712,11 +4716,15 @@ def _user_row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
         data["can_view_reports"] = bool(data["can_view_reports"])
     else:
         data["can_view_reports"] = False
+    data["can_use_server_providers"] = bool(data.get("can_use_server_providers", 0))
     return data
 
 
 async def create_admin_user(
-    username: str, *, can_view_reports: bool = False
+    username: str,
+    *,
+    can_view_reports: bool = False,
+    can_use_server_providers: bool = False,
 ) -> tuple[str, str]:
     """Create an admin user and return (username, raw_api_key).
 
@@ -4735,9 +4743,14 @@ async def create_admin_user(
     async with _connect_db() as db:
         try:
             await db.execute(
-                "INSERT INTO users (username, api_key_hash, role, can_view_reports)"
-                " VALUES (?, ?, 'admin', ?)",
-                (username, key_hash, 1 if can_view_reports else 0),
+                "INSERT INTO users (username, api_key_hash, role, can_view_reports, can_use_server_providers)"
+                " VALUES (?, ?, 'admin', ?, ?)",
+                (
+                    username,
+                    key_hash,
+                    1 if can_view_reports else 0,
+                    int(can_use_server_providers),
+                ),
             )
             await db.commit()
         except Exception as exc:
@@ -4753,7 +4766,7 @@ async def get_user_by_key(api_key: str) -> dict[str, Any] | None:
     key_hash = hash_api_key(api_key)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, can_view_reports, created_at, last_seen"
+            "SELECT id, username, role, can_view_reports, can_use_server_providers, created_at, last_seen"
             " FROM users WHERE api_key_hash = ?",
             (key_hash,),
         )
@@ -4766,7 +4779,7 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
     username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, can_view_reports, created_at, last_seen"
+            "SELECT id, username, role, can_view_reports, can_use_server_providers, created_at, last_seen"
             " FROM users WHERE username = ?",
             (username,),
         )
@@ -4879,7 +4892,7 @@ async def list_users() -> list[dict[str, Any]]:
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, status, can_view_reports, created_at, last_seen"
+            "SELECT id, username, role, status, can_view_reports, can_use_server_providers, created_at, last_seen"
             " FROM users WHERE username != 'admin' ORDER BY created_at DESC"
         )
         return [_user_row_to_dict(row) for row in await cursor.fetchall()]
@@ -4903,6 +4916,28 @@ async def set_user_can_view_reports(username: str, value: bool) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def set_user_can_use_server_providers(username: str, value: bool) -> bool:
+    """Grant or revoke server AI access for a managed user."""
+    username = _normalize_username(username)
+    if username == "admin":
+        raise ValueError("Cannot change server provider access for bootstrap admin")
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET can_use_server_providers = ? WHERE username = ?",
+            (int(value), username),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def can_user_use_server_providers(username: str) -> bool:
+    """Read the current grant; unknown identities are denied."""
+    if username == "admin":
+        return True
+    user = await get_user_by_username(username)
+    return bool(user and user["can_use_server_providers"])
 
 
 async def track_user(username: str) -> None:
@@ -5008,6 +5043,7 @@ async def create_user(
     status: str = "active",
     role: str = "",
     can_view_reports: bool = False,
+    can_use_server_providers: bool | None = None,
 ) -> tuple[str, str]:
     """Create a new user or generate an API key for an existing user without one.
 
@@ -5055,9 +5091,16 @@ async def create_user(
                 # Existing user without key — generate one.
                 # Do NOT reset can_view_reports (preserve any admin-granted flag).
                 update_cursor = await db.execute(
-                    "UPDATE users SET api_key_hash = ?"
+                    "UPDATE users SET api_key_hash = ?, can_use_server_providers = "
+                    "COALESCE(?, can_use_server_providers)"
                     " WHERE username = ? AND role != 'admin'",
-                    (key_hash, username),
+                    (
+                        key_hash,
+                        int(can_use_server_providers)
+                        if can_use_server_providers is not None
+                        else None,
+                        username,
+                    ),
                 )
                 if update_cursor.rowcount == 0:
                     msg = f"User '{username}' not found or is an admin user"
@@ -5065,9 +5108,16 @@ async def create_user(
             else:
                 await db.execute(
                     "INSERT INTO users"
-                    " (username, api_key_hash, role, status, can_view_reports)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (username, key_hash, role, status, reports_flag),
+                    " (username, api_key_hash, role, status, can_view_reports, can_use_server_providers)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        username,
+                        key_hash,
+                        role,
+                        status,
+                        reports_flag,
+                        int(bool(can_use_server_providers)),
+                    ),
                 )
             await db.commit()
         except ValueError:
@@ -5129,6 +5179,24 @@ async def set_user_status(username: str, status: str) -> bool:
         return cursor.rowcount > 0
 
 
+async def approve_pending_user(
+    username: str, can_use_server_providers: bool = False
+) -> bool:
+    """Atomically activate a pending non-admin user and set their server grant.
+
+    Return False without changing the grant if the user is no longer pending.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET status = 'active', can_use_server_providers = ? "
+            "WHERE username = ? AND status = 'pending' AND role != 'admin'",
+            (int(can_use_server_providers), username),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def get_user_status(username: str) -> str | None:
     """Get user status. Returns None if user not found."""
     username = _normalize_username(username)
@@ -5147,7 +5215,7 @@ async def list_pending_users() -> list[dict[str, Any]]:
     """List users with pending status."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, status, can_view_reports, created_at, last_seen "
+            "SELECT id, username, role, status, can_view_reports, can_use_server_providers, created_at, last_seen "
             "FROM users WHERE status = 'pending' AND role != 'admin' ORDER BY created_at DESC"
         )
         return [_user_row_to_dict(row) for row in await cursor.fetchall()]

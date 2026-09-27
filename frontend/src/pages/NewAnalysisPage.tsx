@@ -18,9 +18,11 @@ import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 import { Send, Upload, Loader2 } from 'lucide-react'
 import type { DefaultServerSettings } from '@/types'
 import { normalizeProvider } from '@/lib/aiProviders'
+import { useAuth } from '@/lib/auth'
 
 export function NewAnalysisPage() {
   const navigate = useNavigate()
+  const { canUseServerProviders } = useAuth()
 
   // Input mode
   const [inputMode, setInputMode] = useState<'jenkins' | 'prow' | 'paste' | 'upload'>('jenkins')
@@ -157,8 +159,8 @@ export function NewAnalysisPage() {
       ? PROW_JOB_NAME_RE.test(prowJobName.trim()) && PROW_BUILD_ID_RE.test(prowBuildId.trim())
       : rawXml.trim() !== ''
 
-  const aiUnavailable = !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, forceServerCredentials) ||
-    (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, forceServerCredentials))))
+  const aiUnavailable = !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, forceServerCredentials, canUseServerProviders) ||
+    (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, forceServerCredentials, canUseServerProviders))))
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')
@@ -183,7 +185,7 @@ export function NewAnalysisPage() {
   }, [])
 
   const handleSubmit = useCallback(async () => {
-    if (!canSubmit) return
+    if (!canSubmit || (forceServerCredentials && !canUseServerProviders)) return
     if (aiUnavailable) {
       setError('Select an available AI provider and model.')
       return
@@ -193,7 +195,7 @@ export function NewAnalysisPage() {
     try {
       const commonFields: Record<string, unknown> = {
         // Always include user-entered fields
-        force_server_credentials: forceServerCredentials,
+        force_server_credentials: forceServerCredentials && canUseServerProviders,
         ...(aiProvider && { ai_provider: aiProvider }),
         ...(aiModel && { ai_model: aiModel }),
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
@@ -274,6 +276,7 @@ export function NewAnalysisPage() {
     aiProvider,
     aiModel,
     forceServerCredentials,
+    canUseServerProviders,
     aiUnavailable,
     tags,
     waitForCompletion,
@@ -555,7 +558,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={forceServerCredentials} />
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={forceServerCredentials && canUseServerProviders} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -570,12 +573,13 @@ export function NewAnalysisPage() {
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={forceServerCredentials} />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={forceServerCredentials && canUseServerProviders} />
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Use server credentials</span>
-              <Toggle checked={forceServerCredentials} onChange={setForceServerCredentials} label="Use server credentials" />
+              <Toggle checked={forceServerCredentials && canUseServerProviders} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
             </div>
+            {!canUseServerProviders && <p className="text-xs text-text-tertiary">Server credentials are locked. Ask an admin for access, or use your own AI key.</p>}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea
@@ -608,7 +612,7 @@ export function NewAnalysisPage() {
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
                 strict
-                forceServer={forceServerCredentials}
+                forceServer={forceServerCredentials && canUseServerProviders}
               />
             )}
           </Section>
@@ -759,6 +763,7 @@ export function NewAnalysisPage() {
         <div className="flex items-center justify-between border-t border-border-default px-6 py-4">
           <div>
             {error && <p className="text-signal-red text-xs">{error}</p>}
+            {aiUnavailable && canSubmit && <p role="alert" className="text-signal-amber text-xs">Select an available AI provider and model. Add your own key or ask an admin for server access.</p>}
           </div>
           <div className="flex items-center gap-3">
             <Button variant="outline" onClick={() => navigate('/')} disabled={submitting}>

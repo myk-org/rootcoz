@@ -1453,6 +1453,13 @@ class AdminCreateUserRequest(BaseModel):
     username: str
     role: str = "reviewer"
     can_view_reports: CanViewReportsFlag = False
+    can_use_server_providers: Annotated[bool, Strict()] = False
+
+
+class SetCanUseServerProvidersRequest(BaseModel):
+    """Admin grant for server AI credentials."""
+
+    can_use_server_providers: Annotated[bool, Strict()]
 
 
 class SetCanViewReportsRequest(BaseModel):

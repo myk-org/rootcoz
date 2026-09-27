@@ -954,9 +954,12 @@ class TestAnalyzeProwEndpoint:
         assert response.status_code == 422
 
     async def test_prow_gcs_errors_produce_failed_not_completed(
-        self, temp_db_path: Path
+        self, temp_db_path: Path, monkeypatch
     ) -> None:
         """When all GCS fetches error, the result must be 'failed', not 'completed'."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
         from rootcoz.main import _process_ci_source_analysis
         from rootcoz.models import UnifiedAnalyzeRequest
         from rootcoz.sources.base import CISourceResult
@@ -1011,6 +1014,7 @@ class TestAnalyzeProwEndpoint:
                 resolved_tests_repo_token="",
                 additional_repos_list=[],
                 base_url="",
+                username="admin",
             )
 
             row = await storage.get_result(job_id)
@@ -4211,8 +4215,11 @@ class TestReconstructFromParams:
 class TestResumeWaitingJobs:
     """Tests for _resume_waiting_jobs helper."""
 
-    async def test_resumes_valid_waiting_job(self, mock_settings) -> None:
+    async def test_resumes_valid_waiting_job(self, mock_settings, monkeypatch) -> None:
         """A waiting job with valid request_params spawns a background task."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
         from rootcoz.config import get_settings
         from rootcoz.main import _resume_waiting_jobs
         from rootcoz.models import AnalyzeRequest
@@ -4229,6 +4236,10 @@ class TestResumeWaitingJobs:
             max_wait_minutes=0,
         )
         request_params = _build_jenkins_request_params(body_in, settings, "gemini", "m")
+        request_params["submitted_by"] = "admin"
+        monkeypatch.setattr(
+            storage, "get_user_ai_credentials", AsyncMock(return_value={})
+        )
         waiting_jobs = [
             {
                 "job_id": "w-1",
@@ -4319,9 +4330,12 @@ class TestLifespanResumesWaitingJobs:
         conn.close()
 
     def test_lifespan_resumes_waiting_jobs(
-        self, mock_settings, temp_db_path: Path
+        self, mock_settings, temp_db_path: Path, monkeypatch
     ) -> None:
         """Waiting jobs are resumed (not failed) when the app starts."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
         import json
 
         from rootcoz.config import get_settings
@@ -4338,6 +4352,7 @@ class TestLifespanResumesWaitingJobs:
             max_wait_minutes=0,
         )
         request_params = _build_jenkins_request_params(body_in, settings, "gemini", "m")
+        request_params["submitted_by"] = "admin"
         result_data = json.dumps(
             {
                 "job_name": "my-job",
@@ -4574,8 +4589,19 @@ class TestPeerAnalysisParams:
         assert merged.ai_call_timeout == 99
 
     @pytest.mark.asyncio
-    async def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
+    async def test_resolve_ai_config_allow_defer_respects_passed_settings(
+        self, monkeypatch
+    ) -> None:
         """allow_defer uses the passed Settings, not global get_settings()."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
+        monkeypatch.setattr(
+            storage, "get_user_ai_credentials", AsyncMock(return_value={})
+        )
+        from rootcoz import ai_client
+
+        token = ai_client.ai_username.set("admin")
         from fastapi import HTTPException
 
         from rootcoz.main import _resolve_ai_config_allow_defer
@@ -4603,6 +4629,7 @@ class TestPeerAnalysisParams:
             provider, model = await _resolve_ai_config_allow_defer(body, configured)
         assert provider == "gemini"
         assert model == "flash"
+        ai_client.ai_username.reset(token)
 
     @pytest.mark.asyncio
     async def test_validate_catalog_pair_returns_503_when_uncached_refresh_fails(

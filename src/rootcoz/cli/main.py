@@ -2969,6 +2969,7 @@ def admin_users_list(
                     "username",
                     "role",
                     "can_view_reports",
+                    "can_use_server_providers",
                     "created_at",
                     "last_seen",
                 ],
@@ -2976,6 +2977,7 @@ def admin_users_list(
                     "created_at": "CREATED",
                     "last_seen": "LAST SEEN",
                     "can_view_reports": "REPORTS",
+                    "can_use_server_providers": "SERVER AI",
                 },
                 as_json=False,
             )
@@ -2994,6 +2996,11 @@ def admin_users_create(
         "--can-view-reports/--no-can-view-reports",
         help="Grant access to /api/reports/* (orthogonal to role).",
     ),
+    can_use_server_providers: bool = typer.Option(
+        False,
+        "--can-use-server-providers/--no-can-use-server-providers",
+        help="Grant access to server AI credentials.",
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Create a new user with the specified role. The API key is shown once \u2014 save it."""
@@ -3006,7 +3013,10 @@ def admin_users_create(
     data = _run_client_command(
         json_output,
         lambda c: c.admin_create_user(
-            username, role=role, can_view_reports=can_view_reports
+            username,
+            role=role,
+            can_view_reports=can_view_reports,
+            can_use_server_providers=can_use_server_providers,
         ),
         emit_output=False,
     )
@@ -3107,6 +3117,24 @@ def admin_users_set_can_view_reports(
         )
 
 
+@admin_users_app.command("set-can-use-server-providers")
+def admin_users_set_can_use_server_providers(
+    username: str = typer.Argument(...),
+    value: bool = typer.Argument(..., help="true or false"),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Grant or revoke server AI credentials for a managed user."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_set_can_use_server_providers(username, value),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(
+            f"Set can_use_server_providers={data.get('can_use_server_providers', value)} for '{username}'"
+        )
+
+
 @admin_users_app.command("pending")
 def admin_users_pending(
     json_output: bool = _JSON_OPTION,
@@ -3133,12 +3161,15 @@ def admin_users_pending(
 @admin_users_app.command("approve")
 def admin_users_approve(
     username: str = typer.Argument(..., help="Username to approve."),
+    can_use_server_providers: bool = typer.Option(False, "--can-use-server-providers"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Approve a pending user registration."""
     data = _run_client_command(
         json_output,
-        lambda c: c.approve_user(username),
+        lambda c: c.approve_user(
+            username, can_use_server_providers=can_use_server_providers
+        ),
         emit_output=False,
     )
     if not _state.get("json", False):

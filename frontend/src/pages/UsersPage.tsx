@@ -65,6 +65,10 @@ export function UsersPage() {
   const [newUsername, setNewUsername] = useState('')
   const [newUserRole, setNewUserRole] = useState<UserRole>('reviewer')
   const [newUserCanViewReports, setNewUserCanViewReports] = useState(false)
+  const [newUserServerGrant, setNewUserServerGrant] = useState(false)
+  const [approveTarget, setApproveTarget] = useState<string | null>(null)
+  const [approveServerGrant, setApproveServerGrant] = useState(false)
+  const [grantToggleInProgress, setGrantToggleInProgress] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [createdUser, setCreatedUser] = useState<CreateUserResponse | null>(null)
@@ -116,6 +120,7 @@ export function UsersPage() {
         role: newUserRole,
         // Admins always have effective reports access; ignore leftover switch state
         can_view_reports: newUserRole === 'admin' ? false : newUserCanViewReports,
+        can_use_server_providers: newUserServerGrant,
       }
       const result = await api.post<CreateUserResponse>('/api/admin/users/create', payload)
       setCreatedUser(result)
@@ -176,6 +181,7 @@ export function UsersPage() {
     setNewUsername('')
     setNewUserRole('reviewer')
     setNewUserCanViewReports(false)
+    setNewUserServerGrant(false)
     setCreateError(null)
     setCreatedUser(null)
   }
@@ -216,11 +222,15 @@ export function UsersPage() {
     setActionError(null)
   }
 
-  async function handleApprove(username: string) {
+  async function handleApprove() {
+    if (!approveTarget) return
+    const username = approveTarget
     setActionInProgress(username)
     setActionError(null)
     try {
-      await api.post(`/api/admin/users/${encodeURIComponent(username)}/approve`)
+      await api.post(`/api/admin/users/${encodeURIComponent(username)}/approve`, { can_use_server_providers: approveServerGrant })
+      setApproveTarget(null)
+      setApproveServerGrant(false)
       fetchUsers()
     } catch (err) {
       if (err instanceof ApiError) {
@@ -249,6 +259,20 @@ export function UsersPage() {
       }
     } finally {
       setActionInProgress(null)
+    }
+  }
+
+  async function handleToggleServerGrant(username: string, granted: boolean) {
+    setGrantToggleInProgress(username)
+    setActionError(null)
+    try {
+      await api.put(`/api/admin/users/${encodeURIComponent(username)}/can-use-server-providers`, { can_use_server_providers: granted })
+      setUsers((prev) => prev.map((u) => u.username === username ? { ...u, can_use_server_providers: granted } : u))
+      if (username === currentUser) await refreshAuth()
+    } catch (err) {
+      setActionError(err instanceof ApiError ? (err.body as { detail?: string })?.detail ?? `Failed to update server access (${err.status})` : 'Failed to update server access')
+    } finally {
+      setGrantToggleInProgress(null)
     }
   }
 
@@ -339,6 +363,7 @@ export function UsersPage() {
               <TableHead>Status</TableHead>
               <TableHead>Role</TableHead>
               <TableHead>View reports</TableHead>
+              <TableHead>Server providers</TableHead>
               <TableHead>Created</TableHead>
               <TableHead>Last Seen</TableHead>
               <TableHead className="w-40 text-right">Actions</TableHead>
@@ -411,6 +436,9 @@ export function UsersPage() {
                     />
                   )}
                 </TableCell>
+                <TableCell>
+                  <Switch checked={!!user.can_use_server_providers} disabled={grantToggleInProgress === user.username || user.status !== 'active'} onCheckedChange={(checked) => handleToggleServerGrant(user.username, checked)} aria-label={`Allow server providers for ${user.username}`} />
+                </TableCell>
                 <TableCell className="font-mono text-xs text-text-tertiary">
                   {formatTimestamp(user.created_at)}
                 </TableCell>
@@ -432,7 +460,7 @@ export function UsersPage() {
                               aria-label={`Approve ${user.username}`}
                               className="h-7 w-7"
                               disabled={actionInProgress === user.username}
-                              onClick={() => handleApprove(user.username)}
+                              onClick={() => { setApproveTarget(user.username); setApproveServerGrant(!!user.can_use_server_providers) }}
                             >
                               <CheckCircle className="h-3.5 w-3.5 text-signal-green" />
                             </Button>
@@ -581,6 +609,10 @@ export function UsersPage() {
                   </SelectContent>
                 </Select>
               </div>
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="new-user-server-grant" className="text-sm text-text-secondary">Allow server providers</label>
+                <Switch id="new-user-server-grant" checked={newUserServerGrant} onCheckedChange={setNewUserServerGrant} aria-label="Allow server providers" />
+              </div>
               {newUserRole !== 'admin' && (
                 <div className="flex items-center justify-between gap-3">
                   <label htmlFor="new-user-can-view-reports" className="text-sm text-text-secondary">
@@ -609,6 +641,23 @@ export function UsersPage() {
                 </Button>
               </>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={approveTarget !== null} onOpenChange={(open) => { if (!open && !actionInProgress) { setApproveTarget(null); setActionError(null) } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Approve {approveTarget}</DialogTitle>
+            <DialogDescription>Choose whether this user can use server AI credentials. Without access, they can use their own key.</DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center justify-between gap-3 py-3">
+            <label htmlFor="approve-server-grant" className="text-sm text-text-secondary">Allow server providers</label>
+            <Switch id="approve-server-grant" checked={approveServerGrant} onCheckedChange={setApproveServerGrant} aria-label="Allow server providers on approval" />
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setApproveTarget(null)} disabled={!!actionInProgress}>Cancel</Button>
+            <Button onClick={handleApprove} disabled={!!actionInProgress}>{actionInProgress ? 'Approving...' : 'Approve user'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

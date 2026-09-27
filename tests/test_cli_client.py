@@ -1791,6 +1791,7 @@ class TestRootCozClientAdminUsers:
             assert body["username"] == "newadmin"
             assert body["role"] == "admin"
             assert body["can_view_reports"] is False
+            assert body["can_use_server_providers"] is False
             return httpx.Response(
                 200,
                 json={
@@ -1840,6 +1841,27 @@ class TestRootCozClientAdminUsers:
         client = _make_client(handler)
         result = client.admin_set_can_view_reports("alice", True)
         assert result["can_view_reports"] is True
+
+    def test_admin_set_server_provider_grant_and_approve(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body == {"can_use_server_providers": True}
+            assert request.url.path in (
+                "/api/admin/users/alice/can-use-server-providers",
+                "/api/admin/users/alice/approve",
+            )
+            assert request.method == (
+                "PUT"
+                if request.url.path.endswith("can-use-server-providers")
+                else "POST"
+            )
+            return httpx.Response(200, json={"can_use_server_providers": True})
+
+        client = _make_client(handler)
+        assert client.admin_set_can_use_server_providers("alice", True)[
+            "can_use_server_providers"
+        ]
+        assert client.approve_user("alice", True)["can_use_server_providers"]
 
     def test_admin_create_user_reviewer(self):
         def handler(request):

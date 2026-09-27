@@ -3991,7 +3991,35 @@ class TestAdminUsersCreateCommand:
         assert "not-a-real-key" in result.output
         assert "Save this API key" in result.output
         mock_client.admin_create_user.assert_called_once_with(
-            "newadmin", role="admin", can_view_reports=False
+            "newadmin",
+            role="admin",
+            can_view_reports=False,
+            can_use_server_providers=False,
+        )
+
+    def test_admin_users_create_with_server_grant(self, mock_client):
+        mock_client.admin_create_user.return_value = {
+            "username": "alice",
+            "api_key": "key",  # pragma: allowlist secret
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "users",
+                "create",
+                "alice",
+                "--role",
+                "operator",
+                "--can-use-server-providers",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.admin_create_user.assert_called_once_with(
+            "alice",
+            role="operator",
+            can_view_reports=False,
+            can_use_server_providers=True,
         )
 
     def test_admin_users_create_with_can_view_reports(self, mock_client):
@@ -4015,7 +4043,10 @@ class TestAdminUsersCreateCommand:
         )
         assert result.exit_code == 0
         mock_client.admin_create_user.assert_called_once_with(
-            "ruser", role="reviewer", can_view_reports=True
+            "ruser",
+            role="reviewer",
+            can_view_reports=True,
+            can_use_server_providers=False,
         )
 
     def test_admin_users_create_reviewer(self, mock_client):
@@ -4031,7 +4062,10 @@ class TestAdminUsersCreateCommand:
         assert "Created reviewer user: newuser" in result.output
         assert "Save this API key" not in result.output
         mock_client.admin_create_user.assert_called_once_with(
-            "newuser", role="reviewer", can_view_reports=False
+            "newuser",
+            role="reviewer",
+            can_view_reports=False,
+            can_use_server_providers=False,
         )
 
     def test_admin_users_create_invalid_role(self, mock_client):
@@ -4175,6 +4209,20 @@ class TestAdminUsersChangeRole:
         assert result.exit_code == 0
         output = json.loads(result.output)
         assert output["role"] == "admin"
+
+
+def test_admin_users_set_server_provider_grant(mock_client):
+    mock_client.admin_set_can_use_server_providers.return_value = {
+        "username": "alice",
+        "can_use_server_providers": True,
+    }
+    result = runner.invoke(
+        app, ["admin", "users", "set-can-use-server-providers", "alice", "true"]
+    )
+    assert result.exit_code == 0
+    mock_client.admin_set_can_use_server_providers.assert_called_once_with(
+        "alice", True
+    )
 
 
 class TestAdminUsersSetCanViewReports:
