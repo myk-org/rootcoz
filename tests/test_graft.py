@@ -182,6 +182,86 @@ def test_failed_build_retry_and_marker(tmp_path, monkeypatch):
     assert graft.roots_needing_index(workspace, roots) == roots
 
 
+def test_oversized_graph_followup_backoff_and_source_change(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repo = workspace / "code"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    source = repo / "a.py"
+    source.write_text("old")
+    roots = {"code": repo}
+    builds = []
+
+    def fake_run(argv, **kwargs):
+        builds.append(argv)
+        (graft._root(workspace) / "code" / "graph").mkdir()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", fake_run)
+    assert graft.index_repositories(workspace, roots)["code"]["status"] == "indexed"
+    destination = graft._root(workspace) / "code"
+    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", graft._disk_size(destination) + 10)
+    assert graft.roots_needing_index(workspace, roots) == {}
+    assert graft.index_repositories(workspace, roots)["code"]["status"] == "unchanged"
+    assert len(builds) == 1
+
+    (destination / "graph" / "extra").write_bytes(b"x" * 20)
+    assert graft.query_repo(workspace, "code", "repo_map", {})["status"] == "failed"
+    assert graft.roots_needing_index(workspace, roots) == roots
+    assert graft.index_repositories(workspace, roots)["code"]["status"] == "indexed"
+    assert len(builds) == 2
+    assert graft.roots_needing_index(workspace, roots) == {}
+    source.write_text("new")
+    assert graft.roots_needing_index(workspace, roots) == roots
+    assert graft.index_repositories(workspace, roots)["code"]["status"] == "indexed"
+    assert len(builds) == 3
+
+
+def test_oversized_build_marker_bounds_followup_retries(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repo = workspace / "code"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    source = repo / "a.py"
+    source.write_text("old")
+    roots = {"code": repo}
+    builds = []
+
+    def oversized_run(argv, **kwargs):
+        builds.append(argv)
+        graph = graft._root(workspace) / "code" / "graph"
+        graph.mkdir()
+        (graph / "large").write_bytes(b"x" * 1024)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", oversized_run)
+    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 500)
+    assert graft.index_repositories(workspace, roots)["code"] == {
+        "status": "failed",
+        "reason": "_Limit",
+        "truncated": True,
+    }
+    destination = graft._root(workspace) / "code"
+    assert json.loads((destination / "failed.json").read_text())[
+        "manifest"
+    ] == graft._sources(repo)
+    assert not (destination / "graph").exists()
+    assert graft.indexed_roots(workspace) == {}
+    assert graft.roots_needing_index(workspace, roots) == {}
+    assert len(builds) == 1
+
+    source.write_text("new")
+    assert graft.roots_needing_index(workspace, roots) == roots
+    assert graft.index_repositories(workspace, roots)["code"]["status"] == "failed"
+    assert graft.roots_needing_index(workspace, roots) == {}
+    assert len(builds) == 2
+    marker = destination / "failed.json"
+    failed = json.loads(marker.read_text())
+    failed["retry_after"] = 0
+    marker.write_text(json.dumps(failed))
+    assert graft.roots_needing_index(workspace, roots) == roots
+
+
 def test_failed_source_scan_backoff_and_new_repo(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     repo = workspace / "code"

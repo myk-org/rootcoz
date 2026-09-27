@@ -642,7 +642,10 @@ def roots_needing_index(
                 failed = None
             if manifest is not None:
                 try:
-                    if _sources(repo) != manifest:
+                    if (
+                        _sources(repo) != manifest
+                        or _disk_size(root / name) > MAX_GRAPH_BYTES
+                    ):
                         result[name] = repo
                 except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
                     result[name] = repo  # Never expose a stale graph.
