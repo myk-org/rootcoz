@@ -733,6 +733,7 @@ export function ServerSettingsPage() {
                                 notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
                               >
                                 <ProviderSelect
+                                  showCredentialSources
                                   value={aiProviderValue}
                                   onChange={(v) => {
                                     setAiProviderValue(v)

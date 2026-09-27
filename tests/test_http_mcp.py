@@ -602,9 +602,16 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
         inode = path.stat().st_ino
         waiting = threading.Event()
         acquired = threading.Event()
+        real_flock_until = http_mcp_mod._flock_until
+
+        def signal_waiter(fd, deadline, *, shared=False):
+            if not shared and threading.current_thread() is waiter:
+                waiting.set()  # The waiter has opened the inode under the shared gate.
+            real_flock_until(fd, deadline, shared=shared)
+
+        monkeypatch.setattr(http_mcp_mod, "_flock_until", signal_waiter)
 
         def wait_for_lock() -> None:
-            waiting.set()
             with http_mcp_mod._workspace_install_lock(workspace):
                 assert path.stat().st_ino == inode
                 acquired.set()
