@@ -1170,14 +1170,24 @@ async def test_index_chat_repositories_discovers_and_logs_off_loop(
     seen = []
 
     def index(workspace, roots):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
         seen.append((workspace, roots))
         return {"repo": {"status": "ready"}}
 
+    original_discover = graft_http.cloned_graph_roots
+
+    def discover(workspace):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        return original_discover(workspace)
+
+    monkeypatch.setattr(graft_http, "cloned_graph_roots", discover)
     monkeypatch.setattr(graft, "index_repositories", index)
     monkeypatch.setattr(graft, "log_index_outcomes", seen.append)
     await main_mod._index_chat_repositories(tmp_path)
     assert seen == [
-        (tmp_path, graft_http.cloned_graph_roots(tmp_path)),
+        (tmp_path, original_discover(tmp_path)),
         {"repo": {"status": "ready"}},
     ]
 
@@ -1285,9 +1295,17 @@ async def test_followup_indexes_only_new_or_missing_graph(
     import subprocess
 
     from rootcoz import main as main_mod
-    from rootcoz.engine import graft
+    from rootcoz.engine import graft, graft_http
     from rootcoz.engine.chat import clone_chat_repos
 
+    discover = graft_http.cloned_graph_roots
+
+    def off_loop_discover(workspace):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        return discover(workspace)
+
+    monkeypatch.setattr(graft_http, "cloned_graph_roots", off_loop_discover)
     workspace = tmp_path / "chat-workspace"
     workspace.mkdir()
     repo = workspace / "repo"

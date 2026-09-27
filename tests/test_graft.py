@@ -149,6 +149,72 @@ def test_dedup_and_source_invalidation(tmp_path, monkeypatch):
     assert graft.query_repo(workspace, "code", "repo_map", {})["status"] == "stale"
 
 
+def test_failed_build_retry_and_marker(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repo = workspace / "code"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    source = repo / "a.py"
+    source.write_text("old")
+    builds = []
+
+    def failing_run(argv, **kwargs):
+        builds.append(argv)
+        raise subprocess.CalledProcessError(1, argv)
+
+    monkeypatch.setattr(graft, "_run", failing_run)
+    roots = {"code": repo}
+    assert graft.index_repositories(workspace, roots)["code"]["status"] == "failed"
+    marker = graft._root(workspace) / "code" / "failed.json"
+    failed = json.loads(marker.read_text())
+    assert failed["manifest"] == graft._sources(repo)
+    assert failed["retry_after"] > time.time()
+    assert not (marker.parent / "graph").exists()
+    assert graft.roots_needing_index(workspace, roots) == {}
+    assert len(builds) == 1
+
+    source.write_text("new")
+    assert graft.roots_needing_index(workspace, roots) == roots
+    assert graft.index_repositories(workspace, roots)["code"]["status"] == "failed"
+    assert len(builds) == 2
+    assert graft.roots_needing_index(workspace, roots) == {}
+    marker.unlink()
+    assert graft.roots_needing_index(workspace, roots) == roots
+
+
+def test_failed_source_scan_backoff_and_new_repo(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repo = workspace / "code"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    source = repo / "a.py"
+    source.write_text("old")
+    roots = {"code": repo}
+    monkeypatch.setattr(graft, "MAX_BYTES", 1)
+    outcome = graft.index_repositories(workspace, roots)["code"]
+    assert outcome == {"status": "failed", "reason": "_Limit", "truncated": True}
+    marker = graft._root(workspace) / "code" / "failed.json"
+    assert json.loads(marker.read_text())["stamp"] == graft._source_stamp(repo)
+    assert graft.roots_needing_index(workspace, roots) == {}
+    source.write_text("changed")
+    assert graft.roots_needing_index(workspace, roots) == roots
+    assert graft.index_repositories(workspace, roots)["code"] == outcome
+    assert graft.roots_needing_index(workspace, roots) == {}
+    failed = json.loads(marker.read_text())
+    failed["retry_after"] = 0
+    marker.write_text(json.dumps(failed))
+    assert graft.roots_needing_index(workspace, roots) == roots
+
+    other = workspace / "other"
+    other.mkdir()
+    git(other, "init")
+    (other / "a.py").write_text("new")
+    assert graft.roots_needing_index(workspace, {**roots, "other": other}) == {
+        "code": repo,
+        "other": other,
+    }
+
+
 def test_parallel_builds_and_isolation(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     repos = {}
@@ -624,4 +690,6 @@ def test_over_limit_cleans_snapshot(tmp_path, monkeypatch):
         graft.index_repositories(workspace, {"code": repo})["code"]["status"]
         == "failed"
     )
-    assert not (graft._root(workspace) / "code").exists()
+    destination = graft._root(workspace) / "code"
+    assert sorted(p.name for p in destination.iterdir()) == ["failed.json"]
+    assert json.loads((destination / "failed.json").read_text())["stamp"]

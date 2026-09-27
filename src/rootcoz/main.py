@@ -11170,13 +11170,9 @@ async def _index_chat_repositories(
     from rootcoz.engine.graft import index_repositories, log_index_outcomes
     from rootcoz.engine.graft_http import cloned_graph_roots
 
-    log_index_outcomes(
-        await asyncio.to_thread(
-            index_repositories,
-            workspace,
-            repos if repos is not None else cloned_graph_roots(workspace),
-        )
-    )
+    if repos is None:
+        repos = await asyncio.to_thread(cloned_graph_roots, workspace)
+    log_index_outcomes(await asyncio.to_thread(index_repositories, workspace, repos))
 
 
 async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]:
@@ -11827,10 +11823,11 @@ async def _process_chat_message(
                         from rootcoz.engine.graft import roots_needing_index
                         from rootcoz.engine.graft_http import cloned_graph_roots
 
+                        cloned_roots = await asyncio.to_thread(
+                            cloned_graph_roots, workspace
+                        )
                         stale_roots = await asyncio.to_thread(
-                            roots_needing_index,
-                            workspace,
-                            cloned_graph_roots(workspace),
+                            roots_needing_index, workspace, cloned_roots
                         )
                         if stale_roots:
                             await _index_chat_repositories(workspace, stale_roots)

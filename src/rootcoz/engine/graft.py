@@ -22,6 +22,7 @@ MAX_FILES = 2000
 MAX_BYTES = 20 * 1024 * 1024
 MAX_SECONDS = 30
 BUILD_SECONDS = 120
+FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
 MAX_REPOSITORIES = 10  # includes the primary test repository
 MAX_OUTPUT = 1024 * 1024
@@ -193,6 +194,28 @@ def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
     return result
 
 
+def _source_stamp(repo: Path) -> str:
+    """Cheap bounded change signal for sources too large to hash normally."""
+    listing = _bounded(
+        ["git", "ls-files", "-co", "--exclude-standard", "-z"],
+        cwd=repo,
+        timeout=MAX_SECONDS,
+    )
+    digest = hashlib.sha256(listing)
+    # ponytail: for >MAX_FILES, content-only edits beyond the cap retry after backoff.
+    for raw in islice(listing.split(b"\0"), MAX_FILES):
+        if not raw:
+            continue
+        try:
+            source = _safe_file(repo, _relative(os.fsdecode(raw)))
+            if source is not None:
+                info = source.stat()
+                digest.update(f"{info.st_size}:{info.st_mtime_ns}".encode())
+        except (OSError, ValueError):
+            continue
+    return digest.hexdigest()
+
+
 def _valid_repo(workspace: Path, name: str, repo: Path) -> bool:
     return (
         bool(name)
@@ -239,6 +262,7 @@ def _index_one(
     if not _valid_repo(workspace, name, repo):
         return {"status": "skipped", "reason": "invalid repository"}
     destination = root / name
+    manifest = None
     try:
         if root.is_symlink() or (root.exists() and not root.is_dir()):
             return {"status": "failed", "reason": "invalid graph root"}
@@ -299,6 +323,23 @@ def _index_one(
     except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
         if not destination.is_symlink():
             shutil.rmtree(destination, ignore_errors=True)
+            try:
+                stamp = _source_stamp(repo) if manifest is None else None
+            except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                stamp = None  # Oversized listings still get a bounded retry.
+            try:
+                destination.mkdir(parents=True, exist_ok=True)
+                (destination / "failed.json").write_text(
+                    json.dumps(
+                        {
+                            "manifest": manifest,
+                            "stamp": stamp,
+                            "retry_after": time.time() + FAILED_RETRY_SECONDS,
+                        }
+                    )
+                )
+            except OSError:
+                pass  # Failure must not mask the original indexing outcome.
         return {
             "status": "failed",
             "reason": type(exc).__name__,
@@ -588,12 +629,40 @@ def roots_needing_index(
                 else None
             )
             try:
-                if manifest is None or _sources(repo) != manifest:
-                    result[name] = repo
-            except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
-                result[name] = (
-                    repo  # Let indexing report the failure; never expose a stale graph.
+                marker = root / name / "failed.json"
+                failed = (
+                    json.loads(marker.read_text())
+                    if root.is_dir()
+                    and not root.is_symlink()
+                    and not marker.parent.is_symlink()
+                    and not marker.is_symlink()
+                    else None
                 )
+            except (OSError, ValueError):
+                failed = None
+            if manifest is not None:
+                try:
+                    if _sources(repo) != manifest:
+                        result[name] = repo
+                except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                    result[name] = repo  # Never expose a stale graph.
+            elif (
+                not isinstance(failed, dict)
+                or not isinstance(failed.get("retry_after"), (int, float))
+                or time.time() >= failed["retry_after"]
+            ):
+                result[name] = repo
+            else:
+                try:
+                    if (
+                        _sources(repo) != failed["manifest"]
+                        if failed.get("manifest") is not None
+                        else failed.get("stamp") is not None
+                        and _source_stamp(repo) != failed["stamp"]
+                    ):
+                        result[name] = repo
+                except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                    pass  # Retry an unreadable source after the bounded backoff.
         return result
 
 
