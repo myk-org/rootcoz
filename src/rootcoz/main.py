@@ -11250,7 +11250,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         _raise_if_chat_job_deleted(job_id)
         from rootcoz.engine.chat import graph_http_tools
 
-        custom_tools.extend(graph_http_tools(workspace))
+        custom_tools.extend(graph_http_tools(workspace, job_id))
         session_id = await init_chat_session(
             job_id=job_id,
             job_name=result_data.get("job_name", "unknown"),
@@ -11852,7 +11852,7 @@ async def _process_chat_message(
 
                         from rootcoz.engine.chat import graph_http_tools
 
-                        custom_tools.extend(graph_http_tools(workspace))
+                        custom_tools.extend(graph_http_tools(workspace, job_id))
                         await install_http_tools_mcp_best_effort_async(
                             workspace, custom_tools
                         )

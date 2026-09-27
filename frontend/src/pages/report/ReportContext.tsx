@@ -5,6 +5,7 @@ import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, Review
 
 interface ReportState {
   result: AnalysisResult | null
+  graftEstimatedTokensSaved: number
   createdAt: string
   completedAt: string
   analysisStartedAt: string
@@ -35,7 +36,7 @@ interface ReportState {
 }
 
 type ReportAction =
-  | { type: 'SET_RESULT'; payload: { result: AnalysisResult; createdAt: string; completedAt: string; analysisStartedAt: string; reanalyzedFromJobId?: string; originJobName?: string } }
+  | { type: 'SET_RESULT'; payload: { result: AnalysisResult; createdAt: string; completedAt: string; analysisStartedAt: string; graftEstimatedTokensSaved?: number; reanalyzedFromJobId?: string; originJobName?: string } }
   | { type: 'SET_COMMENTS_AND_REVIEWS'; payload: CommentsAndReviews }
   | { type: 'ADD_COMMENT'; payload: Comment }
   | { type: 'REMOVE_COMMENT'; payload: number }
@@ -78,6 +79,7 @@ type ReportAction =
 
 const initialState: ReportState = {
   result: null,
+  graftEstimatedTokensSaved: 0,
   createdAt: '',
   completedAt: '',
   analysisStartedAt: '',
@@ -134,7 +136,7 @@ function applyOverrideToResult(
 function reportReducer(state: ReportState, action: ReportAction): ReportState {
   switch (action.type) {
     case 'SET_RESULT':
-      return { ...state, result: action.payload.result, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', loading: false, error: '' }
+      return { ...state, result: action.payload.result, graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', loading: false, error: '' }
     case 'SET_COMMENTS_AND_REVIEWS':
       return { ...state, comments: action.payload.comments, reviews: action.payload.reviews }
     case 'ADD_COMMENT':

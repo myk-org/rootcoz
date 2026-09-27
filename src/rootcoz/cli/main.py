@@ -776,6 +776,7 @@ def results_show(
             "status": data.get("status", ""),
             "jenkins_url": data.get("jenkins_url", ""),
             "created_at": data.get("created_at", ""),
+            "graft_estimated_tokens_saved": data.get("graft_estimated_tokens_saved", 0),
         }
         result = data.get("result")
         if isinstance(result, dict):
@@ -793,6 +794,7 @@ def results_show(
                 "children",
                 "ai_provider",
                 "created_at",
+                "graft_estimated_tokens_saved",
             ],
             labels={"ai_provider": "AI PROVIDER", "created_at": "CREATED"},
             as_json=False,

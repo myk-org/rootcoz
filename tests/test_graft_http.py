@@ -96,6 +96,325 @@ def test_graph_bridge(tmp_path: Path, monkeypatch) -> None:
         unregister_workspace(other)
 
 
+def test_estimate_is_job_scoped_and_counts_each_successful_retrieval(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rootcoz import storage
+    from rootcoz.engine import graft
+
+    db = tmp_path / "results.db"
+    monkeypatch.setattr(storage, "DB_PATH", db)
+    asyncio.run(storage.init_db())
+    for job in ("job-a", "job-b"):
+        asyncio.run(storage.save_result(job, "https://example.test", "pending"))
+
+    def query(workspace, scope, name, params, **kwargs):
+        if params.get("query") == "error":
+            return {
+                "status": "failed",
+                "result": {"saved": {"files": 1, "baselineChars": 4000}},
+            }
+        if params.get("query") == "missing":
+            return {"status": "ok", "result": {"hits": []}}
+        if params.get("query") == "zero":
+            return {
+                "status": "ok",
+                "result": {"saved": {"files": 1, "baselineChars": 1}},
+            }
+        return {
+            "status": "ok",
+            "result": {"saved": {"files": 1, "baselineChars": 4000}, "hits": []},
+        }
+
+    monkeypatch.setattr(graft, "query_repo", query)
+    workspaces = []
+    try:
+        for job in ("job-a", "job-b"):
+            ws = tmp_path / job
+            repo = ws / "source"
+            repo.mkdir(parents=True)
+            tools = register_workspace(ws, {"source": repo}, job_id=job)
+            workspaces.append(ws)
+            url = next(t for t in tools if t["name"] == "graft_find_code")["http"][
+                "url"
+            ]
+            bearer = tools[0]["http"]["headers"]["Authorization"]
+            workspaces[-1] = (ws, url, bearer)
+
+        def post(entry, query_text):
+            _, url, bearer = entry
+            request = Request(
+                url,
+                json.dumps(
+                    {"repo": "source", "query": query_text, "limit": "", "path": ""}
+                ).encode(),
+                {"Authorization": bearer},
+                method="POST",
+            )
+            with urlopen(request, timeout=5) as response:
+                return json.load(response)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda entry: post(entry, "ok"), workspaces))
+        expected = [
+            max(0, (4000 + 2) // 4 - (len(json.dumps(result)) + 2) // 4)
+            for result in results
+        ]
+        post(workspaces[0], "ok")  # separate HTTP retrieval, same query
+        post(workspaces[0], "missing")
+        post(workspaces[0], "zero")
+        post(workspaces[0], "error")
+        for job, estimate in zip(("job-a", "job-b"), expected, strict=True):
+            assert asyncio.run(storage.get_result(job))[
+                "graft_estimated_tokens_saved"
+            ] == estimate * (2 if job == "job-a" else 1)
+        first_ws, first_url, first_bearer = workspaces[0]
+        register_workspace(first_ws, {"source": first_ws / "source"}, job_id="job-b")
+        try:
+            post((first_ws, first_url, first_bearer), "different")
+            assert False, "old job token must be revoked"
+        except HTTPError as error:
+            assert error.code == 401
+        unregister_workspace(first_ws)
+        assert post(workspaces[1], "ok")["status"] == "ok"
+        assert (
+            asyncio.run(storage.get_result("job-b"))["graft_estimated_tokens_saved"]
+            == expected[1] * 2
+        )
+    finally:
+        for ws, _, _ in workspaces:
+            unregister_workspace(ws)
+
+
+def test_estimate_counts_both_repos_and_missing_job_is_soft_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+
+    from rootcoz import storage
+    from rootcoz.engine import graft
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "results.db")
+    asyncio.run(storage.init_db())
+    asyncio.run(storage.save_result("live", "https://example.test", "pending"))
+    ws = tmp_path / "work"
+    for name in ("one", "two"):
+        (ws / name).mkdir(parents=True)
+    monkeypatch.setattr(
+        graft,
+        "query_repo",
+        lambda *args, **kwargs: {
+            "status": "ok",
+            "result": {"saved": {"files": 1, "baselineChars": 4000}},
+        },
+    )
+    tools = register_workspace(
+        ws, {name: ws / name for name in ("one", "two")}, job_id="live"
+    )
+    url = next(t for t in tools if t["name"] == "graft_find_code")["http"]["url"]
+
+    def post(repo: str, token: str) -> dict:
+        request = Request(
+            url,
+            json.dumps(
+                {"repo": repo, "query": "same", "limit": "", "path": ""}
+            ).encode(),
+            {"Authorization": token},
+            method="POST",
+        )
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)
+
+    try:
+        token = tools[0]["http"]["headers"]["Authorization"]
+        first = post("one", token)
+        post("two", token)
+        estimate = (4000 + 2) // 4 - (len(json.dumps(first)) + 2) // 4
+        assert (
+            asyncio.run(storage.get_result("live"))["graft_estimated_tokens_saved"]
+            == 2 * estimate
+        )
+        asyncio.run(storage.save_result("deleted", "https://example.test", "pending"))
+        rotated = register_workspace(
+            ws, {name: ws / name for name in ("one", "two")}, job_id="deleted"
+        )
+        asyncio.run(storage.delete_job("deleted"))
+        assert post("one", rotated[0]["http"]["headers"]["Authorization"]) == first
+        assert (
+            asyncio.run(storage.get_result("live"))["graft_estimated_tokens_saved"]
+            == 2 * estimate
+        )
+    finally:
+        unregister_workspace(ws)
+
+
+def test_blocked_metric_serializes_revocation_but_not_other_workspaces(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from rootcoz import storage
+    from rootcoz.engine import graft
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "results.db")
+    asyncio.run(storage.init_db())
+    for job in ("old", "new", "other"):
+        asyncio.run(storage.save_result(job, "https://example.test", "pending"))
+    entered, release, revoking = Event(), Event(), Event()
+    original = storage.add_graft_estimated_tokens_saved
+
+    async def blocked(job_id: str, tokens: int) -> None:
+        if job_id == "old":
+            entered.set()
+            assert await asyncio.to_thread(release.wait, 5)
+        await original(job_id, tokens)
+
+    monkeypatch.setattr(storage, "add_graft_estimated_tokens_saved", blocked)
+    monkeypatch.setattr(
+        graft,
+        "query_repo",
+        lambda *args, **kwargs: {
+            "status": "ok",
+            "result": {"saved": {"files": 1, "baselineChars": 4000}},
+        },
+    )
+    ws = tmp_path / "work"
+    (ws / "repo").mkdir(parents=True)
+    tools = register_workspace(ws, {"repo": ws / "repo"}, job_id="old")
+    url = next(t for t in tools if t["name"] == "graft_find_code")["http"]["url"]
+    token = tools[0]["http"]["headers"]["Authorization"]
+    other = tmp_path / "other-work"
+    (other / "repo").mkdir(parents=True)
+    other_tools = register_workspace(other, {"repo": other / "repo"}, job_id="other")
+
+    def post(bearer: str, url: str = url) -> int:
+        request = Request(
+            url,
+            json.dumps(
+                {"repo": "repo", "query": "x", "limit": "", "path": ""}
+            ).encode(),
+            {"Authorization": bearer},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=2) as response:
+                return response.status
+        except HTTPError as error:
+            return error.code
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            pending = pool.submit(post, token)
+            assert entered.wait(2)
+            revoke = pool.submit(lambda: (revoking.set(), unregister_workspace(ws)))
+            assert revoking.wait(2)
+            assert post("Bearer invalid") == 401
+            assert (
+                post(
+                    other_tools[0]["http"]["headers"]["Authorization"],
+                    other_tools[0]["http"]["url"],
+                )
+                == 200
+            )
+            assert not revoke.done()
+            release.set()
+            assert pending.result(timeout=3) == 200
+            revoke.result(timeout=3)
+            assert (
+                asyncio.run(storage.get_result("old"))["graft_estimated_tokens_saved"]
+                > 0
+            )
+            rotated = register_workspace(ws, {"repo": ws / "repo"}, job_id="new")
+            assert rotated[0]["http"]["headers"]["Authorization"] != token
+            assert post(token) == 401
+            assert (
+                post(
+                    rotated[0]["http"]["headers"]["Authorization"],
+                    rotated[0]["http"]["url"],
+                )
+                == 200
+            )
+            assert (
+                asyncio.run(storage.get_result("new"))["graft_estimated_tokens_saved"]
+                > 0
+            )
+    finally:
+        release.set()
+        unregister_workspace(ws)
+        unregister_workspace(other)
+
+
+def test_revoked_query_cannot_credit_old_job(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from rootcoz import storage
+    from rootcoz.engine import graft
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "results.db")
+    asyncio.run(storage.init_db())
+    for job in ("old", "new"):
+        asyncio.run(storage.save_result(job, "https://example.test", "pending"))
+    entered, release = Event(), Event()
+
+    def query(workspace, scope, name, params, **kwargs):
+        if params["query"] == "old":
+            entered.set()
+            assert release.wait(5)
+        return {
+            "status": "ok",
+            "result": {"saved": {"files": 1, "baselineChars": 4000}},
+        }
+
+    monkeypatch.setattr(graft, "query_repo", query)
+    ws = tmp_path / "work"
+    repo = ws / "repo"
+    repo.mkdir(parents=True)
+    tools = register_workspace(ws, {"repo": repo}, job_id="old")
+
+    def post(tool, text):
+        request = Request(
+            tool["http"]["url"],
+            json.dumps(
+                {"repo": "repo", "query": text, "limit": "", "path": ""}
+            ).encode(),
+            {"Authorization": tool["http"]["headers"]["Authorization"]},
+            method="POST",
+        )
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(post, tools[0], "old")
+            assert entered.wait(2)
+            replacement = register_workspace(ws, {"repo": repo}, job_id="new")
+            release.set()
+            assert (
+                replacement[0]["http"]["headers"]["Authorization"]
+                != tools[0]["http"]["headers"]["Authorization"]
+            )
+            assert pending.result(timeout=3)["status"] == "ok"
+            assert (
+                asyncio.run(storage.get_result("old"))["graft_estimated_tokens_saved"]
+                == 0
+            )
+            assert post(replacement[0], "new")["status"] == "ok"
+            assert (
+                asyncio.run(storage.get_result("new"))["graft_estimated_tokens_saved"]
+                > 0
+            )
+    finally:
+        release.set()
+        unregister_workspace(ws)
+
+
 def test_http_deadline_starts_before_query_dispatch(
     tmp_path: Path, monkeypatch
 ) -> None:

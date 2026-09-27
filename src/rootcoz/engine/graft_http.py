@@ -7,12 +7,14 @@ be queried. No Rootcoz API route is installed.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
 import secrets
 import threading
 import time
+import weakref
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -40,8 +42,11 @@ _MAX_RESULT = 65536
 _lock = threading.RLock()
 _server: ThreadingHTTPServer | None = None
 _thread: threading.Thread | None = None
-# workspace -> (token, {public repo name: resolved clone root})
-_sessions: dict[Path, tuple[str, dict[str, Path]]] = {}
+# workspace -> (token, {public repo name: resolved clone root}, job_id, write lease)
+_sessions: dict[Path, tuple[str, dict[str, Path], str | None, threading.Lock]] = {}
+_leases: weakref.WeakValueDictionary[Path, threading.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -73,7 +78,7 @@ class _Handler(BaseHTTPRequestHandler):
         with _lock:
             session = next(
                 (
-                    (workspace, *entry)
+                    (workspace, *entry, entry)
                     for workspace, entry in _sessions.items()
                     if hmac.compare_digest(bearer, f"Bearer {entry[0]}")
                 ),
@@ -152,6 +157,51 @@ class _Handler(BaseHTTPRequestHandler):
                 params,
                 deadline=deadline,
             )
+            # Count successful query invocations, not confirmed delivery or unique
+            # queries. These are estimates, not actual tokens saved or billed;
+            # HTTP retries count again.
+            try:
+                saved = (
+                    result.get("result", {}).get("saved")
+                    if isinstance(result.get("result"), dict)
+                    else None
+                )
+                if (
+                    session[3]
+                    and name != "graft_check_freshness"
+                    and result.get("status") == "ok"
+                    and isinstance(saved, dict)
+                    and type(saved.get("files")) is int
+                    and saved["files"] > 0
+                    and type(saved.get("baselineChars")) is int
+                    and saved["baselineChars"] > 0
+                ):
+                    # Compare the baseline to the serialized response, not confirmed delivery.
+                    response_json = json.dumps(result, default=str)
+                    if len(response_json.encode("utf-8")) <= _MAX_RESULT:
+                        estimate = max(
+                            0,
+                            (saved["baselineChars"] + 2) // 4
+                            - (len(response_json) + 2) // 4,
+                        )
+                        if estimate:
+                            # Lease serializes writes with revocation for this workspace.
+                            # Never hold the process-wide lock across disk I/O.
+                            with session[4]:
+                                with _lock:
+                                    active = _sessions.get(session[0]) is session[5]
+                                if active:
+                                    from rootcoz.storage import (
+                                        add_graft_estimated_tokens_saved,
+                                    )
+
+                                    asyncio.run(
+                                        add_graft_estimated_tokens_saved(
+                                            session[3], estimate
+                                        )
+                                    )
+            except Exception:  # noqa: BLE001 - metrics must not break retrieval
+                logger.warning("Unable to store Graft estimate")
             self._reply(200, result)
         except (ValueError, TypeError):
             self._reply(400, {"error": "invalid request"})
@@ -261,7 +311,9 @@ def cloned_graph_roots(workspace: Path) -> dict[str, Path]:
     }
 
 
-def register_workspace(workspace: Path, repos: dict[str, Path]) -> list[dict[str, Any]]:
+def register_workspace(
+    workspace: Path, repos: dict[str, Path], *, job_id: str | None = None
+) -> list[dict[str, Any]]:
     """Register cloned roots and return tools, or [] when loopback is unavailable."""
     global _server, _thread
     try:
@@ -281,6 +333,13 @@ def register_workspace(workspace: Path, repos: dict[str, Path]) -> list[dict[str
         if not install_graph_skill(workspace):
             return []
         with _lock:
+            lease = _leases.get(workspace)
+            if lease is None:
+                lease = threading.Lock()
+                _leases[workspace] = lease
+        # Lock order: workspace lease, then registry lock. Never wait for a
+        # workspace write while holding the registry lock.
+        with lease, _lock:
             if _server is None:
                 _server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
                 _server.daemon_threads = True
@@ -292,14 +351,13 @@ def register_workspace(workspace: Path, repos: dict[str, Path]) -> list[dict[str
                     _server, _thread = None, None
                     return []
             existing = _sessions.get(workspace)
-            token = (
-                existing[0]
-                if existing is not None and existing[1] == roots
-                else secrets.token_urlsafe(32)
-            )
-            _sessions[workspace] = (token, roots)
+            if existing is not None and existing[1:3] == (roots, job_id):
+                entry = existing
+            else:
+                entry = (secrets.token_urlsafe(32), roots, job_id, lease)
+                _sessions[workspace] = entry
             return build_graph_tools(
-                f"http://127.0.0.1:{_server.server_port}", token, list(roots)
+                f"http://127.0.0.1:{_server.server_port}", entry[0], list(roots)
             )
     except (OSError, RuntimeError, ValueError):
         return []
@@ -308,8 +366,13 @@ def register_workspace(workspace: Path, repos: dict[str, Path]) -> list[dict[str
 def unregister_workspace(workspace: Path) -> None:
     """Revoke a workspace token and stop the listener after the last session."""
     global _server, _thread
+    workspace = workspace.resolve()
     with _lock:
-        _sessions.pop(workspace.resolve(), None)
+        lease = _leases.get(workspace)
+    if lease is None:
+        return
+    with lease, _lock:
+        _sessions.pop(workspace, None)
         if not _sessions and _server is not None:
             server, thread = _server, _thread
             _server, _thread = None, None
