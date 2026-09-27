@@ -8,7 +8,7 @@ interface TokenUsageBadgeProps {
 }
 
 export function TokenUsageBadge({ usage }: TokenUsageBadgeProps) {
-  const hasCost = usage.total_cost_usd != null && usage.total_cost_usd > 0
+  const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
 
   return (
     <Tooltip>
@@ -16,7 +16,7 @@ export function TokenUsageBadge({ usage }: TokenUsageBadgeProps) {
         <span className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary">
           <Zap className="h-3 w-3" />
           {formatCompactNumber(usage.total_input_tokens)} in / {formatCompactNumber(usage.total_output_tokens)} out
-          {hasCost && <> · {formatCost(usage.total_cost_usd)}</>}
+          {' · '}{cost}
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-w-xs">
@@ -27,7 +27,7 @@ export function TokenUsageBadge({ usage }: TokenUsageBadgeProps) {
           {usage.total_cache_write_tokens > 0 && <p>Cache write: {usage.total_cache_write_tokens.toLocaleString()}</p>}
           <p>API calls: {usage.total_calls.toLocaleString()}</p>
           {usage.total_duration_ms > 0 && <p>Duration: {(usage.total_duration_ms / 1000).toFixed(1)}s</p>}
-          {hasCost && <p>Cost: {formatCost(usage.total_cost_usd)}</p>}
+          <p>Cost: {cost}</p>
         </div>
       </TooltipContent>
     </Tooltip>

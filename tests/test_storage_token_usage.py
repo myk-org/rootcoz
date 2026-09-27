@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz import storage
+from rootcoz.token_tracking import build_token_usage_summary
 
 
 @pytest.fixture
@@ -144,6 +145,38 @@ class TestGetTokenUsageForJob:
         records = await storage.get_token_usage_for_job("job-x")
         assert len(records) == 1
         assert records[0]["job_id"] == "job-x"
+
+
+@pytest.mark.asyncio
+async def test_detailed_usage_keeps_snapshot_during_concurrent_insert(_storage) -> None:
+    await storage.record_token_usage(
+        job_id="snapshot",
+        ai_provider="gemini",
+        ai_model="test",
+        call_type="analysis",
+        input_tokens=3,
+        output_tokens=1,
+    )
+    original = storage._get_job_token_usage_totals
+
+    async def insert_after_totals(db, job_id):
+        totals = await original(db, job_id)
+        await storage.record_token_usage(
+            job_id="snapshot",
+            ai_provider="gemini",
+            ai_model="test",
+            call_type="analysis",
+            input_tokens=10,
+            output_tokens=2,
+        )
+        return totals
+
+    with patch.object(storage, "_get_job_token_usage_totals", insert_after_totals):
+        summary = await build_token_usage_summary("snapshot")
+    assert summary is not None
+    assert summary.total_calls == len(summary.calls) == 1
+    assert summary.total_tokens == sum(call.total_tokens for call in summary.calls) == 4
+    assert len(await storage.get_token_usage_for_job("snapshot")) == 2
 
 
 class TestGetTokenUsageSummary:

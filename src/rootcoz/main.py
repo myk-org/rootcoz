@@ -234,7 +234,7 @@ from rootcoz.storage import (
     stamp_build_url,
     update_status,
 )
-from rootcoz.token_tracking import build_token_usage_summary
+from rootcoz.token_tracking import build_token_usage_summary, set_usage_callback
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -528,6 +528,7 @@ def notify_job_status_changed(job_id: str) -> None:
 # Register progress callback so engine/core.py can trigger SSE
 # notifications without importing from main.py.
 set_progress_callback(notify_job_status_changed)
+set_usage_callback(notify_job_status_changed)
 
 
 def notify_comments_changed(job_id: str) -> None:
@@ -669,10 +670,12 @@ def _install_job_id_filter() -> None:
 _install_job_id_filter()
 
 
-async def _attach_token_usage(job_id: str, result_data: dict[str, Any]) -> None:
+async def _attach_token_usage(
+    job_id: str, result_data: dict[str, Any], *, detailed: bool = True
+) -> None:
     """Attach token usage summary to result data. Best-effort \u2014 never raises."""
     try:
-        token_summary = await build_token_usage_summary(job_id)
+        token_summary = await build_token_usage_summary(job_id, detailed=detailed)
         if token_summary:
             result_data["token_usage"] = token_summary.model_dump(mode="json")
     except Exception:  # best-effort token tracking must never fail the job
@@ -4723,6 +4726,14 @@ async def get_job_result(
     # Apply user classification overrides so the UI shows effective classifications
     if result.get("result"):
         await _apply_effective_classifications(job_id, result["result"])
+        status = result.get("status")
+        if status in IN_PROGRESS_STATUSES:
+            await _attach_token_usage(job_id, result["result"], detailed=False)
+        elif (
+            status in ("failed", "aborted")
+            and result["result"].get("token_usage") is None
+        ):
+            await _attach_token_usage(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)
     # Attach tracked-in data per failure
