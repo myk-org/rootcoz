@@ -898,14 +898,13 @@ def _safe_remove_symlink(link: Path) -> None:
 def cleanup_chat_repos(job_id: str, username: str = "") -> None:
     """Delete cloned repos and artifacts from chat workspace but keep session files."""
     workspace = get_chat_workspace(job_id, username)
-    if not workspace.exists():
-        return
-
     from rootcoz.engine.graft import cleanup_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
     cleanup_graph(workspace)
+    if not workspace.exists():
+        return
 
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():

@@ -1,6 +1,7 @@
 """Loopback graph adapter isolation and sidecar tool wiring."""
 
 import json
+import time
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -10,6 +11,21 @@ from rootcoz.engine.graft_http import (
     register_workspace,
     unregister_workspace,
 )
+
+
+def _await_estimate(job_id: str, expected: int | None) -> None:
+    """Wait for post-response best-effort persistence to finish."""
+    import asyncio
+
+    from rootcoz import storage
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        actual = asyncio.run(storage.get_result(job_id))["graft_estimated_tokens_saved"]
+        if actual > 0 if expected is None else actual == expected:
+            return
+        time.sleep(0.01)
+    assert actual > 0 if expected is None else actual == expected
 
 
 def test_graph_bridge(tmp_path: Path, monkeypatch) -> None:
@@ -168,9 +184,7 @@ def test_estimate_is_job_scoped_and_counts_each_successful_retrieval(
         post(workspaces[0], "zero")
         post(workspaces[0], "error")
         for job, estimate in zip(("job-a", "job-b"), expected, strict=True):
-            assert asyncio.run(storage.get_result(job))[
-                "graft_estimated_tokens_saved"
-            ] == estimate * (2 if job == "job-a" else 1)
+            _await_estimate(job, estimate * (2 if job == "job-a" else 1))
         first_ws, first_url, first_bearer = workspaces[0]
         register_workspace(first_ws, {"source": first_ws / "source"}, job_id="job-b")
         try:
@@ -180,10 +194,7 @@ def test_estimate_is_job_scoped_and_counts_each_successful_retrieval(
             assert error.code == 401
         unregister_workspace(first_ws)
         assert post(workspaces[1], "ok")["status"] == "ok"
-        assert (
-            asyncio.run(storage.get_result("job-b"))["graft_estimated_tokens_saved"]
-            == expected[1] * 2
-        )
+        _await_estimate("job-b", expected[1] * 2)
     finally:
         for ws, _, _ in workspaces:
             unregister_workspace(ws)
@@ -233,20 +244,14 @@ def test_estimate_counts_both_repos_and_missing_job_is_soft_failure(
         first = post("one", token)
         post("two", token)
         estimate = (4000 + 2) // 4 - (len(json.dumps(first)) + 2) // 4
-        assert (
-            asyncio.run(storage.get_result("live"))["graft_estimated_tokens_saved"]
-            == 2 * estimate
-        )
+        _await_estimate("live", 2 * estimate)
         asyncio.run(storage.save_result("deleted", "https://example.test", "pending"))
         rotated = register_workspace(
             ws, {name: ws / name for name in ("one", "two")}, job_id="deleted"
         )
         asyncio.run(storage.delete_job("deleted"))
         assert post("one", rotated[0]["http"]["headers"]["Authorization"]) == first
-        assert (
-            asyncio.run(storage.get_result("live"))["graft_estimated_tokens_saved"]
-            == 2 * estimate
-        )
+        _await_estimate("live", 2 * estimate)
     finally:
         unregister_workspace(ws)
 
@@ -322,8 +327,8 @@ def test_blocked_metric_serializes_revocation_but_not_other_workspaces(
                 == 200
             )
             assert not revoke.done()
+            assert pending.result(timeout=3) == 200  # metric cannot delay delivery
             release.set()
-            assert pending.result(timeout=3) == 200
             revoke.result(timeout=3)
             assert (
                 asyncio.run(storage.get_result("old"))["graft_estimated_tokens_saved"]
@@ -339,10 +344,7 @@ def test_blocked_metric_serializes_revocation_but_not_other_workspaces(
                 )
                 == 200
             )
-            assert (
-                asyncio.run(storage.get_result("new"))["graft_estimated_tokens_saved"]
-                > 0
-            )
+            _await_estimate("new", None)
     finally:
         release.set()
         unregister_workspace(ws)
@@ -406,13 +408,103 @@ def test_revoked_query_cannot_credit_old_job(tmp_path: Path, monkeypatch) -> Non
                 == 0
             )
             assert post(replacement[0], "new")["status"] == "ok"
-            assert (
-                asyncio.run(storage.get_result("new"))["graft_estimated_tokens_saved"]
-                > 0
-            )
+            _await_estimate("new", None)
     finally:
         release.set()
         unregister_workspace(ws)
+
+
+def test_metric_failure_logs_traceback_after_reply(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    from threading import Event
+
+    from rootcoz import storage
+    from rootcoz.engine import graft
+
+    entered, release = Event(), Event()
+
+    async def broken(job_id: str, tokens: int) -> None:
+        entered.set()
+        assert release.wait(5)
+        raise LookupError("job missing")
+
+    monkeypatch.setattr(storage, "add_graft_estimated_tokens_saved", broken)
+    monkeypatch.setattr(
+        graft,
+        "query_repo",
+        lambda *args, **kwargs: {
+            "status": "ok",
+            "result": {"saved": {"files": 1, "baselineChars": 4000}},
+        },
+    )
+    workspace = tmp_path / "workspace"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    tools = register_workspace(workspace, {"repo": repo}, job_id="gone")
+    request = Request(
+        tools[0]["http"]["url"],
+        json.dumps({"repo": "repo", "query": "x", "limit": "", "path": ""}).encode(),
+        {"Authorization": tools[0]["http"]["headers"]["Authorization"]},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=2) as response:
+            assert json.load(response)["status"] == "ok"
+        assert entered.wait(2)
+        release.set()
+        # unregister waits for the metric task, including its error logging.
+        unregister_workspace(workspace)
+        records = [
+            r for r in caplog.records if "Unable to store Graft estimate" in r.message
+        ]
+        assert len(records) == 1
+        assert records[0].exc_info[0] is LookupError
+        assert "job missing" in records[0].exc_info[1].args
+        assert "x" not in records[0].message
+    finally:
+        release.set()
+        unregister_workspace(workspace)
+
+
+def test_estimate_calculation_failure_is_logged_and_query_succeeds(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    from rootcoz.engine import graft
+
+    class BrokenSaved(dict):
+        def get(self, key, default=None):
+            raise RuntimeError("estimate calculation failed")
+
+    workspace = tmp_path / "workspace"
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    monkeypatch.setattr(
+        graft,
+        "query_repo",
+        lambda *args, **kwargs: {
+            "status": "ok",
+            "result": {"saved": BrokenSaved(files=1, baselineChars=4000)},
+        },
+    )
+    tools = register_workspace(workspace, {"repo": repo}, job_id="job")
+    request = Request(
+        tools[0]["http"]["url"],
+        json.dumps({"repo": "repo", "query": "x", "limit": "", "path": ""}).encode(),
+        {"Authorization": tools[0]["http"]["headers"]["Authorization"]},
+        method="POST",
+    )
+    try:
+        # A failing estimate's serialization path should still deliver the graph.
+        with urlopen(request, timeout=2) as response:
+            assert json.load(response)["status"] == "ok"
+        assert any(
+            record.exc_info and record.exc_info[0] is RuntimeError
+            for record in caplog.records
+            if "Unable to calculate Graft estimate" in record.message
+        )
+    finally:
+        unregister_workspace(workspace)
 
 
 def test_http_deadline_starts_before_query_dispatch(

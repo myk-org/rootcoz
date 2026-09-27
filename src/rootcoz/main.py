@@ -11163,6 +11163,18 @@ async def get_chat_history(
     return {"messages": messages, "total": total}
 
 
+async def _index_chat_repositories(workspace: Path) -> None:
+    """Index cloned chat roots off the event loop and record outcomes."""
+    from rootcoz.engine.graft import index_repositories, log_index_outcomes
+    from rootcoz.engine.graft_http import cloned_graph_roots
+
+    log_index_outcomes(
+        await asyncio.to_thread(
+            index_repositories, workspace, cloned_graph_roots(workspace)
+        )
+    )
+
+
 async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]:
     """Initialize chat workspace; hold the lifecycle barrier only for short checks.
 
@@ -11220,14 +11232,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         workspace, decrypted_params, user_repo_token=github_token
     )
     if repos_available:
-        from rootcoz.engine.graft import index_repositories, log_index_outcomes
-        from rootcoz.engine.graft_http import cloned_graph_roots
-
-        log_index_outcomes(
-            await asyncio.to_thread(
-                index_repositories, workspace, cloned_graph_roots(workspace)
-            )
-        )
+        await _index_chat_repositories(workspace)
     _raise_if_chat_job_deleted(job_id)
     ci_build_data_available = await setup_ci_build_workspace(
         workspace,
@@ -11816,19 +11821,7 @@ async def _process_chat_message(
                             workspace, decrypted_params, user_repo_token=github_token
                         )
                         if repos_available:
-                            from rootcoz.engine.graft import (
-                                index_repositories,
-                                log_index_outcomes,
-                            )
-                            from rootcoz.engine.graft_http import cloned_graph_roots
-
-                            log_index_outcomes(
-                                await asyncio.to_thread(
-                                    index_repositories,
-                                    workspace,
-                                    cloned_graph_roots(workspace),
-                                )
-                            )
+                            await _index_chat_repositories(workspace)
 
                         settings = get_settings()
 

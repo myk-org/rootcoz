@@ -978,6 +978,31 @@ class TestChatCleanup:
             assert not link.exists()
             assert not target.exists()
 
+    def test_cleanup_repos_removes_graph_when_workspace_missing(
+        self, tmp_path, monkeypatch
+    ):
+        from rootcoz.engine.chat import cleanup_chat_repos
+        from rootcoz.engine.graft import _root
+        from rootcoz.engine.graft_http import _sessions, register_workspace
+
+        workspace = tmp_path / "missing"
+        repo = workspace / "repo"
+        repo.mkdir(parents=True)
+        register_workspace(workspace, {"repo": repo}, job_id="job")
+        assert workspace.resolve() in _sessions
+        graph = _root(workspace)
+        graph.mkdir()
+        (graph / "snapshot").write_text("source")
+        import shutil
+
+        shutil.rmtree(workspace)
+        monkeypatch.setattr(
+            "rootcoz.engine.chat.get_chat_workspace", lambda *args, **kwargs: workspace
+        )
+        cleanup_chat_repos("job")
+        assert workspace.resolve() not in _sessions
+        assert not graph.exists()
+
     def test_cleanup_workspace_resolves_symlinks(self, tmp_path):
         from rootcoz.engine.chat import cleanup_chat_workspace
 
@@ -1130,6 +1155,31 @@ async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
     assert seen == ["to_thread", "cleanup:job-offload"]
     assert "job-offload" not in main_mod._chat_jobs_deleting
     assert "job-offload" not in main_mod._chat_job_barriers
+
+
+@pytest.mark.asyncio
+async def test_index_chat_repositories_discovers_and_logs_off_loop(
+    tmp_path, monkeypatch
+):
+    from rootcoz import main as main_mod
+    from rootcoz.engine import graft, graft_http
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    seen = []
+
+    def index(workspace, roots):
+        seen.append((workspace, roots))
+        return {"repo": {"status": "ready"}}
+
+    monkeypatch.setattr(graft, "index_repositories", index)
+    monkeypatch.setattr(graft, "log_index_outcomes", seen.append)
+    await main_mod._index_chat_repositories(tmp_path)
+    assert seen == [
+        (tmp_path, graft_http.cloned_graph_roots(tmp_path)),
+        {"repo": {"status": "ready"}},
+    ]
 
 
 @pytest.mark.asyncio

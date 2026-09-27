@@ -545,7 +545,11 @@ def test_analysis_does_not_index_unusable_graphs() -> None:
     ):
         assert "index_repositories" not in inspect.getsource(analysis)
         assert "copy_rootcoz_pi_resources" in inspect.getsource(analysis)
-    assert "index_repositories" in inspect.getsource(main._init_chat_under_barrier)
+    assert "index_repositories" in inspect.getsource(main._index_chat_repositories)
+    assert "_index_chat_repositories" in inspect.getsource(
+        main._init_chat_under_barrier
+    )
+    assert "_index_chat_repositories" in inspect.getsource(main._process_chat_message)
 
 
 def test_install_lock_reaps_short_lived_workspaces(tmp_path: Path, monkeypatch) -> None:
