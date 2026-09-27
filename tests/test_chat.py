@@ -1274,6 +1274,106 @@ async def test_process_chat_cancel_while_waiting_barrier_marks_failed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "graph_state, expected_indexes", [("indexed", 0), ("new", 1), ("missing", 1)]
+)
+async def test_followup_indexes_only_new_or_missing_graph(
+    setup_test_db, tmp_path, monkeypatch, graph_state, expected_indexes
+):
+    """An existing graph must not delay AI, but new clones and lost graphs need indexing."""
+    import json
+
+    from rootcoz import main as main_mod
+    from rootcoz.engine import graft
+    from rootcoz.engine.chat import clone_chat_repos
+
+    workspace = tmp_path / "chat-workspace"
+    workspace.mkdir()
+    repo = workspace / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    destination = graft._root(workspace) / "repo"
+    (destination / "snapshot").mkdir(parents=True)
+    (destination / "graph").mkdir()
+    (destination / "manifest.json").write_text(json.dumps({"a.py": "0" * 64}))
+
+    class Manager:
+        def clone_into(self, url, target, **kwargs):
+            target.mkdir()
+            (target / ".git").mkdir()
+
+    monkeypatch.setattr("rootcoz.repository.RepositoryManager", Manager)
+    params = {"additional_repos": [{"name": "repo", "url": "https://example.com/repo"}]}
+    assert await clone_chat_repos(workspace, params) is False
+    if graph_state == "new":
+        params["additional_repos"].append(
+            {"name": "other", "url": "https://example.com/other"}
+        )
+    elif graph_state == "missing":
+        (graft._root(workspace) / "repo" / "manifest.json").unlink()
+
+    indexes = []
+
+    async def fake_index(path):
+        indexes.append(path)
+
+    monkeypatch.setattr(main_mod, "_index_chat_repositories", fake_index)
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.core.copy_rootcoz_pi_resources", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.chat_with_ai", AsyncMock(return_value=(True, "ok", "sess"))
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async", AsyncMock()
+    )
+    monkeypatch.setattr("rootcoz.engine.chat.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", "", "", "")),
+    )
+    monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
+    job_id = f"chat-index-{graph_state}"
+    await storage.save_result(
+        job_id,
+        "",
+        "completed",
+        {
+            "status": "completed",
+            "summary": "t",
+            "failures": [],
+            "ai_provider": "claude",
+            "ai_model": "sonnet-4",
+            "request_params": params,
+        },
+    )
+    user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
+    )
+    await main_mod._process_chat_message(
+        job_id=job_id,
+        user_msg_id=user_id,
+        assistant_msg_id=assistant_id,
+        message="hello",
+        ai_provider_override="claude",
+        ai_model_override="sonnet-4",
+        username="alice",
+    )
+    assert indexes == [workspace] * expected_indexes
+    if graph_state == "new":
+        assert (workspace / "other" / ".git").is_dir()
+    assert await storage.get_chat_message_status(assistant_id) == "completed"
+
+
+@pytest.mark.asyncio
 async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatch):
     """Job deletion must not wait behind chat_with_ai."""
     from rootcoz import main as main_mod

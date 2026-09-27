@@ -101,7 +101,7 @@ async def clone_chat_repos(
     """Clone repos into the chat workspace.
 
     Skips repos already present in the workspace.
-    Returns True if any repos are available.
+    Returns True only when a repository was newly cloned.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
@@ -138,7 +138,6 @@ async def clone_chat_repos(
                         logger.debug(
                             "Chat: repo %s already cloned in %s", repo_name, workspace
                         )
-                        cloned_any = True
                     else:
                         logger.info(
                             "Chat: cloning repo %s into %s", repo_name, workspace
@@ -177,7 +176,6 @@ async def clone_chat_repos(
                         logger.debug(
                             "Chat: repo %s already cloned in %s", safe_name, workspace
                         )
-                        cloned_any = True
                         continue
                     logger.info("Chat: cloning repo %s into %s", safe_name, workspace)
                     token = getattr(repo, "token", None) or ""
