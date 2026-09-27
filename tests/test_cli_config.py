@@ -267,6 +267,7 @@ class TestGetServerConfig:
         assert cfg.jenkins_ssl_verify is None
         assert cfg.ai_provider == ""
         assert cfg.ai_call_timeout == 0
+        assert cfg.force_server_credentials is None
         assert cfg.max_concurrent_ai_calls == 0
         assert cfg.jira_ssl_verify is None
         assert cfg.jira_max_results == 0

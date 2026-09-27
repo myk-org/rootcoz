@@ -40,7 +40,7 @@ export function PeerConfigList({
 }: PeerConfigListProps) {
   const { canUseServerProviders } = useAuth()
   const legacyOptions = useProviderOptions(peerConfigs.map((p) => p.ai_provider))
-  const { providers, providerStatus } = useProviderCatalog()
+  const { providers, providerStatus } = useProviderCatalog(forceServer)
   const providerOptions = strict
     ? buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
     : legacyOptions

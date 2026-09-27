@@ -40,6 +40,9 @@ _selected_credential_source: ContextVar[str] = ContextVar(
 model_listing_status: ContextVar[dict[str, dict[str, bool]] | None] = ContextVar(
     "model_listing_status", default=None
 )
+_selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = ContextVar(
+    "selected_key_generation", default=None
+)
 
 
 async def supported_key_providers() -> list[str]:
@@ -77,12 +80,16 @@ async def session_key(provider: str) -> str | None:
     username = ai_username.get()
     if force_server_credentials.get() or not username:
         return None
-    from rootcoz.storage import get_user_ai_credentials
+    from rootcoz.storage import get_user_ai_credential_with_generation
 
-    key = (await get_user_ai_credentials(username)).get(provider)
+    _selected_key_generation.set(None)
+    key, generation = await get_user_ai_credential_with_generation(username, provider)
     if key is not None:
         if provider not in await supported_key_providers():
             raise ValueError("Provider session API-key capability unavailable")
+        if generation is None:
+            raise ValueError("AI credential generation unavailable")
+        _selected_key_generation.set((username, provider, key, generation))
         logger.info("Using user AI credential for provider=%s", provider)
     return key
 
@@ -277,10 +284,12 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 logger.warning(
                     "Key-scoped model discovery unavailable for provider=%s", provider
                 )
-                raise ValueError(
-                    f"Key-scoped model discovery failed for {provider}. "
-                    "Retry or select server credentials explicitly."
-                ) from None
+                status[provider] = {
+                    "has_api_key": True,
+                    "modelListingSupported": True,
+                    "unavailable": True,
+                }
+                continue
             listing = discovery["modelListingSupported"]
             status[provider] = {"has_api_key": True, "modelListingSupported": listing}
             entries = (
@@ -320,6 +329,13 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     if ai_username.get():
         scoped = await scoped_models()
         status = model_listing_status.get() or {}
+        if (
+            status.get(provider, {}).get("unavailable")
+            and not force_server_credentials.get()
+        ):
+            raise ValueError(
+                "Key-scoped model discovery unavailable; retry or select server credentials"
+            )
         for entry in scoped.get(provider, []):
             if entry["id"] == model and (
                 entry["verified"] or "server" in entry["credential_sources"]
@@ -603,6 +619,9 @@ def _redact_key_echo(text: str | None, key: str) -> str | None:
     """Remove predictable renderings of a key from successful AI output."""
     if text is None or not key:
         return text
+    # Legacy short keys are not safe for global replacement; never expose their output.
+    if len(key) < 8:
+        return "[REDACTED]"
     encoded = key.encode()
     variants = {
         key,
@@ -675,6 +694,7 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
             ai_username.get(),
             kwargs["provider"],
             "server",
+            client.delete_session,
         )
     if error := _validate_api_key(key):
         raise ValueError(error)
@@ -691,7 +711,22 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
     for field in ("agent_dir", "custom_tools", "tools"):
         if kwargs.get(field) is not None:
             body[field] = kwargs[field]
-    from rootcoz.storage import create_ai_session_with_source
+    from rootcoz.storage import (
+        create_ai_session_with_source,
+        get_user_ai_credential_with_generation,
+    )
+
+    username = ai_username.get()
+    selected = _selected_key_generation.get()
+    if selected is not None and selected[:3] == (username, provider, key):
+        generation = selected[3]
+    else:
+        current_key, current_generation = await get_user_ai_credential_with_generation(
+            username, provider
+        )
+        if current_key != key or current_generation is None:
+            raise ValueError("AI credential changed during session creation")
+        generation = current_generation
 
     async def create() -> str:
         response = await client._client.post("/sessions", json=body)
@@ -699,7 +734,7 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
         return response.json()["session_id"]
 
     return await create_ai_session_with_source(
-        create, ai_username.get(), provider, "user"
+        create, username, provider, "user", client.delete_session, generation
     )
 
 

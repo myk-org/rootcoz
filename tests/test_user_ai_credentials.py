@@ -26,6 +26,22 @@ async def session_provenance_db(tmp_path, monkeypatch):
     await storage.save_ai_session_source("existing", "alice", "p", "user")
 
 
+@pytest.fixture
+async def mock_selected_key_generation(monkeypatch):
+    """Supply a matching user row and atomic lookup for mocked transport keys."""
+    await storage.create_admin_user("alice")
+
+    async def lookup(_username, provider):
+        return await ai_client.session_key(provider), 0
+
+    monkeypatch.setattr(storage, "get_user_ai_credential_with_generation", lookup)
+    token = ai_client.ai_username.set("alice")
+    try:
+        yield
+    finally:
+        ai_client.ai_username.reset(token)
+
+
 @pytest.mark.asyncio
 async def test_credential_map_encrypted_atomic_and_isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "credentials.db")
@@ -64,13 +80,16 @@ async def test_capability_fails_closed_and_exact_key(monkeypatch):
 
     monkeypatch.setattr(
         storage,
-        "get_user_ai_credentials",
+        "get_user_ai_credential_with_generation",
         AsyncMock(
-            return_value={
-                "supported": "wrong-key",
-                "unknown": "bad-key",
-                "unregistered": "bad-key",
-            }
+            side_effect=lambda _user, provider: (
+                {
+                    "supported": "wrong-key",
+                    "unknown": "bad-key",
+                    "unregistered": "bad-key",
+                }.get(provider),
+                0,
+            )
         ),
     )
     token = ai_client.ai_username.set("alice")
@@ -89,7 +108,9 @@ async def test_capability_fails_closed_and_exact_key(monkeypatch):
 @pytest.mark.asyncio
 async def test_key_lookup_checks_only_selected_provider(monkeypatch):
     monkeypatch.setattr(
-        storage, "get_user_ai_credentials", AsyncMock(return_value={"acpx/a": "key"})
+        storage,
+        "get_user_ai_credential_with_generation",
+        AsyncMock(return_value=("key", 0)),
     )
     client = AsyncMock()
     client.get_providers.return_value = [
@@ -116,8 +137,13 @@ async def test_cli_providers_follow_sidecar_capability(monkeypatch):
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
         storage,
-        "get_user_ai_credentials",
-        AsyncMock(return_value={"cli-keyed": "key", "cli-ambient": "other"}),
+        "get_user_ai_credential_with_generation",
+        AsyncMock(
+            side_effect=lambda _user, provider: (
+                {"cli-keyed": "key", "cli-ambient": "other"}.get(provider),
+                0,
+            )
+        ),
     )
     assert await ai_client.supported_key_providers() == ["cli-keyed"]
     token = ai_client.ai_username.set("alice")
@@ -135,7 +161,9 @@ async def test_discovery_failure_fails_closed(monkeypatch):
     client.get_providers.side_effect = RuntimeError("unavailable")
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(
-        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "key"})
+        storage,
+        "get_user_ai_credential_with_generation",
+        AsyncMock(return_value=("key", 0)),
     )
     assert await ai_client.supported_key_providers() == []
     token = ai_client.ai_username.set("alice")
@@ -282,7 +310,7 @@ async def test_failed_sidecar_result_redacted_before_chat_logging(
 @pytest.mark.parametrize("session_id", [None, "existing"])
 @pytest.mark.parametrize("failure", ["response", "exception"])
 async def test_real_sidecar_http_error_never_logs_user_key(
-    monkeypatch, caplog, capsys, session_id, failure
+    monkeypatch, caplog, capsys, session_id, failure, mock_selected_key_generation
 ):
     secret = "rotated-secret-test"  # pragma: allowlist secret
     requests = []
@@ -447,7 +475,7 @@ async def test_chat_initial_creation_encoded_error_never_logs_user_key(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("session_id", [None, "existing"])
 async def test_keyed_prompt_empty_text_usage_never_logs_encoded_key(
-    monkeypatch, caplog, session_id
+    monkeypatch, caplog, session_id, mock_selected_key_generation
 ):
     secret = "review/key"  # pragma: allowlist secret
     encoded = base64.b64encode(secret.encode()).decode()
@@ -618,7 +646,9 @@ async def test_real_sidecar_creation_error_never_logs_user_key(
 
 
 @pytest.mark.asyncio
-async def test_real_sidecar_keyed_once_preserves_usage_and_cleans_up(monkeypatch):
+async def test_real_sidecar_keyed_once_preserves_usage_and_cleans_up(
+    monkeypatch, mock_selected_key_generation
+):
     requests = []
 
     def handle(request):
@@ -846,7 +876,7 @@ async def test_successful_sidecar_result_keeps_analysis_text(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("encoding", ["raw", "url", "base64", "urlsafe", "json"])
 async def test_real_sidecar_success_echo_is_not_logged_or_persisted(
-    monkeypatch, tmp_path, caplog, encoding
+    monkeypatch, tmp_path, caplog, encoding, mock_selected_key_generation
 ):
     secret = "review/key+é"  # pragma: allowlist secret
     encoded = {
@@ -892,7 +922,9 @@ async def test_real_sidecar_success_echo_is_not_logged_or_persisted(
 
 
 @pytest.mark.asyncio
-async def test_real_sidecar_failed_new_chat_prompt_deletes_session(monkeypatch, caplog):
+async def test_real_sidecar_failed_new_chat_prompt_deletes_session(
+    monkeypatch, caplog, mock_selected_key_generation
+):
     secret = "user-test-key"  # pragma: allowlist secret
     requests = []
 
@@ -934,7 +966,7 @@ async def test_real_sidecar_failed_new_chat_prompt_deletes_session(monkeypatch, 
 
 @pytest.mark.asyncio
 async def test_failed_prompt_cleanup_error_keeps_session_without_logging(
-    monkeypatch, caplog
+    monkeypatch, caplog, mock_selected_key_generation
 ):
     secret = "user-test-key"  # pragma: allowlist secret
     requests = []
@@ -980,7 +1012,9 @@ async def test_credential_mutations_require_reviewer(tmp_path, monkeypatch):
         for mutation in (
             lambda request=request: main.set_user_ai_credential(
                 "p",
-                main.AiCredentialInput(api_key="value"),  # pragma: allowlist secret
+                main.AiCredentialInput(
+                    api_key="valid-value"  # pragma: allowlist secret
+                ),
                 request,
             ),
             lambda request=request: main.delete_user_ai_credential("p", request),
@@ -1034,7 +1068,7 @@ async def test_rotating_credential_deletes_sidecar_session(tmp_path, monkeypatch
     sidecar = AsyncMock()
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
-    new_key = "new"  # pragma: allowlist secret
+    new_key = "new-value"  # pragma: allowlist secret
     await main.set_user_ai_credential(
         "p", main.AiCredentialInput(api_key=new_key), request
     )
@@ -1060,9 +1094,12 @@ async def test_invalid_user_key_does_not_fall_back_to_server(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_session_creation_and_resumed_turn(tmp_path, monkeypatch):
+async def test_chat_session_creation_and_resumed_turn(
+    tmp_path, monkeypatch, mock_selected_key_generation
+):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
     await storage.init_db()
+    await storage.create_admin_user("alice")
     requests = []
 
     def handle(request):
@@ -1078,7 +1115,9 @@ async def test_chat_session_creation_and_resumed_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(
         chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
-    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="secret"))
+    monkeypatch.setattr(
+        ai_client, "session_key", AsyncMock(return_value="secret-value")
+    )
     ai_client._selected_credential_source.set("user")
     monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
     assert (
@@ -1087,7 +1126,7 @@ async def test_chat_session_creation_and_resumed_turn(tmp_path, monkeypatch):
         )
         == "sid"
     )
-    expected_key = "secret"  # pragma: allowlist secret
+    expected_key = "secret-value"  # pragma: allowlist secret
     assert expected_key.encode() in requests[0].content
 
     monkeypatch.setattr(
@@ -1279,7 +1318,7 @@ async def test_unreadable_credential_map_refuses_list_set_delete_and_preserves_d
             await db.commit()
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
-    new_key = "new"  # pragma: allowlist secret
+    new_key = "new-value"  # pragma: allowlist secret
     with caplog.at_level(logging.WARNING):
         for operation in (
             lambda: main.get_user_ai_credentials(request),
@@ -1352,7 +1391,7 @@ async def test_js_blank_key_rejected_before_storage(monkeypatch):
     update.assert_not_awaited()
     await main.set_user_ai_credential(
         "p",
-        main.AiCredentialInput(api_key="\u200b\ufeff"),
+        main.AiCredentialInput(api_key="\u200b\ufefflong-enough"),
         SimpleNamespace(state=SimpleNamespace(username="alice", role="admin")),
     )
     update.assert_awaited_once()

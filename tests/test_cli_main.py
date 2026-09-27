@@ -2347,6 +2347,27 @@ class TestAnalyzeConfigDefaults:
             result = runner.invoke(app, cli_args)
             return result, client
 
+    @pytest.mark.parametrize("configured", [None, False, True])
+    @pytest.mark.parametrize(
+        "flag", [None, "--force-server-credentials", "--no-force-server-credentials"]
+    )
+    def test_force_server_credentials_precedence(self, configured, flag):
+        args = ["analyze", "--job-name", "my-job", "--build-number", "1"]
+        if flag:
+            args.append(flag)
+        result, client = self._invoke_analyze(
+            args, ServerConfig(url=_TEST_SERVER, force_server_credentials=configured)
+        )
+        assert result.exit_code == 0
+        actual = client.analyze.call_args.kwargs.get("force_server_credentials")
+        assert actual is (
+            True
+            if flag == "--force-server-credentials"
+            else False
+            if flag
+            else configured
+        )
+
     def test_config_string_fields_used_as_defaults(self):
         """String config fields are sent when CLI flags are absent."""
         result, client = self._invoke_analyze(

@@ -23,7 +23,7 @@ export function SettingsPage() {
         onSaved={async () => { await refreshAuth(); navigate('/') }}
         readOnlyUsername
       />
-      <AiCredentials />
+      {role !== 'viewer' && <AiCredentials />}
       <p className="mt-4 text-center text-xs text-text-tertiary">
         Tokens are stored locally and synced to the server (encrypted at rest) for cross-browser access.
       </p>
