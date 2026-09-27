@@ -97,7 +97,8 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [getArtifacts, setGetArtifacts] = useState<boolean | undefined>(init.getArtifacts)
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(init.maxArtifactsSize)
 
-  const { providers, providerStatus } = useProviderCatalog()
+  const effectiveForceServer = forceServerCredentials && canUseServerProviders
+  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
   const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
@@ -127,7 +128,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
 
-  const effectiveForceServer = forceServerCredentials && canUseServerProviders
   const aiUnavailable = !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders) || (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, effectiveForceServer, canUseServerProviders))))
 
   const handleSubmit = useCallback(async () => {

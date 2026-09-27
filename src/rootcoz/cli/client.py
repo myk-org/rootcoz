@@ -267,13 +267,17 @@ class RootCozClient:
         return self._request("GET", "/api/admin/settings/history", params=params)
 
     def approve_user(
-        self, username: str, can_use_server_providers: bool = False
+        self, username: str, can_use_server_providers: bool | None = None
     ) -> dict[str, Any]:
-        """Approve a pending user. POST /api/admin/users/{username}/approve"""
+        """Approve a pending user. Omitted grant preserves the existing flag."""
         return self._request(
             "POST",
             f"/api/admin/users/{username}/approve",
-            json={"can_use_server_providers": can_use_server_providers},
+            json=(
+                {"can_use_server_providers": can_use_server_providers}
+                if can_use_server_providers is not None
+                else None
+            ),
         )
 
     def reject_user(self, username: str) -> dict[str, Any]:

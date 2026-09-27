@@ -47,6 +47,16 @@ describe('AiCredentials', () => {
     expect(screen.getAllByText('Configured')).toHaveLength(1)
   })
 
+  it('preserves leading and trailing whitespace in an opaque key', async () => {
+    const user = userEvent.setup()
+    render(<AiCredentials />)
+    await user.click(await screen.findByRole('combobox', { name: 'AI provider' }))
+    await user.click(await screen.findByRole('option', { name: 'other' }))
+    await user.type(screen.getByLabelText('API key'), '  secret-key  ')
+    await user.click(screen.getByRole('button', { name: '+ Add key' }))
+    await waitFor(() => expect(put).toHaveBeenCalledWith('/api/user/ai-credentials/other', { api_key: '  secret-key  ' })) // pragma: allowlist secret
+  })
+
   it('does not submit unsupported free text', async () => {
     const user = userEvent.setup()
     render(<AiCredentials />)

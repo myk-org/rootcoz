@@ -1164,6 +1164,8 @@ def _apply_common_config_defaults(
         extras[int_key] = int_value
 
     # Boolean fields — forward when they differ from the dataclass default
+    if cfg.force_server_credentials is not None:
+        extras["force_server_credentials"] = cfg.force_server_credentials
     if cfg.enable_jira is not None:
         extras["enable_jira"] = cfg.enable_jira
     if cfg.jira_ssl_verify is not None:
@@ -1358,6 +1360,11 @@ def analyze(
     jira_max_results: _JiraMaxResultsOpt = None,
     github_token: _GithubTokenOpt = "",
     ai_call_timeout: _AiCallTimeoutOpt = None,
+    force_server_credentials: bool | None = typer.Option(
+        None,
+        "--force-server-credentials/--no-force-server-credentials",
+        help="Use server-managed AI credentials instead of your provider key.",
+    ),
     raw_prompt: _RawPromptOpt = "",
     issue_prompt: _IssuePromptOpt = "",
     peers: _PeersOpt = "",
@@ -1504,6 +1511,7 @@ def analyze(
             "jenkins_ssl_verify": jenkins_ssl_verify,
             "jira_ssl_verify": jira_ssl_verify,
             "get_job_artifacts": get_job_artifacts,
+            "force_server_credentials": force_server_credentials,
             "wait_for_completion": wait_for_completion,
         },
         max_concurrent=max_concurrent,
@@ -3161,7 +3169,9 @@ def admin_users_pending(
 @admin_users_app.command("approve")
 def admin_users_approve(
     username: str = typer.Argument(..., help="Username to approve."),
-    can_use_server_providers: bool = typer.Option(False, "--can-use-server-providers"),
+    can_use_server_providers: bool | None = typer.Option(
+        None, "--can-use-server-providers/--no-can-use-server-providers"
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Approve a pending user registration."""

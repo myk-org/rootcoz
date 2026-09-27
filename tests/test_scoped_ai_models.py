@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from fastapi import HTTPException
 
 from rootcoz import ai_client, main, storage
 
@@ -174,11 +173,9 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
     )
     token = ai_client.ai_username.set("alice")
     try:
-        with pytest.raises(
-            ValueError, match="Key-scoped model discovery failed.*Retry"
-        ):
-            await ai_client.scoped_models()
-        with pytest.raises(ValueError, match="Key-scoped model discovery failed"):
+        assert await ai_client.scoped_models() == {}
+        assert ai_client.model_listing_status.get()["openai"]["unavailable"]
+        with pytest.raises(ValueError, match="Key-scoped model discovery unavailable"):
             await ai_client.resolve_catalog_pair("openai", "made-up")
         # Even an exact server pair cannot silently switch credential source.
         monkeypatch.setattr(
@@ -186,7 +183,7 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
             "_get_model_catalog",
             AsyncMock(return_value=[{"provider": "openai", "id": "shared"}]),
         )
-        with pytest.raises(ValueError, match="Key-scoped model discovery failed"):
+        with pytest.raises(ValueError, match="Key-scoped model discovery unavailable"):
             await ai_client.resolve_catalog_pair("openai", "shared")
         monkeypatch.setattr(main, "_require_authenticated", lambda request: None)
         monkeypatch.setattr(
@@ -199,10 +196,10 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
             (),
             {"state": type("State", (), {"username": "alice", "is_admin": False})()},
         )()
-        with pytest.raises(HTTPException) as exc:
-            await main.list_ai_models(request, provider="openai")
-        assert exc.value.status_code == 503
-        assert "Retry" in exc.value.detail
+        data = await main.list_ai_models(request, provider="openai")
+        assert data["modelListingSupported"] is True
+        assert data["unavailable"] is True
+        assert [model["id"] for model in data["models"]] == ["shared"]
         monkeypatch.setattr(
             ai_client,
             "models_for_api_key",

@@ -79,6 +79,24 @@ describe('useProviderCatalog shared fetch', () => {
     c.unmount()
   })
 
+  it('caches default and forced-server catalogs separately and clears both on reset', async () => {
+    getMock.mockImplementation(async (path: string) => ({ providers: path.includes('force_server_credentials') ? { claude: [{ id: 'sonnet' }] } : { openai: [{ id: 'gpt' }] } }))
+    const regular = renderHook(() => useProviderCatalog())
+    const forced = renderHook(() => useProviderCatalog(true))
+    await waitFor(() => expect(regular.result.current.providerKeys).toEqual(['openai']))
+    await waitFor(() => expect(forced.result.current.providerKeys).toEqual(['claude']))
+    expect(getMock).toHaveBeenCalledTimes(2)
+    expect(getMock).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=true')
+    const again = renderHook(() => useProviderCatalog(true))
+    expect(again.result.current.providerKeys).toEqual(['claude'])
+    expect(getMock).toHaveBeenCalledTimes(2)
+    act(() => resetProviderCatalogCache())
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(4))
+    regular.unmount()
+    forced.unmount()
+    again.unmount()
+  })
+
   it('does not add diagnostic-only cursor to provider options', async () => {
     getMock.mockResolvedValue({
       providers: { openai: [{ id: 'gpt-5', name: 'GPT 5' }] },

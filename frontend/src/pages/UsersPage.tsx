@@ -120,7 +120,7 @@ export function UsersPage() {
         role: newUserRole,
         // Admins always have effective reports access; ignore leftover switch state
         can_view_reports: newUserRole === 'admin' ? false : newUserCanViewReports,
-        can_use_server_providers: newUserServerGrant,
+        can_use_server_providers: newUserRole !== 'admin' && newUserServerGrant,
       }
       const result = await api.post<CreateUserResponse>('/api/admin/users/create', payload)
       setCreatedUser(result)
@@ -437,7 +437,11 @@ export function UsersPage() {
                   )}
                 </TableCell>
                 <TableCell>
-                  <Switch checked={!!user.can_use_server_providers} disabled={grantToggleInProgress === user.username || user.status !== 'active'} onCheckedChange={(checked) => handleToggleServerGrant(user.username, checked)} aria-label={`Allow server providers for ${user.username}`} />
+                  {user.role === 'admin' ? (
+                    <span className="text-xs text-text-tertiary">Always</span>
+                  ) : (
+                    <Switch checked={!!user.can_use_server_providers} disabled={grantToggleInProgress === user.username || user.status !== 'active'} onCheckedChange={(checked) => handleToggleServerGrant(user.username, checked)} aria-label={`Allow server providers for ${user.username}`} />
+                  )}
                 </TableCell>
                 <TableCell className="font-mono text-xs text-text-tertiary">
                   {formatTimestamp(user.created_at)}
@@ -595,7 +599,10 @@ export function UsersPage() {
                   onValueChange={(v) => {
                     const role = v as UserRole
                     setNewUserRole(role)
-                    if (role === 'admin') setNewUserCanViewReports(false)
+                    if (role === 'admin') {
+                      setNewUserCanViewReports(false)
+                      setNewUserServerGrant(false)
+                    }
                   }}
                 >
                   <SelectTrigger className="h-10">
@@ -609,10 +616,12 @@ export function UsersPage() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <label htmlFor="new-user-server-grant" className="text-sm text-text-secondary">Allow server providers</label>
-                <Switch id="new-user-server-grant" checked={newUserServerGrant} onCheckedChange={setNewUserServerGrant} aria-label="Allow server providers" />
-              </div>
+              {newUserRole !== 'admin' && (
+                <div className="flex items-center justify-between gap-3">
+                  <label htmlFor="new-user-server-grant" className="text-sm text-text-secondary">Allow server providers</label>
+                  <Switch id="new-user-server-grant" checked={newUserServerGrant} onCheckedChange={setNewUserServerGrant} aria-label="Allow server providers" />
+                </div>
+              )}
               {newUserRole !== 'admin' && (
                 <div className="flex items-center justify-between gap-3">
                   <label htmlFor="new-user-can-view-reports" className="text-sm text-text-secondary">

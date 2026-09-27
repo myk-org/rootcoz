@@ -11,7 +11,7 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
   forceServer: boolean
   label?: string
 }) {
-  const { providers, providerStatus } = useProviderCatalog()
+  const { providers, providerStatus } = useProviderCatalog(forceServer)
   const { canUseServerProviders } = useAuth()
   const options = buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
   const current = normalizeProvider(value)
@@ -39,7 +39,7 @@ export function AnalysisModelSelect({ provider, value, onChange, forceServer, la
   forceServer: boolean
   label?: string
 }) {
-  const { providers, providerStatus } = useProviderCatalog()
+  const { providers, providerStatus } = useProviderCatalog(forceServer)
   const { canUseServerProviders } = useAuth()
   const unverified = allowsUnverified(providerStatus, provider, forceServer)
   return <>

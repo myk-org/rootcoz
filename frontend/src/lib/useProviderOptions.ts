@@ -17,10 +17,8 @@ type CatalogState = {
 const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {} }
 
 /** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
-let catalogInflight: Promise<CatalogState> | null = null
-let catalogCache: CatalogState | null = null
-/** Auth-scoped key (`username:adminFlag`) for the active cache entry. */
-let catalogCacheKey: string | null = null
+const catalogInflight = new Map<string, Promise<CatalogState>>()
+const catalogCache = new Map<string, CatalogState>()
 /** Mounted useProviderCatalog consumers — notified on cache reset. */
 const catalogSubscribers = new Set<() => void>()
 
@@ -29,17 +27,13 @@ function catalogKeyFor(username: string, isAdmin: boolean, authenticated: boolea
   return `${username}:${isAdmin ? '1' : '0'}`
 }
 
-function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
-  if (catalogCache && catalogCacheKey === cacheKey) {
-    return Promise.resolve(catalogCache)
-  }
-  if (catalogInflight && catalogCacheKey === cacheKey) {
-    return catalogInflight
-  }
-  catalogCacheKey = cacheKey
-  catalogCache = null
+function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<CatalogState> {
+  const cached = catalogCache.get(cacheKey)
+  if (cached) return Promise.resolve(cached)
+  const inflight = catalogInflight.get(cacheKey)
+  if (inflight) return inflight
   const req = api
-    .get<AiModelsResponse>('/api/ai-models')
+    .get<AiModelsResponse>(forceServer ? '/api/ai-models?force_server_credentials=true' : '/api/ai-models')
     .then((res) => {
       const providers = res.providers ?? {}
       const providerKeys = Object.keys(providers)
@@ -49,23 +43,17 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
         enabled: providerKeys.filter((p) => (providers[p] ?? []).length > 0),
         providerStatus: res.provider_status ?? {},
       }
-      // Only commit if this response still matches the active auth scope.
-      if (catalogCacheKey === cacheKey) {
-        catalogCache = next
-      }
-      // Don't clear a newer inflight started after this request.
-      if (catalogInflight === req) {
-        catalogInflight = null
+      if (catalogInflight.get(cacheKey) === req) {
+        catalogCache.set(cacheKey, next)
+        catalogInflight.delete(cacheKey)
       }
       return next
     })
     .catch((err) => {
-      if (catalogInflight === req) {
-        catalogInflight = null
-      }
+      if (catalogInflight.get(cacheKey) === req) catalogInflight.delete(cacheKey)
       throw err
     })
-  catalogInflight = req
+  catalogInflight.set(cacheKey, req)
   return req
 }
 
@@ -74,9 +62,8 @@ function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
  * so they refetch (login/logout/admin refresh/tests).
  */
 export function resetProviderCatalogCache(): void {
-  catalogInflight = null
-  catalogCache = null
-  catalogCacheKey = null
+  catalogInflight.clear()
+  catalogCache.clear()
   // Wake every mounted hook — cacheKey alone does not change on refresh.
   for (const notify of [...catalogSubscribers]) {
     notify()
@@ -95,7 +82,7 @@ export function useEnabledProviders(): string[] {
 }
 
 /** Models catalog + provider_status (e.g. cursor auth). */
-export function useProviderCatalog(): {
+export function useProviderCatalog(forceServer = false): {
   providerKeys: string[]
   providers: AiModelsResponse['providers']
   /** @deprecated Use providerKeys. */
@@ -103,11 +90,11 @@ export function useProviderCatalog(): {
   providerStatus: Record<string, ProviderStatus>
 } {
   const { username, isAdmin, authenticated } = useAuth()
-  const cacheKey = catalogKeyFor(username, isAdmin, authenticated)
+  const cacheKey = `${catalogKeyFor(username, isAdmin, authenticated)}:${forceServer ? 'server' : 'default'}`
   const [reloadToken, setReloadToken] = useState(0)
-  const [state, setState] = useState<CatalogState>(
-    catalogCache && catalogCacheKey === cacheKey ? catalogCache : EMPTY_CATALOG,
-  )
+  const [state, setState] = useState<{ key: string; catalog: CatalogState }>(() => ({
+    key: cacheKey, catalog: catalogCache.get(cacheKey) ?? EMPTY_CATALOG,
+  }))
 
   useEffect(() => {
     const notify = () => setReloadToken((n) => n + 1)
@@ -119,19 +106,19 @@ export function useProviderCatalog(): {
 
   useEffect(() => {
     let ignore = false
-    loadProviderCatalog(cacheKey)
+    loadProviderCatalog(cacheKey, forceServer)
       .then((next) => {
-        if (!ignore) setState(next)
+        if (!ignore) setState({ key: cacheKey, catalog: next })
       })
       .catch(() => {
-        if (!ignore) setState(EMPTY_CATALOG)
+        if (!ignore) setState({ key: cacheKey, catalog: EMPTY_CATALOG })
       })
     return () => {
       ignore = true
     }
-  }, [cacheKey, reloadToken])
+  }, [cacheKey, forceServer, reloadToken])
 
-  return state
+  return state.key === cacheKey ? state.catalog : catalogCache.get(cacheKey) ?? EMPTY_CATALOG
 }
 
 /**

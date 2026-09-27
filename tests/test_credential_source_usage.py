@@ -168,7 +168,7 @@ async def test_keyed_session_creation_survives_key_rotation(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_reused_session_id_replaces_tombstone_but_not_active_owner(
+async def test_reused_session_id_never_replaces_tombstone_or_active_owner(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "reuse.db")
@@ -179,9 +179,14 @@ async def test_reused_session_id_replaces_tombstone_but_not_active_owner(
     await storage.revoke_ai_session_source("sid")
     with pytest.raises(ValueError, match="revoked"):
         await storage.get_ai_session_source("sid", "alice", "openai")
-    await storage.save_ai_session_source("sid", "bob", "openai", "server")
-    assert await storage.get_ai_session_source("sid", "bob", "openai") == "server"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="already active"):
+        await storage.save_ai_session_source("sid", "bob", "openai", "server")
+    assert await storage.delete_revoked_ai_session("sid", AsyncMock())
+    with pytest.raises(ValueError, match="already active"):
+        await storage.save_ai_session_source("sid", "bob", "openai", "server")
+    with pytest.raises(ValueError, match="revoked"):
+        await storage.get_ai_session_source("sid", "bob", "openai")
+    with pytest.raises(ValueError, match="revoked"):
         await storage.get_ai_session_source("sid", "alice", "openai")
 
 
@@ -211,8 +216,9 @@ async def test_rotation_revokes_keyed_peer_and_chat_but_not_server(
         with pytest.raises(ValueError, match="revoked"):
             await storage.get_ai_session_source(sid, "alice", "openai")
     assert await storage.get_ai_session_source("server", "alice", "openai") == "server"
-    await storage.save_ai_session_source("peer", "bob", "openai", "server")
-    assert await storage.get_ai_session_source("peer", "bob", "openai") == "server"
+    assert await storage.delete_revoked_ai_session("peer", AsyncMock())
+    with pytest.raises(ValueError, match="already active"):
+        await storage.save_ai_session_source("peer", "bob", "openai", "server")
 
 
 @pytest.mark.asyncio
@@ -223,12 +229,15 @@ async def test_rotation_cannot_revoke_reused_session(tmp_path, monkeypatch):
     await storage.update_user_ai_credential("alice", "openai", "old")
     await storage.save_ai_session_source("sid", "alice", "openai", "user")
     sessions = await storage.update_user_ai_credential("alice", "openai", "new")
-    await storage.save_ai_session_source("sid", "bob", "openai", "server")
+    assert await storage.delete_revoked_ai_session("sid", AsyncMock())
+    with pytest.raises(ValueError, match="already active"):
+        await storage.save_ai_session_source("sid", "bob", "openai", "server")
     sidecar = AsyncMock()
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
     await main._revoke_ai_sessions(sessions)
     sidecar.delete_session.assert_not_awaited()
-    assert await storage.get_ai_session_source("sid", "bob", "openai") == "server"
+    with pytest.raises(ValueError, match="revoked"):
+        await storage.get_ai_session_source("sid", "bob", "openai")
 
 
 @pytest.mark.asyncio
@@ -237,12 +246,15 @@ async def test_discard_never_deletes_replacement_session(tmp_path, monkeypatch):
     await storage.init_db()
     await storage.save_ai_session_source("sid", "alice", "openai", "user")
     await storage.revoke_ai_session_source("sid")
-    await storage.save_ai_session_source("sid", "bob", "openai", "server")
+    assert await storage.delete_revoked_ai_session("sid", AsyncMock())
+    with pytest.raises(ValueError, match="already active"):
+        await storage.save_ai_session_source("sid", "bob", "openai", "server")
     sidecar = AsyncMock()
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
     await main._revoke_ai_sessions(["sid"])
     sidecar.delete_session.assert_not_awaited()
-    assert await storage.get_ai_session_source("sid", "bob", "openai") == "server"
+    with pytest.raises(ValueError, match="revoked"):
+        await storage.get_ai_session_source("sid", "bob", "openai")
 
 
 @pytest.mark.asyncio
@@ -265,18 +277,15 @@ async def test_revocation_deletes_old_sidecar_before_id_can_be_reused(
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
     revocation = asyncio.create_task(main._revoke_ai_sessions(["sid"]))
     await asyncio.wait_for(deleting.wait(), 10)
-    replacement = asyncio.create_task(
-        storage.save_ai_session_source("sid", "bob", "openai", "server")
-    )
     try:
-        await asyncio.sleep(0.05)
-        assert not replacement.done()
+        with pytest.raises(ValueError, match="already active"):
+            await storage.save_ai_session_source("sid", "bob", "openai", "server")
     finally:
         continue_delete.set()
         await revocation
-        await replacement
     sidecar.delete_session.assert_awaited_once_with("sid")
-    assert await storage.get_ai_session_source("sid", "bob", "openai") == "server"
+    with pytest.raises(ValueError, match="already active"):
+        await storage.save_ai_session_source("sid", "bob", "openai", "server")
 
 
 @pytest.mark.asyncio
@@ -299,20 +308,18 @@ async def test_new_sidecar_create_waits_for_old_delete(tmp_path, monkeypatch):
     revocation = asyncio.create_task(main._revoke_ai_sessions(["sid"]))
     await asyncio.wait_for(deleting.wait(), 10)
     token = ai_client.ai_username.set("bob")
-    creation = asyncio.create_task(
-        ai_client.create_session_safely(
-            client, provider="openai", model="m", system_prompt="test"
-        )
-    )
     try:
-        await asyncio.sleep(0.05)
-        client.create_session.assert_not_awaited()
+        with pytest.raises(ValueError, match="already active"):
+            await ai_client.create_session_safely(
+                client, provider="openai", model="m", system_prompt="test"
+            )
+        client.create_session.assert_awaited_once()
     finally:
         continue_delete.set()
         await revocation
-        await creation
         ai_client.ai_username.reset(token)
-    assert await storage.get_ai_session_source("sid", "bob", "openai") == "server"
+    with pytest.raises(ValueError, match="revoked"):
+        await storage.get_ai_session_source("sid", "bob", "openai")
 
 
 @pytest.mark.asyncio
@@ -350,7 +357,9 @@ async def test_job_delete_revokes_session_source(tmp_path, monkeypatch, bulk):
         await storage.delete_job("job")
     with pytest.raises(ValueError, match="revoked"):
         await storage.get_ai_session_source("sid", "alice", "openai")
-    await storage.save_ai_session_source("sid", "bob", "openai", "server")
+    assert await storage.delete_revoked_ai_session("sid", AsyncMock())
+    with pytest.raises(ValueError, match="already active"):
+        await storage.save_ai_session_source("sid", "bob", "openai", "server")
 
 
 @pytest.mark.asyncio

@@ -56,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUsernameState(user.username)
     setIsAdminState(user.is_admin)
     setCanViewReports(!!user.can_view_reports)
-    setCanUseServerProviders(!!user.can_use_server_providers)
+    setCanUseServerProviders(user.is_admin || user.role === 'admin' || !!user.can_use_server_providers)
     setRoleState(user.role)
     setIsAdmin(user.is_admin)
     setRole(user.role)

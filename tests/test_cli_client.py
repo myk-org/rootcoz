@@ -1863,6 +1863,14 @@ class TestRootCozClientAdminUsers:
         ]
         assert client.approve_user("alice", True)["can_use_server_providers"]
 
+    def test_approve_without_choice_does_not_revoke_existing_grant(self):
+        def handler(request):
+            assert request.url.path == "/api/admin/users/alice/approve"
+            assert not request.content
+            return httpx.Response(200, json={"can_use_server_providers": True})
+
+        assert _make_client(handler).approve_user("alice")["can_use_server_providers"]
+
     def test_admin_create_user_reviewer(self):
         def handler(request):
             body = json.loads(request.content)
