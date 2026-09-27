@@ -21,6 +21,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "created_at",
         "completed_at",
         "analysis_started_at",
+        "graft_estimated_tokens_saved",
         "capabilities",
         "tracked_in",
         "base_url",
