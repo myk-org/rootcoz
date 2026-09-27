@@ -39,24 +39,24 @@ async def record_ai_usage(
     Uses provider/model from result.usage when present, falls back to parameters.
     """
     try:
-        if not job_id or result.usage is None:
+        if not job_id or (not result.success and result.usage is None):
             return
 
         usage = result.usage
-        resolved_provider = usage.provider or ai_provider
-        resolved_model = usage.model or ai_model
+        resolved_provider = (usage.provider if usage else "") or ai_provider
+        resolved_model = (usage.model if usage else "") or ai_model
 
         await storage.record_token_usage(
             job_id=job_id,
             ai_provider=resolved_provider,
             ai_model=resolved_model,
             call_type=call_type,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-            cost_usd=usage.cost_usd,
-            duration_ms=usage.duration_ms,
+            input_tokens=usage.input_tokens if usage else 0,
+            output_tokens=usage.output_tokens if usage else 0,
+            cache_read_tokens=usage.cache_read_tokens if usage else 0,
+            cache_write_tokens=usage.cache_write_tokens if usage else 0,
+            cost_usd=usage.cost_usd if usage else None,
+            duration_ms=usage.duration_ms if usage else None,
             prompt_chars=prompt_chars,
             response_chars=len(result.text),
             credential_source=getattr(result, "credential_source", "unknown"),
