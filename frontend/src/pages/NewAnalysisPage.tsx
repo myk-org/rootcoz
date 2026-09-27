@@ -51,7 +51,7 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('')
   const [aiModel, setAiModel] = useState('')
-  const [forceServerCredentials, setForceServerCredentials] = useState(false)
+  const [forceServerCredentials, setForceServerCredentials] = useState<boolean | undefined>(undefined)
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -97,6 +97,7 @@ export function NewAnalysisPage() {
       if (cancelled || resolved) return
       if (defaults.ai_provider) setAiProvider(normalizeProvider(defaults.ai_provider))
       if (defaults.ai_model) setAiModel(defaults.ai_model)
+      setForceServerCredentials(defaults.force_server_credentials && canUseServerProviders)
       setAiCallTimeout(defaults.ai_call_timeout)
       setTestsRepoUrl(defaults.tests_repo_url)
       if (defaults.tests_repo_ref) setTestsRepoRef(defaults.tests_repo_ref)
@@ -142,11 +143,12 @@ export function NewAnalysisPage() {
       if (!cancelled) setDefaultsLoading(false)
     })
     return () => { cancelled = true; clearTimeout(timeoutId) }
-  }, [])
+  }, [canUseServerProviders])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const { providers, providerStatus } = useProviderCatalog()
+  const effectiveForceServer = forceServerCredentials === true && canUseServerProviders
+  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
   const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
@@ -159,8 +161,9 @@ export function NewAnalysisPage() {
       ? PROW_JOB_NAME_RE.test(prowJobName.trim()) && PROW_BUILD_ID_RE.test(prowBuildId.trim())
       : rawXml.trim() !== ''
 
-  const aiUnavailable = !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, forceServerCredentials, canUseServerProviders) ||
-    (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, forceServerCredentials, canUseServerProviders))))
+  const deferAiToTestsRepo = !!testsRepoUrl.trim() && !aiProvider && !aiModel
+  const aiUnavailable = (!deferAiToTestsRepo && !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders)) ||
+    (enablePeers && (peerConfigs.length === 0 || peerConfigs.some((peer) => !isAnalysisAiAvailable(providers, providerStatus, peer.ai_provider, peer.ai_model, effectiveForceServer, canUseServerProviders))))
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')
@@ -185,7 +188,7 @@ export function NewAnalysisPage() {
   }, [])
 
   const handleSubmit = useCallback(async () => {
-    if (!canSubmit || (forceServerCredentials && !canUseServerProviders)) return
+    if (!canSubmit) return
     if (aiUnavailable) {
       setError('Select an available AI provider and model.')
       return
@@ -195,7 +198,7 @@ export function NewAnalysisPage() {
     try {
       const commonFields: Record<string, unknown> = {
         // Always include user-entered fields
-        force_server_credentials: forceServerCredentials && canUseServerProviders,
+        ...(forceServerCredentials !== undefined && { force_server_credentials: effectiveForceServer }),
         ...(aiProvider && { ai_provider: aiProvider }),
         ...(aiModel && { ai_model: aiModel }),
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
@@ -276,7 +279,7 @@ export function NewAnalysisPage() {
     aiProvider,
     aiModel,
     forceServerCredentials,
-    canUseServerProviders,
+    effectiveForceServer,
     aiUnavailable,
     tags,
     waitForCompletion,
@@ -558,7 +561,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={forceServerCredentials && canUseServerProviders} />
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -573,11 +576,11 @@ export function NewAnalysisPage() {
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={forceServerCredentials && canUseServerProviders} />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
             </div>
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Use server credentials</span>
-              <Toggle checked={forceServerCredentials && canUseServerProviders} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
+              <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
             </div>
             {!canUseServerProviders && <p className="text-xs text-text-tertiary">Server credentials are locked. Ask an admin for access, or use your own AI key.</p>}
             <div className="space-y-1.5">
@@ -612,7 +615,7 @@ export function NewAnalysisPage() {
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
                 strict
-                forceServer={forceServerCredentials && canUseServerProviders}
+                forceServer={effectiveForceServer}
               />
             )}
           </Section>

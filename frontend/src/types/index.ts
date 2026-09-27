@@ -542,6 +542,7 @@ export interface FeedbackCreateResponse {
 /** Non-sensitive server settings returned by GET /api/default-server-settings. */
 export interface DefaultServerSettings {
   // AI configuration
+  force_server_credentials: boolean
   ai_provider: string
   ai_model: string
   ai_call_timeout: number

@@ -141,7 +141,7 @@ async def test_chat_call_rotated_mid_flight_cannot_publish_session(
         job_id, "hello", username="alice", ai_provider="p", ai_model="m"
     )
     revoked = AsyncMock()
-    monkeypatch.setattr(main, "_revoke_ai_sessions", revoked)
+    monkeypatch.setattr(main, "_discard_unsaved_ai_session", revoked)
     process = main._process_admin_chat_message if admin else main._process_chat_message
     await process(
         **({} if admin else {"job_id": job_id}),
@@ -156,7 +156,7 @@ async def test_chat_call_rotated_mid_flight_cannot_publish_session(
     assert message["status"] == "failed"
     assert message["content"] != "reply"
     assert message["session_id"] == ""
-    revoked.assert_awaited_once_with(["stale-session"])
+    revoked.assert_awaited_once_with("stale-session", "alice", "p")
 
 
 @pytest.mark.asyncio
@@ -241,17 +241,21 @@ async def test_discard_notifies_only_pending_placeholder(
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "discard.db")
     await storage.init_db()
     _, pending = await storage.add_chat_message_pair(job_id, "hello", username="alice")
-    monkeypatch.setattr(main, "_revoke_ai_sessions", revoked := AsyncMock())
+    monkeypatch.setattr(main, "_discard_unsaved_ai_session", revoked := AsyncMock())
     notifications = []
     monkeypatch.setattr(
         main,
         "notify_chat_changed",
         lambda job_id, *, username: notifications.append((job_id, username)),
     )
-    await main._discard_unsaved_chat_response(pending, job_id, "alice", "sid", label)
-    revoked.assert_awaited_once_with(["sid"])
+    await main._discard_unsaved_chat_response(
+        pending, job_id, "alice", "p", "sid", label
+    )
+    revoked.assert_awaited_once_with("sid", "alice", "p")
     assert notifications == [(job_id, "alice")]
-    await main._discard_unsaved_chat_response(pending, job_id, "alice", None, label)
+    await main._discard_unsaved_chat_response(
+        pending, job_id, "alice", "p", None, label
+    )
     assert notifications == [(job_id, "alice")]
     revoked.assert_awaited_once()
 
@@ -317,7 +321,7 @@ async def test_abort_between_status_check_and_completion_preserves_reason(
         return await complete(*args, **kwargs)
 
     monkeypatch.setattr(storage, "complete_chat_message_if_generation", paused_complete)
-    monkeypatch.setattr(main, "_revoke_ai_sessions", revoked := AsyncMock())
+    monkeypatch.setattr(main, "_discard_unsaved_ai_session", revoked := AsyncMock())
     process = main._process_admin_chat_message if admin else main._process_chat_message
     task = asyncio.create_task(
         process(
@@ -344,7 +348,7 @@ async def test_abort_between_status_check_and_completion_preserves_reason(
         "Aborted by user.",
         "",
     )
-    revoked.assert_awaited_once_with(["new-session"])
+    revoked.assert_awaited_once_with("new-session", "alice", "p")
 
 
 @pytest.mark.asyncio
@@ -381,9 +385,14 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
     await storage.update_user_ai_credential("alice", "p", "old-key")
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
-    monkeypatch.setattr(main, "_revoke_ai_sessions", revoked := AsyncMock())
+    deleted = AsyncMock(side_effect=OSError("sidecar offline"))
+    monkeypatch.setattr(
+        "pi_sidecar_client.get_sidecar_client",
+        lambda: SimpleNamespace(delete_session=deleted),
+    )
 
     async def rotate_during_init(**_kwargs):
+        await storage.save_ai_session_source("stale-session", "alice", "p", "server")
         await storage.update_user_ai_credential("alice", "p", "new-key")
         return "stale-session"
 
@@ -427,4 +436,7 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
         not msg["session_id"]
         for msg in await storage.get_chat_messages(job_id, username="alice")
     )
-    revoked.assert_awaited_once_with(["stale-session"])
+    assert await storage.list_revoked_ai_sessions() == ["stale-session"]
+    with pytest.raises(ValueError, match="revoked"):
+        await storage.get_ai_session_source("stale-session", "alice", "p")
+    deleted.assert_awaited_once_with("stale-session")

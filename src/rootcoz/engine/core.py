@@ -1484,12 +1484,15 @@ async def _call_ai_with_retry(
         try:
             result = await call_ai_once(prompt, **call_kwargs)
         except Exception as exc:  # noqa: BLE001 - retry failed AI calls
+            from rootcoz.engine.chat import safe_exception_frames
+
             logger.error(
-                "AI call raised %s: provider=%s, model=%s, attempt=%d",
+                "AI call raised %s: provider=%s, model=%s, attempt=%d\n%s",
                 type(exc).__name__,
                 ai_provider,
                 ai_model,
                 attempt,
+                safe_exception_frames(exc),
             )
             result = AIResult(success=False, text="AI call failed unexpectedly")
 

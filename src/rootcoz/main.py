@@ -479,6 +479,7 @@ async def _periodic_session_cleanup() -> None:
             count = await storage.cleanup_expired_sessions()
             if count:
                 logger.info("Periodic cleanup: removed %d expired sessions", count)
+            await _cleanup_revoked_ai_sessions()
         except Exception:
             logger.debug("Periodic session cleanup failed", exc_info=True)
 
@@ -1391,6 +1392,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await init_db()
     await storage.cleanup_expired_sessions()
+    await _cleanup_revoked_ai_sessions()
 
     # Load DB setting overrides BEFORE config validation so
     # validate_startup_config() sees merged env + DB values.
@@ -1807,16 +1809,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.can_view_reports = False
 
         if has_valid_session and username:
-            if username == "admin" and authenticated_admin:
-                request.state.can_use_server_providers = True
-            else:
-                try:
-                    db_user = await storage.get_user_by_username(username)
-                    request.state.can_use_server_providers = bool(
-                        db_user and db_user.get("can_use_server_providers")
-                    )
-                except Exception:  # noqa: BLE001 - grant lookup must fail closed
-                    logger.warning("Unable to load server provider grant")
+            try:
+                request.state.can_use_server_providers = (
+                    await storage.can_user_use_server_providers(username)
+                )
+            except Exception:  # noqa: BLE001 - grant lookup must fail closed
+                logger.warning("Unable to load server provider grant")
 
         # Track user activity only for authenticated identities
         if has_valid_session and username:
@@ -7771,6 +7769,7 @@ async def bulk_delete_jobs_endpoint(
         unauthorized_ids = [jid for jid in body.job_ids if jid not in job_ids]
 
     result = await storage.delete_jobs_bulk(job_ids)
+    await _cleanup_revoked_ai_sessions()
     result["unauthorized"] = unauthorized_ids
 
     for job_id in result["deleted"]:
@@ -7813,6 +7812,7 @@ async def delete_job_endpoint(
         )
 
     await storage.delete_job(job_id)
+    await _cleanup_revoked_ai_sessions()
     await _cleanup_deleted_job_chat_workspaces(job_id)
 
     notify_active_count_changed()
@@ -8887,10 +8887,15 @@ def _cursor_status_from_model_count(model_count: int) -> dict[str, Any]:
 
 async def scoped_models_for_request(
     request: Request,
+    force_server: bool | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Discover models using the authenticated caller's credential scope."""
     token = ai_username.set(request.state.username)
-    force_token = force_server_credentials.set(get_settings().force_server_credentials)
+    force_token = force_server_credentials.set(
+        get_settings().force_server_credentials
+        if force_server is None
+        else force_server
+    )
     try:
         return await scoped_models()
     finally:
@@ -8905,6 +8910,7 @@ async def list_ai_models(
         "",
         description="Filter by an exact Pi-sidecar provider identifier.",
     ),
+    force_server_credentials: bool | None = None,
 ) -> dict[str, Any]:
     """List available AI models for one or all configured providers.
 
@@ -8919,7 +8925,7 @@ async def list_ai_models(
     logger.debug("GET /api/ai-models provider=%s", provider)
     is_admin = bool(getattr(request.state, "is_admin", False))
     try:
-        scoped = await scoped_models_for_request(request)
+        scoped = await scoped_models_for_request(request, force_server_credentials)
         listing_status = model_listing_status.get() or {}
         if provider:
             provider = normalize_provider(provider)
@@ -8934,6 +8940,8 @@ async def list_ai_models(
                 payload["modelListingSupported"] = listing_status[provider][
                     "modelListingSupported"
                 ]
+                if listing_status[provider].get("unavailable"):
+                    payload["unavailable"] = True
             if is_cursor_provider(provider):
                 if is_admin:
                     cursor_raw = await probe_cursor_auth(model_count=len(models))
@@ -9645,7 +9653,8 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
     return JSONResponse(
         content={
             "providers": [
-                {"provider": p, "configured": p in configured} for p in supported
+                {"provider": p, "configured": p in configured}
+                for p in sorted(set(supported) | configured.keys())
             ]
         },
         headers={"Cache-Control": "no-store"},
@@ -9653,11 +9662,16 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
 
 
 async def _discard_unsaved_chat_response(
-    message_id: int, job_id: str, username: str, session_id: str | None, label: str
+    message_id: int,
+    job_id: str,
+    username: str,
+    provider: str,
+    session_id: str | None,
+    label: str,
 ) -> None:
     """Revoke an unsaved response and fail only an open placeholder."""
     if session_id:
-        await _revoke_ai_sessions([session_id])
+        await _discard_unsaved_ai_session(session_id, username, provider)
     logger.info(
         "%s: discarded response for message %d (stale credentials or closed placeholder)",
         label,
@@ -9667,6 +9681,16 @@ async def _discard_unsaved_chat_response(
         message_id, "AI credentials changed during processing. Please try again."
     ):
         notify_chat_changed(job_id, username=username)
+
+
+async def _discard_unsaved_ai_session(
+    session_id: str, username: str, provider: str
+) -> None:
+    """Tombstone an owned unsaved session before best-effort sidecar deletion."""
+    if await storage.revoke_ai_session_source(
+        session_id, username=username, provider=provider
+    ):
+        await _revoke_ai_sessions([session_id])
 
 
 async def _revoke_ai_sessions(sessions: list[str]) -> None:
@@ -9682,7 +9706,12 @@ async def _revoke_ai_sessions(sessions: list[str]) -> None:
         except Exception:  # noqa: BLE001 - tombstone remains if sidecar is unavailable
             logger.warning("Failed to delete revoked AI session")
     if sessions:
-        logger.info("Revoked %d AI sessions after credential change", len(sessions))
+        logger.info("Revoked %d AI sessions", len(sessions))
+
+
+async def _cleanup_revoked_ai_sessions() -> None:
+    """Retry tombstones left by a failed sidecar deletion on the next cleanup."""
+    await _revoke_ai_sessions(await storage.list_revoked_ai_sessions())
 
 
 class AiCredentialInput(BaseModel):
@@ -9712,8 +9741,10 @@ async def set_user_ai_credential(
         )
     except UnicodeEncodeError:
         valid = False
+    if valid and len(key) < 8:
+        valid = False
     if not valid:
-        raise HTTPException(status_code=400, detail="API key must be 1-1024 characters")
+        raise HTTPException(status_code=400, detail="API key must be 8-1024 characters")
     try:
         sessions = await storage.update_user_ai_credential(username, provider, key)
     except storage.UnreadableAiCredentialsError as exc:
@@ -9729,10 +9760,6 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
     """Remove one credential; do not reveal whether a key was present."""
     _require_reviewer(request)
     username = await _credential_user(request)
-    if provider not in await supported_key_providers():
-        raise HTTPException(
-            status_code=400, detail="Provider does not support session API keys"
-        )
     try:
         sessions = await storage.update_user_ai_credential(username, provider, None)
     except storage.UnreadableAiCredentialsError as exc:
@@ -10089,7 +10116,7 @@ async def admin_create_user_endpoint(
             "username": username,
             "api_key": raw_key,
             "role": role,
-            "can_use_server_providers": server_grant,
+            "can_use_server_providers": role == "admin" or server_grant,
             "can_view_reports": effective_can_view_reports(
                 role == "admin", stored_can_view_reports
             ),
@@ -10112,6 +10139,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if not deleted:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
+    await _cleanup_revoked_ai_sessions()
     logger.info(f"[AUDIT] Admin '{request.state.username}' deleted user '{username}'")
     return {"deleted": username}
 
@@ -10234,7 +10262,7 @@ async def approve_user(
 ) -> dict[str, Any]:
     """Approve a pending user registration."""
     _require_admin(request)
-    grant = body.can_use_server_providers if body else False
+    grant = body.can_use_server_providers if body else None
     if not await storage.approve_pending_user(username, grant):
         status = await storage.get_user_status(username)
         if status is None:
@@ -10243,16 +10271,17 @@ async def approve_user(
             status_code=400,
             detail=f"User '{username}' is not pending (current status: {status})",
         )
+    effective_grant = await storage.can_user_use_server_providers(username)
     logger.info(
         "[AUDIT] Admin '%s' approved user '%s' (can_use_server_providers=%s)",
         request.state.username,
         username,
-        grant,
+        effective_grant,
     )
     return {
         "username": username,
         "status": "active",
-        "can_use_server_providers": grant,
+        "can_use_server_providers": effective_grant,
         "message": f"User '{username}' has been approved.",
     }
 
@@ -11590,6 +11619,8 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             )
         finally:
             ai_username.reset(token)
+        if job_id in _chat_jobs_deleting and session_id:
+            await _discard_unsaved_ai_session(session_id, username, ai_provider)
         _raise_if_chat_job_deleted(job_id)
         if session_id:
             saved = await storage.add_chat_message(
@@ -11604,7 +11635,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
                 credential_generation=credential_generation,
             )
             if not saved:
-                await _revoke_ai_sessions([session_id])
+                await _discard_unsaved_ai_session(session_id, username, ai_provider)
                 session_id = None
         welcome_text = build_welcome_message(
             job_name=result_data.get("job_name", "unknown"),
@@ -12244,6 +12275,10 @@ async def _process_chat_message(
 
                     if abort_signal.is_set():
                         abort_signal.clear()
+                        if new_session_id and new_session_id != last_session_id:
+                            await _discard_unsaved_ai_session(
+                                new_session_id, username, ai_provider
+                            )
                         await _fail_chat_assistant_placeholder(
                             assistant_msg_id,
                             job_id,
@@ -12276,6 +12311,10 @@ async def _process_chat_message(
                         assistant_msg_id
                     )
                     if current_status == "failed":
+                        if new_session_id and new_session_id != last_session_id:
+                            await _discard_unsaved_ai_session(
+                                new_session_id, username, ai_provider
+                            )
                         logger.info(
                             "Chat: message %d was aborted during processing, discarding response",
                             assistant_msg_id,
@@ -12292,7 +12331,14 @@ async def _process_chat_message(
                     )
                     if not saved:
                         await _discard_unsaved_chat_response(
-                            assistant_msg_id, job_id, username, new_session_id, "Chat"
+                            assistant_msg_id,
+                            job_id,
+                            username,
+                            ai_provider,
+                            new_session_id
+                            if new_session_id != last_session_id
+                            else None,
+                            "Chat",
                         )
                         return
                     logger.info(
@@ -12347,6 +12393,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
     # while a background worker is still processing
     async with _hold_chat_lock(f"{job_id}:{username}"):
         count = await storage.delete_chat_messages(job_id, username=username)
+        await _cleanup_revoked_ai_sessions()
         notify_chat_changed(job_id, username=username)
         try:
             cleanup_chat_repos(job_id, username=username)
@@ -12524,7 +12571,7 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                     credential_generation=credential_generation,
                 )
                 if not saved:
-                    await _revoke_ai_sessions([session_id])
+                    await _discard_unsaved_ai_session(session_id, username, ai_provider)
                     session_id = None
     logger.info("Admin chat init: workspace=%s, session=%s", workspace, session_id)
     return {"ready": True, "session_id": session_id or ""}
@@ -12754,6 +12801,10 @@ async def _process_admin_chat_message(
 
             if abort_signal.is_set():
                 abort_signal.clear()
+                if new_session_id and new_session_id != last_session_id:
+                    await _discard_unsaved_ai_session(
+                        new_session_id, username, ai_provider
+                    )
                 await storage.update_chat_message_content(
                     assistant_msg_id, "Aborted by user."
                 )
@@ -12777,6 +12828,10 @@ async def _process_admin_chat_message(
             # Check if message was aborted while AI was processing
             current_status = await storage.get_chat_message_status(assistant_msg_id)
             if current_status == "failed":
+                if new_session_id and new_session_id != last_session_id:
+                    await _discard_unsaved_ai_session(
+                        new_session_id, username, ai_provider
+                    )
                 logger.info(
                     "Chat: message %d was aborted during processing, discarding response",
                     assistant_msg_id,
@@ -12796,7 +12851,8 @@ async def _process_admin_chat_message(
                     assistant_msg_id,
                     ADMIN_CHAT_JOB_ID,
                     username,
-                    new_session_id,
+                    ai_provider,
+                    new_session_id if new_session_id != last_session_id else None,
                     "Admin chat",
                 )
                 return
@@ -12959,6 +13015,7 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
 
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
+        await _cleanup_revoked_ai_sessions()
         notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
         try:
             cleanup_chat_repos(ADMIN_CHAT_JOB_ID, username=username)

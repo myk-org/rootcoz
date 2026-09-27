@@ -35,8 +35,8 @@ export function AiCredentials() {
 
   async function save(event: FormEvent) {
     event.preventDefault()
-    const value = keyRef.current.trim()
-    if (!provider || !value || busy) return
+    const value = keyRef.current
+    if (!provider || !value.trim() || busy) return
     clearKey()
     setBusy(provider)
     setError('')

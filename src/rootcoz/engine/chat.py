@@ -1175,6 +1175,18 @@ def build_chat_prompt(
     return "\n".join(parts)
 
 
+def safe_exception_frames(exc: BaseException) -> str:
+    """Format traceback locations without credential-bearing exception messages."""
+    frames = []
+    tb = exc.__traceback__
+    while tb:
+        frames.append(
+            f"{tb.tb_frame.f_code.co_filename}:{tb.tb_lineno} in {tb.tb_frame.f_code.co_name}"
+        )
+        tb = tb.tb_next
+    return "\n".join(frames)
+
+
 async def _create_chat_session(
     *,
     system_prompt: str,
@@ -1225,19 +1237,11 @@ async def _create_chat_session(
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
     except Exception as exc:  # noqa: BLE001 - chat session failure is reported to caller
-        # Exception messages may include the user key; log frames without values.
-        frames = []
-        tb = exc.__traceback__
-        while tb:
-            frames.append(
-                f"{tb.tb_frame.f_code.co_filename}:{tb.tb_lineno} in {tb.tb_frame.f_code.co_name}"
-            )
-            tb = tb.tb_next
         logger.warning(
             "%s: failed to create session (%s)\n%s",
             log_prefix,
             type(exc).__name__,
-            "\n".join(frames),
+            safe_exception_frames(exc),
         )
         return None
 
