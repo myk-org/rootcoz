@@ -1951,29 +1951,51 @@ async def update_status(
                 if active_repos:
                     log = result.setdefault("progress_log", [])
                     state = "failed" if status == "failed" else "cancelled"
-                    for repo in active_repos:
-                        started: dict[str, Any] = next(
-                            (
-                                entry
-                                for entry in reversed(log)
-                                if entry.get("repo") == repo
-                                and entry.get("state") == "cloning"
-                            ),
-                            {},
+                    active_operations: dict[str, dict[str, Any]] = {}
+                    legacy_starts: dict[str, dict[str, Any]] = {}
+                    for entry in log:
+                        repo = entry.get("repo")
+                        if repo not in active_repos:
+                            continue
+                        identity = entry.get("operation_id")
+                        active = active_operations if identity else legacy_starts
+                        key = identity or repo
+                        if entry.get("state") == "cloning":
+                            active[key] = entry
+                        else:
+                            active.pop(key, None)
+                    starts = list(active_operations.values()) + list(
+                        legacy_starts.values()
+                    )
+                    starts.extend(
+                        {"repo": repo}
+                        for repo in active_repos
+                        if repo not in legacy_starts
+                        and not any(
+                            entry["repo"] == repo
+                            for entry in active_operations.values()
                         )
+                    )
+                    for started in starts:
                         transition: dict[str, Any] = {
                             "phase": "cloning",
-                            "repo": repo,
+                            "repo": started["repo"],
                             "state": state,
                             "repos": [],
                             "timestamp": time.time(),
                         }
                         transition.update(
                             (key, started[key])
-                            for key in ("url", "ref")
+                            for key in ("operation_id", "url", "ref")
                             if key in started
                         )
                         log.append(transition)
+                    logger.info(
+                        "Ended %d active clone operations for job_id=%s status=%s",
+                        len(starts),
+                        job_id,
+                        status,
+                    )
                 result["cloning_repos"] = []
                 if status != "completed":
                     result["progress_phase"] = status

@@ -5058,14 +5058,37 @@ async def _reanalyze_failure_background(
                 )
                 outcome = "cancelled"
                 try:
-                    await asyncio.to_thread(
-                        repo_manager.clone_into,
-                        str(tests_repo_url),
-                        repo_path / repo_name,
-                        depth=50,
-                        branch=tests_repo_ref,
-                        token=tests_repo_token or None,
+                    clone_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            repo_manager.clone_into,
+                            str(tests_repo_url),
+                            repo_path / repo_name,
+                            depth=50,
+                            branch=tests_repo_ref,
+                            token=tests_repo_token or None,
+                        )
                     )
+                    try:
+                        await asyncio.shield(clone_task)
+                    except asyncio.CancelledError:
+                        # A cancelled await does not stop the thread. Keep the workspace
+                        # until the worker exits, even if cancellation is repeated.
+                        while not clone_task.done():
+                            try:
+                                await asyncio.wait({clone_task})
+                            except asyncio.CancelledError:
+                                continue
+                        if not clone_task.cancelled() and (
+                            clone_error := clone_task.exception()
+                        ):
+                            logger.warning(
+                                "Test repository clone failed during cancellation: %s",
+                                type(clone_error).__name__,
+                            )
+                        logger.info(
+                            "Test repository clone worker joined after cancellation"
+                        )
+                        raise
                     outcome = "cloned"
                 except Exception:
                     outcome = "failed"

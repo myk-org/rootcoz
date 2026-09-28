@@ -508,6 +508,75 @@ async def test_abort_marks_active_clones_cancelled_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["aborted", "failed"])
+async def test_terminal_status_ends_every_active_clone_operation(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result(
+        "job",
+        "",
+        "running",
+        {
+            "failures": [
+                {"id": ident, "reanalysis_status": "running"}
+                for ident in ("one", "two", "done")
+            ]
+        },
+    )
+    await storage.update_clone_progress(
+        "job", "tests", True, url="https://example.com/legacy", ref="old"
+    )
+    for ident in ("one", "two", "done"):
+        await storage.update_clone_progress(
+            "job",
+            "tests",
+            True,
+            reanalysis=True,
+            operation_id=ident,
+            url=f"https://example.com/{ident}",
+            ref=ident,
+        )
+    await storage.update_clone_progress(
+        "job", "tests", False, reanalysis=True, operation_id="done"
+    )
+    await storage.update_status("job", status, {"error": "stopped"})
+    before = await storage.get_result("job")
+    result = before["result"]
+    assert result["cloning_repos"] == []
+    assert result["progress_phase"] == status
+    assert [
+        (e.get("operation_id"), e["state"], e.get("url"), e.get("ref"))
+        for e in result["progress_log"][-3:]
+    ] == [
+        (
+            "one",
+            "failed" if status == "failed" else "cancelled",
+            "https://example.com/one",
+            "one",
+        ),
+        (
+            "two",
+            "failed" if status == "failed" else "cancelled",
+            "https://example.com/two",
+            "two",
+        ),
+        (
+            None,
+            "failed" if status == "failed" else "cancelled",
+            "https://example.com/legacy",
+            "old",
+        ),
+    ]
+    for ident in ("one", "two"):
+        await storage.update_clone_progress(
+            "job", "tests", False, reanalysis=True, operation_id=ident
+        )
+    assert await storage.get_result("job") == before
+
+
+@pytest.mark.asyncio
 async def test_cancel_during_start_progress_releases_clone_slot(tmp_path: Path) -> None:
     from rootcoz.engine import core
 

@@ -6290,13 +6290,18 @@ class TestReAnalyzeFailure:
             "completed",
             {"failures": [{"id": "failure-id", "reanalysis_status": "running"}]},
         )
-        started = asyncio.Event()
-        release = asyncio.Event()
+        from threading import Event
 
-        async def clone(*_args, **_kwargs):
+        started = Event()
+        release = Event()
+        finished = Event()
+
+        def clone(*_args, **_kwargs):
             started.set()
-            await release.wait()
+            release.wait()
+            finished.set()
 
+        task = None
         try:
             with (
                 patch("rootcoz.main.RepositoryManager") as manager,
@@ -6305,11 +6310,11 @@ class TestReAnalyzeFailure:
                     new_callable=AsyncMock,
                     return_value="",
                 ),
-                patch("rootcoz.main.asyncio.to_thread", side_effect=clone),
             ):
                 manager.return_value.create_workspace.return_value = (
                     tmp_path / "workspace"
                 )
+                manager.return_value.clone_into.side_effect = clone
                 task = asyncio.create_task(
                     _reanalyze_failure_background(
                         "job-cancel-tests",
@@ -6329,10 +6334,25 @@ class TestReAnalyzeFailure:
                         1,
                     )
                 )
-                await asyncio.wait_for(started.wait(), 2)
+                assert await asyncio.to_thread(started.wait, 2)
                 task.cancel()
+                await asyncio.sleep(0.05)
+                assert not finished.is_set()
+                assert not task.done()
+                task.cancel()  # Repeated cancellation must not abandon the worker.
+                await asyncio.sleep(0)
+                assert not task.done()
+                assert not manager.return_value.cleanup.called
+                running = (await storage.get_result("job-cancel-tests"))["result"]
+                assert running["cloning_repos"] == ["tests"]
+                assert [entry["state"] for entry in running["progress_log"]] == [
+                    "cloning"
+                ]
+                release.set()
                 with pytest.raises(asyncio.CancelledError):
-                    await task
+                    await asyncio.wait_for(task, 2)
+                assert finished.is_set()
+                manager.return_value.cleanup.assert_called_once()
             result = (await storage.get_result("job-cancel-tests"))["result"]
             assert result["cloning_repos"] == []
             assert [
@@ -6343,6 +6363,9 @@ class TestReAnalyzeFailure:
             ]
         finally:
             release.set()
+            if task is not None and not task.done():
+                with pytest.raises(asyncio.CancelledError):
+                    await task
 
     @pytest.mark.asyncio
     async def test_re_analyze_failure_defers_ai_with_tests_repo(
