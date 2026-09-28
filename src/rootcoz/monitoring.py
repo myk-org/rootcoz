@@ -333,7 +333,7 @@ def _compute_component_versions() -> dict[str, Any]:
                 versions[key] = (
                     manifest.get("version") if isinstance(manifest, dict) else None
                 )
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 versions[key] = None
     else:
         versions.update(dict.fromkeys(_SIDECAR_COMPONENT_PACKAGES))
@@ -351,7 +351,7 @@ def _compute_component_versions() -> dict[str, Any]:
                 check=False,
             ).stdout.strip()
             versions[key] = out.removeprefix("v") or None
-        except (OSError, subprocess.TimeoutExpired):
+        except OSError, subprocess.TimeoutExpired:
             versions[key] = None
     return versions
 

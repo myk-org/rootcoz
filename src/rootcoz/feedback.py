@@ -179,7 +179,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
         )
     except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
         # feedback formatting should fall back
-        logger.warning("AI call failed for feedback formatting: %s", exc)
+        logger.warning("AI call failed for feedback formatting: %s", type(exc).__name__)
         title, body = _build_fallback_feedback(request)
         return title, body, _derive_fallback_labels(request)
 

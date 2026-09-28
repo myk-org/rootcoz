@@ -31,7 +31,7 @@ _BASE_ENV = {
 
 
 @pytest.fixture
-def settings_with_tests_repo() -> Generator[Settings, None, None]:
+def settings_with_tests_repo() -> Generator[Settings]:
     """Create Settings with TESTS_REPO_URL and GITHUB_TOKEN configured."""
     env = {
         **_BASE_ENV,
@@ -43,7 +43,7 @@ def settings_with_tests_repo() -> Generator[Settings, None, None]:
 
 
 @pytest.fixture
-def settings_no_tests_repo() -> Generator[Settings, None, None]:
+def settings_no_tests_repo() -> Generator[Settings]:
     """Create Settings without TESTS_REPO_URL."""
     with patch.dict(os.environ, _BASE_ENV, clear=True):
         yield Settings(_env_file=None)

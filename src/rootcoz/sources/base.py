@@ -527,7 +527,6 @@ async def setup_analysis_workspace(
             repo_context = "\nFailed to clone repository (details redacted)"
 
     # Additional repositories are resolved after reading the test repo's settings.
-    # Cloning here can leave nine obsolete clones ahead of the effective nine.
     if cloned_repos:
         copy_rootcoz_pi_resources(cloned_repos, repo_path)
 
@@ -599,7 +598,7 @@ def write_console_output_file(
         console_file.write_text(content, encoding="utf-8", errors="replace")
         logger.info("%swrote console-output.txt (%d chars)", log_prefix, len(content))
         return True
-    except (OSError, UnicodeError):
+    except OSError, UnicodeError:
         logger.warning(
             "%sfailed to write console-output.txt", log_prefix, exc_info=True
         )

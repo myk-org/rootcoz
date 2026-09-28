@@ -1,5 +1,6 @@
 """SQLite storage for analysis results."""
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -9,7 +10,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -177,7 +178,7 @@ def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | 
         return None
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         logger.warning(
             f"parse_result_json: malformed JSON for job_id={job_id}, skipping"
         )
@@ -195,8 +196,8 @@ async def _migrate_add_column(
     table: str,
     column: str,
     column_def: str,
-) -> None:
-    """Add a column to a table if it does not already exist.
+) -> bool:
+    """Add a column if absent; return whether this connection added it.
 
     Args:
         db: Active database connection.
@@ -210,6 +211,7 @@ async def _migrate_add_column(
         try:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
             logger.info(f"Migration: added {column} column to {table}")
+            return True
         except sqlite3.OperationalError as exc:
             # Handle race: concurrent init_db may have added the column already
             logger.debug(
@@ -222,6 +224,7 @@ async def _migrate_add_column(
             logger.debug(f"Migration: {table}.{column} added by concurrent process")
     else:
         logger.debug(f"Migration: {table} already has {column} column")
+    return False
 
 
 async def _ensure_migrations_table(db: aiosqlite.Connection) -> None:
@@ -925,10 +928,26 @@ async def init_db() -> None:
         for col in ("github_token_enc", "jira_email_enc", "jira_token_enc"):
             await _migrate_add_column(db, "users", col, "TEXT NOT NULL DEFAULT ''")
 
+        await _migrate_add_column(
+            db, "users", "ai_credentials_enc", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "users", "ai_credential_generation", "INTEGER NOT NULL DEFAULT 0"
+        )
+        await _migrate_add_column(
+            db, "users", "ai_credential_generations", "TEXT NOT NULL DEFAULT '{}'"
+        )
+
         # Migration: add status column to users table (for admin approval flow)
         await _migrate_add_column(
             db, "users", "status", "TEXT NOT NULL DEFAULT 'active'"
         )
+
+        if await _migrate_add_column(
+            db, "users", "can_use_server_providers", "INTEGER NOT NULL DEFAULT 0"
+        ):
+            # Backfill only when introducing the column; later revocations survive init_db.
+            await db.execute("UPDATE users SET can_use_server_providers = 1")
 
         # Migration: can_view_reports flag (orthogonal to role; admins always have access)
         await _migrate_add_column(
@@ -1040,9 +1059,29 @@ async def init_db() -> None:
                 cost_usd REAL,
                 duration_ms INTEGER,
                 prompt_chars INTEGER NOT NULL DEFAULT 0,
-                response_chars INTEGER NOT NULL DEFAULT 0
+                response_chars INTEGER NOT NULL DEFAULT 0,
+                credential_source TEXT NOT NULL DEFAULT 'unknown'
             )
         """)
+        await _migrate_add_column(
+            db, "ai_token_usage", "credential_source", "TEXT NOT NULL DEFAULT 'unknown'"
+        )
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ai_session_sources (
+                session_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                credential_source TEXT NOT NULL,
+                credential_generation INTEGER
+            )
+        """)
+        await _migrate_add_column(
+            db, "ai_session_sources", "credential_generation", "INTEGER"
+        )
+        await _migrate_add_column(db, "ai_session_sources", "claim_token", "TEXT")
+        await _migrate_add_column(
+            db, "ai_session_sources", "claim_expires_at", "INTEGER"
+        )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_token_usage_job_id ON ai_token_usage (job_id)"
         )
@@ -1761,6 +1800,33 @@ def _build_status_update_clause(
     return set_parts, params
 
 
+async def _token_usage_snapshot(
+    db: aiosqlite.Connection, job_id: str
+) -> dict[str, Any] | None:
+    """Build one source-aware summary from per-call rows in this transaction."""
+    from rootcoz.token_tracking import summarize_token_usage
+
+    rows = await (
+        await db.execute(
+            "SELECT * FROM ai_token_usage WHERE job_id = ? ORDER BY created_at, rowid",
+            (job_id,),
+        )
+    ).fetchall()
+    return (
+        summarize_token_usage([dict(row) for row in rows]).model_dump(mode="json")
+        if rows
+        else None
+    )
+
+
+async def _sync_result_token_usage(
+    db: aiosqlite.Connection, job_id: str, result: dict[str, Any]
+) -> None:
+    """Keep analysis writes from replacing newer per-call usage."""
+    if summary := await _token_usage_snapshot(db, job_id):
+        result["token_usage"] = summary
+
+
 async def save_result(
     job_id: str,
     build_url: str = "",
@@ -1783,6 +1849,10 @@ async def save_result(
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
     result_json = json.dumps(result) if result is not None else None
     async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if result is not None:
+            await _sync_result_token_usage(db, job_id, result)
+            result_json = json.dumps(result)
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
         job_name, build_number, build_id_val = _extract_denormalized_fields(result)
         insert_state = _coerce_analysis_state((result or {}).get("analysis_state"))
@@ -1835,6 +1905,9 @@ async def update_status(
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
     async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if result is not None:
+            await _sync_result_token_usage(db, job_id, result)
         result_json = json.dumps(result) if result is not None else None
         set_parts, params = _build_status_update_clause(status, result_json, result)
         params.append(job_id)
@@ -2148,6 +2221,8 @@ async def get_result(
             parsed = parse_result_json(row["result_json"], job_id=job_id)
             if parsed:
                 await _backfill_failure_uuids(job_id, parsed)
+                if summary := await _token_usage_snapshot(db, job_id):
+                    parsed["token_usage"] = summary
             if parsed and strip_sensitive:
                 parsed = strip_sensitive_from_response(parsed)
             row_data = dict(row)
@@ -3988,6 +4063,7 @@ async def _delete_job_rows(db: aiosqlite.Connection, job_id: str) -> bool:
     await db.execute("DELETE FROM failure_history WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM test_classifications WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM ai_token_usage WHERE job_id = ?", (job_id,))
+    await _revoke_chat_session_sources(db, "job_id = ?", (job_id,))
     await db.execute("DELETE FROM chat_messages WHERE job_id = ?", (job_id,))
     await db.execute("DELETE FROM test_entries WHERE job_id = ?", (job_id,))
     cursor = await db.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
@@ -4144,6 +4220,7 @@ async def get_test_entries(
 async def delete_job(job_id: str) -> bool:
     """Delete an analyzed job and all its related data."""
     async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
         job_existed = await _delete_job_rows(db, job_id)
         await db.commit()
         return job_existed
@@ -4672,14 +4749,22 @@ def _user_row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
         data["can_view_reports"] = bool(data["can_view_reports"])
     else:
         data["can_view_reports"] = False
+    data["can_use_server_providers"] = data.get("role") == "admin" or bool(
+        data.get("can_use_server_providers", 0)
+    )
     return data
 
 
 async def create_admin_user(
-    username: str, *, can_view_reports: bool = False
+    username: str,
+    *,
+    can_view_reports: bool = False,
+    can_use_server_providers: bool = False,
 ) -> tuple[str, str]:
     """Create an admin user and return (username, raw_api_key).
 
+    The stored server-provider grant defaults to false: the admin role grants
+    effective access, but only an explicit grant survives a later demotion.
     Raises ValueError if username is invalid or taken.
 
     Args:
@@ -4687,6 +4772,8 @@ async def create_admin_user(
         can_view_reports: Stored DB flag for /api/reports/* access. Orthogonal
             to role — admins always have effective access regardless of this
             value; keeping it false avoids an accidental grant on demotion.
+        can_use_server_providers: Explicit stored grant; false by default even
+            though admins have effective access through their role.
     """
     username = _normalize_username(username)
     _validate_username(username)
@@ -4695,9 +4782,14 @@ async def create_admin_user(
     async with _connect_db() as db:
         try:
             await db.execute(
-                "INSERT INTO users (username, api_key_hash, role, can_view_reports)"
-                " VALUES (?, ?, 'admin', ?)",
-                (username, key_hash, 1 if can_view_reports else 0),
+                "INSERT INTO users (username, api_key_hash, role, can_view_reports, can_use_server_providers)"
+                " VALUES (?, ?, 'admin', ?, ?)",
+                (
+                    username,
+                    key_hash,
+                    1 if can_view_reports else 0,
+                    int(can_use_server_providers),
+                ),
             )
             await db.commit()
         except Exception as exc:
@@ -4713,7 +4805,7 @@ async def get_user_by_key(api_key: str) -> dict[str, Any] | None:
     key_hash = hash_api_key(api_key)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, can_view_reports, created_at, last_seen"
+            "SELECT id, username, role, can_view_reports, can_use_server_providers, created_at, last_seen"
             " FROM users WHERE api_key_hash = ?",
             (key_hash,),
         )
@@ -4726,7 +4818,7 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
     username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, can_view_reports, created_at, last_seen"
+            "SELECT id, username, role, can_view_reports, can_use_server_providers, created_at, last_seen"
             " FROM users WHERE username = ?",
             (username,),
         )
@@ -4738,10 +4830,32 @@ async def delete_user(username: str) -> bool:
     """Delete a user and their sessions. Returns True if deleted."""
     username = _normalize_username(username)
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM users WHERE username = ?",
+        await db.execute("BEGIN IMMEDIATE")
+        if not (
+            await (
+                await db.execute("SELECT 1 FROM users WHERE username = ?", (username,))
+            ).fetchone()
+        ):
+            return False
+        # Include legacy chat sessions without provenance so they cannot resume
+        # after this username is assigned to a different account.
+        await db.execute(
+            "INSERT OR IGNORE INTO ai_session_sources "
+            "(session_id, username, provider, credential_source) "
+            "SELECT session_id, username, ai_provider, 'deleting' FROM chat_messages "
+            "WHERE username = ? AND session_id != ''",
             (username,),
         )
+        await db.execute(
+            "UPDATE ai_session_sources SET credential_source = 'deleting' "
+            "WHERE username = ? AND credential_source NOT IN ('deleting', 'deleted')",
+            (username,),
+        )
+        await db.execute(
+            "UPDATE chat_messages SET session_id = '' WHERE username = ? AND session_id != ''",
+            (username,),
+        )
+        cursor = await db.execute("DELETE FROM users WHERE username = ?", (username,))
         if cursor.rowcount > 0:
             await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
         await db.commit()
@@ -4754,6 +4868,8 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
     When promoting to admin, generates a new API key only if the user
     doesn't already have one.
     For other role changes, the existing API key is preserved.
+    The stored server-provider grant is unchanged: an implicit admin grant
+    ends on demotion, while an explicit grant (including migrated users) survives.
 
     Args:
         username: The user to change.
@@ -4839,7 +4955,7 @@ async def list_users() -> list[dict[str, Any]]:
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, status, can_view_reports, created_at, last_seen"
+            "SELECT id, username, role, status, can_view_reports, can_use_server_providers, created_at, last_seen"
             " FROM users WHERE username != 'admin' ORDER BY created_at DESC"
         )
         return [_user_row_to_dict(row) for row in await cursor.fetchall()]
@@ -4863,6 +4979,37 @@ async def set_user_can_view_reports(username: str, value: bool) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+async def set_user_can_use_server_providers(username: str, value: bool) -> bool:
+    """Grant or revoke server AI access for a non-admin user."""
+    username = _normalize_username(username)
+    if username == "admin":
+        raise ValueError("Cannot change server provider access for bootstrap admin")
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if not value:
+            row = await (
+                await db.execute(
+                    "SELECT role FROM users WHERE username = ?", (username,)
+                )
+            ).fetchone()
+            if row and row["role"] == "admin":
+                raise ValueError("Cannot revoke server provider access for admins")
+        cursor = await db.execute(
+            "UPDATE users SET can_use_server_providers = ? WHERE username = ?",
+            (int(value), username),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def can_user_use_server_providers(username: str) -> bool:
+    """Read the current grant; unknown identities are denied."""
+    if username == "admin":
+        return True
+    user = await get_user_by_username(username)
+    return bool(user and user["can_use_server_providers"])
 
 
 async def track_user(username: str) -> None:
@@ -4968,6 +5115,7 @@ async def create_user(
     status: str = "active",
     role: str = "",
     can_view_reports: bool = False,
+    can_use_server_providers: bool | None = None,
 ) -> tuple[str, str]:
     """Create a new user or generate an API key for an existing user without one.
 
@@ -5015,9 +5163,16 @@ async def create_user(
                 # Existing user without key — generate one.
                 # Do NOT reset can_view_reports (preserve any admin-granted flag).
                 update_cursor = await db.execute(
-                    "UPDATE users SET api_key_hash = ?"
+                    "UPDATE users SET api_key_hash = ?, can_use_server_providers = "
+                    "COALESCE(?, can_use_server_providers)"
                     " WHERE username = ? AND role != 'admin'",
-                    (key_hash, username),
+                    (
+                        key_hash,
+                        int(can_use_server_providers)
+                        if can_use_server_providers is not None
+                        else None,
+                        username,
+                    ),
                 )
                 if update_cursor.rowcount == 0:
                     msg = f"User '{username}' not found or is an admin user"
@@ -5025,9 +5180,16 @@ async def create_user(
             else:
                 await db.execute(
                     "INSERT INTO users"
-                    " (username, api_key_hash, role, status, can_view_reports)"
-                    " VALUES (?, ?, ?, ?, ?)",
-                    (username, key_hash, role, status, reports_flag),
+                    " (username, api_key_hash, role, status, can_view_reports, can_use_server_providers)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        username,
+                        key_hash,
+                        role,
+                        status,
+                        reports_flag,
+                        int(bool(can_use_server_providers)),
+                    ),
                 )
             await db.commit()
         except ValueError:
@@ -5089,6 +5251,30 @@ async def set_user_status(username: str, status: str) -> bool:
         return cursor.rowcount > 0
 
 
+async def approve_pending_user(
+    username: str, can_use_server_providers: bool | None = None
+) -> bool:
+    """Atomically activate a pending non-admin user, optionally setting its grant.
+
+    Return False without changing the grant if the user is no longer pending.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE users SET status = 'active', can_use_server_providers = "
+            "COALESCE(?, can_use_server_providers) "
+            "WHERE username = ? AND status = 'pending' AND role != 'admin'",
+            (
+                int(can_use_server_providers)
+                if can_use_server_providers is not None
+                else None,
+                username,
+            ),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def get_user_status(username: str) -> str | None:
     """Get user status. Returns None if user not found."""
     username = _normalize_username(username)
@@ -5107,7 +5293,7 @@ async def list_pending_users() -> list[dict[str, Any]]:
     """List users with pending status."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, status, can_view_reports, created_at, last_seen "
+            "SELECT id, username, role, status, can_view_reports, can_use_server_providers, created_at, last_seen "
             "FROM users WHERE status = 'pending' AND role != 'admin' ORDER BY created_at DESC"
         )
         return [_user_row_to_dict(row) for row in await cursor.fetchall()]
@@ -5253,6 +5439,395 @@ async def get_user_tokens(username: str) -> dict[str, str]:
             "jira_email": decrypt_value(row[1] or ""),
             "jira_token": decrypt_value(row[2] or ""),
         }
+
+
+class UnreadableAiCredentialsError(ValueError):
+    """Stored user AI credentials cannot be read safely."""
+
+
+def _decode_ai_credentials(value: str | None) -> dict[str, str]:
+    """Decode credentials or refuse access without exposing stored secrets."""
+    if not value:
+        return {}
+    try:
+        data = json.loads(decrypt_value(value))
+        if isinstance(data, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in data.items()
+        ):
+            return data
+    except ValueError, TypeError:
+        pass
+    logger.warning("Unreadable user AI credentials; refusing access")
+    raise UnreadableAiCredentialsError("Stored AI credentials are unreadable")
+
+
+async def get_user_ai_credential_with_generation(
+    username: str, provider: str
+) -> tuple[str | None, int | None]:
+    """Read one provider key and its generation from the same user row."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_credentials_enc, ai_credential_generations FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+    if row is None:
+        return None, None
+    return _decode_ai_credentials(row[0]).get(provider), json.loads(row[1]).get(
+        provider, 0
+    )
+
+
+async def get_user_ai_credentials(username: str) -> dict[str, str]:
+    """Read the encrypted, provider-ID-keyed credential map for a DB user."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_credentials_enc FROM users WHERE username = ?", (username,)
+            )
+        ).fetchone()
+    return _decode_ai_credentials(row[0]) if row else {}
+
+
+async def get_user_ai_credential_generation(username: str, provider: str) -> int | None:
+    """Read the selected provider's credential generation before a chat AI call."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_credential_generations FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+    return json.loads(row[0]).get(provider, 0) if row else None
+
+
+async def update_user_ai_credential(
+    username: str, provider: str, key: str | None
+) -> list[str]:
+    """Save a credential and invalidate its chat sessions; refuse unreadable maps."""
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT ai_credentials_enc, ai_credential_generations FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+        if row is None:
+            raise LookupError("User has no credential store")
+        credentials = _decode_ai_credentials(row[0])
+        if credentials.get(provider) == key or (
+            key is None and provider not in credentials
+        ):
+            await db.commit()
+            return []
+        if key is None:
+            credentials.pop(provider)
+        else:
+            credentials[provider] = key
+        generations = json.loads(row[1])
+        generations[provider] = generations.get(provider, 0) + 1
+        await db.execute(
+            "UPDATE users SET ai_credentials_enc = ?, ai_credential_generations = ?, "
+            "ai_credential_generation = ai_credential_generation + 1 WHERE username = ?",
+            (encrypt_value(json.dumps(credentials)), json.dumps(generations), username),
+        )
+        # A session retains its creation-time key in the sidecar. Drop references
+        # atomically with the credential so later turns start fresh.
+        sessions = await (
+            await db.execute(
+                "SELECT DISTINCT session_id FROM chat_messages "
+                "WHERE username = ? AND ai_provider = ? AND session_id != ''",
+                (username, provider),
+            )
+        ).fetchall()
+        await db.execute(
+            "UPDATE chat_messages SET session_id = '' "
+            "WHERE username = ? AND ai_provider = ? AND session_id != ''",
+            (username, provider),
+        )
+        # Keep tombstones if sidecar deletion fails: an old keyed session must
+        # never become an unowned (legacy) session that can be resumed.
+        keyed = await (
+            await db.execute(
+                "SELECT session_id FROM ai_session_sources "
+                "WHERE username = ? AND provider = ? AND credential_source = 'user'",
+                (username, provider),
+            )
+        ).fetchall()
+        await db.execute(
+            "UPDATE ai_session_sources SET credential_source = 'revoked' "
+            "WHERE username = ? AND provider = ? AND credential_source = 'user'",
+            (username, provider),
+        )
+        await db.commit()
+    logger.info(
+        "Updated AI credential configuration for user=%s provider=%s",
+        username,
+        provider,
+    )
+    return list({row[0] for row in [*sessions, *keyed]})
+
+
+async def create_ai_session_with_source(
+    create: Callable[[], Awaitable[str]],
+    username: str,
+    provider: str,
+    source: str,
+    delete: Callable[[str], Awaitable[None]] | None = None,
+    expected_generation: int | None = None,
+) -> str:
+    """Create outside the write lock, then persist only the selected key's generation."""
+    if source == "user" and expected_generation is None:
+        expected_generation = await get_user_ai_credential_generation(
+            username, provider
+        )
+        if expected_generation is None:
+            raise ValueError("AI credential generation unavailable")
+    async with _connect_db() as db:
+        identity = await (
+            await db.execute("SELECT id FROM users WHERE username = ?", (username,))
+        ).fetchone()
+    session_id = await create()
+    active_collision = False
+    try:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if await (
+                await db.execute(
+                    "SELECT 1 FROM ai_session_sources WHERE session_id = ?",
+                    (session_id,),
+                )
+            ).fetchone():
+                # Never delete a returned ID that may belong to another session.
+                active_collision = True
+                raise ValueError("AI session ID already active")
+            if source == "user" or identity:
+                current = await (
+                    await db.execute(
+                        "SELECT id, ai_credential_generations FROM users WHERE username = ?",
+                        (username,),
+                    )
+                ).fetchone()
+                if (
+                    not current
+                    or (identity and current[0] != identity[0])
+                    or (
+                        source == "user"
+                        and json.loads(current[1]).get(provider, 0)
+                        != expected_generation
+                    )
+                ):
+                    raise ValueError("AI credential changed during session creation")
+            cursor = await db.execute(
+                "INSERT INTO ai_session_sources "
+                "(session_id, username, provider, credential_source, credential_generation) "
+                "VALUES (?, ?, ?, ?, (SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) "
+                "FROM users WHERE username = ?)) "
+                "ON CONFLICT(session_id) DO NOTHING",
+                (session_id, username, provider, source, provider, username),
+            )
+            if not cursor.rowcount:
+                # An active session already owns this ID; deleting it could kill that session.
+                active_collision = True
+                raise ValueError("AI session ID already active")
+            await db.commit()
+    except Exception:
+        if not active_collision:
+            from pi_sidecar_client import get_sidecar_client
+
+            try:
+                await (delete or get_sidecar_client().delete_session)(session_id)
+            except OSError, RuntimeError, ValueError:
+                logger.warning("Unable to clean up untracked AI session")
+        raise
+    return session_id
+
+
+class AiSessionCollisionError(ValueError):
+    """A sidecar session ID already belongs to an existing provenance record."""
+
+
+async def save_ai_session_source(
+    session_id: str,
+    username: str,
+    provider: str,
+    source: str,
+    expected_account_id: int | None = None,
+    *,
+    bootstrap_admin: bool = False,
+) -> None:
+    """Remember the source of a sidecar session, never its key."""
+    if bootstrap_admin and (username != "admin" or expected_account_id is not None):
+        raise ValueError("Invalid bootstrap admin session owner")
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if expected_account_id is not None or bootstrap_admin:
+            collision = await (
+                await db.execute(
+                    "SELECT 1 FROM ai_session_sources WHERE session_id = ?",
+                    (session_id,),
+                )
+            ).fetchone()
+            if collision:
+                raise AiSessionCollisionError("AI session ID already active")
+        if bootstrap_admin:
+            account = await (
+                await db.execute("SELECT 1 FROM users WHERE username = 'admin'")
+            ).fetchone()
+            if account:
+                raise LookupError("Bootstrap admin account unexpectedly exists")
+        if expected_account_id is not None:
+            account = await (
+                await db.execute(
+                    "SELECT 1 FROM users WHERE username = ? AND id = ?",
+                    (username, expected_account_id),
+                )
+            ).fetchone()
+            if not account:
+                raise LookupError(
+                    "AI session owner account changed during session creation"
+                )
+        cursor = await db.execute(
+            "INSERT INTO ai_session_sources "
+            "(session_id, username, provider, credential_source, credential_generation) "
+            "VALUES (?, ?, ?, ?, (SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) "
+            "FROM users WHERE username = ?)) "
+            "ON CONFLICT(session_id) DO NOTHING",
+            (session_id, username, provider, source, provider, username),
+        )
+        if not cursor.rowcount:
+            raise AiSessionCollisionError("AI session ID already active")
+        await db.commit()
+
+
+async def delete_revoked_ai_session(
+    session_id: str, delete: Callable[[str], Awaitable[None]]
+) -> bool:
+    """Claim a revoked session before sidecar I/O, without blocking writers."""
+    return await _delete_revoked_ai_session_claimed(session_id, delete)
+
+
+async def _renew_ai_session_claim(session_id: str, token: str) -> None:
+    """Keep a live sidecar deletion from being mistaken for a crashed worker."""
+    while True:
+        await asyncio.sleep(10)
+        async with _connect_db() as db:
+            await db.execute(
+                "UPDATE ai_session_sources SET claim_expires_at = unixepoch() + 60 "
+                "WHERE session_id = ? AND claim_token = ?",
+                (session_id, token),
+            )
+            await db.commit()
+
+
+async def _delete_revoked_ai_session_claimed(
+    session_id: str, delete: Callable[[str], Awaitable[None]]
+) -> bool:
+    token = uuid.uuid4().hex
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE ai_session_sources SET credential_source = 'deleting', "
+            "claim_token = ?, claim_expires_at = unixepoch() + 60 "
+            "WHERE session_id = ? AND credential_source IN ('revoked', 'deleting') "
+            "AND (claim_token IS NULL OR claim_expires_at < unixepoch())",
+            (token, session_id),
+        )
+        await db.commit()
+        if not cursor.rowcount:
+            return False
+    renewal = asyncio.create_task(_renew_ai_session_claim(session_id, token))
+    try:
+        await delete(session_id)
+        async with _connect_db() as db:
+            await db.execute(
+                "UPDATE ai_session_sources SET credential_source = 'deleted', "
+                "username = '', provider = '', credential_generation = NULL, "
+                "claim_token = NULL, claim_expires_at = NULL "
+                "WHERE session_id = ? AND credential_source = 'deleting' AND claim_token = ?",
+                (session_id, token),
+            )
+            await db.commit()
+    except BaseException:
+        # Cancellation/failure is retryable now; a hard crash is retryable at expiry.
+        async with _connect_db() as db:
+            await db.execute(
+                "UPDATE ai_session_sources SET claim_token = NULL, claim_expires_at = NULL "
+                "WHERE session_id = ? AND claim_token = ?",
+                (session_id, token),
+            )
+            await db.commit()
+        raise
+    finally:
+        renewal.cancel()
+        try:
+            await renewal
+        except asyncio.CancelledError:
+            pass
+    return True
+
+
+async def revoke_ai_session_source(
+    session_id: str,
+    *,
+    only_if_unowned: bool = False,
+    username: str | None = None,
+    provider: str | None = None,
+) -> bool:
+    """Tombstone a session, optionally only when owned by the given user/provider."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE ai_session_sources SET credential_source = 'revoked' "
+            "WHERE session_id = ? "
+            + (
+                "AND credential_source = 'revoked'"
+                if only_if_unowned
+                else "AND credential_source != 'deleted' AND claim_token IS NULL"
+            )
+            + (
+                " AND username = ? AND provider = ?"
+                if username is not None and provider is not None
+                else ""
+            ),
+            (session_id, username, provider)
+            if username is not None and provider is not None
+            else (session_id,),
+        )
+        await db.commit()
+        return bool(cursor.rowcount)
+
+
+async def get_ai_session_source(session_id: str, username: str, provider: str) -> str:
+    """Reject a known session owned by another user or provider."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT username, provider, credential_source, credential_generation "
+                "FROM ai_session_sources WHERE session_id = ?",
+                (session_id,),
+            )
+        ).fetchone()
+        generation = await (
+            await db.execute(
+                "SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(:provider)), 0) "
+                "FROM users WHERE username = :username",
+                {"username": username, "provider": provider},
+            )
+        ).fetchone()
+    if row and (
+        (row[0], row[1]) != (username, provider)
+        or row[2] in ("revoked", "deleting", "deleted")
+        or (
+            row[2] == "user"
+            and row[3] is not None
+            and (not generation or row[3] != generation[0])
+        )
+    ):
+        raise ValueError(
+            "AI session belongs to another user or provider, or was revoked"
+        )
+    return row[2] if row else "unknown"
 
 
 # --- Job Metadata ---
@@ -5603,6 +6178,7 @@ async def record_token_usage(
     duration_ms: int | None = None,
     prompt_chars: int = 0,
     response_chars: int = 0,
+    credential_source: str = "unknown",
 ) -> str:
     """Record a single AI call's token usage. Returns the record ID."""
     record_id = str(uuid.uuid4())
@@ -5612,8 +6188,8 @@ async def record_token_usage(
             "INSERT INTO ai_token_usage "
             "(id, job_id, ai_provider, ai_model, call_type, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
-            "prompt_chars, response_chars) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "prompt_chars, response_chars, credential_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -5629,6 +6205,7 @@ async def record_token_usage(
                 duration_ms,
                 prompt_chars,
                 response_chars,
+                credential_source,
             ),
         )
         await db.commit()
@@ -6187,11 +6764,15 @@ async def add_chat_message(
     ai_model: str = "",
     session_id: str = "",
     status: str = "completed",
+    credential_generation: int | None = None,
 ) -> int:
-    """Add a chat message and return its id."""
+    """Add a chat message and return its id, or zero if credentials rotated."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ? IS NULL OR EXISTS "
+            "(SELECT 1 FROM users WHERE username = ? "
+            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)",
             (
                 job_id,
                 role,
@@ -6201,10 +6782,14 @@ async def add_chat_message(
                 ai_model,
                 session_id,
                 status,
+                credential_generation,
+                username,
+                ai_provider,
+                credential_generation,
             ),
         )
         await db.commit()
-        return cursor.lastrowid or 0
+        return (cursor.lastrowid or 0) if cursor.rowcount else 0
 
 
 async def add_chat_message_pair(
@@ -6290,15 +6875,46 @@ async def delete_chat_message_by_id(msg_id: int) -> None:
         await db.commit()
 
 
+async def _revoke_chat_session_sources(
+    db: aiosqlite.Connection, where: str, params: tuple[str, ...]
+) -> None:
+    """Tombstone only sessions still owned by the deleted chat messages."""
+    await db.execute(
+        "UPDATE ai_session_sources SET credential_source = 'revoked' "
+        "WHERE credential_source NOT IN ('revoked', 'deleted') AND claim_token IS NULL AND EXISTS ("
+        "SELECT 1 FROM chat_messages WHERE session_id = ai_session_sources.session_id "
+        "AND username = ai_session_sources.username "
+        "AND ai_provider = ai_session_sources.provider "
+        f"AND {where})",
+        params,
+    )
+
+
+async def list_revoked_ai_sessions() -> list[str]:
+    """Find tombstones awaiting sidecar deletion, including earlier failed attempts."""
+    async with _connect_db() as db:
+        rows = await (
+            await db.execute(
+                "SELECT session_id FROM ai_session_sources WHERE credential_source IN ('revoked', 'deleting')"
+            )
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
 async def delete_chat_messages(job_id: str, username: str = "") -> int:
     """Delete all chat messages for a job (optionally scoped to a user). Returns count deleted."""
     async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
         if username:
+            await _revoke_chat_session_sources(
+                db, "job_id = ? AND chat_messages.username = ?", (job_id, username)
+            )
             cursor = await db.execute(
                 "DELETE FROM chat_messages WHERE job_id = ? AND username = ?",
                 (job_id, username),
             )
         else:
+            await _revoke_chat_session_sources(db, "job_id = ?", (job_id,))
             cursor = await db.execute(
                 "DELETE FROM chat_messages WHERE job_id = ?",
                 (job_id,),
@@ -6365,14 +6981,84 @@ async def update_chat_message_ai_fields(
     ai_provider: str = "",
     ai_model: str = "",
     session_id: str = "",
-) -> None:
-    """Update AI-related fields on a chat message."""
+    credential_generation: int | None = None,
+) -> bool:
+    """Persist a session only if the user's credentials have not changed."""
     async with _connect_db() as db:
-        await db.execute(
-            "UPDATE chat_messages SET ai_provider = ?, ai_model = ?, session_id = ? WHERE id = ?",
-            (ai_provider, ai_model, session_id, msg_id),
+        cursor = await db.execute(
+            "UPDATE chat_messages SET ai_provider = ?, ai_model = ?, session_id = ? "
+            "WHERE id = ? AND ("
+            "(? IS NULL AND NOT EXISTS (SELECT 1 FROM users WHERE username = chat_messages.username)) "
+            "OR EXISTS (SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?))",
+            (
+                ai_provider,
+                ai_model,
+                session_id,
+                msg_id,
+                credential_generation,
+                ai_provider,
+                credential_generation,
+            ),
         )
         await db.commit()
+        if not cursor.rowcount:
+            logger.info(
+                "Chat session discarded after credential change for message %d", msg_id
+            )
+        return bool(cursor.rowcount)
+
+
+async def fail_pending_chat_message(msg_id: int, content: str) -> bool:
+    """Atomically fail a pending reply without replacing an existing failure."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE chat_messages SET content = ?, status = 'failed' "
+            "WHERE id = ? AND status = 'pending'",
+            (content, msg_id),
+        )
+        await db.commit()
+        logger.info(
+            "Pending chat message %d failed: updated=%s", msg_id, bool(cursor.rowcount)
+        )
+        return bool(cursor.rowcount)
+
+
+async def complete_chat_message_if_generation(
+    msg_id: int,
+    *,
+    content: str,
+    ai_provider: str,
+    ai_model: str,
+    session_id: str,
+    credential_generation: int | None,
+) -> bool:
+    """Complete a pending reply only while its user's credentials are current."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "UPDATE chat_messages SET content = ?, status = 'completed', "
+            "ai_provider = ?, ai_model = ?, session_id = ? "
+            "WHERE id = ? AND status = 'pending' AND "
+            "(? IS NULL OR EXISTS (SELECT 1 FROM users "
+            "WHERE username = chat_messages.username "
+            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?))",
+            (
+                content,
+                ai_provider,
+                ai_model,
+                session_id,
+                msg_id,
+                credential_generation,
+                ai_provider,
+                credential_generation,
+            ),
+        )
+        await db.commit()
+        if not cursor.rowcount:
+            logger.info(
+                "Chat completion skipped for message %d (stale or missing)", msg_id
+            )
+        return bool(cursor.rowcount)
 
 
 # ─── Reports queries ────────────────────────────────────────────────────────

@@ -1728,6 +1728,36 @@ class TestRootCozClientAuth:
         assert exc_info.value.status_code == 401
 
 
+class TestRootCozClientAiCredentials:
+    def test_list_and_mutations(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={"providers": [{"provider": "acpx/a", "configured": False}]},
+                )
+            return httpx.Response(200, json={"status": "ok"})
+
+        client = _make_client(handler)
+        assert client.list_ai_credentials() == {
+            "providers": [{"provider": "acpx/a", "configured": False}]
+        }
+        client.set_ai_credential("acpx/a", "secret-key")
+        client.delete_ai_credential("acpx/a")
+        assert [r.method for r in requests] == ["GET", "PUT", "DELETE"]
+        assert requests[0].url.path == "/api/user/ai-credentials"
+        assert all(
+            r.url.raw_path == b"/api/user/ai-credentials/acpx%2Fa" for r in requests[1:]
+        )
+        assert json.loads(requests[1].content) == {
+            "api_key": "secret-key"  # pragma: allowlist secret
+        }
+        assert b"secret-key" not in requests[2].content
+
+
 class TestRootCozClientAdminUsers:
     def test_admin_list_users(self):
         def handler(request):
@@ -1761,6 +1791,7 @@ class TestRootCozClientAdminUsers:
             assert body["username"] == "newadmin"
             assert body["role"] == "admin"
             assert body["can_view_reports"] is False
+            assert body["can_use_server_providers"] is False
             return httpx.Response(
                 200,
                 json={
@@ -1810,6 +1841,35 @@ class TestRootCozClientAdminUsers:
         client = _make_client(handler)
         result = client.admin_set_can_view_reports("alice", True)
         assert result["can_view_reports"] is True
+
+    def test_admin_set_server_provider_grant_and_approve(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body == {"can_use_server_providers": True}
+            assert request.url.path in (
+                "/api/admin/users/alice/can-use-server-providers",
+                "/api/admin/users/alice/approve",
+            )
+            assert request.method == (
+                "PUT"
+                if request.url.path.endswith("can-use-server-providers")
+                else "POST"
+            )
+            return httpx.Response(200, json={"can_use_server_providers": True})
+
+        client = _make_client(handler)
+        assert client.admin_set_can_use_server_providers("alice", True)[
+            "can_use_server_providers"
+        ]
+        assert client.approve_user("alice", True)["can_use_server_providers"]
+
+    def test_approve_without_choice_does_not_revoke_existing_grant(self):
+        def handler(request):
+            assert request.url.path == "/api/admin/users/alice/approve"
+            assert not request.content
+            return httpx.Response(200, json={"can_use_server_providers": True})
+
+        assert _make_client(handler).approve_user("alice")["can_use_server_providers"]
 
     def test_admin_create_user_reviewer(self):
         def handler(request):

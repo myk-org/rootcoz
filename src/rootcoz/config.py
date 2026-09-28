@@ -83,8 +83,6 @@ def parse_additional_repos(raw: str) -> list[dict[str, Any]]:
         return []
     result = []
     for i, entry in enumerate(raw.split(",")):
-        if i >= 9:
-            raise ValueError("additional_repos exceeds the nine repository limit")
         entry = entry.strip()
         if not entry:
             raise ValueError(f"Empty entry at position {i + 1} in additional repos")
@@ -252,6 +250,7 @@ class Settings(BaseSettings):
     max_concurrent_ai_calls: int = Field(default=3, gt=0)
 
     # Default AI provider (server-level default, can be overridden per-request)
+    force_server_credentials: bool = False
     ai_provider: str = ""
     # Default AI model (server-level default, can be overridden per-request)
     ai_model: str = ""
@@ -262,6 +261,11 @@ class Settings(BaseSettings):
 
     # Additional repositories for AI analysis context
     additional_repos: str = ""  # "name:url,name:url" format
+    max_concurrent_repo_clones: int = Field(
+        default=10,
+        gt=0,
+        description="Maximum simultaneous additional-repository clones",
+    )
 
     # Jenkins artifacts configuration
     jenkins_artifacts_max_size_mb: int = Field(default=500, gt=0)
@@ -427,7 +431,7 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
-    def _normalize_optional_strings(self) -> "Settings":
+    def _normalize_optional_strings(self) -> Settings:
         """Strip whitespace from optional string fields; blank becomes None."""
         for field_name in (
             "tests_repo_url",

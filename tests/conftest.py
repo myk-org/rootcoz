@@ -90,7 +90,7 @@ def make_test_client(
 
 
 @pytest.fixture
-def mock_env_vars() -> Generator[dict[str, str], None, None]:
+def mock_env_vars() -> Generator[dict[str, str]]:
     """Provide minimal environment variables for Settings."""
     env = {
         "JENKINS_URL": "https://jenkins.example.com",
@@ -102,7 +102,7 @@ def mock_env_vars() -> Generator[dict[str, str], None, None]:
 
 
 @pytest.fixture
-def full_env_vars() -> Generator[dict[str, str], None, None]:
+def full_env_vars() -> Generator[dict[str, str]]:
     """Provide full environment variables including AI config."""
     env = {
         "JENKINS_URL": "https://jenkins.example.com",
@@ -170,7 +170,14 @@ def admin_login(
 
 
 @pytest.fixture
-def temp_db_path() -> Generator[Path, None, None]:
+async def initialized_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use an isolated, schema-initialized DB for tests exercising AI persistence."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "results.db")
+    await storage.init_db()
+
+
+@pytest.fixture
+def temp_db_path() -> Generator[Path]:
     """Create a temporary database path for testing."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
@@ -258,7 +265,7 @@ def mock_jenkins_client() -> MagicMock:
 
 
 @pytest.fixture
-def mock_ai() -> Generator[MagicMock, None, None]:
+def mock_ai() -> Generator[MagicMock]:
     """Mock the call_ai function."""
     with patch("rootcoz.engine.core.call_ai_once") as mock:
         mock.return_value = AIResult(

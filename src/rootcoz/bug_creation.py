@@ -255,8 +255,15 @@ async def _generate_issue_content_via_ai(
             ai_call_timeout=ai_call_timeout,
             tools=[],
         )
-    except Exception:
-        logger.exception("AI call raised for %s issue", issue_type)
+    except (
+        httpx.HTTPError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as exc:
+        logger.error("AI call raised %s for %s issue", type(exc).__name__, issue_type)
         return None
 
     if job_id:

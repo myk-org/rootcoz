@@ -1,7 +1,9 @@
 """Tests for analyzer module."""
 
+import asyncio
 import inspect
 import json
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,7 +12,12 @@ import pytest
 import requests
 from pi_sidecar_client import AIResult
 
-from rootcoz.config import Settings, get_settings
+from rootcoz.config import (
+    Settings,
+    get_settings,
+    remove_from_db_settings_cache,
+    update_db_settings_cache,
+)
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     _build_cross_failure_prompt,
@@ -39,6 +46,10 @@ from rootcoz.models import (
 )
 from rootcoz.peer_analysis import analyze_failure_group_with_peers
 from rootcoz.repository import RepositoryManager
+from rootcoz.rootcoz_repo_settings import (
+    apply_rootcoz_repo_settings,
+    load_rootcoz_repo_settings,
+)
 from rootcoz.sources.jenkins_source import (
     JenkinsError,
     analyze_child_job,
@@ -1321,6 +1332,260 @@ class TestCloneAdditionalRepos:
     """Tests for clone_additional_repos helper."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("clone_limit", [10, 3])
+    async def test_settings_repos_all_cloned_with_bounded_concurrency(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_limit: int
+    ) -> None:
+        """All settings-derived repos clone, including beyond the concurrency limit."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        settings_dir = workspace / "tests" / ".rootcoz"
+        settings_dir.mkdir(parents=True)
+        repos = [
+            {"name": f"repo{i}", "url": f"https://example.com/repo{i}"}
+            for i in range(13)
+        ]
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"additional_repos": repos})
+        )
+        effective = apply_rootcoz_repo_settings(
+            AnalyzeRequest(job_name="test", build_number=1),
+            Settings(),
+            load_rootcoz_repo_settings(workspace / "tests"),
+        )
+        manager = MagicMock(spec=RepositoryManager)
+        clone_settings = (
+            Settings()
+            if clone_limit == 10
+            else Settings(max_concurrent_repo_clones=clone_limit)
+        )
+        monkeypatch.setattr("rootcoz.engine.core.get_settings", lambda: clone_settings)
+        active = peak = 0
+        attempted = []
+
+        async def fake_to_thread(_fn, _url, target, **_kwargs):
+            nonlocal active, peak
+            attempted.append(target.name)
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            active -= 1
+            if target.name == "repo5":
+                raise RuntimeError("clone failed")
+
+        with patch("rootcoz.engine.core.asyncio.to_thread", side_effect=fake_to_thread):
+            cloned, result_path = await clone_additional_repos(
+                manager,
+                effective.additional_repos,
+                workspace,
+            )
+
+        assert result_path == workspace
+        assert set(attempted) == {repo["name"] for repo in repos}
+        assert set(cloned) == set(attempted) - {"repo5"}
+        assert all(path == workspace / name for name, path in cloned.items())
+        assert peak == clone_limit
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("clone_limit", [10, 3])
+    async def test_concurrent_analyses_share_live_clone_limit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_limit: int
+    ) -> None:
+        """Concurrent analyses share slots and still attempt every repository."""
+
+        repos = [
+            AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+            for i in range(13)
+        ]
+        manager = MagicMock(spec=RepositoryManager)
+        active = peak = 0
+        attempted: list[str] = []
+        release = asyncio.Event()
+        full = asyncio.Event()
+
+        async def fake_to_thread(_fn, _url, target, **_kwargs):
+            nonlocal active, peak
+            attempted.append(target.name)
+            active += 1
+            peak = max(peak, active)
+            if active == clone_limit:
+                full.set()
+            try:
+                await release.wait()
+                if target.name == "repo5":
+                    raise RuntimeError("clone failed")
+            finally:
+                active -= 1
+
+        monkeypatch.setattr("rootcoz.engine.core.asyncio.to_thread", fake_to_thread)
+        update_db_settings_cache({"max_concurrent_repo_clones": str(clone_limit)})
+        try:
+            jobs = [
+                asyncio.create_task(
+                    clone_additional_repos(
+                        manager, repos[start:stop], tmp_path / str(start)
+                    )
+                )
+                for start, stop in ((0, 7), (7, 13))
+            ]
+            try:
+                await asyncio.wait_for(full.wait(), 2)
+                # Give the other analysis a chance to compete for slots.
+                await asyncio.sleep(0)
+                assert peak == clone_limit
+            finally:
+                release.set()
+            results = await asyncio.wait_for(asyncio.gather(*jobs), 2)
+        finally:
+            remove_from_db_settings_cache(["max_concurrent_repo_clones"])
+
+        assert set(attempted) == {repo.name for repo in repos}
+        assert {name for cloned, _ in results for name in cloned} == set(attempted) - {
+            "repo5"
+        }
+
+    @pytest.mark.asyncio
+    async def test_cancelled_clone_holds_slot_until_worker_finishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancelling an analysis cannot admit a second clone while its worker runs."""
+        from rootcoz.engine import core
+
+        started_first = threading.Event()
+        finish_first = threading.Event()
+        started_second = threading.Event()
+        second_admission = asyncio.Event()
+        observed_active: list[int] = []
+
+        def live_settings():
+            if started_first.is_set():
+                observed_active.append(core._active_clones)
+                second_admission.set()
+            return Settings(max_concurrent_repo_clones=1)
+
+        def fake_clone(_url, target, **_kwargs):
+            if target.name == "first":
+                started_first.set()
+                assert finish_first.wait(2)
+            else:
+                started_second.set()
+            return target
+
+        monkeypatch.setattr(core, "get_settings", live_settings)
+        manager = MagicMock(spec=RepositoryManager)
+        manager.clone_into.side_effect = fake_clone
+        first = asyncio.create_task(
+            clone_additional_repos(
+                manager,
+                [AdditionalRepo(name="first", url="https://example.com/first")],
+                tmp_path,
+            )
+        )
+        second = None
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started_first.wait, 2), 3)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(first, 1)
+            second = asyncio.create_task(
+                clone_additional_repos(
+                    manager,
+                    [AdditionalRepo(name="second", url="https://example.com/second")],
+                    tmp_path,
+                )
+            )
+            await asyncio.wait_for(second_admission.wait(), 2)
+            assert observed_active[0] == 1
+            assert not started_second.is_set()
+            finish_first.set()
+            assert await asyncio.wait_for(asyncio.to_thread(started_second.wait, 2), 3)
+            await asyncio.wait_for(second, 2)
+        finally:
+            finish_first.set()
+            if second is not None and not second.done():
+                second.cancel()
+                await asyncio.gather(second, return_exceptions=True)
+            if not first.done():
+                first.cancel()
+                await asyncio.gather(first, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_live_limit_decrease_applies_to_waiting_clones(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live settings change constrains clones already queued."""
+
+        repos = [
+            AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+            for i in range(13)
+        ]
+        manager = MagicMock(spec=RepositoryManager)
+        active = 0
+        entered: asyncio.Queue[str] = asyncio.Queue()
+        release: asyncio.Queue[None] = asyncio.Queue()
+
+        async def fake_to_thread(_fn, _url, target, **_kwargs):
+            nonlocal active
+            active += 1
+            entered.put_nowait(target.name)
+            try:
+                await release.get()
+            finally:
+                active -= 1
+
+        monkeypatch.setattr("rootcoz.engine.core.asyncio.to_thread", fake_to_thread)
+        try:
+            job = asyncio.create_task(clone_additional_repos(manager, repos, tmp_path))
+            for _ in range(10):
+                await asyncio.wait_for(entered.get(), 2)
+            update_db_settings_cache({"max_concurrent_repo_clones": "2"})
+            for _ in range(9):
+                release.put_nowait(None)
+            await asyncio.wait_for(entered.get(), 2)
+            assert active == 2
+            release.put_nowait(None)
+            await asyncio.wait_for(entered.get(), 2)
+            assert active == 2
+            for _ in range(4):
+                release.put_nowait(None)
+            await asyncio.wait_for(job, 2)
+        finally:
+            remove_from_db_settings_cache(["max_concurrent_repo_clones"])
+
+    @pytest.mark.asyncio
+    async def test_live_limit_increase_unblocks_waiters_without_clone_finishing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """New slots become available even if all running clones stay blocked."""
+        update_db_settings_cache({"max_concurrent_repo_clones": "1"})
+        entered: asyncio.Queue[str] = asyncio.Queue()
+        release = asyncio.Event()
+
+        async def fake_to_thread(_fn, _url, target, **_kwargs):
+            entered.put_nowait(target.name)
+            await release.wait()
+
+        monkeypatch.setattr("rootcoz.engine.core.asyncio.to_thread", fake_to_thread)
+        repos = [
+            AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+            for i in range(3)
+        ]
+        manager = MagicMock(spec=RepositoryManager)
+        try:
+            job = asyncio.create_task(clone_additional_repos(manager, repos, tmp_path))
+            await asyncio.wait_for(entered.get(), 2)
+            update_db_settings_cache({"max_concurrent_repo_clones": "3"})
+            for _ in range(2):
+                await asyncio.wait_for(entered.get(), 2)
+            release.set()
+            cloned, _ = await asyncio.wait_for(job, 2)
+        finally:
+            release.set()
+            remove_from_db_settings_cache(["max_concurrent_repo_clones"])
+        assert set(cloned) == {repo.name for repo in repos}
+
+    @pytest.mark.asyncio
     async def test_clones_into_subdirs_when_repo_path_exists(self, tmp_path) -> None:
         """Additional repos are cloned as subdirectories of repo_path."""
 
@@ -1845,7 +2110,7 @@ class TestAnalyzeFailuresWorkspacePattern:
     async def test_analyze_failures_workspace_via_http(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path,
+        initialized_db: None,
     ) -> None:
         """POST /analyze with type=raw and tests_repo_url dispatches to background task."""
 
@@ -1906,7 +2171,7 @@ class TestWorkspaceAlwaysCreated:
     async def test_analyze_failures_creates_workspace_without_repos(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        tmp_path,
+        initialized_db: None,
     ) -> None:
         """POST /analyze with type=raw (no repos) dispatches background task."""
 

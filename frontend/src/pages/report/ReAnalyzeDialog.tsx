@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect } from 'react'
-import { useProviderModels } from '@/lib/useProviderModels'
 import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import {
@@ -12,27 +11,22 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectTrigger,
-  SelectContent,
-  SelectItem,
-  SelectValue,
-} from '@/components/ui/select'
 import { api } from '@/lib/api'
 import { toIntInRange, resolveBuildDisplayId, ciSourceLabel } from '@/lib/utils'
 import type { AnalysisResult } from '@/types'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
-import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { useProviderOptions } from '@/lib/useProviderOptions'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { isAnalysisFormAiUnavailable } from '@/lib/analysisAi'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 import { RotateCw } from 'lucide-react'
 import { normalizeProvider } from '@/lib/aiProviders'
+import { useAuth } from '@/lib/auth'
 
 interface ReAnalyzeDialogProps {
   open: boolean
@@ -47,6 +41,7 @@ function initFormState(p: AnalysisResult['request_params']) {
   return {
     aiProvider: normalizeProvider(p?.ai_provider || 'claude'),
     aiModel: p?.ai_model || '',
+    forceServerCredentials: p?.force_server_credentials === true,
     aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
     enablePeers: !!(p?.peer_ai_configs?.length),
@@ -76,12 +71,14 @@ function initFormState(p: AnalysisResult['request_params']) {
 
 export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid, inPlaceAnalyze }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
+  const { canUseServerProviders } = useAuth()
   const params = result.request_params
   const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
   const init = initFormState(params)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)
   const [aiModel, setAiModel] = useState(init.aiModel)
+  const [forceServerCredentials, setForceServerCredentials] = useState(init.forceServerCredentials)
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(init.aiCallTimeout)
   const [rawPrompt, setRawPrompt] = useState(init.rawPrompt)
 
@@ -100,8 +97,8 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [getArtifacts, setGetArtifacts] = useState<boolean | undefined>(init.getArtifacts)
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(init.maxArtifactsSize)
 
-  const availableModels = useProviderModels(aiProvider)
-  const providerOptions = useProviderOptions(aiProvider)
+  const effectiveForceServer = forceServerCredentials && canUseServerProviders
+  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
   const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
@@ -113,6 +110,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     const s = initFormState(result.request_params)
     setAiProvider(s.aiProvider)
     setAiModel(s.aiModel)
+    setForceServerCredentials(s.forceServerCredentials)
     setAiCallTimeout(s.aiCallTimeout)
     setRawPrompt(s.rawPrompt)
     setEnablePeers(s.enablePeers)
@@ -130,13 +128,20 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
 
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders)
+
   const handleSubmit = useCallback(async () => {
+    if (aiUnavailable) {
+      setError('Select an available AI provider and model.')
+      return
+    }
     setSubmitting(true)
     setError('')
     try {
       const body: Record<string, unknown> = {
         ai_provider: aiProvider,
         ai_model: aiModel,
+        force_server_credentials: effectiveForceServer,
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(enableJira !== undefined && { enable_jira: enableJira }),
         ...(jiraUrl && { jira_url: jiraUrl }),
@@ -175,6 +180,8 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   }, [
     aiProvider,
     aiModel,
+    effectiveForceServer,
+    aiUnavailable,
     aiCallTimeout,
     rawPrompt,
     enablePeers,
@@ -253,24 +260,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select
-                  value={aiProvider}
-                  onValueChange={(v) => {
-                    setAiProvider(v)
-                    setAiModel('')
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {providerOptions.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -285,13 +275,13 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <ModelCombobox
-                value={aiModel}
-                onChange={setAiModel}
-                options={availableModels}
-                placeholder="Default model"
-              />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
             </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text-secondary">Use server credentials</span>
+              <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
+            </div>
+            {!canUseServerProviders && <p className="text-xs text-text-tertiary">{params?.force_server_credentials ? 'The original analysis used server credentials, but you no longer have access. Select a model available with your own AI key or ask an admin for access.' : 'Server credentials are locked. Ask an admin for access, or use your own AI key.'}</p>}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea
@@ -316,7 +306,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <Toggle checked={enablePeers} onChange={(v) => {
                 setEnablePeers(v)
                 if (v && peerConfigs.length === 0) {
-                  setPeerConfigs([{ id: crypto.randomUUID(), ai_provider: 'claude', ai_model: '' }])
+                  setPeerConfigs([{ id: crypto.randomUUID(), ai_provider: '', ai_model: '' }])
                 }
               }} label="Enable peer review" />
             </div>
@@ -327,6 +317,8 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                 peerModels={peerModels}
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
+                strict
+                forceServer={effectiveForceServer}
               />
             )}
           </Section>
@@ -421,10 +413,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
 
         <DialogFooter className="px-6 py-4 border-t border-border-default flex-shrink-0">
           {error && <p className="text-signal-red text-xs mr-auto">{error}</p>}
+          {aiUnavailable && <p role="alert" className="text-signal-amber text-xs mr-auto">Select an available AI provider and model. Add your own key or ask an admin for server access.</p>}
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={submitting} className="gap-1.5">
+          <Button onClick={handleSubmit} disabled={submitting || aiUnavailable} className="gap-1.5">
             <RotateCw className={`h-3.5 w-3.5 ${submitting ? 'animate-spin' : ''}`} />
             {inPlaceAnalyze ? 'Analyze' : 'Re-Analyze'}
           </Button>

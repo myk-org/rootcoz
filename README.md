@@ -12,7 +12,7 @@ The published package's `postinstall` records an install event and spawns a tele
 
 ## Prerequisites
 
-Provider IDs and models are discovered from Pi-sidecar. Install and authenticate the corresponding provider CLI or API credentials; see [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details.
+Provider IDs and models are discovered from Pi-sidecar. Install and authenticate the corresponding provider CLI or API credentials; see [docs](https://myk-org.github.io/rootcoz/ai-provider-setup.html) for setup details. Users can manage their own session-scoped API keys in Settings → AI provider keys or via `rootcoz auth ai-keys list|set|delete` (use `set --stdin` for piped input). Keys are encrypted at rest, never displayed again, and override server credentials only for a matching provider; without a user key, server authentication still applies. Only providers explicitly advertising session API-key capability appear. Vertex ADC/service accounts, OAuth, and CLI/browser logins remain server-managed. This feature requires pi-sidecar 4.6.0 or newer for session-key support and provider capability metadata ([pi-config #830](https://github.com/myk-org/pi-config/issues/830)); when that metadata is unavailable, key configuration fails closed.
 
 ## Quick Start
 
@@ -36,6 +36,7 @@ For Prow-only deployments, set `PROW_URL` and `GCS_BUCKET` instead of (or in add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAX_CONCURRENT_AI_CALLS` | `3` | Maximum concurrent AI CLI processes. Prevents OOM with heavy models. |
+| `MAX_CONCURRENT_REPO_CLONES` | `10` | Maximum simultaneous additional-repository clones, configurable by admins in Server Settings → Server. Does not limit the number of repos. |
 
 `MAX_CONCURRENT_AI_CALLS` can be set via any of the supported interfaces:
 - Environment variable: `MAX_CONCURRENT_AI_CALLS`
@@ -293,6 +294,8 @@ The interactive setup script prompts for cluster type, hostname, AI provider, an
 Validate the chart with `uvx --with tox-uv tox -e chart` (requires [Helm 3](https://helm.sh/docs/intro/install/)).
 
 ## Development
+
+Requires Python 3.14 or newer.
 
 ```bash
 git clone https://github.com/myk-org/rootcoz.git

@@ -10,7 +10,9 @@ import shutil
 import signal
 import stat
 import subprocess
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
@@ -24,9 +26,9 @@ MAX_SECONDS = 30
 BUILD_SECONDS = 120
 FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
-MAX_REPOSITORIES = 10  # includes the primary test repository
 MAX_OUTPUT = 1024 * 1024
 MAX_GRAPH_BYTES = 40 * 1024 * 1024
+MAX_WORKSPACE_GRAPH_BYTES = 256 * 1024 * 1024
 GRAFT = "/app/sidecar-helper/node_modules/.bin/graft"
 
 
@@ -39,19 +41,38 @@ def _root(workspace: Path) -> Path:
     return workspace.parent / f".{workspace.name}.rootcoz-graft"
 
 
-def _disk_size(path: Path, deadline: float | None = None) -> int:
+def _disk_size(
+    path: Path,
+    deadline: float | None = None,
+    *,
+    limit: int | None = None,
+    reject_symlinks: bool = True,
+) -> int:
+    limit = MAX_GRAPH_BYTES if limit is None else limit
     total = 0
     for directory, dirs, files in os.walk(path, followlinks=False):
         for file in dirs + files:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("graph deadline")
             entry = Path(directory) / file
-            if entry.is_symlink():
+            if entry.is_symlink() and reject_symlinks:
                 raise ValueError("graph contains symlink")
             total += entry.lstat().st_size
-            if total > MAX_GRAPH_BYTES:
+            if limit and total > limit:
                 return total
     return total
+
+
+def _workspace_graph_size(root: Path) -> int:
+    """Measure graph storage without following symlinks in unrelated directories."""
+    if not root.is_dir() or root.is_symlink():
+        return 0
+    return sum(
+        _disk_size(item, limit=0, reject_symlinks=False)
+        if item.is_dir() and not item.is_symlink()
+        else item.lstat().st_size
+        for item in root.iterdir()
+    )
 
 
 def _bounded(
@@ -135,7 +156,7 @@ def _safe_file(repo: Path, relative: Path) -> Path | None:
         ):
             return None
         return current
-    except (OSError, RuntimeError):
+    except OSError, RuntimeError:
         return None
 
 
@@ -211,7 +232,7 @@ def _source_stamp(repo: Path) -> str:
             if source is not None:
                 info = source.stat()
                 digest.update(f"{info.st_size}:{info.st_mtime_ns}".encode())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return digest.hexdigest()
 
@@ -251,12 +272,17 @@ def _manifest(destination: Path) -> dict[str, str] | None:
         ):
             return None
         return manifest
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
 def _index_one(
-    workspace: Path, root: Path, name: str, repo_value: Path
+    workspace: Path,
+    root: Path,
+    name: str,
+    repo_value: Path,
+    reserve: Callable[[Path], bool] | None = None,
+    release: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
     repo = Path(repo_value)
     if not _valid_repo(workspace, name, repo):
@@ -278,6 +304,8 @@ def _index_one(
             and _disk_size(destination) <= MAX_GRAPH_BYTES
         ):
             return {"status": "unchanged", "files": len(manifest)}
+        if reserve is not None and not reserve(destination):
+            return {"status": "skipped", "reason": "workspace graph budget"}
         if destination.exists():
             shutil.rmtree(destination)
         snapshot = destination / "snapshot"
@@ -325,7 +353,7 @@ def _index_one(
             shutil.rmtree(destination, ignore_errors=True)
             try:
                 stamp = _source_stamp(repo) if manifest is None else None
-            except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+            except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                 stamp = None  # Oversized listings still get a bounded retry.
             try:
                 destination.mkdir(parents=True, exist_ok=True)
@@ -345,21 +373,63 @@ def _index_one(
             "reason": type(exc).__name__,
             "truncated": isinstance(exc, _Limit),
         }
+    finally:
+        if release is not None:
+            release(destination)
 
 
 def index_repositories(
     workspace: Path, cloned_repos: dict[str, Path]
 ) -> dict[str, Any]:
-    """Build up to ten repositories per workspace, with two concurrent builds."""
+    """Build per-repo graphs while reserving aggregate workspace disk capacity."""
     workspace = Path(workspace).resolve()
-    names = iter(cloned_repos)
-    selected = list(islice(names, MAX_REPOSITORIES))
+    root = _root(workspace)
+    gate = threading.Lock()
+    reservations: set[Path] = set()
+
+    def reserve(destination: Path) -> bool:
+        with gate:
+            used = _workspace_graph_size(root)
+            old = _disk_size(destination, limit=0) if destination.exists() else 0
+            growth = sum(
+                max(0, MAX_GRAPH_BYTES - _disk_size(item, limit=0))
+                for item in reservations
+            )
+            if used - old + growth + MAX_GRAPH_BYTES > MAX_WORKSPACE_GRAPH_BYTES:
+                # Persist a bounded skip, without overwriting an existing graph.
+                marker = json.dumps(
+                    {
+                        "budget_used": used,
+                        "retry_after": time.time() + FAILED_RETRY_SECONDS,
+                    }
+                )
+                previous = destination / "budget.json"
+                previous_size = (
+                    previous.stat().st_size
+                    if previous.is_file() and not previous.is_symlink()
+                    else 0
+                )
+                if (
+                    not previous.is_symlink()
+                    and used + growth + len(marker) - previous_size
+                    <= MAX_WORKSPACE_GRAPH_BYTES
+                ):
+                    destination.mkdir(parents=True, exist_ok=True)
+                    previous.write_text(marker)
+                return False
+            reservations.add(destination)
+            return True
+
+    def release(destination: Path) -> None:
+        with gate:
+            reservations.discard(destination)
+
     with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             name: pool.submit(
-                _index_one, workspace, _root(workspace), name, cloned_repos[name]
+                _index_one, workspace, root, name, cloned_repos[name], reserve, release
             )
-            for name in selected
+            for name in cloned_repos
         }
         results = {}
         for name, future in futures.items():
@@ -367,9 +437,6 @@ def index_repositories(
                 results[name] = future.result()
             except Exception as exc:  # noqa: BLE001 - isolate and sanitize unexpected worker failures
                 results[name] = {"status": "failed", "reason": type(exc).__name__}
-    results.update(
-        {name: {"status": "skipped", "reason": "repository limit"} for name in names}
-    )
     return results
 
 
@@ -391,9 +458,9 @@ def log_index_outcomes(outcomes: dict[str, Any]) -> None:
         if status not in {"indexed", "unchanged", "skipped", "failed"}:
             status = "failed"
         if reason not in {
-            "repository limit",
             "invalid repository",
             "no eligible files",
+            "workspace graph budget",
             "invalid graph root",
             "invalid graph directory",
             "TimeoutError",
@@ -620,7 +687,7 @@ def roots_needing_index(
     root = _root(workspace)
     with _workspace_install_lock(workspace):
         result = {}
-        for name, repo in islice(cloned_repos.items(), MAX_REPOSITORIES):
+        for name, repo in cloned_repos.items():
             if not _valid_repo(workspace, name, repo):
                 continue
             manifest = (
@@ -638,8 +705,26 @@ def roots_needing_index(
                     and not marker.is_symlink()
                     else None
                 )
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 failed = None
+            budget = root / name / "budget.json"
+            try:
+                skipped = (
+                    json.loads(budget.read_text())
+                    if not budget.is_symlink() and not budget.parent.is_symlink()
+                    else None
+                )
+                if (
+                    isinstance(skipped, dict)
+                    and time.time() < skipped["retry_after"]
+                    and _workspace_graph_size(root)
+                    - _disk_size(root / name, limit=0, reject_symlinks=False)
+                    + MAX_GRAPH_BYTES
+                    > MAX_WORKSPACE_GRAPH_BYTES
+                ):
+                    continue
+            except OSError, ValueError, KeyError, TypeError:
+                pass
             if manifest is not None:
                 try:
                     if (
@@ -647,7 +732,7 @@ def roots_needing_index(
                         or _disk_size(root / name) > MAX_GRAPH_BYTES
                     ):
                         result[name] = repo
-                except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     result[name] = repo  # Never expose a stale graph.
             elif (
                 not isinstance(failed, dict)
@@ -664,7 +749,7 @@ def roots_needing_index(
                         and _source_stamp(repo) != failed["stamp"]
                     ):
                         result[name] = repo
-                except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     pass  # Retry an unreadable source after the bounded backoff.
         return result
 

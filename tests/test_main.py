@@ -4,6 +4,7 @@ import asyncio
 import os
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -11,6 +12,7 @@ import aiosqlite
 import httpx
 import jenkins
 import pytest
+from fastapi import BackgroundTasks, HTTPException
 from pydantic import SecretStr
 
 from rootcoz import storage
@@ -217,6 +219,7 @@ def test_client(mock_settings, temp_db_path: Path):
             [
                 {"provider": "claude", "id": "test-model"},
                 {"provider": "claude", "id": "opus"},
+                {"provider": "gemini", "id": "pro"},
             ]
         )
         with TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client:
@@ -953,9 +956,12 @@ class TestAnalyzeProwEndpoint:
         assert response.status_code == 422
 
     async def test_prow_gcs_errors_produce_failed_not_completed(
-        self, temp_db_path: Path
+        self, temp_db_path: Path, monkeypatch
     ) -> None:
         """When all GCS fetches error, the result must be 'failed', not 'completed'."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
         from rootcoz.main import _process_ci_source_analysis
         from rootcoz.models import UnifiedAnalyzeRequest
         from rootcoz.sources.base import CISourceResult
@@ -1010,6 +1016,7 @@ class TestAnalyzeProwEndpoint:
                 resolved_tests_repo_token="",
                 additional_repos_list=[],
                 base_url="",
+                username="admin",
             )
 
             row = await storage.get_result(job_id)
@@ -4210,8 +4217,107 @@ class TestReconstructFromParams:
 class TestResumeWaitingJobs:
     """Tests for _resume_waiting_jobs helper."""
 
-    async def test_resumes_valid_waiting_job(self, mock_settings) -> None:
+    @pytest.mark.parametrize("failure", ["missing_submitter", "invalid_peer"])
+    async def test_validation_failure_does_not_block_next_job(
+        self, failure, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """Fail only the invalid waiting job; retain grants for the next one."""
+        from fastapi import HTTPException
+
+        from rootcoz.config import get_settings
+        from rootcoz.main import _resume_waiting_jobs
+        from rootcoz.models import AnalyzeRequest
+
+        grant = AsyncMock(return_value=True)
+        monkeypatch.setattr(storage, "can_user_use_server_providers", grant)
+        monkeypatch.setattr(
+            storage, "get_user_ai_credentials", AsyncMock(return_value={})
+        )
+        body = AnalyzeRequest(
+            job_name="my-job", build_number=1, ai_provider="gemini", ai_model="m"
+        )
+        params = _build_jenkins_request_params(body, get_settings(), "gemini", "m")
+        params["submitted_by"] = "admin"
+        first_params = dict(params)
+        if failure == "missing_submitter":
+            first_params.pop("submitted_by")
+        jobs = [
+            {
+                "job_id": job_id,
+                "result_data": {
+                    "job_name": "my-job",
+                    "build_number": 1,
+                    "request_params": request_params,
+                },
+            }
+            for job_id, request_params in (("bad", first_params), ("good", params))
+        ]
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+            ) as process,
+        ):
+            await storage.init_db()
+            for job in jobs:
+                await storage.save_result(
+                    job["job_id"], "http://j/1", "waiting", job["result_data"]
+                )
+            if failure == "invalid_peer":
+                monkeypatch.setattr(
+                    "rootcoz.main._validate_peer_configs",
+                    AsyncMock(
+                        side_effect=[HTTPException(422, "Invalid peer model"), None]
+                    ),
+                )
+            await _resume_waiting_jobs(jobs)
+            await asyncio.sleep(0)
+            bad = await storage.get_result("bad")
+            assert bad["status"] == "failed"
+            assert "request_params" in bad["result"]
+            assert (
+                "grant" if failure == "missing_submitter" else "Invalid peer model"
+            ) in bad["result"]["error"]
+            process.assert_called_once()
+            assert process.call_args.kwargs["job_id"] == "good"
+            assert (await storage.get_result("good"))["status"] == "waiting"
+            assert grant.await_count >= 1
+            assert all(call.args == ("admin",) for call in grant.await_args_list)
+
+    async def test_resume_validation_error_does_not_leak_exception(
+        self, mock_settings, monkeypatch, caplog
+    ) -> None:
+        from rootcoz.config import get_settings
+        from rootcoz.main import _resume_waiting_jobs
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="my-job", build_number=1, ai_provider="gemini", ai_model="m"
+        )
+        params = _build_jenkins_request_params(body, get_settings(), "gemini", "m")
+        params["submitted_by"] = "admin"
+        result_data = {"job_name": "my-job", "request_params": params}
+        monkeypatch.setattr(
+            "rootcoz.main._validate_peer_configs",
+            AsyncMock(side_effect=RuntimeError("secret-api-key")),
+        )
+        with (
+            patch.object(storage, "get_result", AsyncMock(return_value=None)),
+            patch.object(storage, "update_status", new_callable=AsyncMock) as update,
+            patch(
+                "rootcoz.main._resolve_ai_config_allow_defer", new_callable=AsyncMock
+            ),
+        ):
+            await _resume_waiting_jobs([{"job_id": "bad", "result_data": result_data}])
+        assert update.await_args.args[1] == "failed"
+        assert "secret-api-key" not in update.await_args.args[2]["error"]
+        assert "secret-api-key" not in caplog.text
+
+    async def test_resumes_valid_waiting_job(self, mock_settings, monkeypatch) -> None:
         """A waiting job with valid request_params spawns a background task."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
         from rootcoz.config import get_settings
         from rootcoz.main import _resume_waiting_jobs
         from rootcoz.models import AnalyzeRequest
@@ -4228,6 +4334,10 @@ class TestResumeWaitingJobs:
             max_wait_minutes=0,
         )
         request_params = _build_jenkins_request_params(body_in, settings, "gemini", "m")
+        request_params["submitted_by"] = "admin"
+        monkeypatch.setattr(
+            storage, "get_user_ai_credentials", AsyncMock(return_value={})
+        )
         waiting_jobs = [
             {
                 "job_id": "w-1",
@@ -4318,9 +4428,12 @@ class TestLifespanResumesWaitingJobs:
         conn.close()
 
     def test_lifespan_resumes_waiting_jobs(
-        self, mock_settings, temp_db_path: Path
+        self, mock_settings, temp_db_path: Path, monkeypatch
     ) -> None:
         """Waiting jobs are resumed (not failed) when the app starts."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
         import json
 
         from rootcoz.config import get_settings
@@ -4337,6 +4450,7 @@ class TestLifespanResumesWaitingJobs:
             max_wait_minutes=0,
         )
         request_params = _build_jenkins_request_params(body_in, settings, "gemini", "m")
+        request_params["submitted_by"] = "admin"
         result_data = json.dumps(
             {
                 "job_name": "my-job",
@@ -4573,8 +4687,19 @@ class TestPeerAnalysisParams:
         assert merged.ai_call_timeout == 99
 
     @pytest.mark.asyncio
-    async def test_resolve_ai_config_allow_defer_respects_passed_settings(self) -> None:
+    async def test_resolve_ai_config_allow_defer_respects_passed_settings(
+        self, monkeypatch
+    ) -> None:
         """allow_defer uses the passed Settings, not global get_settings()."""
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
+        monkeypatch.setattr(
+            storage, "get_user_ai_credentials", AsyncMock(return_value={})
+        )
+        from rootcoz import ai_client
+
+        token = ai_client.ai_username.set("admin")
         from fastapi import HTTPException
 
         from rootcoz.main import _resolve_ai_config_allow_defer
@@ -4602,6 +4727,7 @@ class TestPeerAnalysisParams:
             provider, model = await _resolve_ai_config_allow_defer(body, configured)
         assert provider == "gemini"
         assert model == "flash"
+        ai_client.ai_username.reset(token)
 
     @pytest.mark.asyncio
     async def test_validate_catalog_pair_returns_503_when_uncached_refresh_fails(
@@ -6415,6 +6541,38 @@ class TestAdminSettingsEndpoints:
                 f"Sensitive field {si['key']} not masked by default"
             )
 
+    def test_repo_clone_limit_metadata_and_db_override(self, test_client) -> None:
+        """Clone concurrency is a live, validated Server setting."""
+        from rootcoz.config import get_settings
+
+        key = "max_concurrent_repo_clones"
+        item = next(
+            s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
+        )
+        assert (item["category"], item["type"], item["default"]) == (
+            "Server",
+            "integer",
+            "10",
+        )
+        assert not item["sensitive"] and not item["restart_required"]
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: "0"}}
+            ).status_code
+            == 400
+        )
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: "3"}}
+            ).status_code
+            == 200
+        )
+        assert get_settings().max_concurrent_repo_clones == 3
+        item = next(
+            s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
+        )
+        assert (item["value"], item["source"]) == ("3", "db")
+
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot access settings."""
         response = test_client.get(
@@ -7016,6 +7174,194 @@ class TestCursorStatusForClient:
         assert "has_api_key" not in out
         assert out["reason"] == "unavailable"
         assert "administrator" in out["hint"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "admin, forced", [(False, False), (False, True), (True, False), (True, True)]
+)
+async def test_chat_send_validates_with_sender_credentials(monkeypatch, admin, forced):
+    from rootcoz import ai_client, main
+    from rootcoz.models import ChatMessageRequest
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            username="alice", role="admin" if admin else "reviewer", is_admin=admin
+        )
+    )
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            allowed_users_set=set(), force_server_credentials=forced
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "get_result",
+        AsyncMock(
+            return_value={
+                "result": {"request_params": {"force_server_credentials": forced}}
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        main.storage, "add_chat_message_pair", AsyncMock(return_value=(1, 2))
+    )
+    monkeypatch.setattr(main, "notify_chat_changed", lambda *args, **kwargs: None)
+    seen = []
+
+    async def validate(provider, model):
+        seen.append(
+            (ai_client.ai_username.get(), ai_client.force_server_credentials.get())
+        )
+        return provider, model
+
+    monkeypatch.setattr(main, "resolve_catalog_pair", validate)
+    send = main.send_admin_chat_message if admin else main.send_chat_message
+    args = (
+        ChatMessageRequest(
+            message="hello", ai_provider="openai", ai_model="test-model"
+        ),
+        request,
+        BackgroundTasks(),
+    )
+    original_user = ai_client.ai_username.set("previous")
+    original_force = ai_client.force_server_credentials.set(not forced)
+    try:
+        result = await (send(*args) if admin else send("job", *args))
+        assert result["assistant_message_id"] == 2
+        assert seen == [("alice", forced)]
+        assert ai_client.ai_username.get() == "previous"
+        assert ai_client.force_server_credentials.get() is not forced
+
+        monkeypatch.setattr(
+            main,
+            "resolve_catalog_pair",
+            AsyncMock(side_effect=ValueError("invalid model")),
+        )
+        with pytest.raises(HTTPException) as exc:
+            await (send(*args) if admin else send("job", *args))
+        assert exc.value.status_code == 422
+        assert ai_client.ai_username.get() == "previous"
+        assert ai_client.force_server_credentials.get() is not forced
+    finally:
+        ai_client.force_server_credentials.reset(original_force)
+        ai_client.ai_username.reset(original_user)
+
+
+@pytest.mark.asyncio
+async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_path):
+    from rootcoz import ai_client, main
+    from rootcoz.engine import chat
+
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ai_provider="openai", ai_model="test-model", force_server_credentials=True
+        ),
+    )
+    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(main.storage, "get_chat_messages", AsyncMock(return_value=[]))
+    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+    monkeypatch.setattr(
+        main.storage, "get_user_ai_credential_generation", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(main.storage, "add_chat_message", AsyncMock(return_value=1))
+    seen = []
+
+    async def init(**kwargs):
+        seen.append(
+            (ai_client.ai_username.get(), ai_client.force_server_credentials.get())
+        )
+        return "session"
+
+    monkeypatch.setattr(chat, "init_admin_chat_session", init)
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))
+    original_force = ai_client.force_server_credentials.set(False)
+    try:
+        assert (await main.init_admin_chat(request))["session_id"] == "session"
+        assert seen == [("alice", True)]
+        assert ai_client.force_server_credentials.get() is False
+        monkeypatch.setattr(
+            chat,
+            "init_admin_chat_session",
+            AsyncMock(side_effect=RuntimeError("unavailable")),
+        )
+        with pytest.raises(RuntimeError, match="unavailable"):
+            await main.init_admin_chat(request)
+        assert ai_client.force_server_credentials.get() is False
+    finally:
+        ai_client.force_server_credentials.reset(original_force)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_admin_chat_processing_forces_server_and_resets_context(
+    monkeypatch, tmp_path, fails
+):
+    from rootcoz import ai_client, main
+    from rootcoz.engine import chat
+
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(
+            ai_provider="openai",
+            ai_model="test-model",
+            force_server_credentials=True,
+            ai_call_timeout=30,
+        ),
+    )
+    monkeypatch.setattr(
+        main.storage, "get_user_ai_credential_generation", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(main.storage, "count_chat_messages", AsyncMock(return_value=0))
+    monkeypatch.setattr(main.storage, "get_chat_messages", AsyncMock(return_value=[]))
+    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(main, "_build_internal_server_url", lambda: "http://localhost")
+    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+    monkeypatch.setattr(chat, "build_admin_custom_tools", lambda **kwargs: [])
+    monkeypatch.setattr(main.storage, "update_chat_message_content", AsyncMock())
+    monkeypatch.setattr(main.storage, "update_chat_message_status", AsyncMock())
+    monkeypatch.setattr(
+        main.storage, "get_chat_message_status", AsyncMock(return_value="pending")
+    )
+    monkeypatch.setattr(
+        main.storage,
+        "complete_chat_message_if_generation",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(main, "notify_chat_changed", lambda *args, **kwargs: None)
+    seen = []
+
+    async def run(**kwargs):
+        seen.append(
+            (ai_client.ai_username.get(), ai_client.force_server_credentials.get())
+        )
+        if fails:
+            raise RuntimeError("unavailable")
+        return True, "reply", "session"
+
+    monkeypatch.setattr(chat, "admin_chat_with_ai", run)
+    original_force = ai_client.force_server_credentials.set(False)
+    original_user = ai_client.ai_username.set("previous")
+    try:
+        await main._process_admin_chat_message(
+            user_msg_id=1,
+            assistant_msg_id=2,
+            message="hello",
+            ai_provider_override="openai",
+            ai_model_override="test-model",
+            username="alice",
+        )
+        assert seen == [("alice", True)]
+        assert ai_client.ai_username.get() == "previous"
+        assert ai_client.force_server_credentials.get() is False
+    finally:
+        ai_client.ai_username.reset(original_user)
+        ai_client.force_server_credentials.reset(original_force)
 
 
 class TestResolveChatAiConfig:

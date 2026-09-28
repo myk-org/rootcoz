@@ -2,6 +2,7 @@
 
 import csv
 import json as json_mod
+import logging
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -42,6 +43,7 @@ classifications_app = typer.Typer(
 )
 config_app = typer.Typer(help="Manage rootcoz configuration.")
 auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
+ai_keys_app = typer.Typer(help="Manage your AI provider keys.", no_args_is_help=True)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
@@ -67,6 +69,7 @@ app.add_typer(chat_app, name="chat")
 app.add_typer(reports_app, name="reports")
 app.add_typer(config_app, name="config")
 app.add_typer(auth_app, name="auth")
+auth_app.add_typer(ai_keys_app, name="ai-keys")
 app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
 admin_app.add_typer(admin_settings_app, name="settings")
@@ -1163,6 +1166,8 @@ def _apply_common_config_defaults(
         extras[int_key] = int_value
 
     # Boolean fields — forward when they differ from the dataclass default
+    if cfg.force_server_credentials is not None:
+        extras["force_server_credentials"] = cfg.force_server_credentials
     if cfg.enable_jira is not None:
         extras["enable_jira"] = cfg.enable_jira
     if cfg.jira_ssl_verify is not None:
@@ -1357,6 +1362,11 @@ def analyze(
     jira_max_results: _JiraMaxResultsOpt = None,
     github_token: _GithubTokenOpt = "",
     ai_call_timeout: _AiCallTimeoutOpt = None,
+    force_server_credentials: bool | None = typer.Option(
+        None,
+        "--force-server-credentials/--no-force-server-credentials",
+        help="Use server-managed AI credentials instead of your provider key.",
+    ),
     raw_prompt: _RawPromptOpt = "",
     issue_prompt: _IssuePromptOpt = "",
     peers: _PeersOpt = "",
@@ -1503,6 +1513,7 @@ def analyze(
             "jenkins_ssl_verify": jenkins_ssl_verify,
             "jira_ssl_verify": jira_ssl_verify,
             "get_job_artifacts": get_job_artifacts,
+            "force_server_credentials": force_server_credentials,
             "wait_for_completion": wait_for_completion,
         },
         max_concurrent=max_concurrent,
@@ -2148,8 +2159,13 @@ def _print_ai_model_rows(models: list[dict[str, Any]]) -> None:
     """Render an id/name table for AI model rows."""
     print_output(
         models,
-        columns=["id", "name"],
-        labels={"id": "MODEL ID", "name": "DISPLAY NAME"},
+        columns=["id", "name", "verified", "credential_sources"],
+        labels={
+            "id": "MODEL ID",
+            "name": "DISPLAY NAME",
+            "verified": "VERIFIED",
+            "credential_sources": "CREDENTIALS",
+        },
         as_json=False,
     )
 
@@ -2178,10 +2194,19 @@ def ai_models_cmd(
         if provider:
             models = data.get("models", [])
             if not models:
-                typer.echo(f"No models found for provider '{provider}'.")
+                if data.get("modelListingSupported") is False:
+                    typer.echo(
+                        "This provider cannot list models for your key. Enter a model ID manually; it is unverified and may fail."
+                    )
+                else:
+                    typer.echo(f"No models found for provider '{provider}'.")
                 raise typer.Exit()
             typer.echo(f"Models for {provider}:")
             _print_ai_model_rows(models)
+            if data.get("modelListingSupported") is False:
+                typer.echo(
+                    "Suggestions are unverified. You may enter a model ID manually; the AI call may fail."
+                )
         else:
             providers_data = data.get("providers", {})
             if not providers_data:
@@ -2809,6 +2834,68 @@ def analyze_comment_intent_cmd(
 # -- Auth ---------------------------------------------------------------------
 
 
+@ai_keys_app.command("list")
+def ai_keys_list(json_output: bool = _JSON_OPTION) -> None:
+    """List AI providers and whether your key is configured."""
+    data = _run_client_command(
+        json_output,
+        lambda c: {
+            "providers": [
+                {"provider": p["provider"], "configured": p["configured"]}
+                for p in c.list_ai_credentials()["providers"]
+            ]
+        },
+        emit_output=False,
+    )
+    logging.getLogger(__name__).info("Listed AI credential providers")
+    if not _state.get("json", False):
+        print_output(data["providers"], columns=["provider", "configured"])
+
+
+@ai_keys_app.command("set")
+def ai_keys_set(
+    provider: str = typer.Argument(help="Exact AI provider ID."),
+    stdin: bool = typer.Option(False, "--stdin", help="Read key from standard input."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Set your AI key securely via hidden prompt or standard input."""
+    if stdin:
+        api_key = sys.stdin.readline().rstrip("\r\n")
+    else:
+        api_key = typer.prompt("AI API key", hide_input=True)
+    if not api_key:
+        typer.echo("Error: AI API key cannot be empty.", err=True)
+        raise typer.Exit(1)
+    _set_json(json_output)
+    try:
+        _get_client().set_ai_credential(provider, api_key)
+    except RootCozError as err:
+        _handle_error(
+            RootCozError(err.status_code, err.detail.replace(api_key, "[REDACTED]"))
+        )
+    logging.getLogger(__name__).info("Saved AI credential for provider %s", provider)
+    print_output(
+        {"status": "saved"}, columns=["status"], as_json=_state.get("json", False)
+    )
+
+
+@ai_keys_app.command("delete")
+def ai_keys_delete(
+    provider: str = typer.Argument(help="Exact AI provider ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Delete your AI key for a provider."""
+    _set_json(json_output)
+    try:
+        _get_client().delete_ai_credential(provider)
+    except RootCozError as err:
+        _handle_error(err)
+    logging.getLogger(__name__).info("Deleted AI credential for provider %s", provider)
+    print_output(
+        {"status": "deleted"}, columns=["status"], as_json=_state.get("json", False)
+    )
+
+
 @auth_app.command("login")
 def auth_login(
     username: str = typer.Option(..., "--username", "-u", help="Username."),
@@ -2892,6 +2979,7 @@ def admin_users_list(
                     "username",
                     "role",
                     "can_view_reports",
+                    "can_use_server_providers",
                     "created_at",
                     "last_seen",
                 ],
@@ -2899,6 +2987,7 @@ def admin_users_list(
                     "created_at": "CREATED",
                     "last_seen": "LAST SEEN",
                     "can_view_reports": "REPORTS",
+                    "can_use_server_providers": "SERVER AI",
                 },
                 as_json=False,
             )
@@ -2917,6 +3006,11 @@ def admin_users_create(
         "--can-view-reports/--no-can-view-reports",
         help="Grant access to /api/reports/* (orthogonal to role).",
     ),
+    can_use_server_providers: bool = typer.Option(
+        False,
+        "--can-use-server-providers/--no-can-use-server-providers",
+        help="Grant access to server AI credentials.",
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Create a new user with the specified role. The API key is shown once \u2014 save it."""
@@ -2929,7 +3023,10 @@ def admin_users_create(
     data = _run_client_command(
         json_output,
         lambda c: c.admin_create_user(
-            username, role=role, can_view_reports=can_view_reports
+            username,
+            role=role,
+            can_view_reports=can_view_reports,
+            can_use_server_providers=can_use_server_providers,
         ),
         emit_output=False,
     )
@@ -3030,6 +3127,24 @@ def admin_users_set_can_view_reports(
         )
 
 
+@admin_users_app.command("set-can-use-server-providers")
+def admin_users_set_can_use_server_providers(
+    username: str = typer.Argument(...),
+    value: bool = typer.Argument(..., help="true or false"),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Grant or revoke server AI credentials for a managed user."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_set_can_use_server_providers(username, value),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(
+            f"Set can_use_server_providers={data.get('can_use_server_providers', value)} for '{username}'"
+        )
+
+
 @admin_users_app.command("pending")
 def admin_users_pending(
     json_output: bool = _JSON_OPTION,
@@ -3056,12 +3171,17 @@ def admin_users_pending(
 @admin_users_app.command("approve")
 def admin_users_approve(
     username: str = typer.Argument(..., help="Username to approve."),
+    can_use_server_providers: bool | None = typer.Option(
+        None, "--can-use-server-providers/--no-can-use-server-providers"
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Approve a pending user registration."""
     data = _run_client_command(
         json_output,
-        lambda c: c.approve_user(username),
+        lambda c: c.approve_user(
+            username, can_use_server_providers=can_use_server_providers
+        ),
         emit_output=False,
     )
     if not _state.get("json", False):
@@ -3247,7 +3367,8 @@ def _print_job_token_usage(data: dict[str, Any]) -> None:
     for rec in records:
         typer.echo(
             f"\n  [{rec.get('call_type', '')}] "
-            f"{rec.get('ai_provider', '')}/{rec.get('ai_model', '')}"
+            f"{rec.get('ai_provider', '')}/{rec.get('ai_model', '')} "
+            f"({rec.get('credential_source') or 'unknown'})"
         )
         typer.echo(
             f"    Input: {rec.get('input_tokens', 0):,}  "

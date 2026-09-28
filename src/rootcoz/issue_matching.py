@@ -135,7 +135,7 @@ Respond with ONLY the JSON array, no other text."""
             text = text[json_start : json_end + 1]
 
         evaluations = json.loads(text)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         logger.warning("Failed to parse AI relevance response")
         return []
 

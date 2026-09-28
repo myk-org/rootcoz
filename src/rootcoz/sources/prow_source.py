@@ -133,7 +133,7 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
     """
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
     if not isinstance(data, dict):
@@ -335,7 +335,7 @@ async def _fetch_gcs_response(
             # Fast-fail when Content-Length is present and over budget
             try:
                 content_length = int(resp.headers.get("content-length", 0))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 content_length = 0
             _raise_if_oversize(effective_label, content_length, max_size, url)
 
@@ -602,7 +602,7 @@ async def _download_gcs_artifacts(
             # Check single-file size from GCS metadata
             try:
                 obj_size = int(obj.get("size", 0))
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 obj_size = 0
 
             if obj_size > max_single_bytes:
@@ -810,7 +810,7 @@ async def _fetch_pr_changes(
                     return None
                 try:
                     content_length = int(pr_resp.headers.get("content-length", 0))
-                except (ValueError, TypeError):
+                except ValueError, TypeError:
                     content_length = 0
                 if content_length > _MAX_SIZE_PR_METADATA:
                     logger.warning(
@@ -839,7 +839,7 @@ async def _fetch_pr_changes(
                     meta_chunks.append(chunk)
                 try:
                     pr_data = json.loads(b"".join(meta_chunks))
-                except (json.JSONDecodeError, TypeError, ValueError):
+                except json.JSONDecodeError, TypeError, ValueError:
                     logger.warning(
                         "Failed to parse PR metadata JSON for %s/%s#%d",
                         org,
@@ -867,7 +867,7 @@ async def _fetch_pr_changes(
                             content_length = int(
                                 diff_resp.headers.get("content-length", 0)
                             )
-                        except (ValueError, TypeError):
+                        except ValueError, TypeError:
                             content_length = 0
                         if content_length > _MAX_SIZE_PR_DIFF:
                             logger.warning(

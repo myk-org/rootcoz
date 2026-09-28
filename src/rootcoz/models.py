@@ -181,6 +181,10 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="AI model to use (overrides env var default)",
     )
+    force_server_credentials: bool | None = Field(
+        default=None,
+        description="Use server AI credentials even when a user key exists",
+    )
     enable_jira: bool | None = Field(
         default=None,
         description="Enable Jira bug search (default: true when Jira is configured, set false to skip)",
@@ -250,7 +254,6 @@ class BaseAnalysisRequest(BaseModel):
     )
     additional_repos: list[AdditionalRepo] | None = Field(
         default=None,
-        max_length=9,
         description=(
             "Additional repository URLs for AI analysis context. "
             "Each entry has a name (used as subdirectory name) and URL. "
@@ -462,7 +465,7 @@ class CodeFix(BaseModel):
         default_factory=list,
         description="AI-suggested keywords for searching related issues in the tests repository",
     )
-    tests_repo_matches: list["SimilarIssue"] = Field(
+    tests_repo_matches: list[SimilarIssue] = Field(
         default_factory=list,
         description="Matched issues from the tests repository (populated in post-processing)",
     )
@@ -509,7 +512,7 @@ class AnalysisDetail(BaseModel):
     )
 
     @model_validator(mode="after")
-    def check_mutual_exclusivity(self) -> "AnalysisDetail":
+    def check_mutual_exclusivity(self) -> AnalysisDetail:
         if self.code_fix and self.product_bug_report:
             raise ValueError("code_fix and product_bug_report are mutually exclusive")
         return self
@@ -604,10 +607,10 @@ class ChildJobAnalysis(BaseModel):
     summary: str | None = Field(
         default=None, description="Summary of the child job failure analysis"
     )
-    failures: list["FailureAnalysis"] = Field(
+    failures: list[FailureAnalysis] = Field(
         default_factory=list, description="List of analyzed failures in child job"
     )
-    failed_children: list["ChildJobAnalysis"] = Field(
+    failed_children: list[ChildJobAnalysis] = Field(
         default_factory=list, description="Nested failed child jobs"
     )
     note: str | None = Field(
@@ -618,7 +621,7 @@ class ChildJobAnalysis(BaseModel):
     failed_count: int = Field(default=0, description="Number of failed tests")
 
     @model_validator(mode="after")
-    def _sync_build_url_aliases(self) -> "ChildJobAnalysis":
+    def _sync_build_url_aliases(self) -> ChildJobAnalysis:
         self.build_url, self.jenkins_url = _apply_build_url_aliases(
             self.build_url, self.jenkins_url
         )
@@ -631,6 +634,7 @@ class TokenUsageEntry(BaseModel):
     provider: str = ""
     model: str = ""
     call_type: str = ""
+    credential_source: str = "unknown"
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -693,13 +697,13 @@ class AnalysisResult(BaseModel):
     passed_count: int = Field(default=0, description="Number of passed tests")
     skipped_count: int = Field(default=0, description="Number of skipped tests")
     failed_count: int = Field(default=0, description="Number of failed tests")
-    cross_failure_patterns: list["CrossFailurePattern"] = Field(
+    cross_failure_patterns: list[CrossFailurePattern] = Field(
         default_factory=list,
         description="Patterns detected across multiple failure groups",
     )
 
     @model_validator(mode="after")
-    def _sync_build_url_aliases(self) -> "AnalysisResult":
+    def _sync_build_url_aliases(self) -> AnalysisResult:
         self.build_url, self.jenkins_url = _apply_build_url_aliases(
             self.build_url, self.jenkins_url
         )
@@ -814,7 +818,7 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         return normalize_prow_url(v)
 
     @model_validator(mode="after")
-    def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
+    def _validate_by_type(self) -> UnifiedAnalyzeRequest:
         """Validate required fields based on analysis type."""
         if self.type == "jenkins":
             if not self.job_name:
@@ -1185,6 +1189,7 @@ class ReAnalyzeFailureRequest(BaseModel):
 
     ai_provider: str | None = None
     ai_model: str | None = None
+    force_server_credentials: bool | None = None
     ai_call_timeout: int | None = None
     raw_prompt: str | None = None
     peer_ai_configs: list[dict[str, Any]] | None = None
@@ -1448,6 +1453,13 @@ class AdminCreateUserRequest(BaseModel):
     username: str
     role: str = "reviewer"
     can_view_reports: CanViewReportsFlag = False
+    can_use_server_providers: Annotated[bool, Strict()] = False
+
+
+class SetCanUseServerProvidersRequest(BaseModel):
+    """Admin grant for server AI credentials."""
+
+    can_use_server_providers: Annotated[bool, Strict()]
 
 
 class SetCanViewReportsRequest(BaseModel):

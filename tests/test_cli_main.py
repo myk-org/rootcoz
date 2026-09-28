@@ -1524,6 +1524,17 @@ class TestAiModelsCommand:
         assert result.exit_code == 0
         assert "No models found" in result.output
 
+    def test_ai_models_unverified_manual(self, mock_client):
+        mock_client.list_ai_models.return_value = {
+            "provider": "xai",
+            "models": [],
+            "modelListingSupported": False,
+        }
+        result = runner.invoke(app, ["ai-models", "--provider", "xai"])
+        assert result.exit_code == 0
+        assert "Enter a model ID manually" in result.output
+        assert "unverified" in result.output
+
     def test_ai_models_empty_all(self, mock_client):
         mock_client.list_ai_models.return_value = {"providers": {}}
         result = runner.invoke(app, ["ai-models"])
@@ -2336,6 +2347,27 @@ class TestAnalyzeConfigDefaults:
             mock_client_fn.return_value = client
             result = runner.invoke(app, cli_args)
             return result, client
+
+    @pytest.mark.parametrize("configured", [None, False, True])
+    @pytest.mark.parametrize(
+        "flag", [None, "--force-server-credentials", "--no-force-server-credentials"]
+    )
+    def test_force_server_credentials_precedence(self, configured, flag):
+        args = ["analyze", "--job-name", "my-job", "--build-number", "1"]
+        if flag:
+            args.append(flag)
+        result, client = self._invoke_analyze(
+            args, ServerConfig(url=_TEST_SERVER, force_server_credentials=configured)
+        )
+        assert result.exit_code == 0
+        actual = client.analyze.call_args.kwargs.get("force_server_credentials")
+        assert actual is (
+            True
+            if flag == "--force-server-credentials"
+            else False
+            if flag
+            else configured
+        )
 
     def test_config_string_fields_used_as_defaults(self):
         """String config fields are sent when CLI flags are absent."""
@@ -3789,6 +3821,72 @@ class TestExportersCommand:
         assert parsed[0]["name"] == "reportportal"
 
 
+class TestAiKeysCommands:
+    def test_list_redacts_unexpected_keys(self, mock_client):
+        mock_client.list_ai_credentials.return_value = {
+            "providers": [
+                {
+                    "provider": "acpx/a",
+                    "configured": True,
+                    "api_key": "secret-key",  # pragma: allowlist secret
+                }
+            ]
+        }
+        result = runner.invoke(app, ["auth", "ai-keys", "list", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {
+            "providers": [{"provider": "acpx/a", "configured": True}]
+        }
+        assert "secret-key" not in result.output
+
+    def test_set_stdin_and_redaction(self, mock_client):
+        mock_client.set_ai_credential.return_value = {
+            "api_key": "secret-key"  # pragma: allowlist secret
+        }
+        result = runner.invoke(
+            app,
+            ["auth", "ai-keys", "set", "acpx/a", "--stdin", "--json"],
+            input="secret-key\n",
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"status": "saved"}
+        assert "secret-key" not in result.output
+        mock_client.set_ai_credential.assert_called_once_with("acpx/a", "secret-key")
+
+    def test_set_interactive_hidden(self, mock_client):
+        result = runner.invoke(
+            app, ["auth", "ai-keys", "set", "vertex"], input="secret-key\n"
+        )
+        assert result.exit_code == 0
+        assert "secret-key" not in result.output
+        mock_client.set_ai_credential.assert_called_once_with("vertex", "secret-key")
+
+    def test_set_rejects_empty_key(self, mock_client):
+        result = runner.invoke(
+            app, ["auth", "ai-keys", "set", "vertex", "--stdin"], input="\n"
+        )
+        assert result.exit_code == 1
+        mock_client.set_ai_credential.assert_not_called()
+
+    def test_set_error_redacts_key(self, mock_client):
+        mock_client.set_ai_credential.side_effect = RootCozError(400, "Bad secret-key")
+        result = runner.invoke(
+            app, ["auth", "ai-keys", "set", "vertex", "--stdin"], input="secret-key\n"
+        )
+        assert result.exit_code == 1
+        assert "secret-key" not in result.output
+        assert "[REDACTED]" in result.output
+
+    def test_delete(self, mock_client):
+        mock_client.delete_ai_credential.return_value = {
+            "api_key": "secret-key"  # pragma: allowlist secret
+        }
+        result = runner.invoke(app, ["auth", "ai-keys", "delete", "acpx/a"])
+        assert result.exit_code == 0
+        assert "secret-key" not in result.output
+        mock_client.delete_ai_credential.assert_called_once_with("acpx/a")
+
+
 class TestAuthLoginCommand:
     def test_auth_login(self, mock_client):
         mock_client.login.return_value = {
@@ -3928,7 +4026,35 @@ class TestAdminUsersCreateCommand:
         assert "not-a-real-key" in result.output
         assert "Save this API key" in result.output
         mock_client.admin_create_user.assert_called_once_with(
-            "newadmin", role="admin", can_view_reports=False
+            "newadmin",
+            role="admin",
+            can_view_reports=False,
+            can_use_server_providers=False,
+        )
+
+    def test_admin_users_create_with_server_grant(self, mock_client):
+        mock_client.admin_create_user.return_value = {
+            "username": "alice",
+            "api_key": "key",  # pragma: allowlist secret
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "users",
+                "create",
+                "alice",
+                "--role",
+                "operator",
+                "--can-use-server-providers",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.admin_create_user.assert_called_once_with(
+            "alice",
+            role="operator",
+            can_view_reports=False,
+            can_use_server_providers=True,
         )
 
     def test_admin_users_create_with_can_view_reports(self, mock_client):
@@ -3952,7 +4078,10 @@ class TestAdminUsersCreateCommand:
         )
         assert result.exit_code == 0
         mock_client.admin_create_user.assert_called_once_with(
-            "ruser", role="reviewer", can_view_reports=True
+            "ruser",
+            role="reviewer",
+            can_view_reports=True,
+            can_use_server_providers=False,
         )
 
     def test_admin_users_create_reviewer(self, mock_client):
@@ -3968,7 +4097,10 @@ class TestAdminUsersCreateCommand:
         assert "Created reviewer user: newuser" in result.output
         assert "Save this API key" not in result.output
         mock_client.admin_create_user.assert_called_once_with(
-            "newuser", role="reviewer", can_view_reports=False
+            "newuser",
+            role="reviewer",
+            can_view_reports=False,
+            can_use_server_providers=False,
         )
 
     def test_admin_users_create_invalid_role(self, mock_client):
@@ -4112,6 +4244,37 @@ class TestAdminUsersChangeRole:
         assert result.exit_code == 0
         output = json.loads(result.output)
         assert output["role"] == "admin"
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        ([], None),
+        (["--can-use-server-providers"], True),
+        (["--no-can-use-server-providers"], False),
+    ],
+)
+def test_admin_users_approve_server_provider_grant(mock_client, option, expected):
+    mock_client.approve_user.return_value = {"username": "alice"}
+    result = runner.invoke(app, ["admin", "users", "approve", "alice", *option])
+    assert result.exit_code == 0
+    mock_client.approve_user.assert_called_once_with(
+        "alice", can_use_server_providers=expected
+    )
+
+
+def test_admin_users_set_server_provider_grant(mock_client):
+    mock_client.admin_set_can_use_server_providers.return_value = {
+        "username": "alice",
+        "can_use_server_providers": True,
+    }
+    result = runner.invoke(
+        app, ["admin", "users", "set-can-use-server-providers", "alice", "true"]
+    )
+    assert result.exit_code == 0
+    mock_client.admin_set_can_use_server_providers.assert_called_once_with(
+        "alice", True
+    )
 
 
 class TestAdminUsersSetCanViewReports:

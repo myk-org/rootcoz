@@ -17,6 +17,69 @@ async def setup_test_db(temp_db_path: Path):
         yield temp_db_path
 
 
+async def test_bootstrap_admin_flag_rejects_missing_normal_user(
+    setup_test_db: Path,
+) -> None:
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        with pytest.raises(ValueError, match="Invalid bootstrap admin"):
+            await storage.save_ai_session_source(
+                "new-session", "missing", "openai", "server", bootstrap_admin=True
+            )
+        assert (
+            await storage.get_ai_session_source("new-session", "missing", "openai")
+            == "unknown"
+        )
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+async def test_server_provenance_refuses_deleted_or_reused_account(
+    setup_test_db: Path, recreate: bool
+) -> None:
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_admin_user("alice")
+        original = await storage.get_user_by_username("alice")
+        assert original is not None
+        await storage.delete_user("alice")
+        if recreate:
+            await storage.create_admin_user("alice")
+        with pytest.raises(LookupError, match="account changed"):
+            await storage.save_ai_session_source(
+                "new-session", "alice", "openai", "server", original["id"]
+            )
+        assert (
+            await storage.get_ai_session_source("new-session", "alice", "openai")
+            == "unknown"
+        )
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+async def test_server_creation_refuses_deleted_or_reused_account(
+    setup_test_db: Path, recreate: bool
+) -> None:
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_admin_user("alice")
+        deleted = []
+
+        async def create() -> str:
+            await storage.delete_user("alice")
+            if recreate:
+                await storage.create_admin_user("alice")
+            return "new-session"
+
+        async def delete(session_id: str) -> None:
+            deleted.append(session_id)
+
+        with pytest.raises(ValueError, match="credential changed"):
+            await storage.create_ai_session_with_source(
+                create, "alice", "openai", "server", delete
+            )
+        assert deleted == ["new-session"]
+        assert (
+            await storage.get_ai_session_source("new-session", "alice", "openai")
+            == "unknown"
+        )
+
+
 class TestInitDb:
     """Tests for the init_db function."""
 

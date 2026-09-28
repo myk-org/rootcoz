@@ -284,7 +284,7 @@ def validate_and_extract_archive(
         shutil.rmtree(extract_dir, ignore_errors=True)
         logger.warning(f"Archive rejected: {exc}")
         return None
-    except (tarfile.TarError, OSError):
+    except tarfile.TarError, OSError:
         fileobj.seek(0)
         try:
             _extract_zip(fileobj, extract_dir, max_extracted_bytes=max_extracted_bytes)

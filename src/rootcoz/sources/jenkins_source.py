@@ -762,7 +762,7 @@ class JenkinsSource(CISource):
         else:
             try:
                 build_number = int(raw_build_number)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 logger.warning(
                     "Cannot reconstruct JenkinsSource: invalid build_number %r",
                     raw_build_number,

@@ -2,6 +2,7 @@
 
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -103,7 +104,7 @@ class RootCozClient:
             try:
                 body = response.json()
                 detail = body.get("detail", str(body))
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 detail = response.text
             raise RootCozError(
                 status_code=response.status_code,
@@ -153,6 +154,24 @@ class RootCozClient:
         """Get current user info including can_view_reports. GET /api/auth/me"""
         return self._request("GET", "/api/auth/me")
 
+    def list_ai_credentials(self) -> dict[str, Any]:
+        """List configured AI credential providers without exposing keys."""
+        return self._request("GET", "/api/user/ai-credentials")
+
+    def set_ai_credential(self, provider: str, api_key: str) -> dict[str, Any]:
+        """Save an AI provider key for the current user."""
+        return self._request(
+            "PUT",
+            f"/api/user/ai-credentials/{quote(provider, safe='')}",
+            json={"api_key": api_key},
+        )
+
+    def delete_ai_credential(self, provider: str) -> dict[str, Any]:
+        """Remove an AI provider key for the current user."""
+        return self._request(
+            "DELETE", f"/api/user/ai-credentials/{quote(provider, safe='')}"
+        )
+
     # -- Admin ----------------------------------------------------------------
 
     def admin_list_users(self) -> dict[str, Any]:
@@ -165,6 +184,7 @@ class RootCozClient:
         role: str,
         *,
         can_view_reports: bool = False,
+        can_use_server_providers: bool = False,
     ) -> dict[str, Any]:
         """Create a user with the specified role and optional can_view_reports.
 
@@ -178,6 +198,7 @@ class RootCozClient:
                 "username": username,
                 "role": role,
                 "can_view_reports": can_view_reports,
+                "can_use_server_providers": can_use_server_providers,
             },
         )
 
@@ -189,6 +210,16 @@ class RootCozClient:
             "PUT",
             f"/api/admin/users/{username}/can-view-reports",
             json={"can_view_reports": can_view_reports},
+        )
+
+    def admin_set_can_use_server_providers(
+        self, username: str, value: bool
+    ) -> dict[str, Any]:
+        """Update a managed user's server AI grant."""
+        return self._request(
+            "PUT",
+            f"/api/admin/users/{username}/can-use-server-providers",
+            json={"can_use_server_providers": value},
         )
 
     def admin_delete_user(self, username: str) -> dict[str, Any]:
@@ -235,9 +266,19 @@ class RootCozClient:
             params["key"] = key
         return self._request("GET", "/api/admin/settings/history", params=params)
 
-    def approve_user(self, username: str) -> dict[str, Any]:
-        """Approve a pending user. POST /api/admin/users/{username}/approve"""
-        return self._request("POST", f"/api/admin/users/{username}/approve")
+    def approve_user(
+        self, username: str, can_use_server_providers: bool | None = None
+    ) -> dict[str, Any]:
+        """Approve a pending user. Omitted grant preserves the existing flag."""
+        return self._request(
+            "POST",
+            f"/api/admin/users/{username}/approve",
+            json=(
+                {"can_use_server_providers": can_use_server_providers}
+                if can_use_server_providers is not None
+                else None
+            ),
+        )
 
     def reject_user(self, username: str) -> dict[str, Any]:
         """Reject a pending user. POST /api/admin/users/{username}/reject"""
@@ -1366,7 +1407,7 @@ class RootCozClient:
             try:
                 body = response.json()
                 detail = body.get("detail", str(body))
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 detail = response.text
             raise RootCozError(status_code=response.status_code, detail=detail)
         return response.content

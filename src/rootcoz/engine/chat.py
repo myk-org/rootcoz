@@ -18,6 +18,7 @@ from simple_logger.logger import get_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     call_ai,
+    create_session_safely,
     resolve_catalog_pair,
 )
 from rootcoz.engine.http_mcp import (
@@ -89,7 +90,7 @@ def _is_github_url(url: str) -> bool:
     try:
         host = urlsplit(url).netloc.lower()
         return host.endswith("github.com") or "github" in host
-    except (TypeError, AttributeError, ValueError):
+    except TypeError, AttributeError, ValueError:
         return False
 
 
@@ -1174,6 +1175,18 @@ def build_chat_prompt(
     return "\n".join(parts)
 
 
+def safe_exception_frames(exc: BaseException) -> str:
+    """Format traceback locations without credential-bearing exception messages."""
+    frames = []
+    tb = exc.__traceback__
+    while tb:
+        frames.append(
+            f"{tb.tb_frame.f_code.co_filename}:{tb.tb_lineno} in {tb.tb_frame.f_code.co_name}"
+        )
+        tb = tb.tb_next
+    return "\n".join(frames)
+
+
 async def _create_chat_session(
     *,
     system_prompt: str,
@@ -1207,11 +1220,29 @@ async def _create_chat_session(
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
-        session_id = await client.create_session(**create_kwargs)
+        from rootcoz.ai_client import _selected_credential_source, session_key
+
+        key = (
+            await session_key(sidecar_provider)
+            if _selected_credential_source.get() == "user"
+            else None
+        )
+        if key is not None:
+            create_kwargs["api_key"] = key
+        else:
+            from rootcoz.ai_client import require_server_provider_grant
+
+            await require_server_provider_grant()
+        session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
-    except Exception:
-        logger.warning("%s: failed to create session", log_prefix, exc_info=True)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "%s: failed to create session (%s)\n%s",
+            log_prefix,
+            type(exc).__name__,
+            safe_exception_frames(exc),
+        )
         return None
 
 

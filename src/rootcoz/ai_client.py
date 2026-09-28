@@ -3,17 +3,98 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import os
+import sqlite3
+import tempfile
 import time
+from contextvars import ContextVar
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from pi_sidecar_client import AIResult, set_usage_recorder
+import httpx
+from pi_sidecar_client import (
+    AIResult,
+    AITokenUsage,
+    SidecarClient,
+    _validate_api_key,
+    get_sidecar_client,
+    set_usage_recorder,
+)
 from pi_sidecar_client import call_ai as _call_ai
 from pi_sidecar_client import call_ai_once as _call_ai_once
 from pi_sidecar_client import list_models as _list_models_raw
 from simple_logger.logger import get_logger
 
 logger = get_logger(name=__name__)
+
+# Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
+ai_username: ContextVar[str] = ContextVar("ai_username", default="")
+force_server_credentials: ContextVar[bool] = ContextVar(
+    "force_server_credentials", default=False
+)
+_selected_credential_source: ContextVar[str] = ContextVar(
+    "selected_credential_source", default=""
+)
+model_listing_status: ContextVar[dict[str, dict[str, bool]] | None] = ContextVar(
+    "model_listing_status", default=None
+)
+_selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = ContextVar(
+    "selected_key_generation", default=None
+)
+
+
+async def supported_key_providers() -> list[str]:
+    """List registered providers with affirmative session-key capability."""
+    try:
+        providers = await get_sidecar_client().get_providers()
+    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+        logger.warning("Unable to discover session-key providers")
+        return []
+    return sorted(
+        {
+            entry["provider"]
+            for entry in providers
+            if isinstance(entry.get("provider"), str)
+            and entry.get("supportsSessionApiKey") is True
+        }
+    )
+
+
+async def require_server_provider_grant() -> None:
+    """Recheck the initiator on every server AI operation, including resumed turns."""
+    from rootcoz.storage import can_user_use_server_providers
+
+    username = ai_username.get()
+    try:
+        allowed = bool(username) and await can_user_use_server_providers(username)
+    except Exception as exc:
+        raise ValueError("Server provider access unavailable") from exc
+    if not allowed:
+        raise ValueError("Server provider access requires an administrator grant")
+
+
+async def session_key(provider: str) -> str | None:
+    """Resolve the current initiator's exact provider key; missing means server auth."""
+    username = ai_username.get()
+    if force_server_credentials.get() or not username:
+        return None
+    from rootcoz.storage import get_user_ai_credential_with_generation
+
+    _selected_key_generation.set(None)
+    key, generation = await get_user_ai_credential_with_generation(username, provider)
+    if key is not None:
+        if provider not in await supported_key_providers():
+            raise ValueError("Provider session API-key capability unavailable")
+        if generation is None:
+            raise ValueError("AI credential generation unavailable")
+        _selected_key_generation.set((username, provider, key, generation))
+        logger.info("Using user AI credential for provider=%s", provider)
+    return key
+
 
 # Pi-sidecar's catalog is the provider/model contract.  These aliases only
 # preserve unambiguous legacy spelling; friendly provider names are resolved
@@ -132,12 +213,186 @@ async def list_models(provider: str = "") -> list[dict[str, Any]]:
     ]
 
 
+# Snapshot of @mariozechner/pi-ai 0.84.4 generated model IDs; never key-verified.
+_PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
+    Path(__file__).with_name("pi_model_suggestions.json").read_text()
+)
+
+
+async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
+    """Ask Pi for key-scoped models and listing capability; never retain the key."""
+    response = await get_sidecar_client().get_models_for_api_key(provider, api_key)
+    if (
+        not isinstance(response, dict)
+        or type(response.get("modelListingSupported")) is not bool
+        or not isinstance(response.get("models"), list)
+    ):
+        raise ValueError("Invalid key-scoped model discovery response")
+    models = response["models"]
+    if any(
+        not isinstance(m, dict)
+        or m.get("provider") != provider
+        or not isinstance(m.get("id"), str)
+        or not m["id"].strip()
+        for m in models
+    ):
+        raise ValueError("Invalid key-scoped model discovery response")
+    if not response["modelListingSupported"] and models:
+        raise ValueError("Invalid key-scoped model discovery response")
+    return {
+        "modelListingSupported": response["modelListingSupported"],
+        "models": [
+            {
+                "id": m["id"],
+                "name": m.get("name") or m["id"],
+                "provider": provider,
+                # Keep only the metadata the sidecar uses to construct unknown models.
+                "capabilities": {
+                    field: m.get("capabilities", {}).get(field)
+                    for field in ("inputTokenLimit", "outputTokenLimit")
+                    if isinstance(m.get("capabilities"), dict)
+                },
+            }
+            for m in models
+        ],
+    }
+
+
+async def scoped_models() -> dict[str, list[dict[str, Any]]]:
+    """Return models usable by the active user or server, with source per pair."""
+    catalog = await _get_model_catalog()
+    status: dict[str, dict[str, bool]] = {}
+    model_listing_status.set(status)
+    from rootcoz.storage import can_user_use_server_providers
+
+    try:
+        allowed = (
+            await can_user_use_server_providers(ai_username.get())
+            if ai_username.get()
+            else False
+        )
+    except sqlite3.Error, OSError, RuntimeError, ValueError, KeyError, TypeError:
+        allowed = False
+    pairs: dict[tuple[str, str], dict[str, Any]] = {}
+    for provider, entries in build_friendly_catalog(catalog).items():
+        for entry in entries:
+            pairs[(provider, entry["id"])] = {
+                **entry,
+                "credential_sources": ["server"],
+                "can_use_server_providers": allowed,
+                "verified": True,
+            }
+    if ai_username.get() and not force_server_credentials.get():
+        from rootcoz.storage import get_user_ai_credentials
+
+        credentials = await get_user_ai_credentials(ai_username.get())
+        supported = await supported_key_providers() if credentials else []
+        for provider, key in credentials.items():
+            if provider not in supported:
+                continue
+            try:
+                discovery = await models_for_api_key(provider, key)
+            except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+                logger.warning(
+                    "Key-scoped model discovery unavailable for provider=%s", provider
+                )
+                status[provider] = {
+                    "has_api_key": True,
+                    "modelListingSupported": True,
+                    "unavailable": True,
+                }
+                continue
+            listing = discovery["modelListingSupported"]
+            status[provider] = {"has_api_key": True, "modelListingSupported": listing}
+            entries = (
+                discovery["models"]
+                if listing
+                else [
+                    {"provider": provider, "id": model, "name": model}
+                    for model in _PI_MODEL_SUGGESTIONS.get(provider, ())
+                ]
+            )
+            if not listing:
+                pairs.setdefault((provider, ""), {})  # Preserve manual-only provider.
+            for entry in entries:
+                pair = (provider, entry["id"])
+                limits = entry.get("capabilities") or {}
+                constructible = pair in pairs or all(
+                    type(limits.get(field)) is int and 0 < limits[field] <= 2**53 - 1
+                    for field in ("inputTokenLimit", "outputTokenLimit")
+                )
+                if listing and not constructible:
+                    continue
+                if pair in pairs:
+                    pairs[pair]["credential_sources"].insert(0, "user")
+                    pairs[pair]["verified"] = True
+                else:
+                    pairs[pair] = {
+                        "provider": provider,
+                        "id": entry["id"],
+                        "name": entry.get("name") or entry["id"],
+                        "source": _source_for_sidecar(provider),
+                        "credential_sources": ["user"],
+                        "can_use_server_providers": allowed,
+                        "verified": listing,
+                    }
+    result: dict[str, list[dict[str, Any]]] = {}
+    for (provider, model), entry in pairs.items():
+        bucket = result.setdefault(provider, [])
+        if model:
+            bucket.append(entry)
+    return result
+
+
 async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     """Validate an exact pair, retaining only unambiguous legacy routes."""
     provider, model = normalize_provider(provider), (model or "").strip()
+    if ai_username.get():
+        scoped = await scoped_models()
+        status = model_listing_status.get() or {}
+        if (
+            status.get(provider, {}).get("unavailable")
+            and not force_server_credentials.get()
+        ):
+            raise ValueError(
+                "Key-scoped model discovery unavailable; retry or select server credentials"
+            )
+        for entry in scoped.get(provider, []):
+            if entry["id"] == model and (
+                entry["verified"] or "server" in entry["credential_sources"]
+            ):
+                source = (
+                    "server"
+                    if force_server_credentials.get()
+                    else entry["credential_sources"][0]
+                )
+                if source not in entry["credential_sources"]:
+                    raise ValueError(
+                        f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
+                    )
+                if source == "server":
+                    await require_server_provider_grant()
+                _selected_credential_source.set(source)
+                return provider, model
+        if provider in status and status[provider]["modelListingSupported"]:
+            raise ValueError(
+                f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
+            )
+        # Manual IDs require an affirmative no-listing response for this key.
+        if (
+            model
+            and not force_server_credentials.get()
+            and provider in status
+            and not status[provider]["modelListingSupported"]
+        ):
+            _selected_credential_source.set("user")
+            return provider, model
+        raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
     catalog = await _get_model_catalog()
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
+        await require_server_provider_grant()
+        _selected_credential_source.set("server")
         return provider, model
 
     # A stale catalog may not yet contain a newly discovered pair. Refresh once;
@@ -145,6 +400,8 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     catalog = await _get_model_catalog(refresh=True)
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
+        await require_server_provider_grant()
+        _selected_credential_source.set("server")
         return provider, model
 
     # Legacy friendly IDs have one explicit destination each.  Mapping only when
@@ -158,6 +415,8 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     providers_for_model = {p for p, m in pairs if p and m == model}
     matches = [p for p in providers_for_model if target and target(p)]
     if len(providers_for_model) == 1 and len(matches) == 1:
+        await require_server_provider_grant()
+        _selected_credential_source.set("server")
         return matches[0], model
     raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
 
@@ -377,12 +636,358 @@ def format_chat_ai_user_error(
     return text
 
 
+def _redact_key_echo(text: str | None, key: str) -> str | None:
+    """Remove predictable renderings of a key from successful AI output."""
+    if text is None or not key:
+        return text
+    # Legacy short keys are not safe for global replacement; never expose their output.
+    if len(key) < 8:
+        return "[REDACTED]"
+    encoded = key.encode()
+    variants = {
+        key,
+        quote(key, safe=""),
+        quote(key, safe="").lower(),
+        json.dumps(key, ensure_ascii=True)[1:-1],
+        base64.b64encode(encoded).decode(),
+        base64.urlsafe_b64encode(encoded).decode(),
+    }
+    variants |= {v.rstrip("=") for v in variants if v.endswith("=")}
+    variants |= {v.replace("/", "\\/") for v in variants if "/" in v}
+    for value in sorted(variants, key=len, reverse=True):
+        text = text.replace(value, "[REDACTED]")
+    return text
+
+
+async def _call_with_safe_error(
+    sidecar_call: Any, *args: Any, redact_key: str | None = None, **kwargs: Any
+) -> AIResult:
+    """Keep sidecar credential-bearing errors out of caller logs and tracebacks."""
+    try:
+        result = await sidecar_call(*args, **kwargs)
+        if redact_key is None:
+            return result
+        if result.success:
+            return replace(
+                result,
+                text=_redact_key_echo(result.text, redact_key),
+                error=_redact_key_echo(result.error, redact_key),
+            )
+        # Encoded keys (URL, JSON, base64) and rotated keys cannot be safely
+        # removed by literal replacement. Keep only fixed retry/auth signals.
+        detail = f"{result.text} {result.error or ''}".lower()
+        text = (
+            "session not found"
+            if "session not found" in detail
+            else "authentication required"
+            if any(
+                marker in detail
+                for marker in (
+                    "authentication required",
+                    "not authenticated",
+                    "not logged in",
+                )
+            )
+            else "AI call failed"
+        )
+        return replace(result, text=text, error=text if result.error else None)
+    except Exception as exc:
+        if redact_key is None:
+            raise
+        # Raise outside the except block; __context__ would retain the raw error.
+        safe_type = (
+            type(exc)
+            if type(exc) in (ValueError, RuntimeError, OSError, TimeoutError, TypeError)
+            else RuntimeError
+        )
+        safe_text = f"{type(exc).__name__}: sidecar call failed"
+    raise safe_type(safe_text)
+
+
+async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
+    """Create keyed sessions without upstream logging untrusted HTTP errors."""
+    key = kwargs.get("api_key")
+    if key is None:
+        from rootcoz.storage import create_ai_session_with_source
+
+        return await create_ai_session_with_source(
+            lambda: client.create_session(**kwargs),
+            ai_username.get(),
+            kwargs["provider"],
+            "server",
+            client.delete_session,
+        )
+    if error := _validate_api_key(key):
+        raise ValueError(error)
+    # Keyed sessions use the exact registered provider, never a friendly alias
+    # that could route the credential to a different endpoint.
+    provider, model = kwargs["provider"], kwargs["model"]
+    body = {
+        "provider": provider,
+        "model": model,
+        "system_prompt": kwargs["system_prompt"],
+        "cwd": kwargs.get("cwd") or tempfile.gettempdir(),
+        "api_key": key,
+    }
+    for field in ("agent_dir", "custom_tools", "tools"):
+        if kwargs.get(field) is not None:
+            body[field] = kwargs[field]
+    from rootcoz.storage import (
+        create_ai_session_with_source,
+        get_user_ai_credential_with_generation,
+    )
+
+    username = ai_username.get()
+    selected = _selected_key_generation.get()
+    if selected is not None and selected[:3] == (username, provider, key):
+        generation = selected[3]
+    else:
+        current_key, current_generation = await get_user_ai_credential_with_generation(
+            username, provider
+        )
+        if current_key != key or current_generation is None:
+            raise ValueError("AI credential changed during session creation")
+        generation = current_generation
+
+    async def create() -> str:
+        response = await client._client.post("/sessions", json=body)
+        response.raise_for_status()
+        return response.json()["session_id"]
+
+    return await create_ai_session_with_source(
+        create, username, provider, "user", client.delete_session, generation
+    )
+
+
+async def _remember_session_source(
+    session_id: str, provider: str, account_id: int | None
+) -> None:
+    """Persist server ownership or discard a session with no valid owner."""
+    from rootcoz.storage import AiSessionCollisionError, save_ai_session_source
+
+    try:
+        await save_ai_session_source(
+            session_id,
+            ai_username.get(),
+            provider,
+            "server",
+            account_id,
+            bootstrap_admin=account_id is None,
+        )
+    except AiSessionCollisionError:
+        # The sidecar returned an ID already owned by another session.
+        raise
+    except Exception:
+        try:
+            await get_sidecar_client().delete_session(session_id)
+        except OSError, RuntimeError, ValueError, httpx.HTTPError:
+            logger.warning("Unable to clean up untracked AI session")
+        raise
+
+
+async def delete_ai_session(client: SidecarClient, session_id: str) -> None:
+    """Delete a sidecar session and invalidate its local ownership record."""
+    await client.delete_session(session_id)
+    from rootcoz.storage import revoke_ai_session_source
+
+    try:
+        await revoke_ai_session_source(session_id)
+    except sqlite3.Error, OSError, RuntimeError:
+        logger.warning("Unable to revoke AI session mapping")
+
+
+async def _prompt_safely(
+    client: SidecarClient, session_id: str, message: str, timeout: float | None
+) -> AIResult:
+    """Mirror the sidecar prompt result without logging untrusted response fields."""
+    response = await client._client.post(
+        f"/sessions/{session_id}/prompt",
+        json={"message": message},
+        timeout=timeout or client._client.timeout,
+    )
+    if response.status_code != 200:
+        try:
+            payload = response.json()
+            error = (
+                payload.get("error", response.text)
+                if isinstance(payload, dict)
+                else response.text
+            )
+        except ValueError:
+            error = response.text or f"HTTP {response.status_code}"
+        return AIResult(success=False, text=error, error=error)
+    data = response.json()
+    usage_data = data.get("usage", {})
+    usage = AITokenUsage(
+        input_tokens=usage_data.get("input_tokens", 0),
+        output_tokens=usage_data.get("output_tokens", 0),
+        cache_read_tokens=usage_data.get("cache_read_tokens", 0),
+        cache_write_tokens=usage_data.get("cache_write_tokens", 0),
+        cost_usd=usage_data.get("cost_usd"),
+        duration_ms=usage_data.get("duration_ms"),
+    )
+    error = data.get("error")
+    if error:
+        return AIResult(
+            success=False, text=data.get("text") or error, usage=usage, error=error
+        )
+    return AIResult(success=True, text=data.get("text", ""), usage=usage)
+
+
+async def _call_user_session(
+    prompt: str,
+    *,
+    ai_provider: str,
+    ai_model: str,
+    api_key: str | None = None,
+    session_id: str | None = None,
+    once: bool = False,
+    **kwargs: Any,
+) -> AIResult:
+    """Avoid the sidecar convenience wrapper, which logs raw resumed-session errors."""
+    client = get_sidecar_client()
+    created = False
+    try:
+        if not session_id:
+            session_id = await create_session_safely(
+                client,
+                provider=ai_provider,
+                model=ai_model,
+                system_prompt=kwargs.get("system_prompt")
+                or "You are a helpful assistant.",
+                cwd=kwargs.get("cwd") or tempfile.gettempdir(),
+                agent_dir=kwargs.get("agent_dir"),
+                custom_tools=kwargs.get("custom_tools"),
+                tools=kwargs.get("tools"),
+                api_key=api_key,
+            )
+            created = True
+        if not session_id:
+            raise ValueError("Missing AI session ID")
+        timeout = kwargs.get("ai_call_timeout")
+        result = await _prompt_safely(
+            client, session_id, prompt, timeout * 60.0 if timeout else None
+        )
+        result.session_id = session_id
+    except (
+        httpx.HTTPError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as exc:
+        if created and session_id:
+            try:
+                await delete_ai_session(client, session_id)
+                session_id = None
+            except httpx.HTTPError, OSError, RuntimeError, ValueError:
+                logger.warning("Unable to clean up failed AI session")
+        # The outer wrapper replaces all failure details for keyed sessions.
+        return AIResult(
+            success=False, text=str(exc), error=str(exc), session_id=session_id
+        )
+    if once or (created and not result.success):
+        try:
+            await delete_ai_session(client, session_id)
+            result.session_id = None
+        except httpx.HTTPError, OSError, RuntimeError, ValueError:
+            logger.warning("Unable to clean up AI session")
+    return result
+
+
 async def call_ai(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
 ) -> AIResult:
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
-    return await _call_ai(*args, ai_provider=provider, ai_model=model, **kwargs)
+    key = None
+    if not kwargs.get("session_id"):
+        if _selected_credential_source.get() != "server":
+            key = await session_key(provider)
+        if key is not None:
+            kwargs["api_key"] = key
+    else:
+        kwargs.pop("api_key", None)
+    username = ai_username.get()
+    sidecar_call = _call_user_session if key is not None else _call_ai
+    session_id = kwargs.get("session_id")
+    if session_id:
+        from rootcoz.storage import get_ai_session_source
+
+        try:
+            source = await get_ai_session_source(session_id, username, provider)
+        except ValueError:
+            return AIResult(
+                success=False,
+                text="AI session unavailable",
+                error="AI session unavailable",
+            )
+        except sqlite3.Error, OSError, RuntimeError, KeyError, TypeError:
+            logger.warning("Unable to verify AI session ownership")
+            return AIResult(
+                success=False,
+                text="AI session unavailable",
+                error="AI session unavailable",
+            )
+        if source == "unknown":
+            return AIResult(
+                success=False,
+                text="AI session unavailable",
+                error="AI session unavailable",
+            )
+    else:
+        source = "user" if key is not None else "server"
+    if source == "server":
+        await require_server_provider_grant()
+    if not session_id and source == "server":
+        from rootcoz.storage import get_user_by_username
+
+        account = await get_user_by_username(username) if username else None
+        if account is None and username != "admin":
+            raise LookupError(
+                "AI session owner account changed during session creation"
+            )
+        account_id = account["id"] if account else None
+    if session_id and source == "user":
+        # Only the current owner's provider key can redact a keyed session.
+        key = await session_key(provider)
+        if key is None:
+            return AIResult(
+                success=False,
+                text="AI session unavailable",
+                error="AI session unavailable",
+            )
+        try:
+            await get_ai_session_source(session_id, username, provider)
+        except ValueError:
+            return AIResult(
+                success=False,
+                text="AI session unavailable",
+                error="AI session unavailable",
+            )
+        sidecar_call = _call_user_session
+    result = await _call_with_safe_error(
+        sidecar_call,
+        *args,
+        redact_key=key if key is not None else "" if session_id and username else None,
+        ai_provider=provider,
+        ai_model=model,
+        **kwargs,
+    )
+    if session_id and source == "user" and result.success:
+        try:
+            await get_ai_session_source(session_id, username, provider)
+        except ValueError:
+            return AIResult(
+                success=False,
+                text="AI session unavailable",
+                error="AI session unavailable",
+            )
+    result.credential_source = source
+    if not session_id and result.session_id and key is None:
+        await _remember_session_source(result.session_id, provider, account_id)
+    return result
 
 
 async def call_ai_once(
@@ -390,7 +995,26 @@ async def call_ai_once(
 ) -> AIResult:
     """Call Pi-sidecar once with a validated, unchanged catalog pair."""
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
-    return await _call_ai_once(*args, ai_provider=provider, ai_model=model, **kwargs)
+    key = None
+    if _selected_credential_source.get() != "server":
+        key = await session_key(provider)
+    if key is not None:
+        kwargs["api_key"] = key
+    sidecar_call = _call_user_session if key is not None else _call_ai_once
+    if key is None:
+        await require_server_provider_grant()
+    if key is not None:
+        kwargs["once"] = True
+    result = await _call_with_safe_error(
+        sidecar_call,
+        *args,
+        redact_key=key,
+        ai_provider=provider,
+        ai_model=model,
+        **kwargs,
+    )
+    result.credential_source = "user" if key is not None else "server"
+    return result
 
 
 def _setup_usage_recorder() -> None:

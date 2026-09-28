@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from rootcoz.ai_client import (
     AIResult,
     call_ai_once,
 )
-from rootcoz.config import Settings, parse_additional_repos
+from rootcoz.config import Settings, get_settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
@@ -72,6 +73,11 @@ def resolve_additional_repos(
     return [AdditionalRepo(**r) for r in parsed] if parsed else []
 
 
+# A thread lock keeps the process-wide count safe even across event loops.
+_clone_lock = threading.Lock()
+_active_clones = 0
+
+
 async def clone_additional_repos(
     repo_manager: RepositoryManager,
     additional_repos_list: list[AdditionalRepo],
@@ -94,14 +100,35 @@ async def clone_additional_repos(
     async def _clone_into_subdir(ar: AdditionalRepo) -> None:
         target = repo_path / ar.name
         try:
-            await asyncio.to_thread(
-                repo_manager.clone_into,
-                str(ar.url),
-                target,
-                depth=1,
-                branch=ar.ref,
-                token=ar.token or None,
+            global _active_clones
+            while True:
+                with _clone_lock:
+                    if _active_clones < get_settings().max_concurrent_repo_clones:
+                        _active_clones += 1
+                        break
+                # ponytail: poll while full; replace with per-loop notifications if
+                # clone admission latency becomes material.
+                await asyncio.sleep(0.05)
+
+            def release_slot(task: asyncio.Task[Path]) -> None:
+                global _active_clones
+                if not task.cancelled():
+                    task.exception()  # Observe failures even when the analysis was cancelled.
+                with _clone_lock:
+                    _active_clones -= 1
+
+            clone_task = asyncio.create_task(
+                asyncio.to_thread(
+                    repo_manager.clone_into,
+                    str(ar.url),
+                    target,
+                    depth=1,
+                    branch=ar.ref,
+                    token=ar.token or None,
+                )
             )
+            clone_task.add_done_callback(release_slot)
+            await asyncio.shield(clone_task)
             cloned[ar.name] = target
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
         except (GitCommandError, ValueError, OSError, RuntimeError) as e:
@@ -226,7 +253,7 @@ def _extract_agent_name(agent_file: Path) -> str | None:
     """
     try:
         text = agent_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return None
     if not text.startswith("---"):
         return None
@@ -1483,12 +1510,16 @@ async def _call_ai_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             result = await call_ai_once(prompt, **call_kwargs)
-        except Exception:
-            logger.exception(
-                "AI call raised exception: provider=%s, model=%s, attempt=%d",
+        except (ValueError, RuntimeError, OSError, TimeoutError, TypeError) as exc:
+            from rootcoz.engine.chat import safe_exception_frames
+
+            logger.error(
+                "AI call raised %s: provider=%s, model=%s, attempt=%d\n%s",
+                type(exc).__name__,
                 ai_provider,
                 ai_model,
                 attempt,
+                safe_exception_frames(exc),
             )
             result = AIResult(success=False, text="AI call failed unexpectedly")
 
@@ -1941,7 +1972,7 @@ def resolve_agent_prompt(workspace: Path | None) -> str:
                     "Using user-provided test-analyzer agent from %s", user_agent
                 )
                 return _strip_frontmatter(content)
-            except (OSError, UnicodeDecodeError):
+            except OSError, UnicodeDecodeError:
                 logger.warning(
                     "Failed to read user agent %s; falling back to built-in",
                     user_agent,
@@ -1954,7 +1985,7 @@ def resolve_agent_prompt(workspace: Path | None) -> str:
         try:
             content = builtin.read_text(encoding="utf-8")
             return _strip_frontmatter(content)
-        except (OSError, UnicodeDecodeError):
+        except OSError, UnicodeDecodeError:
             logger.warning("Failed to read built-in agent %s", builtin, exc_info=True)
 
     return ""

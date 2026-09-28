@@ -54,6 +54,16 @@ class TestRootcozRepoSettingsSchema:
         assert s.additional_repos is not None
         assert s.additional_repos[0].name == "product"
 
+    def test_thirteen_additional_repos_accepted(self) -> None:
+        repos = [
+            {"name": f"repo{i}", "url": f"https://example.com/repo{i}"}
+            for i in range(13)
+        ]
+        settings = RootcozRepoSettings.model_validate({"additional_repos": repos})
+        assert [repo.name for repo in settings.additional_repos] == [
+            repo["name"] for repo in repos
+        ]
+
     def test_rejects_unknown_keys(self) -> None:
         with pytest.raises(Exception, match="Unknown keys|extra"):
             RootcozRepoSettings.model_validate({"jenkins_url": "https://x"})
@@ -401,6 +411,31 @@ class TestApplyRootcozRepoSettings:
         )
         effective = apply_rootcoz_repo_settings(body, settings, repo)
         assert effective.additional_repos == []
+
+    def test_thirteen_request_repos_override_repo_and_server(self) -> None:
+        repos = [
+            AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+            for i in range(13)
+        ]
+        body = BaseAnalysisRequest(additional_repos=repos)
+        settings = Settings(additional_repos="server:https://example.com/server")
+        repo = RootcozRepoSettings(
+            additional_repos=[{"name": "from-repo", "url": "https://example.com/repo"}]
+        )
+        effective = apply_rootcoz_repo_settings(body, settings, repo)
+        assert effective.additional_repos == repos
+
+    def test_thirteen_repo_settings_repos_override_server(self) -> None:
+        repos = [
+            {"name": f"repo{i}", "url": f"https://example.com/repo{i}"}
+            for i in range(13)
+        ]
+        settings = Settings(additional_repos="server:https://example.com/server")
+        repo = RootcozRepoSettings(additional_repos=repos)
+        effective = apply_rootcoz_repo_settings(BaseAnalysisRequest(), settings, repo)
+        assert [item.name for item in effective.additional_repos] == [
+            item["name"] for item in repos
+        ]
 
     def test_repo_peer_settings_skip_malformed_server_default(self) -> None:
         body = BaseAnalysisRequest()

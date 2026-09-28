@@ -1,23 +1,16 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { useProviderModels } from '@/lib/useProviderModels'
 import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectTrigger,
-  SelectContent,
-  SelectItem,
-  SelectValue,
-} from '@/components/ui/select'
 import { api } from '@/lib/api'
 import { toIntInRange, PROW_JOB_NAME_RE, PROW_BUILD_ID_RE } from '@/lib/utils'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
-import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { useProviderOptions } from '@/lib/useProviderOptions'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { isAnalysisFormAiUnavailable } from '@/lib/analysisAi'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
@@ -25,9 +18,11 @@ import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 import { Send, Upload, Loader2 } from 'lucide-react'
 import type { DefaultServerSettings } from '@/types'
 import { normalizeProvider } from '@/lib/aiProviders'
+import { useAuth } from '@/lib/auth'
 
 export function NewAnalysisPage() {
   const navigate = useNavigate()
+  const { canUseServerProviders } = useAuth()
 
   // Input mode
   const [inputMode, setInputMode] = useState<'jenkins' | 'prow' | 'paste' | 'upload'>('jenkins')
@@ -56,6 +51,7 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('')
   const [aiModel, setAiModel] = useState('')
+  const [forceServerCredentials, setForceServerCredentials] = useState<boolean | undefined>(undefined)
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -101,6 +97,7 @@ export function NewAnalysisPage() {
       if (cancelled || resolved) return
       if (defaults.ai_provider) setAiProvider(normalizeProvider(defaults.ai_provider))
       if (defaults.ai_model) setAiModel(defaults.ai_model)
+      setForceServerCredentials(defaults.force_server_credentials)
       setAiCallTimeout(defaults.ai_call_timeout)
       setTestsRepoUrl(defaults.tests_repo_url)
       if (defaults.tests_repo_ref) setTestsRepoRef(defaults.tests_repo_ref)
@@ -150,8 +147,8 @@ export function NewAnalysisPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const availableModels = useProviderModels(aiProvider)
-  const providerOptions = useProviderOptions(aiProvider)
+  const effectiveForceServer = forceServerCredentials === true && canUseServerProviders
+  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
   const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
@@ -163,6 +160,9 @@ export function NewAnalysisPage() {
       : inputMode === 'prow'
       ? PROW_JOB_NAME_RE.test(prowJobName.trim()) && PROW_BUILD_ID_RE.test(prowBuildId.trim())
       : rawXml.trim() !== ''
+
+  const deferAiToTestsRepo = !!testsRepoUrl.trim() && !aiProvider && !aiModel
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, deferAiToTestsRepo)
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')
@@ -188,11 +188,16 @@ export function NewAnalysisPage() {
 
   const handleSubmit = useCallback(async () => {
     if (!canSubmit) return
+    if (aiUnavailable) {
+      setError('Select an available AI provider and model.')
+      return
+    }
     setSubmitting(true)
     setError('')
     try {
       const commonFields: Record<string, unknown> = {
         // Always include user-entered fields
+        ...(forceServerCredentials !== undefined && { force_server_credentials: effectiveForceServer }),
         ...(aiProvider && { ai_provider: aiProvider }),
         ...(aiModel && { ai_model: aiModel }),
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
@@ -272,6 +277,9 @@ export function NewAnalysisPage() {
     buildNumber,
     aiProvider,
     aiModel,
+    forceServerCredentials,
+    effectiveForceServer,
+    aiUnavailable,
     tags,
     waitForCompletion,
     pollInterval,
@@ -552,24 +560,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <Select
-                  value={aiProvider || undefined}
-                  onValueChange={(v) => {
-                    setAiProvider(v)
-                    setAiModel('')
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select provider..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {providerOptions.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -584,13 +575,13 @@ export function NewAnalysisPage() {
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <ModelCombobox
-                value={aiModel}
-                onChange={setAiModel}
-                options={availableModels}
-                placeholder="Default model"
-              />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
             </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-text-secondary">Use server credentials</span>
+              <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
+            </div>
+            {!canUseServerProviders && <p className="text-xs text-text-tertiary">Server credentials are locked. Ask an admin for access, or use your own AI key.</p>}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea
@@ -611,7 +602,7 @@ export function NewAnalysisPage() {
               <Toggle checked={enablePeers} onChange={(v) => {
                 setEnablePeers(v)
                 if (v && peerConfigs.length === 0) {
-                  setPeerConfigs([{ id: crypto.randomUUID(), ai_provider: 'claude', ai_model: '' }])
+                  setPeerConfigs([{ id: crypto.randomUUID(), ai_provider: '', ai_model: '' }])
                 }
               }} label="Enable peer review" />
             </div>
@@ -622,6 +613,8 @@ export function NewAnalysisPage() {
                 peerModels={peerModels}
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
+                strict
+                forceServer={effectiveForceServer}
               />
             )}
           </Section>
@@ -772,12 +765,13 @@ export function NewAnalysisPage() {
         <div className="flex items-center justify-between border-t border-border-default px-6 py-4">
           <div>
             {error && <p className="text-signal-red text-xs">{error}</p>}
+            {aiUnavailable && canSubmit && <p role="alert" className="text-signal-amber text-xs">Select an available AI provider and model. Add your own key or ask an admin for server access.</p>}
           </div>
           <div className="flex items-center gap-3">
             <Button variant="outline" onClick={() => navigate('/')} disabled={submitting}>
               Cancel
             </Button>
-            <Button onClick={handleSubmit} disabled={submitting || !canSubmit} className="gap-1.5">
+            <Button onClick={handleSubmit} disabled={submitting || !canSubmit || !!aiUnavailable} className="gap-1.5">
               <Send className={`h-3.5 w-3.5 ${submitting ? 'animate-pulse' : ''}`} />
               {submitting ? 'Submitting…' : 'Submit Analysis'}
             </Button>

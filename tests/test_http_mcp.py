@@ -601,21 +601,30 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
         target=_lock_in_child, args=(workspace, tmp_path, entered, release)
     )
     holder.start()
+    waiter = other = None
     try:
         assert entered.wait(5)
         inode = path.stat().st_ino
-        waiting = threading.Event()
+        opened = threading.Event()
         acquired = threading.Event()
+        real_open = os.open
+
+        def track_waiter_open(candidate, flags, *args, **kwargs):
+            fd = real_open(candidate, flags, *args, **kwargs)
+            if candidate == path and threading.current_thread() is waiter:
+                opened.set()  # The waiter holds the shared gate and this inode.
+            return fd
+
+        monkeypatch.setattr(http_mcp_mod.os, "open", track_waiter_open)
 
         def wait_for_lock() -> None:
-            waiting.set()
             with http_mcp_mod._workspace_install_lock(workspace):
                 assert path.stat().st_ino == inode
                 acquired.set()
 
         waiter = threading.Thread(target=wait_for_lock)
         waiter.start()
-        assert waiting.wait(5)
+        assert opened.wait(5)
         reaped = threading.Event()
         other_entered = threading.Event()
 
@@ -640,6 +649,10 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
     finally:
         release.set()
         holder.join(5)
+        if waiter is not None:
+            waiter.join(5)
+        if other is not None:
+            other.join(5)
 
 
 def test_install_lock_cleanup_does_not_wait_for_other_waiters(

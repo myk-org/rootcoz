@@ -53,6 +53,7 @@ ROOTCOZ_SETTINGS_KEYS = frozenset(
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "peer_ai_configs",
+        "force_server_credentials",
         "peer_analysis_max_rounds",
         "additional_repos",
     }
@@ -131,9 +132,8 @@ class RootcozRepoSettings(BaseModel):
     max_concurrent_ai_calls: int | None = Field(default=None, gt=0)
     peer_ai_configs: list[RootcozPeerConfig] | None = None
     peer_analysis_max_rounds: int | None = Field(default=None, ge=1, le=10)
-    additional_repos: list[RootcozAdditionalRepo] | None = Field(
-        default=None, max_length=9
-    )
+    force_server_credentials: bool | None = None
+    additional_repos: list[RootcozAdditionalRepo] | None = None
 
     @field_validator("ai_model")
     @classmethod
@@ -392,6 +392,11 @@ def apply_rootcoz_repo_settings(
         resolved_model = ""
 
     # --- timeouts / concurrency / peer rounds ---
+    if body.force_server_credentials is not None:
+        overrides["force_server_credentials"] = body.force_server_credentials
+    elif repo is not None and repo.force_server_credentials is not None:
+        overrides["force_server_credentials"] = repo.force_server_credentials
+
     if body.ai_call_timeout is not None:
         overrides["ai_call_timeout"] = body.ai_call_timeout
     elif repo is not None and repo.ai_call_timeout is not None:
@@ -435,9 +440,6 @@ def apply_rootcoz_repo_settings(
         parsed = parse_additional_repos(settings.additional_repos)
         resolved_additional = [AdditionalRepo(**r) for r in parsed] if parsed else []
 
-    if len(resolved_additional) > 9:
-        raise ValueError("additional_repos exceeds the nine repository limit")
-
     merged = settings
     if overrides:
         merged_data = settings.model_dump(mode="python") | overrides
@@ -458,6 +460,7 @@ _REPO_SETTINGS_OVERLAY_FIELDS: tuple[str, ...] = (
     "ai_call_timeout",
     "max_concurrent_ai_calls",
     "peer_analysis_max_rounds",
+    "force_server_credentials",
 )
 
 
@@ -494,6 +497,7 @@ def effective_repo_settings_request_params_patch(
             ar.model_dump(mode="json") if hasattr(ar, "model_dump") else ar
             for ar in effective.additional_repos
         ],
+        "force_server_credentials": effective.settings.force_server_credentials,
         "ai_call_timeout": effective.settings.ai_call_timeout,
         "max_concurrent_ai_calls": effective.settings.max_concurrent_ai_calls,
         "peer_analysis_max_rounds": effective.settings.peer_analysis_max_rounds,
