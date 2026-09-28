@@ -10,7 +10,9 @@ import shutil
 import signal
 import stat
 import subprocess
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import islice
 from pathlib import Path
@@ -26,6 +28,7 @@ FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
 MAX_OUTPUT = 1024 * 1024
 MAX_GRAPH_BYTES = 40 * 1024 * 1024
+MAX_WORKSPACE_GRAPH_BYTES = 256 * 1024 * 1024
 GRAFT = "/app/sidecar-helper/node_modules/.bin/graft"
 
 
@@ -38,7 +41,10 @@ def _root(workspace: Path) -> Path:
     return workspace.parent / f".{workspace.name}.rootcoz-graft"
 
 
-def _disk_size(path: Path, deadline: float | None = None) -> int:
+def _disk_size(
+    path: Path, deadline: float | None = None, *, limit: int | None = None
+) -> int:
+    limit = MAX_GRAPH_BYTES if limit is None else limit
     total = 0
     for directory, dirs, files in os.walk(path, followlinks=False):
         for file in dirs + files:
@@ -48,7 +54,7 @@ def _disk_size(path: Path, deadline: float | None = None) -> int:
             if entry.is_symlink():
                 raise ValueError("graph contains symlink")
             total += entry.lstat().st_size
-            if total > MAX_GRAPH_BYTES:
+            if limit and total > limit:
                 return total
     return total
 
@@ -255,7 +261,12 @@ def _manifest(destination: Path) -> dict[str, str] | None:
 
 
 def _index_one(
-    workspace: Path, root: Path, name: str, repo_value: Path
+    workspace: Path,
+    root: Path,
+    name: str,
+    repo_value: Path,
+    reserve: Callable[[Path], bool] | None = None,
+    release: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
     repo = Path(repo_value)
     if not _valid_repo(workspace, name, repo):
@@ -277,6 +288,8 @@ def _index_one(
             and _disk_size(destination) <= MAX_GRAPH_BYTES
         ):
             return {"status": "unchanged", "files": len(manifest)}
+        if reserve is not None and not reserve(destination):
+            return {"status": "skipped", "reason": "workspace graph budget"}
         if destination.exists():
             shutil.rmtree(destination)
         snapshot = destination / "snapshot"
@@ -344,17 +357,41 @@ def _index_one(
             "reason": type(exc).__name__,
             "truncated": isinstance(exc, _Limit),
         }
+    finally:
+        if release is not None:
+            release(destination)
 
 
 def index_repositories(
     workspace: Path, cloned_repos: dict[str, Path]
 ) -> dict[str, Any]:
-    """Build cloned repositories with two concurrent builds."""
+    """Build per-repo graphs while reserving aggregate workspace disk capacity."""
     workspace = Path(workspace).resolve()
+    root = _root(workspace)
+    gate = threading.Lock()
+    reservations: set[Path] = set()
+
+    def reserve(destination: Path) -> bool:
+        with gate:
+            # ponytail: whole-root scan per build; cache sizes if indexing throughput matters.
+            used = _disk_size(root, limit=0)
+            old = _disk_size(destination, limit=0) if destination.exists() else 0
+            if (
+                used - old + (len(reservations) + 1) * MAX_GRAPH_BYTES
+                > MAX_WORKSPACE_GRAPH_BYTES
+            ):
+                return False
+            reservations.add(destination)
+            return True
+
+    def release(destination: Path) -> None:
+        with gate:
+            reservations.discard(destination)
+
     with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             name: pool.submit(
-                _index_one, workspace, _root(workspace), name, cloned_repos[name]
+                _index_one, workspace, root, name, cloned_repos[name], reserve, release
             )
             for name in cloned_repos
         }
@@ -387,6 +424,7 @@ def log_index_outcomes(outcomes: dict[str, Any]) -> None:
         if reason not in {
             "invalid repository",
             "no eligible files",
+            "workspace graph budget",
             "invalid graph root",
             "invalid graph directory",
             "TimeoutError",

@@ -1,6 +1,7 @@
 """Bounded Graft snapshots and read-only query routing."""
 
 import json
+import shutil
 import subprocess
 import threading
 import time
@@ -415,7 +416,7 @@ def test_all_repositories_indexed_and_unrelated_workspaces(tmp_path, monkeypatch
     release = threading.Event()
     calls = []
 
-    def index(workspace, root, name, repo):
+    def index(workspace, root, name, repo, *args):
         calls.append(name)
         if workspace.name == "slow":
             entered.set()
@@ -439,6 +440,61 @@ def test_all_repositories_indexed_and_unrelated_workspaces(tmp_path, monkeypatch
             release.set()
         slow.result(timeout=2)
     assert len(calls) == 15
+
+
+def test_workspace_budget_skips_then_retries_after_cleanup(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repos = {}
+    for i in range(14):
+        repo = workspace / f"repo-{i}"
+        repo.mkdir(parents=True)
+        git(repo, "init")
+        (repo / "a.py").write_text("pass")
+        repos[repo.name] = repo
+
+    def run(argv, **kwargs):
+        if "build" in argv:
+            graph = Path(argv[2])
+            graph.mkdir()
+            (graph / "data").write_bytes(b"x" * 200)
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    monkeypatch.setattr(graft, "_run", run)
+    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 4096)
+    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 7000)
+    outcomes = graft.index_repositories(workspace, repos)
+    assert any(result["status"] == "skipped" for result in outcomes.values())
+    assert any(result["status"] == "indexed" for result in outcomes.values())
+    assert graft._disk_size(graft._root(workspace), limit=7000) <= 7000
+    skipped = {
+        name: repo
+        for name, repo in repos.items()
+        if outcomes[name]["status"] == "skipped"
+    }
+    assert skipped.items() <= graft.roots_needing_index(workspace, repos).items()
+    assert not any(
+        (graft._root(workspace) / name / "graph").exists() for name in skipped
+    )
+
+    # Refreshing an existing graph releases its old space rather than counting it twice.
+    kept = next(
+        name for name, result in outcomes.items() if result["status"] == "indexed"
+    )
+    (repos[kept] / "a.py").write_text("changed")
+    assert (
+        graft.index_repositories(workspace, {kept: repos[kept]})[kept]["status"]
+        == "indexed"
+    )
+    for name in list(repos):
+        if name not in skipped:
+            shutil.rmtree(graft._root(workspace) / name)
+    retry = dict(list(skipped.items())[:1])
+    assert all(
+        result["status"] == "indexed"
+        for result in graft.index_repositories(workspace, retry).values()
+    )
+    graft.cleanup_graph(workspace)
+    assert not graft._root(workspace).exists()
 
 
 def test_same_workspace_builds_do_not_overlap(tmp_path, monkeypatch):

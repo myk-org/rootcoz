@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from rootcoz.ai_client import (
     AIResult,
     call_ai_once,
 )
-from rootcoz.config import Settings, parse_additional_repos
+from rootcoz.config import Settings, get_settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
@@ -72,6 +73,11 @@ def resolve_additional_repos(
     return [AdditionalRepo(**r) for r in parsed] if parsed else []
 
 
+# A thread lock keeps the process-wide count safe even across event loops.
+_clone_lock = threading.Lock()
+_active_clones = 0
+
+
 async def clone_additional_repos(
     repo_manager: RepositoryManager,
     additional_repos_list: list[AdditionalRepo],
@@ -87,19 +93,27 @@ async def clone_additional_repos(
         repo_manager: Repository manager for cloning.
         additional_repos_list: List of AdditionalRepo objects.
         repo_path: Workspace path (always provided by caller).
-        max_concurrent_repo_clones: Maximum simultaneous clone operations.
+        max_concurrent_repo_clones: Kept for callers passing their settings snapshot;
+            the live server setting governs admissions.
 
     Returns:
         Tuple of (cloned repos dict mapping name to path, repo_path).
     """
     cloned: dict[str, Path] = {}
-    # Keep clone network/disk work bounded independently of the repository count.
-    clone_slots = asyncio.Semaphore(max_concurrent_repo_clones)
 
     async def _clone_into_subdir(ar: AdditionalRepo) -> None:
         target = repo_path / ar.name
         try:
-            async with clone_slots:
+            global _active_clones
+            while True:
+                with _clone_lock:
+                    if _active_clones < get_settings().max_concurrent_repo_clones:
+                        _active_clones += 1
+                        break
+                # ponytail: poll while full; replace with per-loop notifications if
+                # clone admission latency becomes material.
+                await asyncio.sleep(0.05)
+            try:
                 await asyncio.to_thread(
                     repo_manager.clone_into,
                     str(ar.url),
@@ -108,6 +122,9 @@ async def clone_additional_repos(
                     branch=ar.ref,
                     token=ar.token or None,
                 )
+            finally:
+                with _clone_lock:
+                    _active_clones -= 1
             cloned[ar.name] = target
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
         except (GitCommandError, ValueError, OSError, RuntimeError) as e:
