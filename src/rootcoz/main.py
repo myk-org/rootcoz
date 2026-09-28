@@ -5052,6 +5052,7 @@ async def _reanalyze_failure_background(
                     repo_name,
                     True,
                     reanalysis=True,
+                    operation_id=f"{failure_uuid}:tests",
                     url=str(tests_repo_url),
                     ref=tests_repo_ref,
                 )
@@ -5071,7 +5072,12 @@ async def _reanalyze_failure_background(
                     raise
                 finally:
                     await safe_update_clone_progress(
-                        job_id, repo_name, False, state=outcome, reanalysis=True
+                        job_id,
+                        repo_name,
+                        False,
+                        state=outcome,
+                        reanalysis=True,
+                        operation_id=f"{failure_uuid}:tests",
                     )
                 cloned_repos[repo_name] = repo_path / repo_name
             except Exception:
@@ -5160,6 +5166,7 @@ async def _reanalyze_failure_background(
                 repo_path,
                 job_id=job_id,
                 reanalysis=True,
+                operation_id=failure_uuid,
             )
             cloned_repos.update(additional_repos_cloned)
 

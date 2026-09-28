@@ -71,6 +71,140 @@ async def test_reanalysis_clone_cannot_change_failed_or_cancelled_parent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "aborted"])
+async def test_active_reanalysis_clone_updates_terminal_parent(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result(
+        "job",
+        "",
+        status,
+        {
+            "progress_phase": status,
+            "failures": [{"id": "failure", "reanalysis_status": "running"}],
+        },
+    )
+    await storage.update_clone_progress(
+        "job",
+        "tests",
+        True,
+        reanalysis=True,
+        operation_id="failure",
+        url="https://user:secret@example.com/tests?token=hidden",  # pragma: allowlist secret
+        ref="main",
+    )
+    started = await storage.get_result("job")
+    assert started["status"] == status
+    assert started["result"]["progress_phase"] == status
+    assert started["result"]["cloning_repos"] == ["tests"]
+    await storage.update_clone_progress(
+        "job", "tests", False, reanalysis=True, operation_id="failure", state="failed"
+    )
+    ended = await storage.get_result("job")
+    assert ended["status"] == status
+    assert ended["result"]["progress_phase"] == status
+    assert ended["result"]["cloning_repos"] == []
+    assert [
+        (e["state"], e["url"], e["ref"]) for e in ended["result"]["progress_log"]
+    ] == [
+        ("cloning", "https://example.com/tests", "main"),
+        ("failed", "https://example.com/tests", "main"),
+    ]
+    assert "secret" not in str(ended) and "hidden" not in str(ended)
+    before = await storage.get_result("job")
+    await storage.update_clone_progress(
+        "job", "tests", True, reanalysis=True, operation_id="other"
+    )
+    await storage.update_clone_progress(
+        "job", "tests", False, reanalysis=True, operation_id="failure"
+    )
+    assert await storage.get_result("job") == before
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reanalysis_clones_keep_repo_active_until_both_finish(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result(
+        "job",
+        "",
+        "completed",
+        {
+            "progress_phase": "completed",
+            "failures": [
+                {"id": "one", "reanalysis_status": "running"},
+                {"id": "two", "reanalysis_status": "running"},
+            ],
+        },
+    )
+    await asyncio.gather(
+        *(
+            storage.update_clone_progress(
+                "job",
+                "tests",
+                True,
+                reanalysis=True,
+                operation_id=ident,
+                url=f"https://user:secret@example.com/{ident}?token=hidden",  # pragma: allowlist secret
+                ref=ident,
+            )
+            for ident in ("one", "two")
+        )
+    )
+    first = (await storage.get_result("job"))["result"]
+    assert first["cloning_repos"] == ["tests"]
+    assert len(first["progress_log"]) == 2
+    await storage.update_clone_progress(
+        "job", "tests", False, reanalysis=True, operation_id="one"
+    )
+    middle = (await storage.get_result("job"))["result"]
+    assert middle["cloning_repos"] == ["tests"]
+    assert middle["progress_log"][-1]["repos"] == ["tests"]
+    await storage.update_clone_progress(
+        "job", "tests", False, reanalysis=True, operation_id="two", state="failed"
+    )
+    last = (await storage.get_result("job"))["result"]
+    assert last["cloning_repos"] == []
+    assert last["progress_phase"] == "completed"
+    assert sorted((e["state"], e.get("ref")) for e in last["progress_log"]) == sorted(
+        [("cloning", "one"), ("cloning", "two"), ("cloned", "one"), ("failed", "two")]
+    )
+    assert "secret" not in str(last) and "hidden" not in str(last)
+
+
+@pytest.mark.asyncio
+async def test_completed_parent_rejects_late_identified_clone_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result(
+        "job",
+        "",
+        "completed",
+        {"failures": [{"id": "failure", "reanalysis_status": "running"}]},
+    )
+    await storage.update_clone_progress(
+        "job", "repo", True, reanalysis=True, operation_id="failure:repo"
+    )
+    await storage.patch_result_json(
+        "job", lambda data: data["failures"][0].update(reanalysis_status="completed")
+    )
+    before = await storage.get_result("job")
+    await storage.update_clone_progress(
+        "job", "late", True, reanalysis=True, operation_id="failure:late"
+    )
+    await storage.update_clone_progress(
+        "job", "repo", False, reanalysis=True, operation_id="failure:repo"
+    )
+    assert await storage.get_result("job") == before
+
+
+@pytest.mark.asyncio
 async def test_reanalysis_clone_updates_completed_parent(
     tmp_path: Path, monkeypatch
 ) -> None:

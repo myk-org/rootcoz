@@ -2093,6 +2093,7 @@ async def update_clone_progress(
     reanalysis: bool = False,
     url: str = "",
     ref: str = "",
+    operation_id: str = "",
 ) -> None:
     """Persist one named clone transition and the active repository list."""
     from rootcoz.url_utils import sanitize_clone_url
@@ -2101,20 +2102,42 @@ async def update_clone_progress(
 
     def patch(data: dict[str, Any]) -> None:
         names = set(data.get("cloning_repos") or [])
+        log = data.setdefault("progress_log", [])
+        # Re-analysis operations have their own persisted identity; the UI still
+        # receives one active name and one Cloning stage per repository.
+        # ponytail: scan the log on each transition; persist a separate active
+        # index if clone logs grow large enough to affect progress writes.
+        active_operations: dict[str, str] = {}
+        if operation_id:
+            for entry in log:
+                identity = entry.get("operation_id")
+                if identity:
+                    if entry.get("state") == "cloning":
+                        active_operations[identity] = entry["repo"]
+                    else:
+                        active_operations.pop(identity, None)
         if started:
-            if repo_name in names:
+            if operation_id and operation_id in active_operations:
+                return
+            if not operation_id and repo_name in names:
                 return
             names.add(repo_name)
             transition = "cloning"
             if data.get("progress_phase") not in ("failed", "aborted", "completed"):
                 data["progress_phase"] = "cloning"
         else:
-            if repo_name not in names:
-                return
-            names.remove(repo_name)
+            if operation_id:
+                if active_operations.get(operation_id) != repo_name:
+                    return
+                active_operations.pop(operation_id)
+                if repo_name not in active_operations.values():
+                    names.discard(repo_name)
+            else:
+                if repo_name not in names:
+                    return
+                names.remove(repo_name)
             transition = state
         data["cloning_repos"] = sorted(names)
-        log = data.setdefault("progress_log", [])
         metadata = (
             {"url": safe_url, "ref": ref}
             if started
@@ -2124,6 +2147,7 @@ async def update_clone_progress(
                     for entry in reversed(log)
                     if entry.get("repo") == repo_name
                     and entry.get("state") == "cloning"
+                    and (not operation_id or entry.get("operation_id") == operation_id)
                 ),
                 {},
             )
@@ -2133,6 +2157,7 @@ async def update_clone_progress(
                 "phase": "cloning",
                 "repo": repo_name,
                 "state": transition,
+                **({"operation_id": operation_id} if operation_id else {}),
                 "repos": sorted(names),
                 "timestamp": time.time(),
                 **{key: metadata[key] for key in ("url", "ref") if metadata.get(key)},
@@ -2147,7 +2172,13 @@ async def update_clone_progress(
             data["progress_phase"] = "completed"
 
     await patch_result_json(
-        job_id, patch, skip_terminal=True, allow_completed=reanalysis
+        job_id,
+        patch,
+        skip_terminal=True,
+        allow_completed=reanalysis,
+        active_reanalysis_failure_id=operation_id.partition(":")[0]
+        if reanalysis
+        else "",
     )
 
 
@@ -2170,6 +2201,7 @@ async def patch_result_json(
     *,
     skip_terminal: bool = False,
     allow_completed: bool = False,
+    active_reanalysis_failure_id: str = "",
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
@@ -2185,7 +2217,8 @@ async def patch_result_json(
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
     ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
-    permits completed jobs when a reanalysis updates clone progress.
+    permits completed jobs when a reanalysis updates clone progress. Identified
+    re-analysis updates require a running failure regardless of parent status.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -2200,7 +2233,10 @@ async def patch_result_json(
                 or (
                     skip_terminal
                     and (
-                        row[1] in ("failed", "aborted")
+                        (
+                            row[1] in ("failed", "aborted")
+                            and not active_reanalysis_failure_id
+                        )
                         or (row[1] == "completed" and not allow_completed)
                     )
                 )
@@ -2211,6 +2247,18 @@ async def patch_result_json(
             if result_data is None:
                 await db.execute("ROLLBACK")
                 return
+            if active_reanalysis_failure_id:
+                failure = _find_failure_by_uuid_in_failures(
+                    result_data.get("failures", []), active_reanalysis_failure_id
+                )
+                if failure is None:
+                    failure, _, _ = _find_failure_by_uuid_in_children(
+                        result_data.get("child_job_analyses", []),
+                        active_reanalysis_failure_id,
+                    )
+                if not failure or failure.get("reanalysis_status") != "running":
+                    await db.execute("ROLLBACK")
+                    return
             patch_fn(result_data)
             set_parts = ["result_json = ?"]
             params: list[Any] = [json.dumps(result_data)]

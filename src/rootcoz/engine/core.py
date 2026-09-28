@@ -86,6 +86,7 @@ async def clone_additional_repos(
     job_id: str = "",
     *,
     reanalysis: bool = False,
+    operation_id: str = "",
 ) -> tuple[dict[str, Path], Path]:
     """Clone additional repositories for AI analysis context.
 
@@ -130,6 +131,9 @@ async def clone_additional_repos(
                         ar.name,
                         True,
                         reanalysis=True,
+                        operation_id=f"{operation_id}:additional:{ar.name}"
+                        if operation_id
+                        else "",
                         url=str(ar.url),
                         ref=ar.ref,
                     )
@@ -160,9 +164,20 @@ async def clone_additional_repos(
                         _active_clones -= 1
                 if outcome == "cloned" and not reanalysis:
                     await safe_update_clone_progress(job_id, ar.name, False)
+                elif reanalysis:
+                    await safe_update_clone_progress(
+                        job_id,
+                        ar.name,
+                        False,
+                        state=outcome,
+                        reanalysis=True,
+                        operation_id=f"{operation_id}:additional:{ar.name}"
+                        if operation_id
+                        else "",
+                    )
                 else:
                     await safe_update_clone_progress(
-                        job_id, ar.name, False, state=outcome, reanalysis=reanalysis
+                        job_id, ar.name, False, state=outcome
                     )
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
         except (GitCommandError, ValueError, OSError, RuntimeError) as e:
@@ -214,6 +229,7 @@ async def safe_update_clone_progress(
     reanalysis: bool = False,
     url: str = "",
     ref: str = "",
+    operation_id: str = "",
 ) -> None:
     """Persist a named clone transition and notify SSE listeners."""
     if not job_id:
@@ -228,6 +244,7 @@ async def safe_update_clone_progress(
                 reanalysis=True,
                 url=url,
                 ref=ref,
+                operation_id=operation_id,
             )
         elif started:
             await update_clone_progress(job_id, repo_name, started, url=url, ref=ref)
