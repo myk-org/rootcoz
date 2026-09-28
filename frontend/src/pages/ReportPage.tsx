@@ -580,8 +580,17 @@ function ReportContent() {
         </div>
       )}
 
+      {result.failed_analysis_groups ? (
+        <div role="alert" className="rounded-lg border-l-4 border-l-signal-amber bg-signal-amber/5 p-4 animate-slide-up">
+          <h2 className="text-sm font-medium text-signal-amber">Partial analysis</h2>
+          <p className="mt-1 text-xs text-text-secondary">
+            {result.failed_analysis_groups} group(s) failed; check server logs. Successful analyses remain available below.
+          </p>
+        </div>
+      ) : null}
+
       {/* ---- Zero-failure banner ---- */}
-      {totalFailures === 0 && result.status === 'completed' && !submitted && (
+      {totalFailures === 0 && result.status === 'completed' && !submitted && !result.failed_analysis_groups && (
         <div className="rounded-lg border-l-4 border-l-signal-green bg-signal-green/5 p-4 animate-slide-up">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="h-5 w-5 text-signal-green" />

@@ -183,6 +183,7 @@ export interface AnalysisResult {
   error?: string
   source_warnings?: string[]
   cross_failure_patterns?: CrossFailurePattern[]
+  failed_analysis_groups?: number
   progress_log?: Array<{ phase: string; timestamp: number; repos?: string[] }>
   cloning_repos?: string[]
   progress_phase?: string

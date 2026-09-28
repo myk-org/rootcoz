@@ -4258,6 +4258,16 @@ async def _process_ci_source_analysis(
             and not a.analysis.classification
         ]
         failed_analyses = len({a.error_signature for a in failed_tests})
+        analysis_status: Literal["completed", "failed"] = (
+            "completed" if len(all_analyses) > len(failed_tests) else "failed"
+        )
+        if failed_analyses:
+            logger.warning(
+                "Analysis job %s: %d group(s) failed; status=%s",
+                job_id,
+                failed_analyses,
+                analysis_status,
+            )
         summary = (
             f"Analyzed {len(test_failures)} test failures "
             f"({unique_errors} unique errors). "
@@ -4306,7 +4316,7 @@ async def _process_ci_source_analysis(
 
         analysis_result = FailureAnalysisResult(
             job_id=job_id,
-            status="failed" if failed_analyses else "completed",
+            status=analysis_status,
             summary=summary,
             ai_provider=ai_provider,
             ai_model=ai_model,
@@ -4316,6 +4326,7 @@ async def _process_ci_source_analysis(
         )
 
         result_data = analysis_result.model_dump(mode="json")
+        result_data["failed_analysis_groups"] = failed_analyses
         result_data["job_name"] = display_name
         if child_job_analyses:
             result_data["child_job_analyses"] = [
@@ -4370,9 +4381,7 @@ async def _process_ci_source_analysis(
                 exc_info=True,
             )
 
-        await update_status(
-            job_id, "failed" if failed_analyses else "completed", result_data
-        )
+        await update_status(job_id, analysis_status, result_data)
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)

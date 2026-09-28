@@ -9,6 +9,7 @@ from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.models import (
     AnalysisDetail,
+    BaseTestEntry,
     FailedTest,
     FailureAnalysis,
     ProductBugReport,
@@ -19,13 +20,14 @@ from rootcoz.sources.base import CISourceResult, WorkspaceSetupResult
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "jira_enabled, keywords, partial, dedup",
+    "jira_enabled, keywords, partial, dedup, all_failed",
     [
-        (False, True, False, False),
-        (True, True, False, False),
-        (True, False, False, False),
-        (False, True, True, False),
-        (False, True, True, True),
+        (False, True, False, False, False),
+        (True, True, False, False, False),
+        (True, False, False, False, False),
+        (False, True, True, False, False),
+        (False, True, True, True, False),
+        (False, True, False, False, True),
     ],
 )
 async def test_pipeline_jira_and_saving_stages(
@@ -35,6 +37,7 @@ async def test_pipeline_jira_and_saving_stages(
     keywords: bool,
     partial: bool,
     dedup: bool,
+    all_failed: bool,
 ) -> None:
     from rootcoz.main import _process_ci_source_analysis
 
@@ -54,7 +57,11 @@ async def test_pipeline_jira_and_saving_stages(
             ),
         ),
     )
-    source_result = CISourceResult(failures=body.failures, console_context="context")
+    source_result = CISourceResult(
+        failures=body.failures,
+        passed_tests=[BaseTestEntry(test_name="passed", status="passed")],
+        console_context="context",
+    )
     failed = FailureAnalysis(
         test_name="bad",
         error="err",
@@ -117,6 +124,8 @@ async def test_pipeline_jira_and_saving_stages(
                 if dedup
                 else [analysis, failed]
                 if partial
+                else [failed]
+                if all_failed
                 else [analysis],
                 [],
             ),
@@ -158,14 +167,20 @@ async def test_pipeline_jira_and_saving_stages(
             base_url="",
         )
         row = await storage.get_result("progress-pipeline")
-        assert row["status"] == ("failed" if partial else "completed"), row[
-            "result"
-        ].get("error")
-        if partial:
-            assert len(row["result"]["failures"]) == (4 if dedup else 2)
+        assert row["status"] == ("failed" if all_failed else "completed")
+        assert row["result"]["status"] == row["status"]
+        assert row["result"]["passed_count"] == 1
+        if partial or all_failed:
+            assert len(row["result"]["failures"]) == (
+                4 if dedup else 1 if all_failed else 2
+            )
+            assert row["result"]["failed_analysis_groups"] == 1
             assert "1 group(s) failed" in row["result"]["summary"]
+            assert (
+                f"{2 if dedup else 0 if all_failed else 1} analyzed successfully"
+                in row["result"]["summary"]
+            )
             if dedup:
-                assert "2 analyzed successfully" in row["result"]["summary"]
                 assert (
                     "Analyzed 4 test failures (2 unique errors)"
                     in row["result"]["summary"]
