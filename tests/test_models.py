@@ -1017,6 +1017,20 @@ class TestAdditionalReposDuplicateNames:
         )
         assert len(request.additional_repos) == 2
 
+    def test_repo_count_limit(self) -> None:
+        """Reject oversized request lists before clone and index."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            AnalyzeRequest(
+                job_name="test",
+                build_number=1,
+                additional_repos=[
+                    {"name": f"repo{i}", "url": "https://example.com/repo"}
+                    for i in range(10)
+                ],
+            )
+
     def test_none_additional_repos_accepted(self) -> None:
         """None value for additional_repos passes validation."""
         request = AnalyzeRequest(job_name="test", build_number=1, additional_repos=None)

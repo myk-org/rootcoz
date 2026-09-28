@@ -3,11 +3,26 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { formatCompactNumber, formatCost } from '@/lib/format'
 import type { TokenUsageSummary } from '@/types'
 
-interface TokenUsageBadgeProps {
-  usage: TokenUsageSummary
-}
+type TokenUsageBadgeProps =
+  | { usage: TokenUsageSummary; graftEstimatedTokensSaved?: never }
+  | { usage?: never; graftEstimatedTokensSaved: number }
 
-export function TokenUsageBadge({ usage }: TokenUsageBadgeProps) {
+export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsageBadgeProps) {
+  if (graftEstimatedTokensSaved !== undefined) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span tabIndex={0} className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary cursor-help">
+            Estimated Graft tokens saved: {formatCompactNumber(graftEstimatedTokensSaved)}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>
+          {graftEstimatedTokensSaved.toLocaleString()} tokens saved, estimate versus reading whole referenced files, not billed AI tokens.
+        </TooltipContent>
+      </Tooltip>
+    )
+  }
+  if (!usage) return null
   const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
 
   return (

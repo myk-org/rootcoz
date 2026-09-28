@@ -978,6 +978,31 @@ class TestChatCleanup:
             assert not link.exists()
             assert not target.exists()
 
+    def test_cleanup_repos_removes_graph_when_workspace_missing(
+        self, tmp_path, monkeypatch
+    ):
+        from rootcoz.engine.chat import cleanup_chat_repos
+        from rootcoz.engine.graft import _root
+        from rootcoz.engine.graft_http import _sessions, register_workspace
+
+        workspace = tmp_path / "missing"
+        repo = workspace / "repo"
+        repo.mkdir(parents=True)
+        register_workspace(workspace, {"repo": repo}, job_id="job")
+        assert workspace.resolve() in _sessions
+        graph = _root(workspace)
+        graph.mkdir()
+        (graph / "snapshot").write_text("source")
+        import shutil
+
+        shutil.rmtree(workspace)
+        monkeypatch.setattr(
+            "rootcoz.engine.chat.get_chat_workspace", lambda *args, **kwargs: workspace
+        )
+        cleanup_chat_repos("job")
+        assert workspace.resolve() not in _sessions
+        assert not graph.exists()
+
     def test_cleanup_workspace_resolves_symlinks(self, tmp_path):
         from rootcoz.engine.chat import cleanup_chat_workspace
 
@@ -1133,6 +1158,41 @@ async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_index_chat_repositories_discovers_and_logs_off_loop(
+    tmp_path, monkeypatch
+):
+    from rootcoz import main as main_mod
+    from rootcoz.engine import graft, graft_http
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    seen = []
+
+    def index(workspace, roots):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        seen.append((workspace, roots))
+        return {"repo": {"status": "ready"}}
+
+    original_discover = graft_http.cloned_graph_roots
+
+    def discover(workspace):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        return original_discover(workspace)
+
+    monkeypatch.setattr(graft_http, "cloned_graph_roots", discover)
+    monkeypatch.setattr(graft, "index_repositories", index)
+    monkeypatch.setattr(graft, "log_index_outcomes", seen.append)
+    await main_mod._index_chat_repositories(tmp_path)
+    assert seen == [
+        (tmp_path, original_discover(tmp_path)),
+        {"repo": {"status": "ready"}},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_init_chat_under_barrier_rejects_deleting_job():
     from fastapi import HTTPException
 
@@ -1221,6 +1281,151 @@ async def test_process_chat_cancel_while_waiting_barrier_marks_failed(
         await task
     barrier.release()
     assert await storage.get_chat_message_status(assistant_id) == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "graph_state, expected_indexes",
+    [("indexed", 0), ("changed", 1), ("new", 1), ("missing", 1)],
+)
+async def test_followup_indexes_only_new_or_missing_graph(
+    setup_test_db, tmp_path, monkeypatch, graph_state, expected_indexes
+):
+    """An existing graph must not delay AI, but new clones and lost graphs need indexing."""
+    import subprocess
+
+    from rootcoz import main as main_mod
+    from rootcoz.engine import graft, graft_http
+    from rootcoz.engine.chat import clone_chat_repos
+
+    discover = graft_http.cloned_graph_roots
+
+    def off_loop_discover(workspace):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        return discover(workspace)
+
+    monkeypatch.setattr(graft_http, "cloned_graph_roots", off_loop_discover)
+    workspace = tmp_path / "chat-workspace"
+    workspace.mkdir()
+    repo = workspace / "repo"
+    repo.mkdir()
+    await asyncio.to_thread(
+        subprocess.run, ["git", "init", "-q", str(repo)], check=True
+    )
+    (repo / "a.py").write_text("old")
+    builds = []
+
+    def fake_run(argv, **kwargs):
+        builds.append(argv)
+        (Path(argv[-1]).parent / "graph").mkdir()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", fake_run)
+    assert (
+        graft.index_repositories(workspace, {"repo": repo})["repo"]["status"]
+        == "indexed"
+    )
+    assert len(builds) == 1
+    scans = []
+    original_sources = graft._sources
+
+    def tracked_sources(path, *args, **kwargs):
+        scans.append(path)
+        return original_sources(path, *args, **kwargs)
+
+    monkeypatch.setattr(graft, "_sources", tracked_sources)
+
+    class Manager:
+        def clone_into(self, url, target, **kwargs):
+            target.mkdir()
+            subprocess.run(["git", "init", "-q", str(target)], check=True)
+            (target / "a.py").write_text("other")
+
+    monkeypatch.setattr("rootcoz.repository.RepositoryManager", Manager)
+    params = {"additional_repos": [{"name": "repo", "url": "https://example.com/repo"}]}
+    assert await clone_chat_repos(workspace, params) is False
+    if graph_state == "new":
+        params["additional_repos"].append(
+            {"name": "other", "url": "https://example.com/other"}
+        )
+    elif graph_state == "changed":
+        (repo / "a.py").write_text("new")
+    elif graph_state == "missing":
+        (graft._root(workspace) / "repo" / "manifest.json").unlink()
+
+    indexes = []
+
+    async def fake_index(path, repos=None):
+        indexes.append((path, repos))
+        graft.index_repositories(path, repos or {})
+
+    monkeypatch.setattr(main_mod, "_index_chat_repositories", fake_index)
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.core.copy_rootcoz_pi_resources", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.chat_with_ai", AsyncMock(return_value=(True, "ok", "sess"))
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async", AsyncMock()
+    )
+    monkeypatch.setattr("rootcoz.engine.chat.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", "", "", "")),
+    )
+    monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
+    job_id = f"chat-index-{graph_state}"
+    await storage.save_result(
+        job_id,
+        "",
+        "completed",
+        {
+            "status": "completed",
+            "summary": "t",
+            "failures": [],
+            "ai_provider": "claude",
+            "ai_model": "sonnet-4",
+            "request_params": params,
+        },
+    )
+    user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
+    )
+    await main_mod._process_chat_message(
+        job_id=job_id,
+        user_msg_id=user_id,
+        assistant_msg_id=assistant_id,
+        message="hello",
+        ai_provider_override="claude",
+        ai_model_override="sonnet-4",
+        username="alice",
+    )
+    assert len(indexes) == expected_indexes
+    if indexes:
+        assert set(indexes[0][1]) == ({"other"} if graph_state == "new" else {"repo"})
+    assert len(builds) == (1 if graph_state == "indexed" else 2)
+    if graph_state == "indexed":
+        assert scans == [repo]
+    if graph_state == "changed":
+        assert (
+            graft._root(workspace) / "repo" / "snapshot" / "a.py"
+        ).read_text() == "new"
+    if graph_state == "new":
+        assert (workspace / "other" / ".git").is_dir()
+        assert (
+            graft._root(workspace) / "other" / "snapshot" / "a.py"
+        ).read_text() == "other"
+    assert await storage.get_chat_message_status(assistant_id) == "completed"
 
 
 @pytest.mark.asyncio

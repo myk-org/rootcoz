@@ -382,6 +382,7 @@ export interface TrackedInEntry {
 
 export interface ResultResponse {
   job_id: string
+  graft_estimated_tokens_saved?: number
   build_url?: string | null
   jenkins_url: string | null
   status: AnalysisStatus
