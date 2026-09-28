@@ -10,12 +10,106 @@ from rootcoz.config import Settings
 from rootcoz.models import (
     AnalysisDetail,
     BaseTestEntry,
+    ChildJobAnalysis,
     FailedTest,
     FailureAnalysis,
     ProductBugReport,
     UnifiedAnalyzeRequest,
 )
 from rootcoz.sources.base import CISourceResult, WorkspaceSetupResult
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direct_failed, expected", [(False, 2), (True, 3)])
+async def test_direct_and_child_failures_persist_scoped_group_count(
+    temp_db_path: Path, tmp_path: Path, direct_failed: bool, expected: int
+) -> None:
+    from rootcoz.main import _process_ci_source_analysis
+
+    failed = FailureAnalysis(
+        test_name="bad",
+        error="boom",
+        error_signature="same",
+        analysis=AnalysisDetail(
+            details="Analysis failed; check server logs for details"
+        ),
+    )
+    good = FailureAnalysis(
+        test_name="good",
+        error="boom",
+        error_signature="same",
+        analysis=AnalysisDetail(details="diagnosed"),
+    )
+    children = [
+        ChildJobAnalysis(
+            job_name=name,
+            build_number=number,
+            all_groups_failed=True,
+            failures=[
+                failed.model_copy(update={"test_name": "a"}),
+                failed.model_copy(update={"test_name": "b"}),
+            ],
+        )
+        for name, number in (("leaf", 1), ("leaf", 2))
+    ]
+    source_result = CISourceResult(
+        failures=[FailedTest(test_name="direct", error_message="boom")],
+        child_job_infos=[("leaf", 1), ("leaf", 2)],
+    )
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch(
+            "rootcoz.main.run_orchestrated_analysis",
+            new_callable=AsyncMock,
+            return_value=([good, failed] if direct_failed else [good], []),
+        ),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=(children, []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result("direct-child", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="direct-child",
+            body=UnifiedAnalyzeRequest(type="raw", failures=source_result.failures),
+            merged=Settings(),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("direct-child")
+    assert row["status"] == "completed", row["result"]
+    assert row["result"]["failed_analysis_groups"] == expected
 
 
 @pytest.mark.asyncio

@@ -243,6 +243,115 @@ async def test_failed_child_group_does_not_expose_provider_exception() -> None:
     assert "pi_sidecar_client" in str(log_error.call_args)
 
 
+@pytest.mark.asyncio
+async def test_child_only_completion_persists_nested_failed_group_count(
+    temp_db_path,
+) -> None:
+    from rootcoz.main import _process_ci_source_analysis
+    from rootcoz.models import UnifiedAnalyzeRequest
+
+    def failure(name: str, signature: str, details: str) -> FailureAnalysis:
+        return FailureAnalysis(
+            test_name=name,
+            error="boom",
+            error_signature=signature,
+            analysis=AnalysisDetail(details=details),
+        )
+
+    failed_details = "Analysis failed; check server logs for details"
+    children = [
+        ChildJobAnalysis(
+            job_name="pipeline",
+            build_number=1,
+            failed_children=[
+                ChildJobAnalysis(
+                    job_name="leaf",
+                    build_number=2,
+                    all_groups_failed=True,
+                    failures=[
+                        failure("a", "same", failed_details),
+                        failure("b", "same", failed_details),
+                    ],
+                ),
+                ChildJobAnalysis(
+                    job_name="leaf",
+                    build_number=3,
+                    all_groups_failed=True,
+                    failures=[failure("c", "same", failed_details)],
+                ),
+            ],
+        ),
+        ChildJobAnalysis(
+            job_name="console",
+            build_number=5,
+            all_groups_failed=True,
+            note="Child console analysis failed; check server logs for details",
+        ),
+        ChildJobAnalysis(
+            job_name="ok",
+            build_number=4,
+            failures=[failure("good", "same", "diagnosed")],
+        ),
+    ]
+    source_result = CISourceResult(
+        failures=[],
+        child_job_infos=[("pipeline", 1), ("console", 5), ("ok", 4)],
+        identity={"job_name": "parent", "build_number": 1},
+    )
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch(
+            "rootcoz.sources.jenkins_source.JenkinsSource.requires_pre_fetch",
+            return_value=False,
+        ),
+        patch(
+            "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
+            new_callable=AsyncMock,
+            return_value=source_result,
+        ),
+        patch(
+            "rootcoz.sources.jenkins_source.JenkinsSource.analyze_children",
+            new_callable=AsyncMock,
+            return_value=(children, []),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "test"),
+        ),
+    ):
+        await storage.init_db()
+        await storage.save_result("parent", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="parent",
+            body=UnifiedAnalyzeRequest(
+                type="jenkins", job_name="parent", build_number=1
+            ),
+            merged=Settings(
+                jenkins_url="https://example.test",
+                jenkins_user="user",
+                jenkins_password="fake",  # pragma: allowlist secret
+            ),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="test",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("parent")
+    assert row["status"] == "completed", row["result"]
+    assert row["result"]["failed_analysis_groups"] == 3
+
+
 def test_nested_all_failed_children_are_not_counted_as_success() -> None:
     from rootcoz.sources.jenkins_source import child_has_successful_analysis
 

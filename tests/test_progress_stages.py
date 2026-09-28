@@ -109,9 +109,16 @@ async def test_fallback_per_group_progress(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_progress_stage_sse_and_refresh(temp_db_path: Path) -> None:
-    from rootcoz.main import _job_status_listeners, _make_sse_stream
+    from rootcoz.main import (
+        _job_status_listeners,
+        _make_sse_stream,
+        notify_job_status_changed,
+    )
 
-    with patch.object(storage, "DB_PATH", temp_db_path):
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.engine.core._on_progress_updated", notify_job_status_changed),
+    ):
         await storage.init_db()
         await storage.save_result("stage-job", "", "running", {})
         request = AsyncMock()
@@ -124,8 +131,12 @@ async def test_progress_stage_sse_and_refresh(temp_db_path: Path) -> None:
             listener_key="stage-job",
         ).body_iterator
         event = asyncio.create_task(anext(stream))
-        await asyncio.sleep(0)
         try:
+            for _ in range(100):
+                if _job_status_listeners.get("stage-job"):
+                    break
+                await asyncio.sleep(0.01)
+            assert _job_status_listeners.get("stage-job"), "SSE listener not registered"
             await safe_update_progress("stage-job", "saving")
             assert (
                 await asyncio.wait_for(event, 1)
@@ -137,4 +148,7 @@ async def test_progress_stage_sse_and_refresh(temp_db_path: Path) -> None:
                 "saving"
             ]
         finally:
+            if not event.done():
+                event.cancel()
+                await asyncio.gather(event, return_exceptions=True)
             await stream.aclose()

@@ -9,14 +9,17 @@ vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), post: vi.fn() } }))
 vi.mock('@/lib/SSEProvider', () => ({ useSSE: vi.fn() }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ role: 'viewer', isOperator: false }) }))
 
-function showReport() {
+function showReport(childOnly = false) {
   const response: ResultResponse = {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '', base_url: null, result_url: null,
     result: {
       job_id: 'job-1', job_name: 'example', build_number: 1, jenkins_url: null,
       status: 'completed', summary: '1 analyzed successfully. 1 group(s) failed; check server logs.',
       failed_analysis_groups: 1, passed_count: 3, ai_provider: '', ai_model: '',
-      failures: [], child_job_analyses: [],
+      failures: [], child_job_analyses: childOnly ? [{
+        job_name: 'leaf', build_number: 2, failures: [], failed_children: [],
+        all_groups_failed: true, note: 'Child console analysis failed',
+      }] : [],
     },
   }
   vi.mocked(api.get).mockImplementation(async path => {
@@ -33,6 +36,12 @@ function showReport() {
 }
 
 describe('partial analysis report', () => {
+  it('shows the persisted warning even when only a child failed', async () => {
+    showReport(true)
+    expect(await screen.findByRole('alert')).toHaveTextContent('1 group(s) failed')
+    expect(screen.queryByText('All Tests Passed')).not.toBeInTheDocument()
+  })
+
   it('opens the report and visibly warns of failed groups alongside successful tests', async () => {
     showReport()
     expect(await screen.findByText('example')).toBeInTheDocument()

@@ -3801,6 +3801,24 @@ async def _analyze_failures_or_exit(
     return all_analyses, test_failures, unique_errors, cross_failure_patterns
 
 
+def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
+    """Count failed signatures within each child build, including nested builds."""
+    total = 0
+    for child in children:
+        signatures = {
+            failure.error_signature
+            for failure in child.failures
+            if failure.analysis.details
+            == "Analysis failed; check server logs for details"
+            and not failure.analysis.classification
+        }
+        total += len(signatures)
+        if child.all_groups_failed and not child.failures:
+            total += 1  # Console-only child analysis has no failure signature.
+        total += _count_failed_child_groups(child.failed_children)
+    return total
+
+
 async def _process_ci_source_analysis(
     *,
     job_id: str,
@@ -4178,6 +4196,15 @@ async def _process_ci_source_analysis(
                 result_data["child_job_analyses"] = [
                     c.model_dump(mode="json") for c in child_job_analyses
                 ]
+                result_data["failed_analysis_groups"] = _count_failed_child_groups(
+                    child_job_analyses
+                )
+                if result_data["failed_analysis_groups"]:
+                    logger.warning(
+                        "Analysis job %s: %d child group(s) failed",
+                        job_id,
+                        result_data["failed_analysis_groups"],
+                    )
                 _stamp_result_metadata(result_data, source_result)
                 await _preserve_request_params(job_id, result_data)
                 await _attach_token_usage(job_id, result_data)
@@ -4261,7 +4288,7 @@ async def _process_ci_source_analysis(
         analysis_status: Literal["completed", "failed"] = (
             "completed" if len(all_analyses) > len(failed_tests) else "failed"
         )
-        if failed_analyses:
+        if failed_analyses and not child_job_analyses:
             logger.warning(
                 "Analysis job %s: %d group(s) failed; status=%s",
                 job_id,
@@ -4326,7 +4353,15 @@ async def _process_ci_source_analysis(
         )
 
         result_data = analysis_result.model_dump(mode="json")
-        result_data["failed_analysis_groups"] = failed_analyses
+        result_data["failed_analysis_groups"] = (
+            failed_analyses + _count_failed_child_groups(child_job_analyses)
+        )
+        if child_job_analyses and result_data["failed_analysis_groups"]:
+            logger.warning(
+                "Analysis job %s: %d failed group(s) across direct and child scopes",
+                job_id,
+                result_data["failed_analysis_groups"],
+            )
         result_data["job_name"] = display_name
         if child_job_analyses:
             result_data["child_job_analyses"] = [
