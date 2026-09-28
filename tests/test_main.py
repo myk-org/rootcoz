@@ -5984,6 +5984,94 @@ class TestReAnalyzeFailure:
         assert failure["status"] == "FAILED"
 
     @pytest.mark.asyncio
+    async def test_reanalyze_additional_repo_persists_and_notifies_clone_progress(
+        self, test_client, tmp_path, monkeypatch
+    ) -> None:
+        import asyncio
+
+        from rootcoz import storage
+        from rootcoz.engine.core import set_progress_callback
+
+        fa = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="old"),
+        )
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "reanalyze.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-clone",
+            "",
+            "completed",
+            {
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                        "additional_repos": [
+                            {"name": "extra", "url": "https://example.com/extra"}
+                        ],
+                    }
+                ),
+            },
+        )
+        events = []
+        set_progress_callback(lambda job: events.append(job))
+        new = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="new"),
+        )
+        try:
+            with (
+                patch("rootcoz.main.RepositoryManager"),
+                patch("rootcoz.main.copy_rootcoz_pi_resources"),
+                patch(
+                    "rootcoz.engine.core.asyncio.to_thread",
+                    new_callable=AsyncMock,
+                    return_value=tmp_path / "extra",
+                ),
+                patch(
+                    "rootcoz.main.analyze_failure_group",
+                    new_callable=AsyncMock,
+                    return_value=[new],
+                ),
+                patch(
+                    "rootcoz.main._create_ai_auth_header",
+                    new_callable=AsyncMock,
+                    return_value="",
+                ),
+            ):
+                response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    if (stored := await storage.get_result("job-clone")) and (
+                        stored["result"]["failures"][0]
+                        .get("analysis", {})
+                        .get("details")
+                        == "new"
+                    ):
+                        break
+            assert response.status_code == 202
+            assert (await storage.get_result("job-clone"))["result"][
+                "cloning_repos"
+            ] == []
+            assert any(
+                entry["repos"] == ["extra"]
+                for entry in (await storage.get_result("job-clone"))["result"][
+                    "progress_log"
+                ]
+            )
+            assert events.count("job-clone") >= 2
+            assert (await storage.get_result("job-clone"))["result"].get(
+                "progress_phase"
+            ) != "cloning"
+        finally:
+            set_progress_callback(lambda _job: None)
+
+    @pytest.mark.asyncio
     async def test_re_analyze_failure_defers_ai_with_tests_repo(
         self, test_client
     ) -> None:

@@ -254,7 +254,7 @@ async def verify_ai_key(provider: str, model: str, key: str) -> str:
         )
         if auth_error(response):
             outcome = "rejected"
-        elif response.status_code == 200:
+        elif response.status_code in (200, 201):
             session_id = response.json()["session_id"]
             result = await client._client.post(
                 f"/sessions/{quote(session_id, safe='')}/prompt",
@@ -271,13 +271,20 @@ async def verify_ai_key(provider: str, model: str, key: str) -> str:
                     and data["text"].strip()
                 ):
                     outcome = "accepted"
-    except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
+    except (
+        httpx.HTTPError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as _exc:
         pass  # Transport and malformed responses cannot prove a key is bad.
     finally:
         if session_id:
             try:
                 await client.delete_session(session_id)
-            except httpx.HTTPError, OSError, RuntimeError, ValueError:
+            except (httpx.HTTPError, OSError, RuntimeError, ValueError) as _exc:
                 logger.warning("Unable to clean up credential verification session")
         logger.info(
             "AI credential verification: provider=%s outcome=%s", provider, outcome

@@ -3574,7 +3574,14 @@ async def _run_per_group_analysis(
 
     failures = [result for result in results if isinstance(result, Exception)]
     if failures:
-        logger.error("Failed to analyze failure group: %s", type(failures[0]).__name__)
+        from rootcoz.engine.chat import safe_exception_frames
+
+        for failure in failures:
+            logger.error(
+                "Failed to analyze failure group: %s\n%s",
+                type(failure).__name__,
+                safe_exception_frames(failure),
+            )
         raise RuntimeError(
             "AI analysis failed. Check provider credentials and try again."
         )
@@ -3726,10 +3733,13 @@ async def _analyze_failures_or_exit(
             peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
         )
     except (RuntimeError, ValueError, OSError, TypeError) as exc:
+        from rootcoz.engine.chat import safe_exception_frames
+
         logger.warning(
-            "Orchestrated analysis failed for job_id=%s; falling back to per-group analysis (%s)",
+            "Orchestrated analysis failed for job_id=%s; falling back to per-group analysis (%s)\n%s",
             job_id,
             type(exc).__name__,
+            safe_exception_frames(exc),
         )
         logger.debug("Retrying analysis per group for job_id=%s", job_id)
         try:
@@ -3752,9 +3762,10 @@ async def _analyze_failures_or_exit(
             )
         except (RuntimeError, ValueError, OSError, TypeError) as fallback_exc:
             logger.error(
-                "Fallback per-group analysis failed for job_id=%s (%s)",
+                "Fallback per-group analysis failed for job_id=%s (%s)\n%s",
                 job_id,
                 type(fallback_exc).__name__,
+                safe_exception_frames(fallback_exc),
             )
             all_analyses = []
 
@@ -4240,11 +4251,20 @@ async def _process_ci_source_analysis(
             analysis_result_tuple
         )
 
+        failed_tests = [
+            a
+            for a in all_analyses
+            if a.analysis.details == "Analysis failed; check server logs for details"
+            and not a.analysis.classification
+        ]
+        failed_analyses = len({a.error_signature for a in failed_tests})
         summary = (
             f"Analyzed {len(test_failures)} test failures "
             f"({unique_errors} unique errors). "
-            f"{len(all_analyses)} analyzed successfully."
+            f"{len(all_analyses) - len(failed_tests)} analyzed successfully."
         )
+        if failed_analyses:
+            summary += f" {failed_analyses} group(s) failed; check server logs."
         if child_job_analyses:
             summary = (
                 f"{summary} Additionally, {len(child_job_analyses)} failed child "
@@ -4286,7 +4306,7 @@ async def _process_ci_source_analysis(
 
         analysis_result = FailureAnalysisResult(
             job_id=job_id,
-            status="completed",
+            status="failed" if failed_analyses else "completed",
             summary=summary,
             ai_provider=ai_provider,
             ai_model=ai_model,
@@ -4350,7 +4370,9 @@ async def _process_ci_source_analysis(
                 exc_info=True,
             )
 
-        await update_status(job_id, "completed", result_data)
+        await update_status(
+            job_id, "failed" if failed_analyses else "completed", result_data
+        )
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
@@ -5073,6 +5095,8 @@ async def _reanalyze_failure_background(
                 repo_manager,
                 additional_repos_list,
                 repo_path,
+                job_id=job_id,
+                reanalysis=True,
             )
             cloned_repos.update(additional_repos_cloned)
 
@@ -9807,9 +9831,10 @@ async def set_user_ai_credential(
         raise HTTPException(status_code=400, detail="API key must be 8-1024 characters")
     from rootcoz.ai_client import verify_ai_key
 
-    if not body.model.strip():
+    model = body.model.strip()
+    if not model:
         raise HTTPException(status_code=400, detail="Select a model to verify the key")
-    outcome = await verify_ai_key(provider, body.model, key)
+    outcome = await verify_ai_key(provider, model, key)
     if outcome == "accepted":
         try:
             sessions = await storage.update_user_ai_credential(username, provider, key)

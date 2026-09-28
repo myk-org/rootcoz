@@ -1306,7 +1306,15 @@ async def _analyze_grouped_failures(
     group_list = list(failure_groups.values())
     for i, result in enumerate(group_results):
         if isinstance(result, Exception):
+            from rootcoz.engine.chat import safe_exception_frames
+
             failed_groups += 1
+            logger.error(
+                "Child failure group %d raised %s\n%s",
+                i + 1,
+                type(result).__name__,
+                safe_exception_frames(result),
+            )
             for tf in group_list[i]:
                 failures.append(
                     FailureAnalysis(

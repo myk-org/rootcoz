@@ -33,6 +33,41 @@ async def test_late_clone_updates_do_not_change_terminal_result(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "aborted"])
+async def test_reanalysis_clone_cannot_change_failed_or_cancelled_parent(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {"job_name": "test"})
+    await storage.update_clone_progress("job", "slow", True, reanalysis=True)
+    await storage.update_status("job", status, {"error": "stopped"})
+    before = await storage.get_result("job")
+
+    # A cancelled clone can still run its finally cleanup after the terminal commit.
+    await asyncio.gather(
+        storage.update_clone_progress("job", "slow", False, reanalysis=True),
+        storage.update_clone_progress("job", "late", True, reanalysis=True),
+    )
+    assert await storage.get_result("job") == before
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_clone_updates_completed_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "completed", {"progress_phase": "completed"})
+    await storage.update_clone_progress("job", "repo", True, reanalysis=True)
+    result = await storage.get_result("job")
+    assert result["status"] == "completed"
+    assert result["result"]["cloning_repos"] == ["repo"]
+    await storage.update_clone_progress("job", "repo", False, reanalysis=True)
+    assert (await storage.get_result("job"))["result"]["cloning_repos"] == []
+
+
+@pytest.mark.asyncio
 async def test_clone_progress_notifies_sse_after_persist() -> None:
     notifications: list[str] = []
 
@@ -93,6 +128,40 @@ async def test_parallel_clone_progress_and_failure(tmp_path: Path) -> None:
         cloned, _ = await task
     assert set(cloned) == {"one"}
     assert active == set()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_start_progress_releases_clone_slot(tmp_path: Path) -> None:
+    from rootcoz.engine import core
+
+    manager = MagicMock(spec=RepositoryManager)
+    entered = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def progress(_job: str, _name: str, started: bool) -> None:
+        if started:
+            entered.set()
+            await blocker.wait()
+
+    with (
+        patch("rootcoz.engine.core.safe_update_clone_progress", side_effect=progress),
+        patch("rootcoz.engine.core.asyncio.to_thread") as worker,
+    ):
+        task = asyncio.create_task(
+            clone_additional_repos(
+                manager,
+                [AdditionalRepo(name="one", url="https://example.com/one")],
+                tmp_path,
+                job_id="job",
+            )
+        )
+        await asyncio.wait_for(entered.wait(), 2)
+        before = core._active_clones
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert core._active_clones == before - 1
+        worker.assert_not_called()
 
 
 @pytest.mark.asyncio

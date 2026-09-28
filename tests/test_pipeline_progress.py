@@ -19,10 +19,22 @@ from rootcoz.sources.base import CISourceResult, WorkspaceSetupResult
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "jira_enabled, keywords", [(False, True), (True, True), (True, False)]
+    "jira_enabled, keywords, partial, dedup",
+    [
+        (False, True, False, False),
+        (True, True, False, False),
+        (True, False, False, False),
+        (False, True, True, False),
+        (False, True, True, True),
+    ],
 )
 async def test_pipeline_jira_and_saving_stages(
-    temp_db_path: Path, tmp_path: Path, jira_enabled: bool, keywords: bool
+    temp_db_path: Path,
+    tmp_path: Path,
+    jira_enabled: bool,
+    keywords: bool,
+    partial: bool,
+    dedup: bool,
 ) -> None:
     from rootcoz.main import _process_ci_source_analysis
 
@@ -43,6 +55,28 @@ async def test_pipeline_jira_and_saving_stages(
         ),
     )
     source_result = CISourceResult(failures=body.failures, console_context="context")
+    failed = FailureAnalysis(
+        test_name="bad",
+        error="err",
+        analysis=AnalysisDetail(
+            details="Analysis failed; check server logs for details"
+        ),
+    )
+
+    if dedup:
+        source_result.failures = [
+            FailedTest(test_name=name, error_message=error)
+            for name, error in (
+                ("good1", "good"),
+                ("good2", "good"),
+                ("bad1", "bad"),
+                ("bad2", "bad"),
+            )
+        ]
+        analysis.error_signature = "good-sig"
+        failed.error_signature = "bad-sig"
+        failed_duplicate = failed.model_copy(update={"test_name": "bad2"})
+        success_duplicate = analysis.model_copy(update={"test_name": "good2"})
 
     async def jira(*_args, **_kwargs):
         row = await storage.get_result("progress-pipeline")
@@ -78,7 +112,14 @@ async def test_pipeline_jira_and_saving_stages(
         patch(
             "rootcoz.main.run_orchestrated_analysis",
             new_callable=AsyncMock,
-            return_value=([analysis], []),
+            return_value=(
+                [analysis, success_duplicate, failed, failed_duplicate]
+                if dedup
+                else [analysis, failed]
+                if partial
+                else [analysis],
+                [],
+            ),
         ),
         patch("rootcoz.main._resolve_enable_jira", return_value=jira_enabled),
         patch.object(
@@ -117,7 +158,18 @@ async def test_pipeline_jira_and_saving_stages(
             base_url="",
         )
         row = await storage.get_result("progress-pipeline")
-        assert row["status"] == "completed", row["result"].get("error")
+        assert row["status"] == ("failed" if partial else "completed"), row[
+            "result"
+        ].get("error")
+        if partial:
+            assert len(row["result"]["failures"]) == (4 if dedup else 2)
+            assert "1 group(s) failed" in row["result"]["summary"]
+            if dedup:
+                assert "2 analyzed successfully" in row["result"]["summary"]
+                assert (
+                    "Analyzed 4 test failures (2 unique errors)"
+                    in row["result"]["summary"]
+                )
         phases = [entry["phase"] for entry in row["result"]["progress_log"]]
         assert phases == ["fetching", "analyzing"] + (
             ["enriching_jira"] if jira_enabled and keywords else []

@@ -732,8 +732,14 @@ async def run_console_only_analysis(
             auth_header=auth_header,
         )
         return True, results, ""
-    except RuntimeError, ValueError, OSError, TypeError:
-        logger.error("Console-only analysis failed")
+    except (RuntimeError, ValueError, OSError, TypeError) as exc:
+        from rootcoz.engine.chat import safe_exception_frames
+
+        logger.error(
+            "Console-only analysis failed: %s\n%s",
+            type(exc).__name__,
+            safe_exception_frames(exc),
+        )
         return (
             False,
             [],

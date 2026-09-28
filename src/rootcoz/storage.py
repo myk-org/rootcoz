@@ -2057,7 +2057,9 @@ def _make_progress_phase_patcher(phase: str) -> Callable[[dict[str, Any]], None]
     return _patcher
 
 
-async def update_clone_progress(job_id: str, repo_name: str, started: bool) -> None:
+async def update_clone_progress(
+    job_id: str, repo_name: str, started: bool, *, reanalysis: bool = False
+) -> None:
     """Persist the currently cloning repository names and a snapshot for refresh."""
 
     def patch(data: dict[str, Any]) -> None:
@@ -2073,8 +2075,12 @@ async def update_clone_progress(job_id: str, repo_name: str, started: bool) -> N
             data.setdefault("progress_log", []).append(
                 {"phase": "cloning", "repos": sorted(names), "timestamp": time.time()}
             )
+            if not names and reanalysis:
+                data["progress_phase"] = "completed"
 
-    await patch_result_json(job_id, patch, skip_terminal=True)
+    await patch_result_json(
+        job_id, patch, skip_terminal=True, allow_completed=reanalysis
+    )
 
 
 async def update_progress_phase(job_id: str, phase: str) -> None:
@@ -2095,6 +2101,7 @@ async def patch_result_json(
     patch_fn: Callable[[dict[str, Any]], None],
     *,
     skip_terminal: bool = False,
+    allow_completed: bool = False,
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
@@ -2109,7 +2116,8 @@ async def patch_result_json(
     columns — missing keys leave existing column values unchanged.
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
-    ``skip_terminal`` also prevents patches to failed, aborted, or completed jobs.
+    ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
+    permits completed jobs when a reanalysis updates clone progress.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -2121,7 +2129,13 @@ async def patch_result_json(
             if (
                 not row
                 or not row[0]
-                or (skip_terminal and row[1] in ("failed", "aborted", "completed"))
+                or (
+                    skip_terminal
+                    and (
+                        row[1] in ("failed", "aborted")
+                        or (row[1] == "completed" and not allow_completed)
+                    )
+                )
             ):
                 await db.execute("ROLLBACK")
                 return

@@ -23,6 +23,7 @@ const phaseLabels: Record<string, string> = {
   waiting_for_build: 'Waiting for build to complete...',
   fetching: 'Fetching test results...',
   routing: 'Routing failure groups...',
+  agent_routing: 'Routing failure groups to agents...',
   cross_failure: 'Finding cross-failure patterns...',
   cloning: 'Cloning repositories...',
   analyzing: 'Analyzing test failures with AI...',
@@ -36,6 +37,9 @@ function getPhaseLabel(phase: string | undefined, repos?: string[]): string | un
   if (phase === 'cloning' && repos?.length) return `Cloning repositories: ${repos.join(', ')}...`
   if (!phase) return undefined
   if (phaseLabels[phase]) return phaseLabels[phase]
+
+  const analysisGroup = phase.match(/^analyzing_failures \(group (\d+\/\d+)\)$/)
+  if (analysisGroup) return `Analyzing test failures \u2014 group ${analysisGroup[1]}...`
 
   // Handle peer_review_round_N or peer_review_round_N (group X/Y)
   const peerMatch = phase.match(/^peer_review_round_(\d+)(?:\s*\(group (.+)\))?$/)

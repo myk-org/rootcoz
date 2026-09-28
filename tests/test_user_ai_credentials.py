@@ -212,6 +212,29 @@ async def test_verify_replacement_only_saves_accepted(tmp_path, monkeypatch, out
 
 
 @pytest.mark.asyncio
+async def test_credential_strips_model_before_verification(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "model.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    verify = AsyncMock(return_value="accepted")
+    monkeypatch.setattr(ai_client, "verify_ai_key", verify)
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    await main.set_user_ai_credential(
+        "openai",
+        main.AiCredentialInput(
+            api_key="candidate-key",  # pragma: allowlist secret
+            model=" gpt-4o ",
+        ),
+        request,
+    )
+    verify.assert_awaited_once_with("openai", "gpt-4o", "candidate-key")
+    assert (await storage.get_user_ai_credentials("alice"))["openai"] == "candidate-key"
+
+
+@pytest.mark.asyncio
 async def test_live_verification_transport_timeout_preserves_key(monkeypatch):
     def handler(request):
         raise httpx.ReadTimeout("candidate-key")
@@ -241,7 +264,7 @@ async def test_live_verification_uses_key_and_cleans_session(monkeypatch):
         if request.method == "POST" and request.url.path == "/sessions":
             candidate_key = json.loads(request.content)["api_key"]
             assert candidate_key == "candidate-key"  # pragma: allowlist secret
-            return httpx.Response(200, json={"session_id": "test-session"})
+            return httpx.Response(201, json={"session_id": "test-session"})
         if request.method == "POST":
             return httpx.Response(200, json={"text": "OK"})
         return httpx.Response(204)

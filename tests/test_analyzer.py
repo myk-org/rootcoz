@@ -2962,6 +2962,46 @@ async def test_run_orchestrated_analysis_ai_failure(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrated_mixed_groups_keep_success_and_mark_failure(
+    tmp_path: Path,
+) -> None:
+    groups = {
+        name: [FailedTest(test_name=name, error_message=name)]
+        for name in ("good", "bad")
+    }
+    success = FailureAnalysis(
+        test_name="good", error="good", analysis=AnalysisDetail(details="real analysis")
+    )
+    with (
+        patch(
+            "rootcoz.engine.core.analyze_failure_group",
+            new_callable=AsyncMock,
+            side_effect=[[success], RuntimeError("secret-provider-response")],
+        ) as analyze,
+        patch(
+            "rootcoz.engine.core._call_ai_with_retry", new_callable=AsyncMock
+        ) as cross,
+    ):
+        analyses, _ = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+    assert analyze.await_count == 2
+    assert len(analyses) == 2
+    assert analyses[0] == success
+    assert analyses[1].test_name == "bad"
+    assert (
+        analyses[1].analysis.details == "Analysis failed; check server logs for details"
+    )
+    assert analyses[1].analysis.classification == ""
+    assert "secret-provider-response" not in str(analyses)
+    cross.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_orchestrated_analysis_copies_builtin_agents(tmp_path: Path) -> None:
     """run_orchestrated_analysis copies built-in agents to workspace."""
     f1 = FailedTest(test_name="test_a", error_message="err_a")

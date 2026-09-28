@@ -75,11 +75,23 @@ describe('StatusPage usage', () => {
   it.each([
     ['fetching', 'Fetching test results...'],
     ['routing', 'Routing failure groups...'],
+    ['agent_routing', 'Routing failure groups to agents...'],
+    ['analyzing_failures (group 2/3)', 'Analyzing test failures — group 2/3...'],
+    ['analyzing_failures (group 1/1)', 'Analyzing test failures — group 1/1...'],
+    ['analyzing_failures', 'Analyzing test failures...'],
     ['cross_failure', 'Finding cross-failure patterns...'],
   ])('labels %s progress', async (phase, label) => {
     get.mockResolvedValue({ ...result('running'), result: { ...result('running').result!, progress_phase: phase, progress_log: [{ phase, timestamp: 1 }] } })
     renderPage()
-    expect((await screen.findAllByText(label)).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText(label)).length).toBe(2)
+    expect(screen.queryByText(phase)).not.toBeInTheDocument()
+  })
+
+  it('falls back to the raw phase in both current progress and log for unknown groups', async () => {
+    const phase = 'analyzing_failures (group unknown)'
+    get.mockResolvedValue({ ...result('running'), result: { ...result('running').result!, progress_phase: phase, progress_log: [{ phase, timestamp: 1 }] } })
+    renderPage()
+    expect((await screen.findAllByText(phase)).length).toBe(2)
   })
 
   it('does not show cost when there is no usage', async () => {

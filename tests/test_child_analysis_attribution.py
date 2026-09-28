@@ -223,10 +223,13 @@ async def test_pipeline_with_only_failed_child_groups_marks_parent_failed(
 async def test_failed_child_group_does_not_expose_provider_exception() -> None:
     from rootcoz.sources.jenkins_source import _analyze_grouped_failures
 
-    with patch(
-        "rootcoz.sources.jenkins_source.analyze_failure_group",
-        new_callable=AsyncMock,
-        side_effect=RuntimeError("secret-api-key-value"),
+    with (
+        patch(
+            "rootcoz.sources.jenkins_source.analyze_failure_group",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("secret-api-key-value"),
+        ),
+        patch("rootcoz.sources.jenkins_source.logger.error") as log_error,
     ):
         failures, total, failed = await _analyze_grouped_failures(
             [FailedTest(test_name="test_a", error_message="boom")],
@@ -236,6 +239,8 @@ async def test_failed_child_group_does_not_expose_provider_exception() -> None:
         )
     assert (total, failed) == (1, 1)
     assert "secret-api-key-value" not in failures[0].analysis.details
+    assert "secret-api-key-value" not in str(log_error.call_args)
+    assert "pi_sidecar_client" in str(log_error.call_args)
 
 
 def test_nested_all_failed_children_are_not_counted_as_success() -> None:
