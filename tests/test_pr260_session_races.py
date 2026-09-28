@@ -18,6 +18,15 @@ async def test_key_rotated_before_session_persistence_is_rejected(
     await storage.init_db()
     await storage.create_admin_user("alice")
     await storage.update_user_ai_credential("alice", "openai", "old-key-value")
+    monkeypatch.setattr(
+        ai_client,
+        "get_sidecar_client",
+        lambda: SimpleNamespace(
+            get_providers=AsyncMock(
+                return_value=[{"provider": "openai", "supportsSessionApiKey": True}]
+            )
+        ),
+    )
     entered, resume = asyncio.Event(), asyncio.Event()
     deleted = AsyncMock()
 
