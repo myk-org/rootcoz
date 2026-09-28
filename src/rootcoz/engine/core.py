@@ -90,18 +90,21 @@ async def clone_additional_repos(
         Tuple of (cloned repos dict mapping name to path, repo_path).
     """
     cloned: dict[str, Path] = {}
+    # Keep clone network/disk work bounded independently of the repository count.
+    clone_slots = asyncio.Semaphore(2)
 
     async def _clone_into_subdir(ar: AdditionalRepo) -> None:
         target = repo_path / ar.name
         try:
-            await asyncio.to_thread(
-                repo_manager.clone_into,
-                str(ar.url),
-                target,
-                depth=1,
-                branch=ar.ref,
-                token=ar.token or None,
-            )
+            async with clone_slots:
+                await asyncio.to_thread(
+                    repo_manager.clone_into,
+                    str(ar.url),
+                    target,
+                    depth=1,
+                    branch=ar.ref,
+                    token=ar.token or None,
+                )
             cloned[ar.name] = target
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
         except (GitCommandError, ValueError, OSError, RuntimeError) as e:

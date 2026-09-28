@@ -1,5 +1,6 @@
 """Tests for analyzer module."""
 
+import asyncio
 import inspect
 import json
 from pathlib import Path
@@ -39,6 +40,10 @@ from rootcoz.models import (
 )
 from rootcoz.peer_analysis import analyze_failure_group_with_peers
 from rootcoz.repository import RepositoryManager
+from rootcoz.rootcoz_repo_settings import (
+    apply_rootcoz_repo_settings,
+    load_rootcoz_repo_settings,
+)
 from rootcoz.sources.jenkins_source import (
     JenkinsError,
     analyze_child_job,
@@ -1319,6 +1324,53 @@ class TestResolveAdditionalRepos:
 
 class TestCloneAdditionalRepos:
     """Tests for clone_additional_repos helper."""
+
+    @pytest.mark.asyncio
+    async def test_settings_repos_all_cloned_with_bounded_concurrency(
+        self, tmp_path: Path
+    ) -> None:
+        """A large settings list clones fully, with at most two active clones."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        settings_dir = workspace / "tests" / ".rootcoz"
+        settings_dir.mkdir(parents=True)
+        repos = [
+            {"name": f"repo{i}", "url": f"https://example.com/repo{i}"}
+            for i in range(13)
+        ]
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"additional_repos": repos})
+        )
+        effective = apply_rootcoz_repo_settings(
+            AnalyzeRequest(job_name="test", build_number=1),
+            Settings(),
+            load_rootcoz_repo_settings(workspace / "tests"),
+        )
+        manager = MagicMock(spec=RepositoryManager)
+        active = peak = 0
+        attempted = []
+
+        async def fake_to_thread(_fn, _url, target, **_kwargs):
+            nonlocal active, peak
+            attempted.append(target.name)
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            active -= 1
+            if target.name == "repo5":
+                raise RuntimeError("clone failed")
+
+        with patch("rootcoz.engine.core.asyncio.to_thread", side_effect=fake_to_thread):
+            cloned, result_path = await clone_additional_repos(
+                manager, effective.additional_repos, workspace
+            )
+
+        assert result_path == workspace
+        assert set(attempted) == {repo["name"] for repo in repos}
+        assert set(cloned) == set(attempted) - {"repo5"}
+        assert all(path == workspace / name for name, path in cloned.items())
+        assert peak == 2
 
     @pytest.mark.asyncio
     async def test_clones_into_subdirs_when_repo_path_exists(self, tmp_path) -> None:
