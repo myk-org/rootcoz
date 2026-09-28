@@ -24,6 +24,7 @@ from rootcoz.models import (
     PreviewIssueRequest,
     PreviewIssueResponse,
     ProductBugReport,
+    ReAnalyzeRequest,
     SimilarIssue,
     UnifiedAnalyzeRequest,
 )
@@ -1017,19 +1018,16 @@ class TestAdditionalReposDuplicateNames:
         )
         assert len(request.additional_repos) == 2
 
-    def test_repo_count_limit(self) -> None:
-        """Reject oversized request lists before clone and index."""
-        from pydantic import ValidationError
-
-        with pytest.raises(ValidationError):
-            AnalyzeRequest(
-                job_name="test",
-                build_number=1,
-                additional_repos=[
-                    {"name": f"repo{i}", "url": "https://example.com/repo"}
-                    for i in range(10)
-                ],
-            )
+    @pytest.mark.parametrize("request_type", [AnalyzeRequest, ReAnalyzeRequest])
+    def test_thirteen_repos_accepted(self, request_type: type) -> None:
+        repos = [
+            {"name": f"repo{i}", "url": f"https://example.com/repo{i}"}
+            for i in range(13)
+        ]
+        request = request_type(job_name="test", build_number=1, additional_repos=repos)
+        assert [repo.name for repo in request.additional_repos] == [
+            repo["name"] for repo in repos
+        ]
 
     def test_none_additional_repos_accepted(self) -> None:
         """None value for additional_repos passes validation."""

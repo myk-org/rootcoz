@@ -527,7 +527,6 @@ async def setup_analysis_workspace(
             repo_context = "\nFailed to clone repository (details redacted)"
 
     # Additional repositories are resolved after reading the test repo's settings.
-    # Cloning here can leave nine obsolete clones ahead of the effective nine.
     if cloned_repos:
         copy_rootcoz_pi_resources(cloned_repos, repo_path)
 

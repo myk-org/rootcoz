@@ -410,6 +410,12 @@ class TestParseAdditionalRepos:
             "ref": "",
         }
 
+    def test_thirteen_repos(self) -> None:
+        raw = ",".join(f"repo{i}:https://example.com/repo{i}" for i in range(13))
+        result = parse_additional_repos(raw)
+        assert [repo["name"] for repo in result] == [f"repo{i}" for i in range(13)]
+        assert result[-1]["url"] == "https://example.com/repo12"
+
     def test_whitespace_trimmed(self) -> None:
         result = parse_additional_repos("  infra : https://github.com/org/infra  ")
         assert result == [

@@ -149,7 +149,6 @@
           "items": {
             "$ref": "#/$defs/RootcozAdditionalRepo"
           },
-          "maxItems": 9,
           "type": "array"
         },
         {
