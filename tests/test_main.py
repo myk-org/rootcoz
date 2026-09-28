@@ -6510,6 +6510,38 @@ class TestAdminSettingsEndpoints:
                 f"Sensitive field {si['key']} not masked by default"
             )
 
+    def test_repo_clone_limit_metadata_and_db_override(self, test_client) -> None:
+        """Clone concurrency is a live, validated Server setting."""
+        from rootcoz.config import get_settings
+
+        key = "max_concurrent_repo_clones"
+        item = next(
+            s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
+        )
+        assert (item["category"], item["type"], item["default"]) == (
+            "Server",
+            "integer",
+            "10",
+        )
+        assert not item["sensitive"] and not item["restart_required"]
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: "0"}}
+            ).status_code
+            == 400
+        )
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: "3"}}
+            ).status_code
+            == 200
+        )
+        assert get_settings().max_concurrent_repo_clones == 3
+        item = next(
+            s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
+        )
+        assert (item["value"], item["source"]) == ("3", "db")
+
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot access settings."""
         response = test_client.get(

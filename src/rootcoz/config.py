@@ -261,6 +261,11 @@ class Settings(BaseSettings):
 
     # Additional repositories for AI analysis context
     additional_repos: str = ""  # "name:url,name:url" format
+    max_concurrent_repo_clones: int = Field(
+        default=10,
+        gt=0,
+        description="Maximum simultaneous additional-repository clones",
+    )
 
     # Jenkins artifacts configuration
     jenkins_artifacts_max_size_mb: int = Field(default=500, gt=0)

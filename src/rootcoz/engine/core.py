@@ -76,6 +76,8 @@ async def clone_additional_repos(
     repo_manager: RepositoryManager,
     additional_repos_list: list[AdditionalRepo],
     repo_path: Path,
+    *,
+    max_concurrent_repo_clones: int = 10,
 ) -> tuple[dict[str, Path], Path]:
     """Clone additional repositories for AI analysis context.
 
@@ -85,13 +87,14 @@ async def clone_additional_repos(
         repo_manager: Repository manager for cloning.
         additional_repos_list: List of AdditionalRepo objects.
         repo_path: Workspace path (always provided by caller).
+        max_concurrent_repo_clones: Maximum simultaneous clone operations.
 
     Returns:
         Tuple of (cloned repos dict mapping name to path, repo_path).
     """
     cloned: dict[str, Path] = {}
     # Keep clone network/disk work bounded independently of the repository count.
-    clone_slots = asyncio.Semaphore(2)
+    clone_slots = asyncio.Semaphore(max_concurrent_repo_clones)
 
     async def _clone_into_subdir(ar: AdditionalRepo) -> None:
         target = repo_path / ar.name

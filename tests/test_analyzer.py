@@ -1326,10 +1326,11 @@ class TestCloneAdditionalRepos:
     """Tests for clone_additional_repos helper."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("clone_limit", [10, 3])
     async def test_settings_repos_all_cloned_with_bounded_concurrency(
-        self, tmp_path: Path
+        self, tmp_path: Path, clone_limit: int
     ) -> None:
-        """A large settings list clones fully, with at most two active clones."""
+        """All settings-derived repos clone, including beyond the concurrency limit."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         settings_dir = workspace / "tests" / ".rootcoz"
@@ -1347,6 +1348,11 @@ class TestCloneAdditionalRepos:
             load_rootcoz_repo_settings(workspace / "tests"),
         )
         manager = MagicMock(spec=RepositoryManager)
+        clone_settings = (
+            Settings()
+            if clone_limit == 10
+            else Settings(max_concurrent_repo_clones=clone_limit)
+        )
         active = peak = 0
         attempted = []
 
@@ -1363,14 +1369,17 @@ class TestCloneAdditionalRepos:
 
         with patch("rootcoz.engine.core.asyncio.to_thread", side_effect=fake_to_thread):
             cloned, result_path = await clone_additional_repos(
-                manager, effective.additional_repos, workspace
+                manager,
+                effective.additional_repos,
+                workspace,
+                max_concurrent_repo_clones=clone_settings.max_concurrent_repo_clones,
             )
 
         assert result_path == workspace
         assert set(attempted) == {repo["name"] for repo in repos}
         assert set(cloned) == set(attempted) - {"repo5"}
         assert all(path == workspace / name for name, path in cloned.items())
-        assert peak == 2
+        assert peak == clone_limit
 
     @pytest.mark.asyncio
     async def test_clones_into_subdirs_when_repo_path_exists(self, tmp_path) -> None:

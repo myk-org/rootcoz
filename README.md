@@ -36,6 +36,7 @@ For Prow-only deployments, set `PROW_URL` and `GCS_BUCKET` instead of (or in add
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAX_CONCURRENT_AI_CALLS` | `3` | Maximum concurrent AI CLI processes. Prevents OOM with heavy models. |
+| `MAX_CONCURRENT_REPO_CLONES` | `10` | Maximum simultaneous additional-repository clones, configurable by admins in Server Settings → Server. Does not limit the number of repos. |
 
 `MAX_CONCURRENT_AI_CALLS` can be set via any of the supported interfaces:
 - Environment variable: `MAX_CONCURRENT_AI_CALLS`

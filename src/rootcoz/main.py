@@ -373,6 +373,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "Server": [
         "public_base_url",
         "additional_repos",
+        "max_concurrent_repo_clones",
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
@@ -3992,7 +3993,10 @@ async def _process_ci_source_analysis(
 
         if additional_repos_list:
             additional_repos_cloned, repo_path = await clone_additional_repos(
-                repo_manager, additional_repos_list, repo_path
+                repo_manager,
+                additional_repos_list,
+                repo_path,
+                max_concurrent_repo_clones=merged.max_concurrent_repo_clones,
             )
             cloned_repos.update(additional_repos_cloned)
 
@@ -5022,7 +5026,10 @@ async def _reanalyze_failure_background(
 
         if additional_repos_list:
             additional_repos_cloned, repo_path = await clone_additional_repos(
-                repo_manager, additional_repos_list, repo_path
+                repo_manager,
+                additional_repos_list,
+                repo_path,
+                max_concurrent_repo_clones=get_settings().max_concurrent_repo_clones,
             )
             cloned_repos.update(additional_repos_cloned)
 
