@@ -6367,6 +6367,153 @@ class TestReAnalyzeFailure:
                 with pytest.raises(asyncio.CancelledError):
                     await task
 
+    @pytest.mark.parametrize(
+        ("failure", "stderr_message", "expected_cause"),
+        [
+            ("git", "Authentication failed", "Authentication failed"),
+            ("basic", "Authentication failed", "Authentication failed"),
+            (
+                "git",
+                "Remote branch missing not found in upstream origin",
+                "Branch or ref not found",
+            ),
+            (
+                "git",
+                "pathspec 'missing' did not match any file(s) known to git",
+                "Branch or ref not found",
+            ),
+            (
+                "git",
+                "SSL certificate problem: certificate verify failed",
+                "SSL verification failed",
+            ),
+            ("git", "Permission denied (publickey)", "Permission denied"),
+            (
+                "git",
+                "Could not resolve host: example.com",
+                "Network DNS resolution failed",
+            ),
+            ("git", "repository not found", "Repository not found"),
+            ("git", "unexpected failure", "Git command failed"),
+            ("invalid_url", "", "Invalid repository URL scheme"),
+            ("unknown", "", "Clone worker failed"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_reanalyze_cancelled_clone_logs_safe_cause_and_frames(
+        self, tmp_path, monkeypatch, failure, stderr_message, expected_cause
+    ) -> None:
+        import asyncio
+        from threading import Event
+
+        from git.exc import GitCommandError
+
+        from rootcoz import storage
+        from rootcoz.main import _reanalyze_failure_background
+        from rootcoz.repository import _validate_repo_url
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "cancel-failed.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-cancel-failed",
+            "",
+            "completed",
+            {"failures": [{"id": "failure-id", "reanalysis_status": "running"}]},
+        )
+        started, release = Event(), Event()
+        secret = "clone-secret-12345"  # pragma: allowlist secret
+        userinfo = "alice:password"  # pragma: allowlist secret
+        url = f"https://{userinfo}@example.com/tests?access_token={secret}"
+        if failure == "invalid_url":
+            url = f"ftp://{userinfo}@example.com/tests?access_token={secret}"
+
+        def clone(*_args, **_kwargs):
+            started.set()
+            release.wait(2)
+            if failure == "invalid_url":
+                _validate_repo_url(url)
+            if failure == "unknown":
+                raise RuntimeError(f"unexpected credential opaque-secret-789 in {url}")
+            raise GitCommandError(
+                f"git clone https://x-token-auth:{secret}@example.com/tests",
+                128,
+                stderr=(
+                    f"fatal: {stderr_message} for '{url}'; "
+                    + (
+                        "Authorization: Basic dXNlcjpwYXNz; opaque-secret-789"
+                        if failure == "basic"
+                        else "Authorization: Bearer other-secret-456; api_key=extra-secret-789"
+                    )
+                ),
+            )
+
+        with (
+            patch("rootcoz.main.RepositoryManager") as manager,
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.logger.warning") as warning,
+        ):
+            manager.return_value.create_workspace.return_value = tmp_path / "workspace"
+            manager.return_value.clone_into.side_effect = clone
+            task = asyncio.create_task(
+                _reanalyze_failure_background(
+                    "job-cancel-failed",
+                    "failure-id",
+                    {},
+                    "claude",
+                    "opus",
+                    None,
+                    "",
+                    None,
+                    0,
+                    url,
+                    "main",
+                    secret,
+                    None,
+                    "admin",
+                    1,
+                )
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                task.cancel()
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        log = "\n".join(
+            str(arg) for call in warning.call_args_list for arg in call.args
+        )
+        assert " in clone" in log
+        assert "[path]:" in log
+        assert expected_cause in log
+        assert (
+            "GitCommandError"
+            if failure in ("git", "basic")
+            else "ValueError"
+            if failure == "invalid_url"
+            else "RuntimeError"
+        ) in log
+        for leaked in (
+            secret,
+            "example.com",
+            "ftp://",
+            "opaque-secret-789",
+            "dXNlcjpwYXNz",
+            "alice",
+            "password",
+            "access_token=",
+            "x-token-auth",
+            "other-secret-456",
+            "extra-secret-789",
+        ):
+            assert leaked not in log
+        assert all(not call.kwargs.get("exc_info") for call in warning.call_args_list)
+
     @pytest.mark.asyncio
     async def test_re_analyze_failure_defers_ai_with_tests_repo(
         self, test_client

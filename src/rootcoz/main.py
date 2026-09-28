@@ -5069,7 +5069,9 @@ async def _reanalyze_failure_background(
                         )
                     )
                     try:
-                        await asyncio.shield(clone_task)
+                        # wait() leaves the worker running if this await is cancelled.
+                        await asyncio.wait({clone_task})
+                        clone_task.result()
                     except asyncio.CancelledError:
                         # A cancelled await does not stop the thread. Keep the workspace
                         # until the worker exits, even if cancellation is repeated.
@@ -5081,9 +5083,83 @@ async def _reanalyze_failure_background(
                         if not clone_task.cancelled() and (
                             clone_error := clone_task.exception()
                         ):
+                            # Exception text, stderr and traceback filenames can all
+                            # contain attacker-controlled URLs, headers or paths.
+                            if isinstance(clone_error, GitCommandError):
+                                # Match only fixed phrases; stderr may embed credentials.
+                                stderr = (clone_error.stderr or "").lower()
+                                cause = "Git command failed"
+                                for patterns, label in (
+                                    (
+                                        ("authentication failed",),
+                                        "Authentication failed",
+                                    ),
+                                    (
+                                        (
+                                            "remote branch",
+                                            "pathspec",
+                                            "bad revision",
+                                            "not a valid ref",
+                                        ),
+                                        "Branch or ref not found",
+                                    ),
+                                    (
+                                        (
+                                            "ssl certificate",
+                                            "certificate verify",
+                                            "server verification failed",
+                                        ),
+                                        "SSL verification failed",
+                                    ),
+                                    (("permission denied",), "Permission denied"),
+                                    (
+                                        (
+                                            "could not resolve host",
+                                            "name or service not known",
+                                        ),
+                                        "Network DNS resolution failed",
+                                    ),
+                                    (
+                                        (
+                                            "repository not found",
+                                            "not a git repository",
+                                        ),
+                                        "Repository not found",
+                                    ),
+                                ):
+                                    if any(pattern in stderr for pattern in patterns):
+                                        cause = label
+                                        break
+                            elif isinstance(clone_error, ValueError) and str(
+                                clone_error
+                            ).startswith("Invalid repository URL scheme."):
+                                cause = "Invalid repository URL scheme"
+                            else:
+                                cause = "Clone worker failed"
+                            frames = []
+                            tb = clone_error.__traceback__
+                            while tb:
+                                name = tb.tb_frame.f_code.co_name
+                                if name not in {
+                                    "clone",
+                                    "clone_into",
+                                    "_validate_repo_url",
+                                }:
+                                    name = "frame"
+                                filename = tb.tb_frame.f_code.co_filename
+                                source_dir = str(Path(__file__).parent) + os.sep
+                                location = (
+                                    filename.removeprefix(source_dir)
+                                    if filename.startswith(source_dir)
+                                    else "[path]"
+                                )
+                                frames.append(f"{location}:{tb.tb_lineno} in {name}")
+                                tb = tb.tb_next
                             logger.warning(
-                                "Test repository clone failed during cancellation: %s",
+                                "Test repository clone failed during cancellation: %s: %s\n%s",
                                 type(clone_error).__name__,
+                                cause,
+                                "\n".join(frames),
                             )
                         logger.info(
                             "Test repository clone worker joined after cancellation"
