@@ -465,7 +465,7 @@ class CodeFix(BaseModel):
         default_factory=list,
         description="AI-suggested keywords for searching related issues in the tests repository",
     )
-    tests_repo_matches: list["SimilarIssue"] = Field(
+    tests_repo_matches: list[SimilarIssue] = Field(
         default_factory=list,
         description="Matched issues from the tests repository (populated in post-processing)",
     )
@@ -512,7 +512,7 @@ class AnalysisDetail(BaseModel):
     )
 
     @model_validator(mode="after")
-    def check_mutual_exclusivity(self) -> "AnalysisDetail":
+    def check_mutual_exclusivity(self) -> AnalysisDetail:
         if self.code_fix and self.product_bug_report:
             raise ValueError("code_fix and product_bug_report are mutually exclusive")
         return self
@@ -607,10 +607,10 @@ class ChildJobAnalysis(BaseModel):
     summary: str | None = Field(
         default=None, description="Summary of the child job failure analysis"
     )
-    failures: list["FailureAnalysis"] = Field(
+    failures: list[FailureAnalysis] = Field(
         default_factory=list, description="List of analyzed failures in child job"
     )
-    failed_children: list["ChildJobAnalysis"] = Field(
+    failed_children: list[ChildJobAnalysis] = Field(
         default_factory=list, description="Nested failed child jobs"
     )
     note: str | None = Field(
@@ -621,7 +621,7 @@ class ChildJobAnalysis(BaseModel):
     failed_count: int = Field(default=0, description="Number of failed tests")
 
     @model_validator(mode="after")
-    def _sync_build_url_aliases(self) -> "ChildJobAnalysis":
+    def _sync_build_url_aliases(self) -> ChildJobAnalysis:
         self.build_url, self.jenkins_url = _apply_build_url_aliases(
             self.build_url, self.jenkins_url
         )
@@ -697,13 +697,13 @@ class AnalysisResult(BaseModel):
     passed_count: int = Field(default=0, description="Number of passed tests")
     skipped_count: int = Field(default=0, description="Number of skipped tests")
     failed_count: int = Field(default=0, description="Number of failed tests")
-    cross_failure_patterns: list["CrossFailurePattern"] = Field(
+    cross_failure_patterns: list[CrossFailurePattern] = Field(
         default_factory=list,
         description="Patterns detected across multiple failure groups",
     )
 
     @model_validator(mode="after")
-    def _sync_build_url_aliases(self) -> "AnalysisResult":
+    def _sync_build_url_aliases(self) -> AnalysisResult:
         self.build_url, self.jenkins_url = _apply_build_url_aliases(
             self.build_url, self.jenkins_url
         )
@@ -818,7 +818,7 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
         return normalize_prow_url(v)
 
     @model_validator(mode="after")
-    def _validate_by_type(self) -> "UnifiedAnalyzeRequest":
+    def _validate_by_type(self) -> UnifiedAnalyzeRequest:
         """Validate required fields based on analysis type."""
         if self.type == "jenkins":
             if not self.job_name:

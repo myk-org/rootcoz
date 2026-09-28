@@ -73,7 +73,7 @@ def extract_all_tests_from_xml(raw_xml: str) -> TestExtractionResult:
             duration = float(raw_duration)
             if duration < 0:
                 duration = 0.0
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             duration = 0.0
 
         failure_elem = testcase.find("failure")

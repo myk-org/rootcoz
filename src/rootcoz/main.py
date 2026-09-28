@@ -1251,7 +1251,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
         if raw_wait_started_at is not None:
             try:
                 wait_started_at = float(raw_wait_started_at)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 await _fail_resumed_waiting_job(
                     job["job_id"],
                     result_data,
@@ -1303,9 +1303,15 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
         try:
             ai_provider, ai_model = await _resolve_ai_config_allow_defer(body, merged)
             resolved_peers = await _validate_peer_configs(body, merged)
-        except Exception as exc:  # noqa: BLE001 — isolate each job's validation failure
-            reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
-            logger.warning("Cannot resume waiting job %s: %s", job["job_id"], reason)
+        except Exception as exc:
+            reason = (
+                exc.detail
+                if isinstance(exc, HTTPException)
+                else "AI/peer validation unavailable (grant or catalog lookup failed)"
+            )
+            logger.exception(
+                "Cannot resume waiting job %s", job["job_id"], exc_info=False
+            )
             await _fail_resumed_waiting_job(
                 job["job_id"],
                 result_data,
@@ -1689,7 +1695,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 if session_token and await storage.get_session(session_token):
                     return await call_next(request)
                 # SSO user hitting /login — redirect to dashboard
-                response = RedirectResponse(url="/", status_code=303)
+                response: Response = RedirectResponse(url="/", status_code=303)
                 if _read_cookie(request, "rootcoz_username") != proxy_username:
                     _set_username_cookie(
                         response, proxy_username, secure=settings.secure_cookies
@@ -1735,7 +1741,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                                     request.state.renew_session_token = session_token
                             except Exception:
                                 logger.debug("Session renewal failed", exc_info=True)
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         logger.debug(
                             "Failed to parse session expires_at for renewal",
                             exc_info=True,
@@ -1823,8 +1829,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 request.state.can_use_server_providers = (
                     await storage.can_user_use_server_providers(username)
                 )
-            except Exception:  # noqa: BLE001 - grant lookup must fail closed
-                logger.warning("Unable to load server provider grant")
+            except Exception:
+                logger.exception("Unable to load server provider grant", exc_info=False)
 
         # Track user activity only for authenticated identities
         if has_valid_session and username:
@@ -1944,7 +1950,7 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
                         request.url.path,
                         json.dumps(masked),
                     )
-                except (json.JSONDecodeError, UnicodeDecodeError):
+                except json.JSONDecodeError, UnicodeDecodeError:
                     logger.debug(
                         "Incoming %s %s body: <non-JSON, %d bytes>",
                         request.method,
@@ -2025,7 +2031,7 @@ async def _validation_error_handler(
                 masked_body = f"<non-JSON, {size} bytes>"
             else:
                 masked_body = f"<non-JSON body: {type(exc.body).__name__}>"
-        except (TypeError, ValueError, AttributeError, RecursionError):
+        except TypeError, ValueError, AttributeError, RecursionError:
             # masking must never break the 422 response
             masked_body = "<unable to mask>"
     raw_errors = jsonable_encoder(exc.errors())
@@ -3053,8 +3059,8 @@ def _build_base_request_params(
 
 def _apply_base_analysis_overrides(
     params: dict[str, Any],
-    body: "BaseAnalysisRequest",
-    merged: "Settings",
+    body: BaseAnalysisRequest,
+    merged: Settings,
 ) -> None:
     """Apply BaseAnalysisRequest overrides to a base params dict.
 
@@ -3228,8 +3234,8 @@ async def _finish_ci_ingest(
 
 
 async def _enqueue_ci_source_analysis(
-    body: "UnifiedAnalyzeRequest",
-    merged: "Settings",
+    body: UnifiedAnalyzeRequest,
+    merged: Settings,
     resolved_peers: list[Any] | None,
     display_name: str,
     analysis_type: str,
@@ -3996,7 +4002,6 @@ async def _process_ci_source_analysis(
                 repo_manager,
                 additional_repos_list,
                 repo_path,
-                max_concurrent_repo_clones=merged.max_concurrent_repo_clones,
             )
             cloned_repos.update(additional_repos_cloned)
 
@@ -5029,7 +5034,6 @@ async def _reanalyze_failure_background(
                 repo_manager,
                 additional_repos_list,
                 repo_path,
-                max_concurrent_repo_clones=get_settings().max_concurrent_repo_clones,
             )
             cloned_repos.update(additional_repos_cloned)
 
@@ -7412,7 +7416,7 @@ async def _execute_rp_push(
                 if settings.rp.url
                 else "unknown"
             )
-        except (ValueError, TypeError, AttributeError):
+        except ValueError, TypeError, AttributeError:
             rp_host = "unknown"
         log_msg = f"{log_msg}, reportportal_host='{rp_host}'"
         return _log_and_return_rp_error(user_msg, log_msg=log_msg)
@@ -7958,7 +7962,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                 active = await storage.count_active_analyses()
                 last_active = active
                 yield f"event: active-count\ndata: {active}\n\n"
-            except (aiosqlite.Error, OSError, TypeError, ValueError):
+            except aiosqlite.Error, OSError, TypeError, ValueError:
                 last_active = 0
                 yield "event: active-count\ndata: 0\n\n"
 
@@ -7968,7 +7972,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     unread = await storage.get_unread_mention_count(username)
                     last_unread = unread
                     yield f"event: unread-count\ndata: {unread}\n\n"
-                except (aiosqlite.Error, OSError, TypeError, ValueError):
+                except aiosqlite.Error, OSError, TypeError, ValueError:
                     last_unread = 0
                     yield "event: unread-count\ndata: 0\n\n"
 
@@ -8223,7 +8227,7 @@ async def stream_multiplexed(
                     active = await storage.count_active_analyses()
                     last_active = active
                     yield f"event: navbar:active-count\ndata: {active}\n\n"
-                except (aiosqlite.Error, OSError, TypeError, ValueError):
+                except aiosqlite.Error, OSError, TypeError, ValueError:
                     last_active = 0
                     yield "event: navbar:active-count\ndata: 0\n\n"
                 if username:
@@ -8231,7 +8235,7 @@ async def stream_multiplexed(
                         unread = await storage.get_unread_mention_count(username)
                         last_unread = unread
                         yield f"event: navbar:unread-count\ndata: {unread}\n\n"
-                    except (aiosqlite.Error, OSError, TypeError, ValueError):
+                    except aiosqlite.Error, OSError, TypeError, ValueError:
                         last_unread = 0
                         yield "event: navbar:unread-count\ndata: 0\n\n"
 
@@ -8622,7 +8626,7 @@ async def validate_token(
                 resp.raise_for_status()
                 try:
                     data = resp.json()
-                except (ValueError, json.JSONDecodeError):
+                except ValueError, json.JSONDecodeError:
                     return _invalid("Tracker API returned an unexpected response")
                 return {
                     "valid": True,
@@ -8657,7 +8661,7 @@ async def validate_token(
                 resp.raise_for_status()
                 try:
                     data = resp.json()
-                except (ValueError, json.JSONDecodeError):
+                except ValueError, json.JSONDecodeError:
                     return _invalid("Tracker API returned an unexpected response")
                 display = data.get("displayName", data.get("name", ""))
                 return {
@@ -9719,8 +9723,8 @@ async def _revoke_ai_sessions(sessions: list[str]) -> None:
                 session_id,
                 get_sidecar_client().delete_session,
             )
-        except Exception:  # noqa: BLE001 - tombstone remains if sidecar is unavailable
-            logger.warning("Failed to delete revoked AI session")
+        except Exception:
+            logger.exception("Failed to delete revoked AI session", exc_info=False)
     if sessions:
         logger.info("Revoked %d AI sessions", len(sessions))
 
@@ -10536,7 +10540,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
                         and int_val > meta.le
                     ):
                         errors.append(f"{key}: must be <= {meta.le}")
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 errors.append(f"{key}: must be an integer")
     if errors:
         raise HTTPException(

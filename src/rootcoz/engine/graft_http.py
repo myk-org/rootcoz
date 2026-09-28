@@ -140,7 +140,7 @@ class _Handler(BaseHTTPRequestHandler):
                     )
                 ):
                     raise ValueError
-        except (ValueError, UnicodeDecodeError, TimeoutError):
+        except ValueError, UnicodeDecodeError, TimeoutError:
             self._reply(400, {"error": "invalid request"})
             return
         try:
@@ -203,7 +203,7 @@ class _Handler(BaseHTTPRequestHandler):
                             )
                 except Exception:  # metrics must not break retrieval
                     logger.warning("Unable to store Graft estimate", exc_info=True)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             self._reply(400, {"error": "invalid request"})
         except Exception:  # noqa: BLE001 - never expose graph errors containing source text or host paths
             self._reply(500, {"error": "graph query failed"})
@@ -359,7 +359,7 @@ def register_workspace(
             return build_graph_tools(
                 f"http://127.0.0.1:{_server.server_port}", entry[0], list(roots)
             )
-    except (OSError, RuntimeError, ValueError):
+    except OSError, RuntimeError, ValueError:
         return []
 
 

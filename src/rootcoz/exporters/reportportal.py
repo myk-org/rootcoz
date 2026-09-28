@@ -88,7 +88,7 @@ def format_rp_error(exc: Exception, operation: str) -> tuple[str, str]:
             rp_message = raw if isinstance(raw, str) else ""
             # Full response text — log only
             detail = resp.text or ""
-        except (ValueError, TypeError, json.JSONDecodeError, AttributeError):
+        except ValueError, TypeError, json.JSONDecodeError, AttributeError:
             detail = resp.text or ""
     else:
         detail = str(exc) if str(exc) else ""

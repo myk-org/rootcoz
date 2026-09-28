@@ -4282,6 +4282,35 @@ class TestResumeWaitingJobs:
             assert grant.await_count >= 1
             assert all(call.args == ("admin",) for call in grant.await_args_list)
 
+    async def test_resume_validation_error_does_not_leak_exception(
+        self, mock_settings, monkeypatch, caplog
+    ) -> None:
+        from rootcoz.config import get_settings
+        from rootcoz.main import _resume_waiting_jobs
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="my-job", build_number=1, ai_provider="gemini", ai_model="m"
+        )
+        params = _build_jenkins_request_params(body, get_settings(), "gemini", "m")
+        params["submitted_by"] = "admin"
+        result_data = {"job_name": "my-job", "request_params": params}
+        monkeypatch.setattr(
+            "rootcoz.main._validate_peer_configs",
+            AsyncMock(side_effect=RuntimeError("secret-api-key")),
+        )
+        with (
+            patch.object(storage, "get_result", AsyncMock(return_value=None)),
+            patch.object(storage, "update_status", new_callable=AsyncMock) as update,
+            patch(
+                "rootcoz.main._resolve_ai_config_allow_defer", new_callable=AsyncMock
+            ),
+        ):
+            await _resume_waiting_jobs([{"job_id": "bad", "result_data": result_data}])
+        assert update.await_args.args[1] == "failed"
+        assert "secret-api-key" not in update.await_args.args[2]["error"]
+        assert "secret-api-key" not in caplog.text
+
     async def test_resumes_valid_waiting_job(self, mock_settings, monkeypatch) -> None:
         """A waiting job with valid request_params spawns a background task."""
         monkeypatch.setattr(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from rootcoz import ai_client
@@ -29,6 +30,17 @@ def _clear_model_catalog() -> None:
 )
 def test_normalize_provider(raw: str, canonical: str) -> None:
     assert normalize_provider(raw) == canonical
+
+
+@pytest.mark.asyncio
+async def test_provider_discovery_transport_failure_denies_key_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AsyncMock()
+    client.get_providers.side_effect = httpx.ConnectError("secret from sidecar")
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+
+    assert await ai_client.supported_key_providers() == []
 
 
 def test_build_catalog_groups_duplicate_model_ids_by_exact_provider() -> None:

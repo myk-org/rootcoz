@@ -82,8 +82,6 @@ async def clone_additional_repos(
     repo_manager: RepositoryManager,
     additional_repos_list: list[AdditionalRepo],
     repo_path: Path,
-    *,
-    max_concurrent_repo_clones: int = 10,
 ) -> tuple[dict[str, Path], Path]:
     """Clone additional repositories for AI analysis context.
 
@@ -93,8 +91,6 @@ async def clone_additional_repos(
         repo_manager: Repository manager for cloning.
         additional_repos_list: List of AdditionalRepo objects.
         repo_path: Workspace path (always provided by caller).
-        max_concurrent_repo_clones: Kept for callers passing their settings snapshot;
-            the live server setting governs admissions.
 
     Returns:
         Tuple of (cloned repos dict mapping name to path, repo_path).
@@ -113,8 +109,16 @@ async def clone_additional_repos(
                 # ponytail: poll while full; replace with per-loop notifications if
                 # clone admission latency becomes material.
                 await asyncio.sleep(0.05)
-            try:
-                await asyncio.to_thread(
+
+            def release_slot(task: asyncio.Task[Path]) -> None:
+                global _active_clones
+                if not task.cancelled():
+                    task.exception()  # Observe failures even when the analysis was cancelled.
+                with _clone_lock:
+                    _active_clones -= 1
+
+            clone_task = asyncio.create_task(
+                asyncio.to_thread(
                     repo_manager.clone_into,
                     str(ar.url),
                     target,
@@ -122,9 +126,9 @@ async def clone_additional_repos(
                     branch=ar.ref,
                     token=ar.token or None,
                 )
-            finally:
-                with _clone_lock:
-                    _active_clones -= 1
+            )
+            clone_task.add_done_callback(release_slot)
+            await asyncio.shield(clone_task)
             cloned[ar.name] = target
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
         except (GitCommandError, ValueError, OSError, RuntimeError) as e:
@@ -249,7 +253,7 @@ def _extract_agent_name(agent_file: Path) -> str | None:
     """
     try:
         text = agent_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return None
     if not text.startswith("---"):
         return None
@@ -1506,7 +1510,7 @@ async def _call_ai_with_retry(
     for attempt in range(1, max_attempts + 1):
         try:
             result = await call_ai_once(prompt, **call_kwargs)
-        except Exception as exc:  # noqa: BLE001 - retry failed AI calls
+        except (ValueError, RuntimeError, OSError, TimeoutError, TypeError) as exc:
             from rootcoz.engine.chat import safe_exception_frames
 
             logger.error(
@@ -1968,7 +1972,7 @@ def resolve_agent_prompt(workspace: Path | None) -> str:
                     "Using user-provided test-analyzer agent from %s", user_agent
                 )
                 return _strip_frontmatter(content)
-            except (OSError, UnicodeDecodeError):
+            except OSError, UnicodeDecodeError:
                 logger.warning(
                     "Failed to read user agent %s; falling back to built-in",
                     user_agent,
@@ -1981,7 +1985,7 @@ def resolve_agent_prompt(workspace: Path | None) -> str:
         try:
             content = builtin.read_text(encoding="utf-8")
             return _strip_frontmatter(content)
-        except (OSError, UnicodeDecodeError):
+        except OSError, UnicodeDecodeError:
             logger.warning("Failed to read built-in agent %s", builtin, exc_info=True)
 
     return ""

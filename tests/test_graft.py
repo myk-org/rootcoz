@@ -471,7 +471,19 @@ def test_workspace_budget_skips_then_retries_after_cleanup(tmp_path, monkeypatch
         for name, repo in repos.items()
         if outcomes[name]["status"] == "skipped"
     }
-    assert skipped.items() <= graft.roots_needing_index(workspace, repos).items()
+    root = graft._root(workspace)
+    used = graft._workspace_graph_size(root)
+    retryable = {
+        name
+        for name in skipped
+        if not (root / name / "budget.json").exists()
+        or used
+        - graft._disk_size(root / name, limit=0, reject_symlinks=False)
+        + graft.MAX_GRAPH_BYTES
+        <= graft.MAX_WORKSPACE_GRAPH_BYTES
+    }
+    needed = graft.roots_needing_index(workspace, repos)
+    assert skipped.keys() & needed.keys() == retryable
     assert not any(
         (graft._root(workspace) / name / "graph").exists() for name in skipped
     )
@@ -495,6 +507,177 @@ def test_workspace_budget_skips_then_retries_after_cleanup(tmp_path, monkeypatch
     )
     graft.cleanup_graph(workspace)
     assert not graft._root(workspace).exists()
+
+
+def test_active_build_bytes_are_not_reserved_twice(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repos = {}
+    for name in ("a", "b"):
+        repo = workspace / name
+        repo.mkdir(parents=True)
+        git(repo, "init")
+        (repo / "a.py").write_text("pass")
+        repos[name] = repo
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def run(argv, **kwargs):
+        graph = Path(argv[2])
+        graph.mkdir()
+        (graph / "data").write_bytes(b"x" * 700)
+        if graph.parent.name == "a":
+            entered.set()
+            assert release.wait(3)
+        else:
+            assert entered.wait(3)
+            release.set()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", run)
+    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
+    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 2100)
+    try:
+        outcomes = graft.index_repositories(workspace, repos)
+        assert all(outcome["status"] == "indexed" for outcome in outcomes.values()), (
+            outcomes
+        )
+    finally:
+        release.set()
+
+
+def test_budget_skip_backoff_and_capacity_recovery(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repos = {}
+    for name in ("a", "b"):
+        repo = workspace / name
+        repo.mkdir(parents=True)
+        git(repo, "init")
+        (repo / "a.py").write_text("pass")
+        repos[name] = repo
+    builds = []
+
+    def run(argv, **kwargs):
+        builds.append(Path(argv[2]).parent.name)
+        graph = Path(argv[2])
+        graph.mkdir()
+        (graph / "data").write_bytes(b"x" * 400)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", run)
+    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
+    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 1500)
+    outcomes = graft.index_repositories(workspace, repos)
+    indexed = next(
+        name for name, value in outcomes.items() if value["status"] == "indexed"
+    )
+    skipped = next(
+        name for name, value in outcomes.items() if value["status"] == "skipped"
+    )
+    assert builds == [indexed]
+    assert graft.roots_needing_index(workspace, repos) == {}
+    assert graft.roots_needing_index(workspace, repos) == {}
+    assert builds == [indexed]
+    shutil.rmtree(graft._root(workspace) / indexed)
+    assert graft.roots_needing_index(workspace, {skipped: repos[skipped]}) == {
+        skipped: repos[skipped]
+    }
+    assert (
+        graft.index_repositories(workspace, {skipped: repos[skipped]})[skipped][
+            "status"
+        ]
+        == "indexed"
+    )
+
+
+def test_budget_skip_on_rebuild_preserves_graph_and_retries_on_expiry(
+    tmp_path, monkeypatch
+):
+    workspace = tmp_path / "workspace"
+    repos = {}
+    for name in ("a", "b"):
+        repo = workspace / name
+        repo.mkdir(parents=True)
+        git(repo, "init")
+        (repo / "a.py").write_text("old")
+        repos[name] = repo
+
+    def run(argv, **kwargs):
+        graph = Path(argv[2])
+        graph.mkdir()
+        (graph / "data").write_bytes(b"x" * 400)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", run)
+    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
+    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 2200)
+    assert all(
+        v["status"] == "indexed"
+        for v in graft.index_repositories(workspace, repos).values()
+    )
+    (repos["a"] / "a.py").write_text("new")
+    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 1500)
+    assert (
+        graft.index_repositories(workspace, {"a": repos["a"]})["a"]["reason"]
+        == "workspace graph budget"
+    )
+    destination = graft._root(workspace) / "a"
+    assert (destination / "graph").is_dir()
+    assert graft.query_repo(workspace, "a", "repo_map", {})["status"] == "stale"
+    assert graft.roots_needing_index(workspace, {"a": repos["a"]}) == {}
+    marker = destination / "budget.json"
+    state = json.loads(marker.read_text())
+    state["retry_after"] = 0
+    marker.write_text(json.dumps(state))
+    assert graft.roots_needing_index(workspace, {"a": repos["a"]}) == {"a": repos["a"]}
+
+
+def test_malformed_other_graph_does_not_block_build(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repo = workspace / "good"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    (repo / "a.py").write_text("pass")
+    bad = graft._root(workspace) / "bad"
+    bad.mkdir(parents=True)
+    (bad / "data").write_bytes(b"x" * 100)
+    (bad / "link").symlink_to(tmp_path / "outside")
+
+    def run(argv, **kwargs):
+        Path(argv[2]).mkdir()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_run", run)
+    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
+    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 2000)
+    assert (
+        graft.index_repositories(workspace, {"good": repo})["good"]["status"]
+        == "indexed"
+    )
+    assert (bad / "link").is_symlink()
+    assert (bad / "data").exists()
+
+
+def test_symlink_in_own_graph_is_rejected_without_following_it(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    repo = workspace / "bad"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    (repo / "a.py").write_text("pass")
+    destination = graft._root(workspace) / "bad"
+    destination.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.write_text("untouched")
+    (destination / "link").symlink_to(outside)
+    monkeypatch.setattr(
+        graft,
+        "_run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    assert (
+        graft.index_repositories(workspace, {"bad": repo})["bad"]["status"] == "failed"
+    )
+    assert outside.read_text() == "untouched"
 
 
 def test_same_workspace_builds_do_not_overlap(tmp_path, monkeypatch):

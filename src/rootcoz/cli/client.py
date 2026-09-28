@@ -104,7 +104,7 @@ class RootCozClient:
             try:
                 body = response.json()
                 detail = body.get("detail", str(body))
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 detail = response.text
             raise RootCozError(
                 status_code=response.status_code,
@@ -1407,7 +1407,7 @@ class RootCozClient:
             try:
                 body = response.json()
                 detail = body.get("detail", str(body))
-            except (ValueError, KeyError):
+            except ValueError, KeyError:
                 detail = response.text
             raise RootCozError(status_code=response.status_code, detail=detail)
         return response.content

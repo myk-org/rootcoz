@@ -90,7 +90,7 @@ def _is_github_url(url: str) -> bool:
     try:
         host = urlsplit(url).netloc.lower()
         return host.endswith("github.com") or "github" in host
-    except (TypeError, AttributeError, ValueError):
+    except TypeError, AttributeError, ValueError:
         return False
 
 
@@ -1236,7 +1236,7 @@ async def _create_chat_session(
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
-    except Exception as exc:  # noqa: BLE001 - chat session failure is reported to caller
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
         logger.warning(
             "%s: failed to create session (%s)\n%s",
             log_prefix,

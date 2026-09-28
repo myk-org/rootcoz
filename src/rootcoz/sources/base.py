@@ -598,7 +598,7 @@ def write_console_output_file(
         console_file.write_text(content, encoding="utf-8", errors="replace")
         logger.info("%swrote console-output.txt (%d chars)", log_prefix, len(content))
         return True
-    except (OSError, UnicodeError):
+    except OSError, UnicodeError:
         logger.warning(
             "%sfailed to write console-output.txt", log_prefix, exc_info=True
         )

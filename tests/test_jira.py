@@ -30,14 +30,14 @@ _BASE_JIRA_ENV = {
 
 def _jira_settings_from_env(
     extra_env: dict[str, str],
-) -> Generator[Settings, None, None]:
+) -> Generator[Settings]:
     """Yield Settings built from the shared base env merged with *extra_env*."""
     with patch.dict(os.environ, {**_BASE_JIRA_ENV, **extra_env}, clear=True):
         yield Settings(_env_file=None)
 
 
 @pytest.fixture
-def jira_settings() -> Generator[Settings, None, None]:
+def jira_settings() -> Generator[Settings]:
     """Create Settings with Jira Cloud credentials."""
     yield from _jira_settings_from_env(
         {
@@ -50,7 +50,7 @@ def jira_settings() -> Generator[Settings, None, None]:
 
 
 @pytest.fixture
-def jira_server_settings() -> Generator[Settings, None, None]:
+def jira_server_settings() -> Generator[Settings]:
     """Create Settings with Jira Server/DC PAT credentials."""
     yield from _jira_settings_from_env(
         {
@@ -61,7 +61,7 @@ def jira_server_settings() -> Generator[Settings, None, None]:
 
 
 @pytest.fixture
-def jira_cloud_pat_settings() -> Generator[Settings, None, None]:
+def jira_cloud_pat_settings() -> Generator[Settings]:
     """Create Settings with JIRA_PAT + JIRA_EMAIL (no JIRA_API_TOKEN).
 
     Email present → Cloud mode.  The PAT is used as the token value

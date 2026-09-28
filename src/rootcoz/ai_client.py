@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import sqlite3
 import tempfile
 import time
 from contextvars import ContextVar
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import httpx
 from pi_sidecar_client import (
     AIResult,
     AITokenUsage,
@@ -49,7 +51,7 @@ async def supported_key_providers() -> list[str]:
     """List registered providers with affirmative session-key capability."""
     try:
         providers = await get_sidecar_client().get_providers()
-    except Exception:  # noqa: BLE001 - unavailable discovery must fail closed
+    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
         logger.warning("Unable to discover session-key providers")
         return []
     return sorted(
@@ -269,7 +271,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             if ai_username.get()
             else False
         )
-    except Exception:  # noqa: BLE001 - metadata must never imply permission on DB failure
+    except sqlite3.Error, OSError, RuntimeError, ValueError, KeyError, TypeError:
         allowed = False
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
     for provider, entries in build_friendly_catalog(catalog).items():
@@ -290,7 +292,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 continue
             try:
                 discovery = await models_for_api_key(provider, key)
-            except Exception:  # noqa: BLE001 - never fall back to server credentials
+            except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
                 logger.warning(
                     "Key-scoped model discovery unavailable for provider=%s", provider
                 )
@@ -775,7 +777,7 @@ async def delete_ai_session(client: SidecarClient, session_id: str) -> None:
 
     try:
         await revoke_ai_session_source(session_id)
-    except Exception:  # noqa: BLE001 - stale mapping denies reuse until replaced
+    except sqlite3.Error, OSError, RuntimeError:
         logger.warning("Unable to revoke AI session mapping")
 
 
@@ -852,13 +854,20 @@ async def _call_user_session(
             client, session_id, prompt, timeout * 60.0 if timeout else None
         )
         result.session_id = session_id
-    except Exception as exc:  # noqa: BLE001 - sidecar/transport errors may contain credentials
+    except (
+        httpx.HTTPError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as exc:
         if created and session_id:
             try:
                 await delete_ai_session(client, session_id)
                 session_id = None
-            except Exception:  # noqa: BLE001, S110 - never log credential-bearing cleanup errors
-                pass
+            except httpx.HTTPError, OSError, RuntimeError, ValueError:
+                logger.warning("Unable to clean up failed AI session")
         # The outer wrapper replaces all failure details for keyed sessions.
         return AIResult(
             success=False, text=str(exc), error=str(exc), session_id=session_id
@@ -867,8 +876,8 @@ async def _call_user_session(
         try:
             await delete_ai_session(client, session_id)
             result.session_id = None
-        except Exception:  # noqa: BLE001, S110 - retain session, never log raw errors
-            pass
+        except httpx.HTTPError, OSError, RuntimeError, ValueError:
+            logger.warning("Unable to clean up AI session")
     return result
 
 
@@ -899,7 +908,7 @@ async def call_ai(
                 text="AI session unavailable",
                 error="AI session unavailable",
             )
-        except Exception:  # noqa: BLE001 - failed ownership lookup must never prompt
+        except sqlite3.Error, OSError, RuntimeError, KeyError, TypeError:
             logger.warning("Unable to verify AI session ownership")
             return AIResult(
                 success=False,

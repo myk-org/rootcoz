@@ -158,7 +158,7 @@ def _load_json_object(path: Path) -> tuple[dict[str, Any], bool]:
         return {}, False
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except OSError, json.JSONDecodeError, UnicodeDecodeError:
         logger.warning("Ignoring malformed MCP JSON at %s", path)
         return {}, True
     if not isinstance(data, dict):

@@ -826,7 +826,7 @@ def main() -> int:
             )
             if route_host.returncode == 0 and route_host.stdout.strip():
                 route_url = f"https://{route_host.stdout.strip()}"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except FileNotFoundError, subprocess.TimeoutExpired:
             pass  # kubectl not available or timed out — skip
 
     print("\nDone. First login:")

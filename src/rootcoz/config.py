@@ -431,7 +431,7 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
-    def _normalize_optional_strings(self) -> "Settings":
+    def _normalize_optional_strings(self) -> Settings:
         """Strip whitespace from optional string fields; blank becomes None."""
         for field_name in (
             "tests_repo_url",

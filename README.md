@@ -295,6 +295,8 @@ Validate the chart with `uvx --with tox-uv tox -e chart` (requires [Helm 3](http
 
 ## Development
 
+Requires Python 3.14 or newer.
+
 ```bash
 git clone https://github.com/myk-org/rootcoz.git
 cd rootcoz

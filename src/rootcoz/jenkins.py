@@ -41,7 +41,7 @@ class JenkinsClient(jenkins.Jenkins):
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     @property
-    def session(self) -> "requests.Session":
+    def session(self) -> requests.Session:
         """Authenticated requests session for direct API calls."""
         return self._session
 

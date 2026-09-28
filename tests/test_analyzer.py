@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1378,7 +1379,6 @@ class TestCloneAdditionalRepos:
                 manager,
                 effective.additional_repos,
                 workspace,
-                max_concurrent_repo_clones=clone_settings.max_concurrent_repo_clones,
             )
 
         assert result_path == workspace
@@ -1444,6 +1444,71 @@ class TestCloneAdditionalRepos:
         assert {name for cloned, _ in results for name in cloned} == set(attempted) - {
             "repo5"
         }
+
+    @pytest.mark.asyncio
+    async def test_cancelled_clone_holds_slot_until_worker_finishes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cancelling an analysis cannot admit a second clone while its worker runs."""
+        from rootcoz.engine import core
+
+        started_first = threading.Event()
+        finish_first = threading.Event()
+        started_second = threading.Event()
+        second_admission = asyncio.Event()
+        observed_active: list[int] = []
+
+        def live_settings():
+            if started_first.is_set():
+                observed_active.append(core._active_clones)
+                second_admission.set()
+            return Settings(max_concurrent_repo_clones=1)
+
+        def fake_clone(_url, target, **_kwargs):
+            if target.name == "first":
+                started_first.set()
+                assert finish_first.wait(2)
+            else:
+                started_second.set()
+            return target
+
+        monkeypatch.setattr(core, "get_settings", live_settings)
+        manager = MagicMock(spec=RepositoryManager)
+        manager.clone_into.side_effect = fake_clone
+        first = asyncio.create_task(
+            clone_additional_repos(
+                manager,
+                [AdditionalRepo(name="first", url="https://example.com/first")],
+                tmp_path,
+            )
+        )
+        second = None
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(started_first.wait, 2), 3)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(first, 1)
+            second = asyncio.create_task(
+                clone_additional_repos(
+                    manager,
+                    [AdditionalRepo(name="second", url="https://example.com/second")],
+                    tmp_path,
+                )
+            )
+            await asyncio.wait_for(second_admission.wait(), 2)
+            assert observed_active[0] == 1
+            assert not started_second.is_set()
+            finish_first.set()
+            assert await asyncio.wait_for(asyncio.to_thread(started_second.wait, 2), 3)
+            await asyncio.wait_for(second, 2)
+        finally:
+            finish_first.set()
+            if second is not None and not second.done():
+                second.cancel()
+                await asyncio.gather(second, return_exceptions=True)
+            if not first.done():
+                first.cancel()
+                await asyncio.gather(first, return_exceptions=True)
 
     @pytest.mark.asyncio
     async def test_live_limit_decrease_applies_to_waiting_clones(

@@ -178,7 +178,7 @@ def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | 
         return None
     try:
         data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         logger.warning(
             f"parse_result_json: malformed JSON for job_id={job_id}, skipping"
         )
@@ -5455,7 +5455,7 @@ def _decode_ai_credentials(value: str | None) -> dict[str, str]:
             isinstance(k, str) and isinstance(v, str) for k, v in data.items()
         ):
             return data
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         pass
     logger.warning("Unreadable user AI credentials; refusing access")
     raise UnreadableAiCredentialsError("Stored AI credentials are unreadable")
@@ -5639,8 +5639,8 @@ async def create_ai_session_with_source(
 
             try:
                 await (delete or get_sidecar_client().delete_session)(session_id)
-            except Exception:  # noqa: BLE001, S110 - keep the original persistence failure
-                pass
+            except OSError, RuntimeError, ValueError:
+                logger.warning("Unable to clean up untracked AI session")
         raise
     return session_id
 

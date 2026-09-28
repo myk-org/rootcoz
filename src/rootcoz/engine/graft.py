@@ -42,7 +42,11 @@ def _root(workspace: Path) -> Path:
 
 
 def _disk_size(
-    path: Path, deadline: float | None = None, *, limit: int | None = None
+    path: Path,
+    deadline: float | None = None,
+    *,
+    limit: int | None = None,
+    reject_symlinks: bool = True,
 ) -> int:
     limit = MAX_GRAPH_BYTES if limit is None else limit
     total = 0
@@ -51,12 +55,24 @@ def _disk_size(
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("graph deadline")
             entry = Path(directory) / file
-            if entry.is_symlink():
+            if entry.is_symlink() and reject_symlinks:
                 raise ValueError("graph contains symlink")
             total += entry.lstat().st_size
             if limit and total > limit:
                 return total
     return total
+
+
+def _workspace_graph_size(root: Path) -> int:
+    """Measure graph storage without following symlinks in unrelated directories."""
+    if not root.is_dir() or root.is_symlink():
+        return 0
+    return sum(
+        _disk_size(item, limit=0, reject_symlinks=False)
+        if item.is_dir() and not item.is_symlink()
+        else item.lstat().st_size
+        for item in root.iterdir()
+    )
 
 
 def _bounded(
@@ -140,7 +156,7 @@ def _safe_file(repo: Path, relative: Path) -> Path | None:
         ):
             return None
         return current
-    except (OSError, RuntimeError):
+    except OSError, RuntimeError:
         return None
 
 
@@ -216,7 +232,7 @@ def _source_stamp(repo: Path) -> str:
             if source is not None:
                 info = source.stat()
                 digest.update(f"{info.st_size}:{info.st_mtime_ns}".encode())
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
     return digest.hexdigest()
 
@@ -256,7 +272,7 @@ def _manifest(destination: Path) -> dict[str, str] | None:
         ):
             return None
         return manifest
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
@@ -337,7 +353,7 @@ def _index_one(
             shutil.rmtree(destination, ignore_errors=True)
             try:
                 stamp = _source_stamp(repo) if manifest is None else None
-            except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+            except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                 stamp = None  # Oversized listings still get a bounded retry.
             try:
                 destination.mkdir(parents=True, exist_ok=True)
@@ -373,13 +389,33 @@ def index_repositories(
 
     def reserve(destination: Path) -> bool:
         with gate:
-            # ponytail: whole-root scan per build; cache sizes if indexing throughput matters.
-            used = _disk_size(root, limit=0)
+            used = _workspace_graph_size(root)
             old = _disk_size(destination, limit=0) if destination.exists() else 0
-            if (
-                used - old + (len(reservations) + 1) * MAX_GRAPH_BYTES
-                > MAX_WORKSPACE_GRAPH_BYTES
-            ):
+            growth = sum(
+                max(0, MAX_GRAPH_BYTES - _disk_size(item, limit=0))
+                for item in reservations
+            )
+            if used - old + growth + MAX_GRAPH_BYTES > MAX_WORKSPACE_GRAPH_BYTES:
+                # Persist a bounded skip, without overwriting an existing graph.
+                marker = json.dumps(
+                    {
+                        "budget_used": used,
+                        "retry_after": time.time() + FAILED_RETRY_SECONDS,
+                    }
+                )
+                previous = destination / "budget.json"
+                previous_size = (
+                    previous.stat().st_size
+                    if previous.is_file() and not previous.is_symlink()
+                    else 0
+                )
+                if (
+                    not previous.is_symlink()
+                    and used + growth + len(marker) - previous_size
+                    <= MAX_WORKSPACE_GRAPH_BYTES
+                ):
+                    destination.mkdir(parents=True, exist_ok=True)
+                    previous.write_text(marker)
                 return False
             reservations.add(destination)
             return True
@@ -669,8 +705,26 @@ def roots_needing_index(
                     and not marker.is_symlink()
                     else None
                 )
-            except (OSError, ValueError):
+            except OSError, ValueError:
                 failed = None
+            budget = root / name / "budget.json"
+            try:
+                skipped = (
+                    json.loads(budget.read_text())
+                    if not budget.is_symlink() and not budget.parent.is_symlink()
+                    else None
+                )
+                if (
+                    isinstance(skipped, dict)
+                    and time.time() < skipped["retry_after"]
+                    and _workspace_graph_size(root)
+                    - _disk_size(root / name, limit=0, reject_symlinks=False)
+                    + MAX_GRAPH_BYTES
+                    > MAX_WORKSPACE_GRAPH_BYTES
+                ):
+                    continue
+            except OSError, ValueError, KeyError, TypeError:
+                pass
             if manifest is not None:
                 try:
                     if (
@@ -678,7 +732,7 @@ def roots_needing_index(
                         or _disk_size(root / name) > MAX_GRAPH_BYTES
                     ):
                         result[name] = repo
-                except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     result[name] = repo  # Never expose a stale graph.
             elif (
                 not isinstance(failed, dict)
@@ -695,7 +749,7 @@ def roots_needing_index(
                         and _source_stamp(repo) != failed["stamp"]
                     ):
                         result[name] = repo
-                except (OSError, ValueError, TimeoutError, subprocess.SubprocessError):
+                except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     pass  # Retry an unreadable source after the bounded backoff.
         return result
 
