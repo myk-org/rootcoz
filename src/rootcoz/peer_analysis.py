@@ -43,9 +43,30 @@ from rootcoz.models import (
     OverrideClassificationLiteral,
     PeerDebate,
     PeerRound,
+    TokenUsageEntry,
 )
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+
+
+def _round_usage(
+    result: AIResult, provider: str, model: str, call_type: str
+) -> TokenUsageEntry:
+    """Keep a call's reported usage on its own debate entry, not on its model peers."""
+    usage = result.usage
+    assert usage is not None
+    return TokenUsageEntry(
+        provider=usage.provider or provider,
+        model=usage.model or model,
+        call_type=call_type,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+        total_tokens=usage.input_tokens + usage.output_tokens,
+        cost_usd=usage.cost_usd,
+        duration_ms=usage.duration_ms,
+    )
 
 
 class PeerResponseSummary(TypedDict):
@@ -553,6 +574,7 @@ async def analyze_failure_group_with_peers(
     )
     all_rounds: list[PeerRound] = []
     consensus_reached = False
+    revision_usage: TokenUsageEntry | None = None
     rounds_used = 0
     group_suffix = f" (group {group_label})" if group_label else ""
 
@@ -592,6 +614,8 @@ async def analyze_failure_group_with_peers(
                     classification=parsed_analysis.classification,
                     details=parsed_analysis.details,
                     agrees_with_orchestrator=True,
+                    # Round 1 reuses the primary answer; it is billed on the failure card.
+                    token_usage=revision_usage,
                 )
             )
 
@@ -819,6 +843,10 @@ async def analyze_failure_group_with_peers(
                                 details=peer_details,
                                 agrees_with_orchestrator=agrees,
                             )
+                if ai_result.usage is not None:
+                    entry.token_usage = _round_usage(
+                        ai_result, config.ai_provider, config.ai_model, "peer"
+                    )
                 round_peer_entries.append(entry)
                 all_rounds.append(entry)
 
@@ -867,6 +895,7 @@ async def analyze_failure_group_with_peers(
                 )
 
                 previous_analysis = parsed_analysis
+                revision_usage = None
                 try:
                     logger.info(
                         "AI call: provider=%s, model=%s, call_type=revision, round=%d, job_id=%s",
@@ -903,6 +932,13 @@ async def analyze_failure_group_with_peers(
                             round_num,
                             len(rev_result.text),
                         )
+                    revision_usage = (
+                        _round_usage(
+                            rev_result, main_ai_provider, main_ai_model, "revision"
+                        )
+                        if rev_result.usage is not None
+                        else None
+                    )
                     await rev_result.record_usage(
                         request_id=job_id,
                         call_type="revision",

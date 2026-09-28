@@ -158,6 +158,7 @@ from rootcoz.models import (
     OverrideClassificationRequest,
     OverridePatternRequest,
     PreviewIssueRequest,
+    ProductBugReport,
     PushSubscriptionRequest,
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
@@ -2703,6 +2704,17 @@ async def _enrich_result_with_jira(
         return
 
     all_failures = _collect_all_failures(failures)
+    if not any(
+        isinstance(failure.analysis.product_bug_report, ProductBugReport)
+        and failure.analysis.product_bug_report.jira_search_keywords
+        for failure in all_failures
+    ):
+        logger.debug(
+            "Skipping Jira enrichment without product bug keywords for job=%s", job_id
+        )
+        return
+    await safe_update_progress(job_id, "enriching_jira")
+    logger.info("Enriching failures with Jira for job=%s", job_id)
     await enrich_with_jira_matches(
         all_failures,
         settings,
@@ -3519,8 +3531,15 @@ async def _run_per_group_analysis(
     Returns:
         Flat list of FailureAnalysis objects from all groups.
     """
-    coroutines: list[Coroutine[Any, Any, Any]] = [
-        analyze_failure_group(
+
+    async def _analyze_group(group_failures: list[Any], number: int) -> list[Any]:
+        await safe_update_progress(
+            job_id, f"analyzing_failures (group {number}/{len(groups)})"
+        )
+        logger.info(
+            "Analyzing fallback group %d/%d for job=%s", number, len(groups), job_id
+        )
+        return await analyze_failure_group(
             failures=group_failures,
             console_context=console_context,
             repo_path=repo_path,
@@ -3538,7 +3557,10 @@ async def _run_per_group_analysis(
             auth_header=auth_header,
             all_groups=groups,
         )
-        for _sig, group_failures in groups.items()
+
+    coroutines: list[Coroutine[Any, Any, Any]] = [
+        _analyze_group(group_failures, number)
+        for number, group_failures in enumerate(groups.values(), 1)
     ]
 
     results = await run_parallel_with_limit(
@@ -3550,12 +3572,15 @@ async def _run_per_group_analysis(
         len(groups),
     )
 
+    failures = [result for result in results if isinstance(result, Exception)]
+    if failures:
+        logger.error("Failed to analyze failure group: %s", type(failures[0]).__name__)
+        raise RuntimeError(
+            "AI analysis failed. Check provider credentials and try again."
+        )
     all_analyses: list[Any] = []
     for result in results:
-        if isinstance(result, Exception):
-            logger.error("Failed to analyze failure group: %s", result, exc_info=result)
-        else:
-            all_analyses.extend(result)
+        all_analyses.extend(result)
     return all_analyses
 
 
@@ -3700,12 +3725,13 @@ async def _analyze_failures_or_exit(
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
         )
-    except Exception:
-        logger.exception(
-            "Orchestrated analysis failed for job_id=%s; "
-            "falling back to per-group analysis",
+    except (RuntimeError, ValueError, OSError, TypeError) as exc:
+        logger.warning(
+            "Orchestrated analysis failed for job_id=%s; falling back to per-group analysis (%s)",
             job_id,
+            type(exc).__name__,
         )
+        logger.debug("Retrying analysis per group for job_id=%s", job_id)
         try:
             all_analyses = await _run_per_group_analysis(
                 groups=groups,
@@ -3724,10 +3750,11 @@ async def _analyze_failures_or_exit(
                 max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
                 auth_header=auth_header,
             )
-        except Exception:
-            logger.exception(
-                "Fallback per-group analysis also failed for job_id=%s",
+        except (RuntimeError, ValueError, OSError, TypeError) as fallback_exc:
+            logger.error(
+                "Fallback per-group analysis failed for job_id=%s (%s)",
                 job_id,
+                type(fallback_exc).__name__,
             )
             all_analyses = []
 
@@ -3827,7 +3854,12 @@ async def _process_ci_source_analysis(
                 notify_job_status_changed(job_id)
                 return
 
-        # Fetch failures from source
+        # Fetch failures from source. Waiting jobs switch only after pre-fetch completes.
+        await update_status(job_id, "running")
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        await safe_update_progress(job_id, "fetching")
         source_result = await source.fetch()
         logger.debug(
             f"Source fetch complete: {len(source_result.failures)} failures, "
@@ -4002,8 +4034,11 @@ async def _process_ci_source_analysis(
                 repo_manager,
                 additional_repos_list,
                 repo_path,
+                job_id=job_id,
             )
             cloned_repos.update(additional_repos_cloned)
+
+        await safe_update_progress(job_id, "analyzing")
 
         # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
         if cloned_repos:
@@ -4058,10 +4093,10 @@ async def _process_ci_source_analysis(
 
             # Pipeline/orchestrator: failed children, no direct test failures
             if child_job_analyses and not test_failures:
+                from rootcoz.sources.jenkins_source import child_has_successful_analysis
+
                 analyzed_children = [
-                    c
-                    for c in child_job_analyses
-                    if (c.failures or c.failed_children) and not c.note
+                    c for c in child_job_analyses if child_has_successful_analysis(c)
                 ]
                 if not analyzed_children:
                     summary = f"All {len(child_job_analyses)} child job analyses failed"
@@ -4101,7 +4136,7 @@ async def _process_ci_source_analysis(
                     )
 
                 # Enrich child failures before saving
-                if _resolve_enable_jira(body, merged):
+                if _resolve_enable_jira(body, merged) and merged.jira_enabled:
                     await _enrich_result_with_jira(
                         child_job_analyses,
                         merged,
@@ -4145,6 +4180,8 @@ async def _process_ci_source_analysis(
                     )
 
                 # Persist top-level + child-scoped test entries
+                await safe_update_progress(job_id, "saving")
+                logger.info("Saving child job analysis for job=%s", job_id)
                 _top_entries = source_result.test_entry_dicts()
                 await replace_job_test_entries(job_id, _top_entries, child_test_scopes)
                 _apply_cached_test_counts(result_data, _top_entries, child_test_scopes)
@@ -4220,7 +4257,7 @@ async def _process_ci_source_analysis(
         logger.debug(
             f"Enriching with Jira matches (enable_jira={_resolve_enable_jira(body, merged)})"
         )
-        if _resolve_enable_jira(body, merged):
+        if _resolve_enable_jira(body, merged) and merged.jira_enabled:
             await _enrich_result_with_jira(
                 enrich_targets, merged, ai_provider, ai_model, job_id=job_id
             )
@@ -4272,6 +4309,8 @@ async def _process_ci_source_analysis(
         await _attach_token_usage(job_id, result_data)
 
         # Populate failure history and auto-review BEFORE marking completed
+        await safe_update_progress(job_id, "saving")
+        logger.info("Saving analysis for job=%s", job_id)
         try:
             await populate_failure_history(job_id, result_data)
         except Exception:
@@ -9736,6 +9775,7 @@ async def _cleanup_revoked_ai_sessions() -> None:
 
 class AiCredentialInput(BaseModel):
     api_key: SecretStr
+    model: str
 
 
 @app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
@@ -9765,12 +9805,31 @@ async def set_user_ai_credential(
         valid = False
     if not valid:
         raise HTTPException(status_code=400, detail="API key must be 8-1024 characters")
-    try:
-        sessions = await storage.update_user_ai_credential(username, provider, key)
-    except storage.UnreadableAiCredentialsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await _revoke_ai_sessions(sessions)
-    return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+    from rootcoz.ai_client import verify_ai_key
+
+    if not body.model.strip():
+        raise HTTPException(status_code=400, detail="Select a model to verify the key")
+    outcome = await verify_ai_key(provider, body.model, key)
+    if outcome == "accepted":
+        try:
+            sessions = await storage.update_user_ai_credential(username, provider, key)
+        except storage.UnreadableAiCredentialsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await _revoke_ai_sessions(sessions)
+    message = {
+        "rejected": "Check the key and selected model; existing credential unchanged.",
+        "inconclusive": "Try again when the provider is available; existing credential unchanged.",
+    }.get(outcome)
+    return JSONResponse(
+        content=strip_sensitive_from_response(
+            {
+                "outcome": outcome,
+                "ok": outcome == "accepted",
+                **({"message": message} if message else {}),
+            }
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.delete(

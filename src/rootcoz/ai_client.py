@@ -219,6 +219,72 @@ _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
 )
 
 
+async def verify_ai_key(provider: str, model: str, key: str) -> str:
+    """Probe a submitted key with a real sidecar turn, without storing it."""
+    client = get_sidecar_client()
+    session_id = None
+    outcome = "inconclusive"
+
+    def auth_error(response: httpx.Response) -> bool:
+        if response.status_code == 401:
+            return True
+        try:
+            payload = response.json()
+            error = (
+                str(payload.get("error", "")).lower()
+                if isinstance(payload, dict)
+                else ""
+            )
+        except ValueError:
+            return False
+        return any(marker in error for marker in ("invalid_api_key", "invalid api key"))
+
+    try:
+        response = await client._client.post(
+            "/sessions",
+            json={
+                "provider": provider,
+                "model": model,
+                "api_key": key,
+                "system_prompt": "Reply briefly.",
+                "cwd": tempfile.gettempdir(),
+                "tools": [],
+            },
+            timeout=30,
+        )
+        if auth_error(response):
+            outcome = "rejected"
+        elif response.status_code == 200:
+            session_id = response.json()["session_id"]
+            result = await client._client.post(
+                f"/sessions/{quote(session_id, safe='')}/prompt",
+                json={"message": "Say OK."},
+                timeout=30,
+            )
+            if auth_error(result):
+                outcome = "rejected"
+            elif result.status_code == 200:
+                data = result.json()
+                if (
+                    not data.get("error")
+                    and isinstance(data.get("text"), str)
+                    and data["text"].strip()
+                ):
+                    outcome = "accepted"
+    except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
+        pass  # Transport and malformed responses cannot prove a key is bad.
+    finally:
+        if session_id:
+            try:
+                await client.delete_session(session_id)
+            except httpx.HTTPError, OSError, RuntimeError, ValueError:
+                logger.warning("Unable to clean up credential verification session")
+        logger.info(
+            "AI credential verification: provider=%s outcome=%s", provider, outcome
+        )
+    return outcome
+
+
 async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
     """Ask Pi for key-scoped models and listing capability; never retain the key."""
     response = await get_sidecar_client().get_models_for_api_key(provider, api_key)

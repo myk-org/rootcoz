@@ -47,7 +47,8 @@ from rootcoz.models import (
     ProductBugReport,
 )
 from rootcoz.repository import RepositoryManager
-from rootcoz.storage import update_progress_phase
+from rootcoz.storage import update_clone_progress, update_progress_phase
+from rootcoz.token_tracking import failure_group_usage
 
 _log_file = get_log_file()
 
@@ -82,6 +83,7 @@ async def clone_additional_repos(
     repo_manager: RepositoryManager,
     additional_repos_list: list[AdditionalRepo],
     repo_path: Path,
+    job_id: str = "",
 ) -> tuple[dict[str, Path], Path]:
     """Clone additional repositories for AI analysis context.
 
@@ -117,19 +119,23 @@ async def clone_additional_repos(
                 with _clone_lock:
                     _active_clones -= 1
 
-            clone_task = asyncio.create_task(
-                asyncio.to_thread(
-                    repo_manager.clone_into,
-                    str(ar.url),
-                    target,
-                    depth=1,
-                    branch=ar.ref,
-                    token=ar.token or None,
+            await safe_update_clone_progress(job_id, ar.name, True)
+            try:
+                clone_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        repo_manager.clone_into,
+                        str(ar.url),
+                        target,
+                        depth=1,
+                        branch=ar.ref,
+                        token=ar.token or None,
+                    )
                 )
-            )
-            clone_task.add_done_callback(release_slot)
-            await asyncio.shield(clone_task)
-            cloned[ar.name] = target
+                clone_task.add_done_callback(release_slot)
+                await asyncio.shield(clone_task)
+                cloned[ar.name] = target
+            finally:
+                await safe_update_clone_progress(job_id, ar.name, False)
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
         except (GitCommandError, ValueError, OSError, RuntimeError) as e:
             # non-fatal additional repo clone failure
@@ -169,6 +175,28 @@ async def safe_update_progress(job_id: str | None, phase: str) -> None:
             _on_progress_updated(job_id)
     except Exception:
         logger.debug("Failed to update progress phase", exc_info=True)
+
+
+async def safe_update_clone_progress(
+    job_id: str | None, repo_name: str, started: bool
+) -> None:
+    """Persist a clone snapshot and notify job SSE listeners without blocking clones on DB errors."""
+    if not job_id:
+        return
+    try:
+        await update_clone_progress(job_id, repo_name, started)
+        if _on_progress_updated:
+            _on_progress_updated(job_id)
+        logger.info(
+            "Repository clone %s: job=%s repo=%s",
+            "started" if started else "finished",
+            job_id,
+            repo_name,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to update clone progress for job=%s", job_id, exc_info=True
+        )
 
 
 def format_exception_with_type(exc: Exception) -> str:
@@ -1749,27 +1777,27 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         job_id,
     )
     try:
-        result = await _call_ai_with_retry(
-            prompt,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            workspace_dir=workspace_dir,
-            ai_call_timeout=ai_call_timeout,
-            server_url=server_url,
-            job_id=job_id,
-            auth_header=auth_header,
-            call_type="primary",
-            system_prompt=system_prompt,
-        )
+        with failure_group_usage(job_id, error_signature):
+            result = await _call_ai_with_retry(
+                prompt,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                workspace_dir=workspace_dir,
+                ai_call_timeout=ai_call_timeout,
+                server_url=server_url,
+                job_id=job_id,
+                auth_header=auth_header,
+                call_type="primary",
+                system_prompt=system_prompt,
+            )
 
+        if not result.success:
+            raise RuntimeError(
+                "AI call failed. Check provider credentials and try again."
+            )
         parsed: AnalysisDetail | None = None
         if _is_empty_ai_text(result):
-            parsed = AnalysisDetail(
-                details=(
-                    "AI returned empty response after retry "
-                    f"(provider={ai_provider}, model={ai_model})"
-                )
-            )
+            raise RuntimeError("AI returned empty response after retry.")
         elif result.success:
             parsed = parse_json_response(result.text)
         if parsed is None:
@@ -2314,6 +2342,8 @@ async def run_orchestrated_analysis(
         agent_routing: dict[str, str | None] = {sig: None for sig in groups}
 
         if custom_agents:
+            await safe_update_progress(job_id, "agent_routing")
+            logger.info("Agent routing progress started for job=%s", job_id)
             # Prepare workspace files for routing call context
             workspace_files = prepare_orchestrator_workspace(
                 groups, console_context, workspace_dir
@@ -2358,9 +2388,18 @@ async def run_orchestrated_analysis(
         )
 
         async def _analyze_group(
-            sig: str, failures: list[FailedTest]
+            sig: str, failures: list[FailedTest], group_number: int
         ) -> list[FailureAnalysis]:
             """Analyze a single failure group with agent prompt."""
+            await safe_update_progress(
+                job_id, f"analyzing_failures (group {group_number}/{len(groups)})"
+            )
+            logger.info(
+                "Analyzing failure group %d/%d for job=%s",
+                group_number,
+                len(groups),
+                job_id,
+            )
             # Point AI at specialist agent file (do not embed body)
             agent_appendix = ""
             routed_agent = agent_routing.get(sig)
@@ -2405,7 +2444,10 @@ async def run_orchestrated_analysis(
             return results
 
         # Run all groups in parallel
-        coroutines = [_analyze_group(sig, failures) for sig, failures in groups.items()]
+        coroutines = [
+            _analyze_group(sig, failures, number)
+            for number, (sig, failures) in enumerate(groups.items(), 1)
+        ]
         results = await run_parallel_with_limit(
             coroutines, max_concurrency=max_concurrent_ai_calls
         )
@@ -2413,27 +2455,26 @@ async def run_orchestrated_analysis(
         # Collect results
         all_analyses: list[FailureAnalysis] = []
         group_results: list[tuple[str, AnalysisDetail]] = []
+        failed = next((r for r in results if isinstance(r, Exception)), None)
+        if failed is not None:
+            logger.error("Failed to analyze group: %s", type(failed).__name__)
+            raise RuntimeError(
+                "AI analysis failed. Check provider credentials and try again."
+            ) from None
         for (sig, failures), result in zip(groups.items(), results):
-            if isinstance(result, Exception):
-                logger.error(
-                    "Failed to analyze group %s: %s", sig, result, exc_info=result
-                )
-                fallback = AnalysisDetail(details=f"Analysis failed: {result}")
-                all_analyses.extend(_expand_group_to_analyses(sig, failures, fallback))
-                group_results.append((sig, fallback))
+            # result is a list of FailureAnalysis from analyze_failure_group
+            all_analyses.extend(result)
+            if result:
+                group_results.append((sig, result[0].analysis))
             else:
-                # result is a list of FailureAnalysis from analyze_failure_group
-                all_analyses.extend(result)
-                # Use first result's analysis for cross-failure detection
-                if result:
-                    group_results.append((sig, result[0].analysis))
-                else:
-                    fallback = AnalysisDetail(details="No analysis returned")
-                    group_results.append((sig, fallback))
+                group_results.append(
+                    (sig, AnalysisDetail(details="No analysis returned"))
+                )
 
         # Cross-failure pattern detection (only when multiple groups)
         cross_patterns: list[CrossFailurePattern] = []
         if len(group_results) > 1:
+            await safe_update_progress(job_id, "cross_failure")
             logger.info(
                 "Running cross-failure pattern detection for %d groups",
                 len(group_results),

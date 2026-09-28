@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from rootcoz.sources.base import (
     CISource,
@@ -12,6 +16,41 @@ from rootcoz.sources.base import (
 )
 from rootcoz.sources.jenkins_source import JenkinsSource
 from rootcoz.sources.prow_source import ProwSource
+
+
+@pytest.mark.asyncio
+async def test_workspace_clone_reports_test_repo_start_and_end(tmp_path: Path) -> None:
+    from rootcoz.sources.base import setup_analysis_workspace
+
+    manager = MagicMock()
+    manager.create_workspace.return_value = tmp_path
+    started = asyncio.Event()
+    release = asyncio.Event()
+    events: list[tuple[str, bool]] = []
+
+    async def clone(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+
+    async def progress(_job_id: str, name: str, active: bool) -> None:
+        events.append((name, active))
+
+    with (
+        patch("rootcoz.sources.base.asyncio.to_thread", side_effect=clone),
+        patch("rootcoz.engine.core.safe_update_clone_progress", side_effect=progress),
+    ):
+        task = asyncio.create_task(
+            setup_analysis_workspace(
+                manager, tests_repo_url="https://example.com/tests", job_id="job"
+            )
+        )
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            assert events == [("tests", True)]
+        finally:
+            release.set()
+        await task
+    assert events == [("tests", True), ("tests", False)]
 
 
 class TestLinkArtifactsToWorkspace:

@@ -158,12 +158,14 @@ class RootCozClient:
         """List configured AI credential providers without exposing keys."""
         return self._request("GET", "/api/user/ai-credentials")
 
-    def set_ai_credential(self, provider: str, api_key: str) -> dict[str, Any]:
-        """Save an AI provider key for the current user."""
+    def set_ai_credential(
+        self, provider: str, api_key: str, model: str
+    ) -> dict[str, Any]:
+        """Verify and save an AI provider key for the current user."""
         return self._request(
             "PUT",
             f"/api/user/ai-credentials/{quote(provider, safe='')}",
-            json={"api_key": api_key},
+            json={"api_key": api_key, "model": model},
         )
 
     def delete_ai_credential(self, provider: str) -> dict[str, Any]:

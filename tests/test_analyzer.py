@@ -289,21 +289,19 @@ class TestRunSingleAiAnalysis:
         failure = FailedTest(
             test_name="test_bar", error_message="err", stack_trace="st"
         )
-        parsed, sig = await run_single_ai_analysis(
-            failures=[failure],
-            console_context="",
-            repo_path=None,
-            ai_provider="claude",
-            ai_model="opus",
-            ai_call_timeout=None,
-            custom_prompt="",
-            artifacts_context="",
-            server_url="",
-            job_id="",
-        )
-        assert parsed.details == "CLI timeout"
-        assert parsed.classification == ""
-        assert isinstance(sig, str) and len(sig) == 64
+        with pytest.raises(RuntimeError, match="AI call failed"):
+            await run_single_ai_analysis(
+                failures=[failure],
+                console_context="",
+                repo_path=None,
+                ai_provider="claude",
+                ai_model="opus",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="",
+            )
         mock_cli.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -356,23 +354,20 @@ class TestRunSingleAiAnalysis:
         failure = FailedTest(
             test_name="test_foo", error_message="timeout", stack_trace="st"
         )
-        parsed, _sig = await run_single_ai_analysis(
-            failures=[failure],
-            console_context="",
-            repo_path=None,
-            ai_provider="cursor",
-            ai_model="cursor:grok",
-            ai_call_timeout=None,
-            custom_prompt="",
-            artifacts_context="",
-            server_url="",
-            job_id="job-1",
-        )
+        with pytest.raises(RuntimeError, match="AI returned empty response"):
+            await run_single_ai_analysis(
+                failures=[failure],
+                console_context="",
+                repo_path=None,
+                ai_provider="cursor",
+                ai_model="cursor:grok",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="job-1",
+            )
         assert mock_cli.await_count == 2
-        assert parsed.classification == ""
-        assert "empty response after retry" in parsed.details
-        assert "provider=cursor" in parsed.details
-        assert "model=cursor:grok" in parsed.details
 
     @pytest.mark.asyncio
     async def test_non_empty_first_response_does_not_retry(
@@ -2942,29 +2937,28 @@ async def test_run_orchestrated_analysis_success(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_orchestrated_analysis_ai_failure(tmp_path: Path) -> None:
-    """run_orchestrated_analysis keeps group result details on AI failure."""
+    """run_orchestrated_analysis must not turn failed calls into completed analyses."""
     f1 = FailedTest(test_name="test_a", error_message="err_a")
     groups = {"sig_1": [f1]}
 
     mock_result = AIResult(success=False, text="connection error")
     mock_result.record_usage = AsyncMock()
 
-    with patch(
-        "rootcoz.engine.core.call_ai_once",
-        new_callable=AsyncMock,
-        return_value=mock_result,
+    with (
+        patch(
+            "rootcoz.engine.core.call_ai_once",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ),
+        pytest.raises(RuntimeError, match="AI analysis failed"),
     ):
-        analyses, patterns = await run_orchestrated_analysis(
+        await run_orchestrated_analysis(
             groups=groups,
             console_context="console",
             repo_path=tmp_path,
             ai_provider="test",
             ai_model="test-model",
         )
-
-    assert len(analyses) == 1
-    assert "connection error" in analyses[0].analysis.details.lower()
-    assert len(patterns) == 0
 
 
 @pytest.mark.asyncio

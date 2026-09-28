@@ -504,14 +504,20 @@ async def setup_analysis_workspace(
             repo_name = derive_test_repo_name(
                 str(tests_repo_url), additional_repos_list
             )
-            await asyncio.to_thread(
-                repo_manager.clone_into,
-                str(tests_repo_url),
-                repo_path / repo_name,
-                depth=50,
-                branch=tests_repo_ref,
-                token=tests_repo_token or None,
-            )
+            from rootcoz.engine.core import safe_update_clone_progress
+
+            await safe_update_clone_progress(job_id, repo_name, True)
+            try:
+                await asyncio.to_thread(
+                    repo_manager.clone_into,
+                    str(tests_repo_url),
+                    repo_path / repo_name,
+                    depth=50,
+                    branch=tests_repo_ref,
+                    token=tests_repo_token or None,
+                )
+            finally:
+                await safe_update_clone_progress(job_id, repo_name, False)
             cloned_repos[repo_name] = repo_path / repo_name
             logger.info("Test repo cloned successfully into %s/", repo_name)
             repo_context = (
@@ -726,9 +732,13 @@ async def run_console_only_analysis(
             auth_header=auth_header,
         )
         return True, results, ""
-    except Exception as exc:
-        logger.exception("Console-only analysis failed")
-        return False, [], str(exc)
+    except RuntimeError, ValueError, OSError, TypeError:
+        logger.error("Console-only analysis failed")
+        return (
+            False,
+            [],
+            "AI analysis failed. Check provider credentials and try again.",
+        )
 
 
 def resolve_display_build_id(result_data: dict[str, Any]) -> str | int:

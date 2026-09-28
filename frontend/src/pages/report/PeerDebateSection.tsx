@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { PeerDebate } from '@/types'
+import type { FailureAnalysis, PeerDebate } from '@/types'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { PeerRoundEntry } from '@/components/shared/PeerRoundEntry'
@@ -9,9 +9,10 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 interface PeerDebateSectionProps {
   debate: PeerDebate
   repoUrls: RepoUrl[]
+  primaryUsage?: FailureAnalysis['token_usage']
 }
 
-export function PeerDebateSection({ debate, repoUrls }: PeerDebateSectionProps) {
+export function PeerDebateSection({ debate, repoUrls, primaryUsage }: PeerDebateSectionProps) {
   const [expanded, setExpanded] = useState(false)
 
   const groupedRounds = groupPeerRounds(debate.rounds)
@@ -49,7 +50,7 @@ export function PeerDebateSection({ debate, repoUrls }: PeerDebateSectionProps) 
               </p>
               <div className="space-y-2">
                 {entries.map((entry, i) => (
-                  <PeerRoundEntry key={`${entry.role}-${entry.ai_provider}-${i}`} entry={entry} repoUrls={repoUrls} />
+                  <PeerRoundEntry key={`${entry.role}-${entry.ai_provider}-${i}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} />
                 ))}
               </div>
             </div>

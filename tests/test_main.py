@@ -5104,6 +5104,63 @@ class TestProgressPhaseTracking:
     """Tests for progress_phase updates during shared CI source analysis."""
 
     @pytest.mark.asyncio
+    async def test_active_fetch_running_before_fetch_and_preserves_waiting(
+        self, temp_db_path: Path
+    ) -> None:
+        """Pending work becomes running on fetch; waiting remains waiting until fetch."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+            wait_for_completion=True,
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com",
+            jenkins_user="user",
+            jenkins_password=FAKE_JENKINS_PASSWORD,
+            wait_for_completion=True,
+        )
+        statuses: list[str] = []
+
+        async def wait(_source, _job_id):
+            statuses.append((await storage.get_result("fetch-job"))["status"])
+
+        async def fetch(_source):
+            row = await storage.get_result("fetch-job")
+            statuses.append(row["status"])
+            assert row["result"]["progress_phase"] == "fetching"
+            return CISourceResult(failures=[], skip_analysis=True)
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch("rootcoz.sources.jenkins_source.JenkinsSource.pre_fetch", wait),
+            patch("rootcoz.sources.jenkins_source.JenkinsSource.fetch", fetch),
+            _patch_preflight(),
+        ):
+            await storage.init_db()
+            await storage.save_result("fetch-job", "", "pending", {"job_name": "test"})
+            await _process_ci_source_analysis(
+                job_id="fetch-job",
+                body=body,
+                merged=merged,
+                display_name="test",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+        assert statuses == ["waiting", "running"]
+
     async def test_progress_phases_with_jenkins_wait(self, temp_db_path: Path) -> None:
         """Waiting path emits waiting_for_jenkins progress phase."""
         from rootcoz.main import _process_ci_source_analysis

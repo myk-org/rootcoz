@@ -6,7 +6,13 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz import storage
-from rootcoz.token_tracking import build_token_usage_summary
+from rootcoz.token_tracking import (
+    attach_failure_usage,
+    build_token_usage_summary,
+    child_usage_scope,
+    failure_group_usage,
+    record_ai_usage,
+)
 
 
 @pytest.fixture
@@ -22,6 +28,226 @@ def _storage(temp_db_path, _init_db):
     """Patch DB_PATH for all storage calls in the test."""
     with patch.object(storage, "DB_PATH", temp_db_path):
         yield
+
+
+@pytest.mark.asyncio
+async def test_group_usage_correlates_concurrent_primary_calls_only(_storage) -> None:
+    from types import SimpleNamespace
+
+    from rootcoz.models import AnalysisResult, FailureAnalysis
+
+    async def call(signature: str, tokens: int) -> None:
+        with failure_group_usage("group-job", signature):
+            await asyncio.sleep(0)
+            usage = SimpleNamespace(
+                provider="claude",
+                model="test",
+                input_tokens=tokens,
+                output_tokens=1,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
+                cost_usd=tokens / 100,
+                duration_ms=10,
+            )
+            await record_ai_usage(
+                "group-job",
+                SimpleNamespace(success=True, usage=usage, text="ok"),
+                "primary",
+                prompt_chars=tokens,
+            )
+            await storage.record_token_usage(
+                "group-job",
+                "claude",
+                "test",
+                "agent_routing",
+                input_tokens=300,
+                cost_usd=3,
+            )
+
+    await asyncio.gather(call("a", 10), call("b", 20))
+    records = await storage.get_token_usage_for_job("group-job")
+    assert sorted(
+        (r["call_type"], r["error_signature"]) for r in records if r["prompt_chars"]
+    ) == [("primary", "a"), ("primary", "b")]
+    assert all(
+        r["error_signature"] == "" for r in records if r["call_type"] == "agent_routing"
+    )
+
+    def failure(name: str, signature: str) -> dict:
+        return FailureAnalysis(
+            test_name=name, error="oops", analysis="ok", error_signature=signature
+        ).model_dump(mode="json")
+
+    result = AnalysisResult(
+        job_id="group-job", status="completed", summary="ok"
+    ).model_dump(mode="json")
+    result["failures"] = [
+        failure("one", "a"),
+        failure("two", "a"),
+        failure("three", "b"),
+        failure("old", "c"),
+    ]
+    await storage.save_result("group-job", status="completed", result=result)
+    saved = (await storage.get_result("group-job"))["result"]
+    assert [
+        f["token_usage"]["total_calls"] if f["token_usage"] else None
+        for f in saved["failures"]
+    ] == [1, 1, 1, None]
+    assert saved["token_usage"]["total_calls"] == len(records)
+    assert saved["token_usage"]["total_cost_usd"] == pytest.approx(6.3)
+    assert saved["failures"][0]["token_usage"]["total_cost_usd"] == pytest.approx(0.1)
+    assert saved["failures"][2]["token_usage"]["total_cost_usd"] == pytest.approx(0.2)
+    assert saved["failures"][0]["token_usage"]["total_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_child_failures_share_group_usage_and_stale_values_are_cleared(
+    _storage,
+) -> None:
+    await storage.record_token_usage(
+        "child",
+        "claude",
+        "test",
+        "primary",
+        input_tokens=7,
+        cost_usd=0.07,
+        error_signature="same",
+    )
+    child = {
+        "failures": [
+            {"error_signature": "same", "token_usage": {"total_calls": 999}},
+            {"error_signature": "other", "token_usage": {"total_calls": 999}},
+        ],
+        "failed_children": [{"failures": [{"error_signature": "same"}]}],
+    }
+    await storage.save_result(
+        "child", status="completed", result={"child_job_analyses": [child]}
+    )
+    failures = (await storage.get_result("child"))["result"]["child_job_analyses"][0]
+    assert failures["failures"][0]["token_usage"]["total_calls"] == 1
+    assert failures["failures"][1]["token_usage"] is None
+    assert (
+        failures["failed_children"][0]["failures"][0]["token_usage"]["total_cost_usd"]
+        == 0.07
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_primary_usage_is_not_attributed(_storage) -> None:
+    from rootcoz.models import AnalysisResult, FailureAnalysis
+
+    result = AnalysisResult(
+        job_id="legacy",
+        status="completed",
+        summary="ok",
+        failures=[
+            FailureAnalysis(
+                test_name="old", error="error", analysis="ok", error_signature="a"
+            )
+        ],
+    ).model_dump(mode="json")
+    await storage.record_token_usage(
+        "legacy",
+        "claude",
+        "test",
+        "primary",
+        cost_usd=2,
+        input_tokens=10,
+    )
+    await storage.save_result("legacy", status="completed", result=result)
+    saved = (await storage.get_result("legacy"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    assert saved["token_usage"]["total_cost_usd"] == 2
+
+
+@pytest.mark.asyncio
+async def test_child_usage_is_scoped_by_child_build_and_signature(_storage) -> None:
+    from types import SimpleNamespace
+
+    usage = SimpleNamespace(
+        provider="claude",
+        model="test",
+        input_tokens=5,
+        output_tokens=1,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        cost_usd=0.05,
+        duration_ms=1,
+    )
+
+    async def record(name: str, build: int) -> None:
+        with child_usage_scope(name, build), failure_group_usage("pipeline", "same"):
+            await asyncio.sleep(0)
+            await record_ai_usage(
+                "pipeline",
+                SimpleNamespace(success=True, usage=usage, text="ok"),
+                "primary",
+            )
+
+    await asyncio.gather(record("alpha", 1), record("beta", 1), record("alpha", 2))
+    records = await storage.get_token_usage_for_job("pipeline")
+    assert {(r["child_job_name"], r["child_build_number"]) for r in records} == {
+        ("alpha", 1),
+        ("beta", 1),
+        ("alpha", 2),
+    }
+    result = {
+        "failures": [{"error_signature": "same"}],
+        "child_job_analyses": [
+            {
+                "job_name": name,
+                "build_number": build,
+                "failures": [{"error_signature": "same"}, {"error_signature": "same"}],
+            }
+            for name, build in [("alpha", 1), ("beta", 1), ("alpha", 2)]
+        ],
+    }
+    await storage.save_result("pipeline", status="completed", result=result)
+    saved = (await storage.get_result("pipeline"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    for child in saved["child_job_analyses"]:
+        assert [f["token_usage"]["total_calls"] for f in child["failures"]] == [1, 1]
+    assert saved["token_usage"]["total_calls"] == 3
+
+
+def test_shared_signature_usage_does_not_mix_children() -> None:
+    records = [
+        {
+            "call_type": "primary",
+            "error_signature": "same",
+            "child_job_name": "a",
+            "child_build_number": 1,
+            "ai_provider": "test",
+            "ai_model": "test",
+            "input_tokens": 2,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 2,
+            "cost_usd": None,
+            "duration_ms": None,
+        },
+    ]
+    result = {
+        "child_job_analyses": [
+            {
+                "job_name": "a",
+                "build_number": 1,
+                "failures": [{"error_signature": "same"}],
+            },
+            {
+                "job_name": "b",
+                "build_number": 1,
+                "failures": [{"error_signature": "same"}],
+            },
+        ]
+    }
+    attach_failure_usage(result, records)
+    assert (
+        result["child_job_analyses"][0]["failures"][0]["token_usage"]["total_calls"]
+        == 1
+    )
+    assert result["child_job_analyses"][1]["failures"][0]["token_usage"] is None
 
 
 class TestRecordTokenUsage:

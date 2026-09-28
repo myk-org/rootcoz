@@ -20,6 +20,11 @@ import { useAuth } from '@/lib/auth'
 
 const phaseLabels: Record<string, string> = {
   waiting_for_jenkins: 'Waiting for Jenkins build to complete...',
+  waiting_for_build: 'Waiting for build to complete...',
+  fetching: 'Fetching test results...',
+  routing: 'Routing failure groups...',
+  cross_failure: 'Finding cross-failure patterns...',
+  cloning: 'Cloning repositories...',
   analyzing: 'Analyzing test failures with AI...',
   analyzing_child_jobs: 'Analyzing child job failures...',
   analyzing_failures: 'Analyzing test failures...',
@@ -27,7 +32,8 @@ const phaseLabels: Record<string, string> = {
   saving: 'Saving results...',
 }
 
-function getPhaseLabel(phase: string | undefined): string | undefined {
+function getPhaseLabel(phase: string | undefined, repos?: string[]): string | undefined {
+  if (phase === 'cloning' && repos?.length) return `Cloning repositories: ${repos.join(', ')}...`
   if (!phase) return undefined
   if (phaseLabels[phase]) return phaseLabels[phase]
 
@@ -211,7 +217,7 @@ export function StatusPage() {
   const stepLog: StepLogEntry[] = useMemo(
     () => progressLog.map(entry => ({
       phase: entry.phase,
-      label: getPhaseLabel(entry.phase) ?? entry.phase,
+      label: getPhaseLabel(entry.phase, entry.repos) ?? entry.phase,
       timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(),
     })),
     [progressLog],
@@ -427,7 +433,7 @@ export function StatusPage() {
                     {msg.title}
                   </h2>
                   <p className="mt-1 text-sm text-text-tertiary">
-                    {getPhaseLabel(progressPhase) ?? progressPhase ?? msg.subtitle}
+                    {getPhaseLabel(progressPhase, data?.result?.cloning_repos) ?? progressPhase ?? msg.subtitle}
                   </p>
                 </>
               )}

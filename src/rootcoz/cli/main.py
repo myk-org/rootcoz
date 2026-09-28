@@ -2855,6 +2855,9 @@ def ai_keys_list(json_output: bool = _JSON_OPTION) -> None:
 @ai_keys_app.command("set")
 def ai_keys_set(
     provider: str = typer.Argument(help="Exact AI provider ID."),
+    model: str = typer.Option(
+        ..., "--model", help="Model ID to verify the key against."
+    ),
     stdin: bool = typer.Option(False, "--stdin", help="Read key from standard input."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -2868,15 +2871,26 @@ def ai_keys_set(
         raise typer.Exit(1)
     _set_json(json_output)
     try:
-        _get_client().set_ai_credential(provider, api_key)
+        response = _get_client().set_ai_credential(provider, api_key, model)
     except RootCozError as err:
         _handle_error(
             RootCozError(err.status_code, err.detail.replace(api_key, "[REDACTED]"))
         )
-    logging.getLogger(__name__).info("Saved AI credential for provider %s", provider)
-    print_output(
-        {"status": "saved"}, columns=["status"], as_json=_state.get("json", False)
+    outcome = response.get("outcome", "inconclusive")
+    logging.getLogger(__name__).info(
+        "AI credential verification for provider %s: %s", provider, outcome
     )
+    message = {
+        "rejected": "Check the key and selected model; existing credential unchanged.",
+        "inconclusive": "Try again when the provider is available; existing credential unchanged.",
+    }.get(outcome)
+    print_output(
+        {"status": outcome, **({"message": message} if message else {})},
+        columns=["status", "message"] if message else ["status"],
+        as_json=_state.get("json", False),
+    )
+    if outcome != "accepted":
+        raise typer.Exit(1)
 
 
 @ai_keys_app.command("delete")

@@ -3839,31 +3839,68 @@ class TestAiKeysCommands:
         }
         assert "secret-key" not in result.output
 
-    def test_set_stdin_and_redaction(self, mock_client):
-        mock_client.set_ai_credential.return_value = {
-            "api_key": "secret-key"  # pragma: allowlist secret
-        }
+    @pytest.mark.parametrize(
+        "outcome,exit_code", [("accepted", 0), ("rejected", 1), ("inconclusive", 1)]
+    )
+    def test_set_verification_outcome(self, mock_client, outcome, exit_code):
+        mock_client.set_ai_credential.return_value = {"outcome": outcome}
         result = runner.invoke(
             app,
-            ["auth", "ai-keys", "set", "acpx/a", "--stdin", "--json"],
+            [
+                "auth",
+                "ai-keys",
+                "set",
+                "openai",
+                "--model",
+                "gpt-4o",
+                "--stdin",
+                "--json",
+            ],
+            input="secret-key\n",
+        )
+        assert result.exit_code == exit_code
+        assert outcome in result.output
+        if outcome == "rejected":
+            assert "Check the key" in result.output
+        if outcome == "inconclusive":
+            assert "Try again" in result.output
+        assert "secret-key" not in result.output
+        mock_client.set_ai_credential.assert_called_once_with(
+            "openai", "secret-key", "gpt-4o"
+        )
+
+    def test_set_stdin_and_redaction(self, mock_client):
+        mock_client.set_ai_credential.return_value = {"outcome": "accepted"}
+        result = runner.invoke(
+            app,
+            ["auth", "ai-keys", "set", "acpx/a", "--model", "m", "--stdin", "--json"],
             input="secret-key\n",
         )
         assert result.exit_code == 0
-        assert json.loads(result.output) == {"status": "saved"}
+        assert json.loads(result.output) == {"status": "accepted"}
         assert "secret-key" not in result.output
-        mock_client.set_ai_credential.assert_called_once_with("acpx/a", "secret-key")
+        mock_client.set_ai_credential.assert_called_once_with(
+            "acpx/a", "secret-key", "m"
+        )
 
     def test_set_interactive_hidden(self, mock_client):
+        mock_client.set_ai_credential.return_value = {"outcome": "accepted"}
         result = runner.invoke(
-            app, ["auth", "ai-keys", "set", "vertex"], input="secret-key\n"
+            app,
+            ["auth", "ai-keys", "set", "vertex", "--model", "m"],
+            input="secret-key\n",
         )
         assert result.exit_code == 0
         assert "secret-key" not in result.output
-        mock_client.set_ai_credential.assert_called_once_with("vertex", "secret-key")
+        mock_client.set_ai_credential.assert_called_once_with(
+            "vertex", "secret-key", "m"
+        )
 
     def test_set_rejects_empty_key(self, mock_client):
         result = runner.invoke(
-            app, ["auth", "ai-keys", "set", "vertex", "--stdin"], input="\n"
+            app,
+            ["auth", "ai-keys", "set", "vertex", "--model", "m", "--stdin"],
+            input="\n",
         )
         assert result.exit_code == 1
         mock_client.set_ai_credential.assert_not_called()
@@ -3871,7 +3908,9 @@ class TestAiKeysCommands:
     def test_set_error_redacts_key(self, mock_client):
         mock_client.set_ai_credential.side_effect = RootCozError(400, "Bad secret-key")
         result = runner.invoke(
-            app, ["auth", "ai-keys", "set", "vertex", "--stdin"], input="secret-key\n"
+            app,
+            ["auth", "ai-keys", "set", "vertex", "--model", "m", "--stdin"],
+            input="secret-key\n",
         )
         assert result.exit_code == 1
         assert "secret-key" not in result.output

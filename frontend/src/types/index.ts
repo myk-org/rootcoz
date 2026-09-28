@@ -109,6 +109,7 @@ export interface PeerRound {
   pattern: string
   details: string
   agrees_with_orchestrator: boolean | null
+  token_usage?: TokenUsageEntry | null
 }
 
 export interface PeerDebate {
@@ -135,6 +136,7 @@ export interface FailureAnalysis {
   error: string
   analysis: AnalysisDetail
   error_signature: string
+  token_usage?: TokenUsageSummary | null
   peer_debate?: PeerDebate | null
   previous_analysis?: AnalysisDetail | null
   previous_analyses?: PreviousAnalysis[] | null
@@ -181,7 +183,8 @@ export interface AnalysisResult {
   error?: string
   source_warnings?: string[]
   cross_failure_patterns?: CrossFailurePattern[]
-  progress_log?: Array<{ phase: string; timestamp: number }>
+  progress_log?: Array<{ phase: string; timestamp: number; repos?: string[] }>
+  cloning_repos?: string[]
   progress_phase?: string
   request_params?: {
     force_server_credentials?: boolean

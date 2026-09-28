@@ -5,6 +5,8 @@ import { api } from '@/lib/api'
 import { StatusPage } from '../StatusPage'
 import type { ResultResponse, TokenUsageSummary } from '@/types'
 
+Element.prototype.scrollIntoView = vi.fn()
+
 const { onStatusChanged } = vi.hoisted(() => ({ onStatusChanged: { current: undefined as (() => void) | undefined } }))
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), post: vi.fn() }, ApiError: class extends Error {} }))
 vi.mock('@/lib/SSEProvider', () => ({ useSSE: (_topic: string, handlers: Record<string, () => void>) => { onStatusChanged.current = handlers['status-changed'] } }))
@@ -58,6 +60,26 @@ describe('StatusPage usage', () => {
     renderPage()
     await waitFor(() => expect(screen.getByText(/100 in \/ 20 out · Unavailable/)).toBeInTheDocument())
     expect(screen.queryByText(/\$0.00/)).not.toBeInTheDocument()
+  })
+
+  it('shows active clone repo names and completed clone snapshots', async () => {
+    get.mockResolvedValue({ ...result('running'), result: {
+      ...result('running').result!, progress_phase: 'cloning', cloning_repos: ['tests', 'extra'],
+      progress_log: [{ phase: 'cloning', repos: ['tests'], timestamp: 1 }, { phase: 'cloning', repos: ['tests', 'extra'], timestamp: 2 }],
+    } })
+    renderPage()
+    await waitFor(() => expect(screen.getAllByText(/Cloning repositories: tests, extra/).length).toBeGreaterThan(1))
+    expect(screen.getByText(/Cloning repositories: tests\.\.\./)).toBeInTheDocument()
+  })
+
+  it.each([
+    ['fetching', 'Fetching test results...'],
+    ['routing', 'Routing failure groups...'],
+    ['cross_failure', 'Finding cross-failure patterns...'],
+  ])('labels %s progress', async (phase, label) => {
+    get.mockResolvedValue({ ...result('running'), result: { ...result('running').result!, progress_phase: phase, progress_log: [{ phase, timestamp: 1 }] } })
+    renderPage()
+    expect((await screen.findAllByText(label)).length).toBeGreaterThan(0)
   })
 
   it('does not show cost when there is no usage', async () => {

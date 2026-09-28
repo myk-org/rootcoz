@@ -542,6 +542,7 @@ class PeerRound(BaseModel):
     agrees_with_orchestrator: bool | None = (
         None  # None = failed/excluded from consensus
     )
+    token_usage: TokenUsageEntry | None = None
 
 
 class PeerDebate(BaseModel):
@@ -571,6 +572,10 @@ class FailureAnalysis(BaseModel):
     peer_debate: PeerDebate | None = Field(
         default=None,
         description="Peer debate trail (present only when peer analysis was used)",
+    )
+    token_usage: TokenUsageSummary | None = Field(
+        default=None,
+        description="Primary AI usage for this failure's signature; shared by group members",
     )
 
     @field_validator("analysis", mode="before")
@@ -616,6 +621,9 @@ class ChildJobAnalysis(BaseModel):
     note: str | None = Field(
         default=None, description="Additional notes (e.g., max depth reached)"
     )
+    all_groups_failed: bool = Field(
+        default=False, description="Every attempted AI group for this child failed"
+    )
     passed_count: int = Field(default=0, description="Number of passed tests")
     skipped_count: int = Field(default=0, description="Number of skipped tests")
     failed_count: int = Field(default=0, description="Number of failed tests")
@@ -634,6 +642,7 @@ class TokenUsageEntry(BaseModel):
     provider: str = ""
     model: str = ""
     call_type: str = ""
+    error_signature: str = ""
     credential_source: str = "unknown"
     input_tokens: int = 0
     output_tokens: int = 0

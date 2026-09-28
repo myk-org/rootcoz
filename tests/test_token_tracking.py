@@ -53,6 +53,9 @@ class TestRecordAiUsage:
                 prompt_chars=500,
                 response_chars=len("analysis output"),
                 credential_source="unknown",
+                error_signature="",
+                child_job_name="",
+                child_build_number=0,
             )
 
     @pytest.mark.asyncio

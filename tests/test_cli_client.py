@@ -1745,7 +1745,7 @@ class TestRootCozClientAiCredentials:
         assert client.list_ai_credentials() == {
             "providers": [{"provider": "acpx/a", "configured": False}]
         }
-        client.set_ai_credential("acpx/a", "secret-key")
+        client.set_ai_credential("acpx/a", "secret-key", "model-1")
         client.delete_ai_credential("acpx/a")
         assert [r.method for r in requests] == ["GET", "PUT", "DELETE"]
         assert requests[0].url.path == "/api/user/ai-credentials"
@@ -1753,7 +1753,8 @@ class TestRootCozClientAiCredentials:
             r.url.raw_path == b"/api/user/ai-credentials/acpx%2Fa" for r in requests[1:]
         )
         assert json.loads(requests[1].content) == {
-            "api_key": "secret-key"  # pragma: allowlist secret
+            "api_key": "secret-key",  # pragma: allowlist secret
+            "model": "model-1",
         }
         assert b"secret-key" not in requests[2].content
 

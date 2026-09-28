@@ -689,6 +689,71 @@ class TestBuildPeerReviewPrompt:
 
 class TestAnalyzeWithPeers:
     @pytest.mark.asyncio
+    async def test_usage_stays_with_each_duplicate_peer_and_revision(
+        self, monkeypatch
+    ) -> None:
+        """Per-call usage survives duplicate models, failed calls, and new rounds."""
+        from pi_sidecar_client import AITokenUsage
+
+        responses = iter(
+            [
+                AIResult(
+                    success=True,
+                    text=_make_ai_json_response(),
+                    usage=AITokenUsage(input_tokens=99, output_tokens=9, cost_usd=0.09),
+                ),
+                AIResult(
+                    success=True,
+                    text=_make_peer_json_response(False, "PRODUCT BUG"),
+                    usage=AITokenUsage(input_tokens=11, output_tokens=1, cost_usd=0.01),
+                ),
+                AIResult(
+                    success=False,
+                    text="failed",
+                    usage=AITokenUsage(input_tokens=22, output_tokens=2, cost_usd=0.02),
+                ),
+                AIResult(
+                    success=True,
+                    text=_make_ai_json_response(),
+                    usage=AITokenUsage(input_tokens=33, output_tokens=3, cost_usd=0.03),
+                ),
+                AIResult(
+                    success=True,
+                    text=_make_peer_json_response(),
+                    usage=AITokenUsage(input_tokens=44, output_tokens=4, cost_usd=0.04),
+                ),
+                AIResult(
+                    success=True,
+                    text=_make_peer_json_response(),
+                    usage=AITokenUsage(input_tokens=55, output_tokens=5, cost_usd=0.05),
+                ),
+            ]
+        )
+
+        async def ai_call(*_args, **_kwargs):
+            return next(responses)
+
+        result = await _run_peer_analysis(
+            monkeypatch,
+            ai_call,
+            peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")] * 2,
+            max_rounds=2,
+        )
+        rounds = result[0].peer_debate.rounds
+        assert [
+            (r.round, r.role, r.token_usage.input_tokens if r.token_usage else None)
+            for r in rounds
+        ] == [
+            (1, "orchestrator", None),
+            (1, "peer", 11),
+            (1, "peer", 22),
+            (2, "orchestrator", 33),
+            (2, "peer", 44),
+            (2, "peer", 55),
+        ]
+        assert [r.token_usage.cost_usd for r in rounds[1:3]] == [0.01, 0.02]
+
+    @pytest.mark.asyncio
     async def test_analyze_with_peers_consensus_round_1(self) -> None:
         """All peers agree in round 1 -> consensus reached, 1 round used."""
         from unittest.mock import AsyncMock

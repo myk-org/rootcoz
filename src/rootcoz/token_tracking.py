@@ -5,7 +5,10 @@ and build token usage summaries for analysis results.
 """
 
 import os
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from pi_sidecar_client import AIResult
@@ -17,6 +20,66 @@ from rootcoz.models import TokenUsageEntry, TokenUsageSummary
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 _on_usage_recorded: Callable[[str], None] | None = None
+_group_context: ContextVar[tuple[str, str] | None] = ContextVar(
+    "failure_group_usage", default=None
+)
+_child_context: ContextVar[tuple[str, int] | None] = ContextVar(
+    "child_usage_scope", default=None
+)
+
+
+@contextmanager
+def child_usage_scope(job_name: str, build_number: int) -> Iterator[None]:
+    """Scope primary usage to a Jenkins child build, including nested analyses."""
+    token = _child_context.set((job_name, build_number))
+    try:
+        yield
+    finally:
+        _child_context.reset(token)
+
+
+@contextmanager
+def failure_group_usage(job_id: str, error_signature: str) -> Iterator[None]:
+    """Scope primary call attribution to this job and failure group."""
+    token = _group_context.set((job_id, error_signature))
+    try:
+        yield
+    finally:
+        _group_context.reset(token)
+
+
+def attach_failure_usage(result: dict[str, Any], records: list[dict[str, Any]]) -> None:
+    """Attach per-signature primary usage to every matching failure, without splitting it."""
+    grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        if record["call_type"] == "primary" and record.get("error_signature"):
+            key = (
+                record.get("child_job_name") or "",
+                record.get("child_build_number") or 0,
+                record["error_signature"],
+            )
+            grouped[key].append(record)
+
+    summaries = {
+        key: summarize_token_usage(calls).model_dump(mode="json")
+        for key, calls in grouped.items()
+    }
+
+    def apply(
+        node: dict[str, Any], child_name: str = "", build_number: int = 0
+    ) -> None:
+        for failure in node.get("failures") or []:
+            if isinstance(failure, dict):
+                signature: str = failure.get("error_signature") or ""
+                failure["token_usage"] = summaries.get(
+                    (child_name, build_number, signature)
+                )
+        for child in (node.get("child_job_analyses") or []) + (
+            node.get("failed_children") or []
+        ):
+            apply(child, child.get("job_name") or "", child.get("build_number") or 0)
+
+    apply(result)
 
 
 def set_usage_callback(callback: Callable[[str], None]) -> None:
@@ -46,6 +109,8 @@ async def record_ai_usage(
         resolved_provider = (usage.provider if usage else "") or ai_provider
         resolved_model = (usage.model if usage else "") or ai_model
 
+        group = _group_context.get() if call_type == "primary" else None
+        child = _child_context.get() if group and group[0] == job_id else None
         await storage.record_token_usage(
             job_id=job_id,
             ai_provider=resolved_provider,
@@ -60,7 +125,12 @@ async def record_ai_usage(
             prompt_chars=prompt_chars,
             response_chars=len(result.text),
             credential_source=getattr(result, "credential_source", "unknown"),
+            error_signature=group[1] if group and group[0] == job_id else "",
+            child_job_name=child[0] if child else "",
+            child_build_number=child[1] if child else 0,
         )
+        if group and group[0] == job_id:
+            logger.info("Recorded primary usage for job %s group %s", job_id, group[1])
         if _on_usage_recorded:
             _on_usage_recorded(job_id)
     except Exception:

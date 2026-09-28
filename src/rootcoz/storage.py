@@ -1060,11 +1060,23 @@ async def init_db() -> None:
                 duration_ms INTEGER,
                 prompt_chars INTEGER NOT NULL DEFAULT 0,
                 response_chars INTEGER NOT NULL DEFAULT 0,
-                credential_source TEXT NOT NULL DEFAULT 'unknown'
+                credential_source TEXT NOT NULL DEFAULT 'unknown',
+                error_signature TEXT NOT NULL DEFAULT '',
+                child_job_name TEXT NOT NULL DEFAULT '',
+                child_build_number INTEGER NOT NULL DEFAULT 0
             )
         """)
         await _migrate_add_column(
             db, "ai_token_usage", "credential_source", "TEXT NOT NULL DEFAULT 'unknown'"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "error_signature", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "child_job_name", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "child_build_number", "INTEGER NOT NULL DEFAULT 0"
         )
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ai_session_sources (
@@ -1825,6 +1837,22 @@ async def _sync_result_token_usage(
     """Keep analysis writes from replacing newer per-call usage."""
     if summary := await _token_usage_snapshot(db, job_id):
         result["token_usage"] = summary
+    await _attach_failure_usage(db, job_id, result)
+
+
+async def _attach_failure_usage(
+    db: aiosqlite.Connection, job_id: str, result: dict[str, Any]
+) -> None:
+    from rootcoz.token_tracking import attach_failure_usage
+
+    rows = await (
+        await db.execute(
+            "SELECT * FROM ai_token_usage WHERE job_id = ? AND call_type = 'primary' "
+            "AND error_signature != '' ORDER BY created_at, rowid",
+            (job_id,),
+        )
+    ).fetchall()
+    attach_failure_usage(result, [dict(row) for row in rows])
 
 
 async def save_result(
@@ -1907,6 +1935,21 @@ async def update_status(
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
+            cursor = await db.execute(
+                "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+            )
+            row = await cursor.fetchone()
+            previous = (
+                parse_result_json(row[0], job_id=job_id) if row and row[0] else None
+            )
+            if previous:
+                for key in ("progress_phase", "progress_log", "cloning_repos"):
+                    if key in previous:
+                        result[key] = previous[key]
+            if status in ("failed", "aborted", "completed"):
+                result["cloning_repos"] = []
+                if status != "completed":
+                    result["progress_phase"] = status
             await _sync_result_token_usage(db, job_id, result)
         result_json = json.dumps(result) if result is not None else None
         set_parts, params = _build_status_update_clause(status, result_json, result)
@@ -2014,6 +2057,26 @@ def _make_progress_phase_patcher(phase: str) -> Callable[[dict[str, Any]], None]
     return _patcher
 
 
+async def update_clone_progress(job_id: str, repo_name: str, started: bool) -> None:
+    """Persist the currently cloning repository names and a snapshot for refresh."""
+
+    def patch(data: dict[str, Any]) -> None:
+        names = set(data.get("cloning_repos") or [])
+        if started:
+            names.add(repo_name)
+            if data.get("progress_phase") not in ("failed", "aborted", "completed"):
+                data["progress_phase"] = "cloning"
+        else:
+            names.discard(repo_name)
+        data["cloning_repos"] = sorted(names)
+        if data.get("progress_phase") == "cloning":
+            data.setdefault("progress_log", []).append(
+                {"phase": "cloning", "repos": sorted(names), "timestamp": time.time()}
+            )
+
+    await patch_result_json(job_id, patch, skip_terminal=True)
+
+
 async def update_progress_phase(job_id: str, phase: str) -> None:
     """Update the ``progress_phase`` field in the stored result JSON.
 
@@ -2030,6 +2093,8 @@ async def update_progress_phase(job_id: str, phase: str) -> None:
 async def patch_result_json(
     job_id: str,
     patch_fn: Callable[[dict[str, Any]], None],
+    *,
+    skip_terminal: bool = False,
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
@@ -2044,15 +2109,20 @@ async def patch_result_json(
     columns — missing keys leave existing column values unchanged.
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
+    ``skip_terminal`` also prevents patches to failed, aborted, or completed jobs.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute(
-                "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+                "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
             )
             row = await cursor.fetchone()
-            if not row or not row[0]:
+            if (
+                not row
+                or not row[0]
+                or (skip_terminal and row[1] in ("failed", "aborted", "completed"))
+            ):
                 await db.execute("ROLLBACK")
                 return
             result_data = parse_result_json(row[0], job_id=job_id)
@@ -2223,6 +2293,7 @@ async def get_result(
                 await _backfill_failure_uuids(job_id, parsed)
                 if summary := await _token_usage_snapshot(db, job_id):
                     parsed["token_usage"] = summary
+                await _attach_failure_usage(db, job_id, parsed)
             if parsed and strip_sensitive:
                 parsed = strip_sensitive_from_response(parsed)
             row_data = dict(row)
@@ -6179,6 +6250,9 @@ async def record_token_usage(
     prompt_chars: int = 0,
     response_chars: int = 0,
     credential_source: str = "unknown",
+    error_signature: str = "",
+    child_job_name: str = "",
+    child_build_number: int = 0,
 ) -> str:
     """Record a single AI call's token usage. Returns the record ID."""
     record_id = str(uuid.uuid4())
@@ -6188,8 +6262,9 @@ async def record_token_usage(
             "INSERT INTO ai_token_usage "
             "(id, job_id, ai_provider, ai_model, call_type, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
-            "prompt_chars, response_chars, credential_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "prompt_chars, response_chars, credential_source, error_signature, "
+            "child_job_name, child_build_number) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -6206,6 +6281,9 @@ async def record_token_usage(
                 prompt_chars,
                 response_chars,
                 credential_source,
+                error_signature if call_type == "primary" else "",
+                child_job_name if call_type == "primary" else "",
+                child_build_number if call_type == "primary" else 0,
             ),
         )
         await db.commit()
