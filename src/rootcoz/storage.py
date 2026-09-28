@@ -5655,11 +5655,15 @@ async def save_ai_session_source(
     provider: str,
     source: str,
     expected_account_id: int | None = None,
+    *,
+    bootstrap_admin: bool = False,
 ) -> None:
     """Remember the source of a sidecar session, never its key."""
+    if bootstrap_admin and (username != "admin" or expected_account_id is not None):
+        raise ValueError("Invalid bootstrap admin session owner")
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
-        if expected_account_id is not None:
+        if expected_account_id is not None or bootstrap_admin:
             collision = await (
                 await db.execute(
                     "SELECT 1 FROM ai_session_sources WHERE session_id = ?",
@@ -5668,6 +5672,12 @@ async def save_ai_session_source(
             ).fetchone()
             if collision:
                 raise AiSessionCollisionError("AI session ID already active")
+        if bootstrap_admin:
+            account = await (
+                await db.execute("SELECT 1 FROM users WHERE username = 'admin'")
+            ).fetchone()
+            if account:
+                raise LookupError("Bootstrap admin account unexpectedly exists")
         if expected_account_id is not None:
             account = await (
                 await db.execute(

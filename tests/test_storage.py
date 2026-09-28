@@ -17,6 +17,20 @@ async def setup_test_db(temp_db_path: Path):
         yield temp_db_path
 
 
+async def test_bootstrap_admin_flag_rejects_missing_normal_user(
+    setup_test_db: Path,
+) -> None:
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        with pytest.raises(ValueError, match="Invalid bootstrap admin"):
+            await storage.save_ai_session_source(
+                "new-session", "missing", "openai", "server", bootstrap_admin=True
+            )
+        assert (
+            await storage.get_ai_session_source("new-session", "missing", "openai")
+            == "unknown"
+        )
+
+
 @pytest.mark.parametrize("recreate", [False, True])
 async def test_server_provenance_refuses_deleted_or_reused_account(
     setup_test_db: Path, recreate: bool

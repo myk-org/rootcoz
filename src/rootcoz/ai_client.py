@@ -760,14 +760,19 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
 
 
 async def _remember_session_source(
-    session_id: str, provider: str, account_id: int
+    session_id: str, provider: str, account_id: int | None
 ) -> None:
     """Persist server ownership or discard a session with no valid owner."""
     from rootcoz.storage import AiSessionCollisionError, save_ai_session_source
 
     try:
         await save_ai_session_source(
-            session_id, ai_username.get(), provider, "server", account_id
+            session_id,
+            ai_username.get(),
+            provider,
+            "server",
+            account_id,
+            bootstrap_admin=account_id is None,
         )
     except AiSessionCollisionError:
         # The sidecar returned an ID already owned by another session.
@@ -939,7 +944,11 @@ async def call_ai(
         from rootcoz.storage import get_user_by_username
 
         account = await get_user_by_username(username) if username else None
-        account_id = account["id"] if account else -1
+        if account is None and username != "admin":
+            raise LookupError(
+                "AI session owner account changed during session creation"
+            )
+        account_id = account["id"] if account else None
     if session_id and source == "user":
         # Only the current owner's provider key can redact a keyed session.
         key = await session_key(provider)

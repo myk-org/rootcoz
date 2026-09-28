@@ -670,6 +670,7 @@ def test_budget_skip_on_rebuild_preserves_graph_and_retries_on_expiry(
 
 
 def test_malformed_other_graph_does_not_block_build(tmp_path, monkeypatch):
+    deterministic_disk_size(monkeypatch)
     workspace = tmp_path / "workspace"
     repo = workspace / "good"
     repo.mkdir(parents=True)
@@ -687,10 +688,8 @@ def test_malformed_other_graph_does_not_block_build(tmp_path, monkeypatch):
     monkeypatch.setattr(graft, "_run", run)
     monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
     monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 2000)
-    assert (
-        graft.index_repositories(workspace, {"good": repo})["good"]["status"]
-        == "indexed"
-    )
+    outcome = graft.index_repositories(workspace, {"good": repo})["good"]
+    assert outcome["status"] == "indexed", outcome
     assert (bad / "link").is_symlink()
     assert (bad / "data").exists()
 

@@ -75,8 +75,10 @@ def test_build_catalog_groups_duplicate_model_ids_by_exact_provider() -> None:
     [("openai", "gpt-5.4"), ("cli-cursor", "cursor:cursor-grok-4.6-high")],
 )
 async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
-    monkeypatch: pytest.MonkeyPatch, provider: str, model: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path, provider: str, model: str
 ) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sessions.db")
+    await storage.init_db()
     monkeypatch.setattr(
         ai_client,
         "_list_models_raw",
@@ -86,13 +88,69 @@ async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
     call = AsyncMock(return_value=result)
     monkeypatch.setattr(ai_client, "_call_ai", call)
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
-
-    assert (
-        await call_ai_under_test("prompt", ai_provider=provider, ai_model=model)
-        is result
-    )
+    token = ai_client.ai_username.set("admin")
+    force_token = ai_client.force_server_credentials.set(True)
+    try:
+        assert (
+            await call_ai_under_test("prompt", ai_provider=provider, ai_model=model)
+            is result
+        )
+    finally:
+        ai_client.force_server_credentials.reset(force_token)
+        ai_client.ai_username.reset(token)
     assert result.credential_source == "server"
     call.assert_awaited_once_with("prompt", ai_provider=provider, ai_model=model)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_admin_server_session_is_saved(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sessions.db")
+    await storage.init_db()
+    ai_client.update_model_catalog([{"provider": "openai", "id": "model"}])
+    token = ai_client.ai_username.set("admin")
+    call = AsyncMock(
+        return_value=AIResult(success=True, text="reply", session_id="new-session")
+    )
+    monkeypatch.setattr(ai_client, "_call_ai", call)
+    try:
+        result = await call_ai_under_test(
+            "prompt", ai_provider="openai", ai_model="model"
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+    assert result.success and result.text == "reply"
+    assert result.credential_source == "server"
+    assert (
+        await storage.get_ai_session_source("new-session", "admin", "openai")
+        == "server"
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_normal_user_cannot_create_server_session(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sessions.db")
+    await storage.init_db()
+    ai_client.update_model_catalog([{"provider": "openai", "id": "model"}])
+    token = ai_client.ai_username.set("missing")
+    call = AsyncMock(
+        return_value=AIResult(success=True, text="reply", session_id="new-session")
+    )
+    monkeypatch.setattr(ai_client, "_call_ai", call)
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    try:
+        with pytest.raises(LookupError, match="account changed"):
+            await call_ai_under_test("prompt", ai_provider="openai", ai_model="model")
+    finally:
+        ai_client.ai_username.reset(token)
+    call.assert_not_awaited()
+    assert (
+        await storage.get_ai_session_source("new-session", "missing", "openai")
+        == "unknown"
+    )
 
 
 @pytest.mark.asyncio
