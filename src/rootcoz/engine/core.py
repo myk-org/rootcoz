@@ -122,13 +122,21 @@ async def clone_additional_repos(
                     _active_clones -= 1
 
             clone_task = None
+            outcome = "cancelled"
             try:
                 if reanalysis:
                     await safe_update_clone_progress(
-                        job_id, ar.name, True, reanalysis=True
+                        job_id,
+                        ar.name,
+                        True,
+                        reanalysis=True,
+                        url=str(ar.url),
+                        ref=ar.ref,
                     )
                 else:
-                    await safe_update_clone_progress(job_id, ar.name, True)
+                    await safe_update_clone_progress(
+                        job_id, ar.name, True, url=str(ar.url), ref=ar.ref
+                    )
                 clone_task = asyncio.create_task(
                     asyncio.to_thread(
                         repo_manager.clone_into,
@@ -142,16 +150,20 @@ async def clone_additional_repos(
                 clone_task.add_done_callback(release_slot)
                 await asyncio.shield(clone_task)
                 cloned[ar.name] = target
+                outcome = "cloned"
+            except Exception:
+                outcome = "failed"
+                raise
             finally:
                 if clone_task is None:
                     with _clone_lock:
                         _active_clones -= 1
-                if reanalysis:
-                    await safe_update_clone_progress(
-                        job_id, ar.name, False, reanalysis=True
-                    )
-                else:
+                if outcome == "cloned" and not reanalysis:
                     await safe_update_clone_progress(job_id, ar.name, False)
+                else:
+                    await safe_update_clone_progress(
+                        job_id, ar.name, False, state=outcome, reanalysis=reanalysis
+                    )
             logger.info(f"Cloned additional repo '{ar.name}' into {target}")
         except (GitCommandError, ValueError, OSError, RuntimeError) as e:
             # non-fatal additional repo clone failure
@@ -194,21 +206,40 @@ async def safe_update_progress(job_id: str | None, phase: str) -> None:
 
 
 async def safe_update_clone_progress(
-    job_id: str | None, repo_name: str, started: bool, *, reanalysis: bool = False
+    job_id: str | None,
+    repo_name: str,
+    started: bool,
+    *,
+    state: str = "cloned",
+    reanalysis: bool = False,
+    url: str = "",
+    ref: str = "",
 ) -> None:
-    """Persist a clone snapshot and notify job SSE listeners without blocking clones on DB errors."""
+    """Persist a named clone transition and notify SSE listeners."""
     if not job_id:
         return
     try:
         if reanalysis:
-            await update_clone_progress(job_id, repo_name, started, reanalysis=True)
+            await update_clone_progress(
+                job_id,
+                repo_name,
+                started,
+                state=state,
+                reanalysis=True,
+                url=url,
+                ref=ref,
+            )
+        elif started:
+            await update_clone_progress(job_id, repo_name, started, url=url, ref=ref)
+        elif state != "cloned":
+            await update_clone_progress(job_id, repo_name, started, state=state)
         else:
             await update_clone_progress(job_id, repo_name, started)
         if _on_progress_updated:
             _on_progress_updated(job_id)
         logger.info(
             "Repository clone %s: job=%s repo=%s",
-            "started" if started else "finished",
+            "cloning" if started else state,
             job_id,
             repo_name,
         )

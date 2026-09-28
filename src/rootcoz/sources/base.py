@@ -506,7 +506,10 @@ async def setup_analysis_workspace(
             )
             from rootcoz.engine.core import safe_update_clone_progress
 
-            await safe_update_clone_progress(job_id, repo_name, True)
+            await safe_update_clone_progress(
+                job_id, repo_name, True, url=str(tests_repo_url), ref=tests_repo_ref
+            )
+            outcome = "cancelled"
             try:
                 await asyncio.to_thread(
                     repo_manager.clone_into,
@@ -516,8 +519,17 @@ async def setup_analysis_workspace(
                     branch=tests_repo_ref,
                     token=tests_repo_token or None,
                 )
+                outcome = "cloned"
+            except Exception:
+                outcome = "failed"
+                raise
             finally:
-                await safe_update_clone_progress(job_id, repo_name, False)
+                if outcome == "cloned":
+                    await safe_update_clone_progress(job_id, repo_name, False)
+                else:
+                    await safe_update_clone_progress(
+                        job_id, repo_name, False, state=outcome
+                    )
             cloned_repos[repo_name] = repo_path / repo_name
             logger.info("Test repo cloned successfully into %s/", repo_name)
             repo_context = (

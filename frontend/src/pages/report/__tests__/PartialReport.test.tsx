@@ -17,8 +17,9 @@ function showReport(childOnly = false) {
       status: 'completed', summary: '1 analyzed successfully. 1 group(s) failed; check server logs.',
       failed_analysis_groups: 1, passed_count: 3, ai_provider: '', ai_model: '',
       failures: [], child_job_analyses: childOnly ? [{
-        job_name: 'leaf', build_number: 2, failures: [], failed_children: [],
-        all_groups_failed: true, note: 'Child console analysis failed',
+        id: 'leaf-2', job_name: 'leaf', build_number: 2, jenkins_url: null, summary: null,
+        failures: [], failed_children: [], all_groups_failed: true,
+        note: 'Child console analysis failed',
       }] : [],
     },
   }

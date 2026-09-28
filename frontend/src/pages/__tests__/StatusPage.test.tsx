@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { StatusPage } from '../StatusPage'
@@ -62,14 +63,161 @@ describe('StatusPage usage', () => {
     expect(screen.queryByText(/\$0.00/)).not.toBeInTheDocument()
   })
 
-  it('shows active clone repo names and completed clone snapshots', async () => {
-    get.mockResolvedValue({ ...result('running'), result: {
-      ...result('running').result!, progress_phase: 'cloning', cloning_repos: ['tests', 'extra'],
-      progress_log: [{ phase: 'cloning', repos: ['tests'], timestamp: 1 }, { phase: 'cloning', repos: ['tests', 'extra'], timestamp: 2 }],
+  it('groups clone transitions in one chronological stage and refreshes repo states via SSE', async () => {
+    const base = result('running')
+    const log = [
+      { phase: 'fetching', timestamp: 1 },
+      { phase: 'cloning', repo: 'tests', state: 'cloning' as const, timestamp: 2 },
+      { phase: 'cloning', repo: 'extra', state: 'cloning' as const, timestamp: 3 },
+      { phase: 'cloning', repo: 'tests', state: 'cloned' as const, timestamp: 4 },
+      { phase: 'routing', timestamp: 5 },
+    ]
+    const params = { ai_provider: 'gemini', ai_model: 'test', tests_repo_url: 'https://secret:token@example.com/tests.git', tests_repo_ref: 'main', additional_repos: [{ name: 'extra', url: 'https://user:pass@example.com/extra.git', ref: 'dev' }] } // pragma: allowlist secret
+    get.mockResolvedValueOnce({ ...base, result: { ...base.result!, request_params: params, progress_phase: 'routing', progress_log: log } })
+      .mockResolvedValueOnce({ ...base, result: { ...base.result!, request_params: params, progress_phase: 'routing', progress_log: [...log, { phase: 'cloning', repo: 'extra', state: 'failed', timestamp: 6 }] } })
+    const user = userEvent.setup()
+    renderPage()
+    await screen.findByText('Cloning')
+    const timeline = screen.getByText('Progress').parentElement!.parentElement!
+    expect(timeline.textContent).toMatch(/Fetching test results.*Cloning.*Routing failure groups/)
+    expect(screen.getAllByText('Cloning')).toHaveLength(1)
+    expect(timeline.textContent).toMatch(/tests · https:\/\/example.com\/tests.git · main\s*cloned/)
+    expect(timeline.textContent).toMatch(/extra · https:\/\/example.com\/extra.git · dev\s*cloning/)
+    const toggle = screen.getByRole('button', { name: 'Cloning' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('extra')).toBeVisible()
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(timeline.querySelector('#clone-repos')).toHaveAttribute('hidden')
+    expect(screen.getByText('extra')).not.toBeVisible()
+    expect(timeline).toHaveTextContent('Routing failure groups')
+    expect(timeline).not.toHaveTextContent('secret')
+    expect(timeline).not.toHaveTextContent('token')
+    expect(timeline).not.toHaveTextContent('user:pass')
+    await act(async () => { onStatusChanged.current?.() })
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(timeline.querySelector('#clone-repos')).toHaveAttribute('hidden')
+    expect(screen.getByText('extra')).not.toBeVisible()
+    toggle.focus()
+    await user.keyboard('{Enter}')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(timeline.querySelector('#clone-repos')).not.toHaveAttribute('hidden')
+    await waitFor(() => expect(timeline.textContent).toMatch(/extra · https:\/\/example.com\/extra.git · dev\s*failed/))
+    expect(screen.getByText('extra')).toBeVisible()
+    expect(screen.getAllByText('Cloning')).toHaveLength(1)
+  })
+
+  it('groups legacy clone snapshots on page load', async () => {
+    const base = result('running')
+    get.mockResolvedValue({ ...base, result: { ...base.result!, progress_log: [
+      { phase: 'cloning', repos: ['tests'], timestamp: 1 },
+      { phase: 'cloning', repos: [], timestamp: 2 },
+    ] } })
+    renderPage()
+    await screen.findByText('Cloning')
+    expect(screen.getAllByText('Cloning')).toHaveLength(1)
+    expect(screen.getByText('tests').parentElement).toHaveTextContent('URL unavailable · default')
+    expect(screen.getByText('tests').parentElement).toHaveTextContent('cloned')
+  })
+
+  it('shows one row per concurrent clone with its URL, ref and latest state, preserving other stages', async () => {
+    const running = result('running')
+    get.mockResolvedValue({ ...running, result: { ...running.result!, progress_phase: 'cloning',
+      request_params: { ai_provider: 'gemini', ai_model: 'test', additional_repos: [
+        { name: 'alpha', url: 'https://secret:password@example.com/org/alpha.git', ref: 'release/very-long-branch-name' }, // pragma: allowlist secret
+        { name: 'beta', url: 'https://example.com/org/beta.git', ref: 'main' },
+      ] },
+      progress_log: [
+        { phase: 'fetching', timestamp: 1 },
+        { phase: 'cloning', repo: 'alpha', state: 'cloning', timestamp: 2 },
+        { phase: 'cloning', repo: 'beta', state: 'cloning', timestamp: 3 },
+        { phase: 'cloning', repo: 'alpha', state: 'cloned', timestamp: 4 },
+      ],
     } })
     renderPage()
-    await waitFor(() => expect(screen.getAllByText(/Cloning repositories: tests, extra/).length).toBeGreaterThan(1))
-    expect(screen.getByText(/Cloning repositories: tests\.\.\./)).toBeInTheDocument()
+    const list = await screen.findByRole('list', { name: 'Progress' })
+    expect(list).toHaveAttribute('tabindex', '0')
+    expect(list).toHaveClass('overflow-y-auto')
+    expect(screen.getByText('Fetching test results...')).toBeInTheDocument()
+    expect(screen.getAllByText('alpha')).toHaveLength(1)
+    expect(screen.getAllByText('beta')).toHaveLength(1)
+    expect(screen.getByText('cloned')).toBeInTheDocument()
+    expect(screen.getByText('cloning')).toBeInTheDocument()
+    expect(screen.getByText('alpha').closest('li')).toHaveTextContent('release/very-long-branch-name')
+    expect(screen.getByRole('link', { name: 'https://example.com/org/alpha.git' })).toHaveAttribute('href', 'https://example.com/org/alpha.git')
+    expect(screen.queryByText(/password/)).not.toBeInTheDocument()
+    expect(list.closest('[data-testid="status-card"]')).toHaveClass('w-full', 'min-w-0')
+  })
+
+  it('uses event metadata over stale request params', async () => {
+    const running = result('running')
+    get.mockResolvedValue({ ...running, result: { ...running.result!,
+      request_params: { ai_provider: 'gemini', ai_model: 'test', additional_repos: [{ name: 'alpha', url: 'https://old.example/alpha', ref: 'old' }] },
+      progress_log: [{ phase: 'cloning', repo: 'alpha', state: 'cloning', url: 'https://new.example/alpha', ref: 'new', timestamp: 1 }],
+    } })
+    renderPage()
+    const row = (await screen.findByText('alpha')).closest('li')!
+    expect(row).toHaveTextContent('new')
+    expect(row.querySelector('a')).toHaveAttribute('href', 'https://new.example/alpha')
+    expect(row).not.toHaveTextContent('old')
+  })
+
+  it('prefers persisted event metadata without request params and sanitizes links on live updates', async () => {
+    const running = result('running')
+    const longRef = `release/${'long-'.repeat(30)}`
+    const longPath = `org/${'nested/'.repeat(30)}repo.git`
+    const log = [
+      { phase: 'cloning', repo: 'alpha', state: 'cloning' as const, url: `https://user:password@example.com/${longPath}?token=secret#private`, ref: longRef, timestamp: 1 }, // pragma: allowlist secret
+      { phase: 'cloning', repo: 'beta', state: 'cloning' as const, url: 'javascript:alert(1)', timestamp: 2 },
+    ]
+    get.mockResolvedValueOnce({ ...running, result: { ...running.result!, progress_log: log } })
+      .mockResolvedValueOnce({ ...running, result: { ...running.result!, progress_log: [...log, { phase: 'cloning', repo: 'alpha', state: 'cloned', timestamp: 3 }, { phase: 'routing', timestamp: 4 }] } })
+    renderPage()
+    const list = await screen.findByRole('list', { name: 'Progress' })
+    const alpha = screen.getByText('alpha').closest('li')!
+    const beta = screen.getByText('beta').closest('li')!
+    expect(alpha).toHaveTextContent(longRef)
+    expect(alpha).toHaveClass('min-w-0', 'break-words')
+    expect(alpha.querySelector('a')).toHaveClass('break-all')
+    expect(alpha.querySelector('a')).toHaveAttribute('href', `https://example.com/${longPath}`)
+    expect(beta).toHaveTextContent('URL unavailable · default')
+    expect(beta.querySelector('a')).toBeNull()
+    expect(list.closest('[data-testid="status-card"]')).toHaveClass('w-full', 'max-w-[80rem]')
+    expect(list).toHaveClass('max-h-[min(60vh,36rem)]')
+    expect(list.textContent).not.toMatch(/password|secret|private|javascript/)
+    await act(async () => { onStatusChanged.current?.() })
+    await waitFor(() => expect(alpha).toHaveTextContent('cloned'))
+    expect(alpha).toHaveTextContent(longRef)
+    expect(screen.getAllByText('Cloning')).toHaveLength(1)
+    expect(list).toHaveTextContent('Routing failure groups')
+  })
+
+  it('updates clone rows on SSE refresh and handles legacy snapshots without generic cloning spam', async () => {
+    const running = result('running')
+    const base = { ...running.result!, request_params: { ai_provider: 'gemini', ai_model: 'test', additional_repos: [
+      { name: 'alpha', url: 'javascript:alert(1)', ref: 'main' },
+      { name: 'beta', url: 'https://example.com/beta', ref: 'dev' },
+    ] } }
+    get.mockResolvedValueOnce({ ...running, result: { ...base, progress_log: [
+      { phase: 'cloning', timestamp: 1 },
+      { phase: 'cloning', repos: ['alpha', 'beta'], timestamp: 2 },
+    ] } }).mockResolvedValueOnce({ ...running, result: { ...base, progress_log: [
+      { phase: 'cloning', timestamp: 1 },
+      { phase: 'cloning', repos: ['alpha', 'beta'], timestamp: 2 },
+      { phase: 'cloning', repo: 'alpha', state: 'failed', timestamp: 3 },
+      { phase: 'cloning', repo: 'beta', state: 'cloned', timestamp: 4 },
+    ] } })
+    renderPage()
+    await waitFor(() => expect(screen.getAllByText('alpha')).toHaveLength(1))
+    expect(screen.getAllByText('beta')).toHaveLength(1)
+    expect(screen.queryByRole('link', { name: /javascript/ })).not.toBeInTheDocument()
+    expect(screen.queryAllByText('cloning')).toHaveLength(2)
+    await act(async () => { onStatusChanged.current?.() })
+    await waitFor(() => expect(screen.getByText('failed')).toBeInTheDocument())
+    expect(screen.getByText('cloned')).toBeInTheDocument()
+    expect(screen.getAllByText('alpha')).toHaveLength(1)
+    expect(screen.queryAllByText('cloning')).toHaveLength(0)
   })
 
   it.each([

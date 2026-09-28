@@ -1947,6 +1947,33 @@ async def update_status(
                     if key in previous:
                         result[key] = previous[key]
             if status in ("failed", "aborted", "completed"):
+                active_repos = result.get("cloning_repos") or []
+                if active_repos:
+                    log = result.setdefault("progress_log", [])
+                    state = "failed" if status == "failed" else "cancelled"
+                    for repo in active_repos:
+                        started: dict[str, Any] = next(
+                            (
+                                entry
+                                for entry in reversed(log)
+                                if entry.get("repo") == repo
+                                and entry.get("state") == "cloning"
+                            ),
+                            {},
+                        )
+                        transition: dict[str, Any] = {
+                            "phase": "cloning",
+                            "repo": repo,
+                            "state": state,
+                            "repos": [],
+                            "timestamp": time.time(),
+                        }
+                        transition.update(
+                            (key, started[key])
+                            for key in ("url", "ref")
+                            if key in started
+                        )
+                        log.append(transition)
                 result["cloning_repos"] = []
                 if status != "completed":
                     result["progress_phase"] = status
@@ -2058,25 +2085,70 @@ def _make_progress_phase_patcher(phase: str) -> Callable[[dict[str, Any]], None]
 
 
 async def update_clone_progress(
-    job_id: str, repo_name: str, started: bool, *, reanalysis: bool = False
+    job_id: str,
+    repo_name: str,
+    started: bool,
+    *,
+    state: str = "cloned",
+    reanalysis: bool = False,
+    url: str = "",
+    ref: str = "",
 ) -> None:
-    """Persist the currently cloning repository names and a snapshot for refresh."""
+    """Persist one named clone transition and the active repository list."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    from rootcoz.url_utils import sanitize_http_href
+
+    safe_url = sanitize_http_href(url)
+    if safe_url:
+        safe_url = urlunsplit(urlsplit(safe_url)._replace(query="", fragment=""))
 
     def patch(data: dict[str, Any]) -> None:
         names = set(data.get("cloning_repos") or [])
         if started:
+            if repo_name in names:
+                return
             names.add(repo_name)
+            transition = "cloning"
             if data.get("progress_phase") not in ("failed", "aborted", "completed"):
                 data["progress_phase"] = "cloning"
         else:
-            names.discard(repo_name)
+            if repo_name not in names:
+                return
+            names.remove(repo_name)
+            transition = state
         data["cloning_repos"] = sorted(names)
-        if data.get("progress_phase") == "cloning":
-            data.setdefault("progress_log", []).append(
-                {"phase": "cloning", "repos": sorted(names), "timestamp": time.time()}
+        log = data.setdefault("progress_log", [])
+        metadata = (
+            {"url": safe_url, "ref": ref}
+            if started
+            else next(
+                (
+                    entry
+                    for entry in reversed(log)
+                    if entry.get("repo") == repo_name
+                    and entry.get("state") == "cloning"
+                ),
+                {},
             )
-            if not names and reanalysis:
-                data["progress_phase"] = "completed"
+        )
+        log.append(
+            {
+                "phase": "cloning",
+                "repo": repo_name,
+                "state": transition,
+                "repos": sorted(names),
+                "timestamp": time.time(),
+                **{key: metadata[key] for key in ("url", "ref") if metadata.get(key)},
+            }
+        )
+        if (
+            not started
+            and not names
+            and reanalysis
+            and data.get("progress_phase") == "cloning"
+        ):
+            data["progress_phase"] = "completed"
 
     await patch_result_json(
         job_id, patch, skip_terminal=True, allow_completed=reanalysis

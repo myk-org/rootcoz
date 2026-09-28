@@ -8,7 +8,7 @@ import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { AlertTriangle, Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -89,10 +89,20 @@ const terminalErrorTitles: Record<string, string> = {
   aborted: 'Analysis aborted',
 }
 
+function safeRepoHref(raw?: string): string | null {
+  const sanitized = sanitizeHttpHref(raw)
+  if (!sanitized) return null
+  const url = new URL(sanitized)
+  url.search = ''
+  url.hash = ''
+  return url.toString()
+}
+
 interface StepLogEntry {
   phase: string
   label: string
   timestamp: string
+  repos?: Array<{ name: string; state: string; url?: string; ref?: string }>
 }
 
 export function StatusPage() {
@@ -104,6 +114,7 @@ export function StatusPage() {
   const [reAnalyzeOpen, setReAnalyzeOpen] = useState(false)
   const [isAborting, setIsAborting] = useState(false)
   const [abortConfirmOpen, setAbortConfirmOpen] = useState(false)
+  const [clonesExpanded, setClonesExpanded] = useState(true)
   const prevLogLenRef = useRef(0)
   const logEndRef = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
@@ -120,6 +131,7 @@ export function StatusPage() {
     setError('')
     setTerminalErrorKind(null)
     setReAnalyzeOpen(false)
+    setClonesExpanded(true)
     prevLogLenRef.current = 0
     async function fetchStatus() {
       if (inFlight || cancelled) {
@@ -217,15 +229,38 @@ export function StatusPage() {
 
   // Derive stepLog from server-persisted progress_log (survives F5 refresh)
   const rawProgressLog = data?.result?.progress_log
-  const progressLog = Array.isArray(rawProgressLog) ? rawProgressLog : []
-  const stepLog: StepLogEntry[] = useMemo(
-    () => progressLog.map(entry => ({
-      phase: entry.phase,
-      label: getPhaseLabel(entry.phase, entry.repos) ?? entry.phase,
-      timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(),
-    })),
-    [progressLog],
-  )
+  const stepLog: StepLogEntry[] = useMemo(() => {
+    const progressLog = Array.isArray(rawProgressLog) ? rawProgressLog : []
+    const steps: StepLogEntry[] = []
+    const clones = new Map<string, { name: string; state: string; url?: string; ref?: string }>()
+    const updateClone = (name: string, state: string, url?: string, ref?: string) => {
+      const previous = clones.get(name)
+      clones.set(name, { name, state, url: url ?? previous?.url, ref: ref ?? previous?.ref })
+    }
+    for (const entry of progressLog) {
+      if (entry.phase === 'cloning') {
+        if (!steps.some(step => step.phase === 'cloning')) {
+          steps.push({ phase: 'cloning', label: 'Cloning', timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(), repos: [] })
+        }
+        if (entry.repo) updateClone(entry.repo, entry.state ?? 'cloning', entry.url, entry.ref)
+        // Older jobs contain active-name snapshots rather than per-repo transitions.
+        if (entry.repos) {
+          for (const [name, clone] of clones) {
+            if (!entry.repos.includes(name) && clone.state === 'cloning') updateClone(name, 'cloned')
+          }
+          for (const name of entry.repos) updateClone(name, 'cloning')
+        }
+      } else {
+        steps.push({ phase: entry.phase, label: getPhaseLabel(entry.phase) ?? entry.phase, timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString() })
+      }
+    }
+    for (const name of data?.result?.cloning_repos ?? []) {
+      if (!clones.has(name)) updateClone(name, 'cloning')
+    }
+    const cloneStep = steps.find(step => step.phase === 'cloning')
+    if (cloneStep) cloneStep.repos = [...clones.values()]
+    return steps
+  }, [rawProgressLog, data?.result?.cloning_repos])
 
   useEffect(() => {
     if (stepLog.length > prevLogLenRef.current) {
@@ -254,9 +289,9 @@ export function StatusPage() {
   const peers = params?.peer_ai_configs
   const hasPeers = !!peers?.length
   const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
-  const testsRepoHref = sanitizeHttpHref(testsRepoUrl)
+  const testsRepoHref = safeRepoHref(testsRepoUrl)
   const testsRepoRef = (params?.tests_repo_ref ?? '').trim()
-  const testsRepoDisplay = testsRepoHref ?? testsRepoUrl
+  const testsRepoDisplay = testsRepoHref ?? (testsRepoUrl ? 'Invalid repository URL' : '')
   const testsRepoLabel = testsRepoDisplay
     ? (testsRepoRef ? `${testsRepoDisplay}:${testsRepoRef}` : testsRepoDisplay)
     : '—'
@@ -338,9 +373,9 @@ export function StatusPage() {
           }}
         />
 
-        <div className="relative z-10 w-full max-w-xl px-4">
-        <Card className="animate-slide-up border-border-muted">
-          <CardContent className="flex flex-col items-center gap-6 p-8">
+        <div data-testid="status-card" className="relative z-10 w-full min-w-0 max-w-[80rem] px-4 sm:w-fit sm:max-w-[90vw]">
+        <Card className="w-full animate-slide-up border-border-muted">
+          <CardContent className="flex flex-col items-center gap-6 p-4 sm:p-8">
             {/* Pulsing / spinning indicator */}
             <div className="relative flex h-24 w-24 items-center justify-center">
               {/* Outer ring */}
@@ -575,11 +610,11 @@ export function StatusPage() {
                     Progress
                   </span>
                 </div>
-                <div ref={logContainerRef} className="max-h-64 overflow-y-auto px-3 py-2 space-y-1">
+                <div ref={logContainerRef} role="list" aria-label="Progress" tabIndex={0} className="max-h-[min(60vh,36rem)] overflow-y-auto px-3 py-2 space-y-1">
                   {stepLog.map((step, i) => {
                     const isLatest = i === stepLog.length - 1
                     return (
-                      <div key={i} className={`flex items-start gap-2 text-xs ${isLatest ? 'text-signal-blue' : 'text-text-tertiary'}`}>
+                      <div role="listitem" key={i} className={`min-w-0 flex flex-wrap items-start gap-2 text-xs ${isLatest ? 'text-signal-blue' : 'text-text-tertiary'}`}>
                         <span className="shrink-0 font-mono text-[10px] text-text-tertiary/60">
                           {step.timestamp}
                         </span>
@@ -590,9 +625,36 @@ export function StatusPage() {
                         ) : (
                           <span className="shrink-0 text-signal-green mt-0.5">{'\u2713'}</span>
                         )}
-                        <span className={isLatest ? 'font-medium' : ''}>
-                          {step.label}
-                        </span>
+                        <div className="min-w-0 flex-1">
+                          {step.repos?.length ? (
+                            <button type="button" aria-expanded={clonesExpanded} aria-controls="clone-repos" onClick={() => setClonesExpanded(expanded => !expanded)} className={`inline-flex items-center gap-1 rounded-sm text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent ${isLatest ? 'font-medium' : ''}`}>
+                              <ChevronDown aria-hidden="true" className={`h-3 w-3 transition-transform ${clonesExpanded ? '' : '-rotate-90'}`} />
+                              {step.label}
+                            </button>
+                          ) : (
+                            <span className={isLatest ? 'font-medium' : ''}>{step.label}</span>
+                          )}
+                          {step.repos && step.repos.length > 0 && (
+                            <ul id="clone-repos" hidden={!clonesExpanded} className="mt-1 space-y-1 border-l border-border-muted pl-3">
+                              {step.repos.map(repo => {
+                                const config = params?.additional_repos?.find(item => item.name === repo.name)
+                                  ?? (testsRepoHref && new URL(testsRepoHref).pathname.split('/').pop()?.replace(/\.git$/, '') === repo.name
+                                    ? { url: params?.tests_repo_url, ref: params?.tests_repo_ref } : undefined)
+                                  ?? (repo.name === 'tests' ? { url: params?.tests_repo_url, ref: params?.tests_repo_ref } : undefined)
+                                const href = safeRepoHref(repo.url ?? config?.url)
+                                const ref = (repo.ref ?? config?.ref)?.trim() || 'default'
+                                return (
+                                  <li key={repo.name} className="min-w-0 break-words text-text-secondary">
+                                    <span className="font-medium text-text-primary">{repo.name}</span>
+                                    {' · '}{href && isSafeHref(href) ? <a href={href} target="_blank" rel="noopener noreferrer" className="break-all text-text-link hover:underline">{href}</a> : <span className="text-text-tertiary">URL unavailable</span>}
+                                    {' · '}<span className="break-all">{ref}</span>
+                                    <span className="ml-2 text-text-tertiary">{repo.state}</span>
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                          )}
+                        </div>
                       </div>
                     )
                   })}

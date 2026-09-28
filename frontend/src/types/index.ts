@@ -155,6 +155,7 @@ export interface ChildJobAnalysis {
   failures: FailureAnalysis[]
   failed_children: ChildJobAnalysis[]
   note: string | null
+  all_groups_failed?: boolean
   passed_count?: number
   skipped_count?: number
   failed_count?: number
@@ -184,7 +185,7 @@ export interface AnalysisResult {
   source_warnings?: string[]
   cross_failure_patterns?: CrossFailurePattern[]
   failed_analysis_groups?: number
-  progress_log?: Array<{ phase: string; timestamp: number; repos?: string[] }>
+  progress_log?: Array<{ phase: string; timestamp: number; repos?: string[]; repo?: string; url?: string; ref?: string; state?: 'cloning' | 'cloned' | 'failed' | 'cancelled' }>
   cloning_repos?: string[]
   progress_phase?: string
   request_params?: {
