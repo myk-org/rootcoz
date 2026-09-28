@@ -108,6 +108,45 @@ describe('StatusPage usage', () => {
     expect(screen.getAllByText('Cloning')).toHaveLength(1)
   })
 
+  it('displays git clone URLs without credentials or query data, never as links, including rows with missing event URLs', async () => {
+    const running = result('running')
+    const gitUrl = 'git://user:password@example.com/org/tests.git?token=secret#private' // pragma: allowlist secret
+    get.mockResolvedValue({ ...running, result: { ...running.result!,
+      request_params: { tests_repo_url: gitUrl, tests_repo_ref: 'main', additional_repos: [
+        { name: 'extra', url: 'git://user:password@example.com/org/extra.git?token=secret#private', ref: 'dev' }, // pragma: allowlist secret
+      ] },
+      progress_log: [
+        { phase: 'cloning', repo: 'tests', state: 'cloning', timestamp: 1 },
+        { phase: 'cloning', repo: 'extra', state: 'cloning', url: 'git://other:credentials@example.com/org/extra.git?key=hidden#fragment', timestamp: 2 }, // pragma: allowlist secret
+      ],
+    } })
+    renderPage()
+    const list = await screen.findByRole('list', { name: 'Progress' })
+    expect(screen.getByText('TEST REPO').parentElement).toHaveTextContent('git://example.com/org/tests.git:main')
+    expect(screen.getByText('TEST REPO').parentElement?.querySelector('a')).toBeNull()
+    expect(screen.getByText('tests').closest('li')).toHaveTextContent('git://example.com/org/tests.git · main')
+    expect(screen.getByText('extra').closest('li')).toHaveTextContent('git://example.com/org/extra.git · dev')
+    expect(list.querySelectorAll('a')).toHaveLength(0)
+    expect(screen.getByTestId('status-card').textContent).not.toMatch(/password|secret|private|credentials|hidden|fragment|Invalid repository URL|URL unavailable/)
+  })
+
+  it('keeps invalid schemes hidden while preserving sanitized HTTP links', async () => {
+    const running = result('running')
+    get.mockResolvedValue({ ...running, result: { ...running.result!,
+      request_params: { tests_repo_url: 'https://user:pass@example.com/tests.git?token=secret#private' }, // pragma: allowlist secret
+      progress_log: [{ phase: 'cloning', repo: 'tests', state: 'cloning', timestamp: 1 },
+        { phase: 'cloning', repo: 'bad', state: 'cloning', url: 'javascript:alert(1)', timestamp: 2 }],
+    } })
+    renderPage()
+    await screen.findByText('Cloning')
+    expect(screen.getAllByRole('link', { name: 'https://example.com/tests.git' })).toHaveLength(2)
+    for (const link of screen.getAllByRole('link', { name: 'https://example.com/tests.git' })) {
+      expect(link).toHaveAttribute('href', 'https://example.com/tests.git')
+    }
+    expect(screen.getByText('bad').closest('li')).toHaveTextContent('URL unavailable')
+    expect(screen.getByTestId('status-card').textContent).not.toMatch(/password|token|private|javascript/)
+  })
+
   it('groups legacy clone snapshots on page load', async () => {
     const base = result('running')
     get.mockResolvedValue({ ...base, result: { ...base.result!, progress_log: [

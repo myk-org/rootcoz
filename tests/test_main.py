@@ -6072,6 +6072,165 @@ class TestReAnalyzeFailure:
             set_progress_callback(lambda _job: None)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("clone_fails", [False, True])
+    async def test_reanalyze_test_repo_records_clone_outcome(
+        self, test_client, tmp_path, monkeypatch, clone_fails
+    ) -> None:
+        import asyncio
+
+        from rootcoz import storage
+        from rootcoz.engine.core import set_progress_callback
+
+        fa = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="old"),
+        )
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "reanalyze-tests.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-tests-clone",
+            "",
+            "completed",
+            {
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                        "tests_repo_url": "https://user:secret@example.com/tests",  # pragma: allowlist secret
+                        "tests_repo_ref": "main",
+                    }
+                ),
+            },
+        )
+        new = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="new"),
+        )
+        events: list[str] = []
+        set_progress_callback(events.append)
+        try:
+            with (
+                patch("rootcoz.main.RepositoryManager") as manager,
+                patch("rootcoz.main.copy_rootcoz_pi_resources"),
+                patch(
+                    "rootcoz.main.analyze_failure_group",
+                    new_callable=AsyncMock,
+                    return_value=[new],
+                ),
+                patch(
+                    "rootcoz.main._create_ai_auth_header",
+                    new_callable=AsyncMock,
+                    return_value="",
+                ),
+            ):
+                manager.return_value.create_workspace.return_value = (
+                    tmp_path / "workspace"
+                )
+                if clone_fails:
+                    manager.return_value.clone_into.side_effect = RuntimeError(
+                        "clone failed"
+                    )
+                response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    result = (await storage.get_result("job-tests-clone"))["result"]
+                    if (
+                        result.get("failures", [{}])[0]
+                        .get("analysis", {})
+                        .get("details")
+                        == "new"
+                    ):
+                        break
+            assert response.status_code == 202
+            assert result["cloning_repos"] == []
+            assert [
+                (e["repo"], e["state"], e["url"], e["ref"])
+                for e in result["progress_log"]
+            ] == [
+                ("tests", "cloning", "https://example.com/tests", "main"),
+                (
+                    "tests",
+                    "failed" if clone_fails else "cloned",
+                    "https://example.com/tests",
+                    "main",
+                ),
+            ]
+            assert events.count("job-tests-clone") >= 2
+            assert "secret" not in str(result["progress_log"])
+        finally:
+            set_progress_callback(lambda _job: None)
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_cancelled_test_repo_records_terminal_clone(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import asyncio
+
+        from rootcoz import storage
+        from rootcoz.main import _reanalyze_failure_background
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "cancel-tests.db")
+        await storage.init_db()
+        await storage.save_result("job-cancel-tests", "", "completed", {})
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def clone(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+
+        try:
+            with (
+                patch("rootcoz.main.RepositoryManager") as manager,
+                patch(
+                    "rootcoz.main._create_ai_auth_header",
+                    new_callable=AsyncMock,
+                    return_value="",
+                ),
+                patch("rootcoz.main.asyncio.to_thread", side_effect=clone),
+            ):
+                manager.return_value.create_workspace.return_value = (
+                    tmp_path / "workspace"
+                )
+                task = asyncio.create_task(
+                    _reanalyze_failure_background(
+                        "job-cancel-tests",
+                        "failure-id",
+                        {},
+                        "claude",
+                        "opus",
+                        None,
+                        "",
+                        None,
+                        0,
+                        "https://example.com/tests",
+                        "main",
+                        "",
+                        None,
+                        "admin",
+                        1,
+                    )
+                )
+                await asyncio.wait_for(started.wait(), 2)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            result = (await storage.get_result("job-cancel-tests"))["result"]
+            assert result["cloning_repos"] == []
+            assert [
+                (entry["repo"], entry["state"]) for entry in result["progress_log"]
+            ] == [
+                ("tests", "cloning"),
+                ("tests", "cancelled"),
+            ]
+        finally:
+            release.set()
+
+    @pytest.mark.asyncio
     async def test_re_analyze_failure_defers_ai_with_tests_repo(
         self, test_client
     ) -> None:

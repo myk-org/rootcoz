@@ -26,3 +26,20 @@ def sanitize_http_href(url: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         return ""
     return cleaned
+
+
+def sanitize_clone_url(url: str) -> str:
+    """Return a credential-free HTTP(S) or git clone URL without query or fragment."""
+    try:
+        cleaned = strip_url_userinfo(url.strip())
+        parsed = urlparse(cleaned)
+        if (
+            parsed.scheme not in ("http", "https", "git")
+            or not parsed.hostname
+            or any(char.isspace() for char in parsed.netloc)
+        ):
+            return ""
+        _ = parsed.port  # Reject malformed ports before persisting the URL.
+        return urlunparse(parsed._replace(query="", fragment=""))
+    except ValueError:  # Malformed authority, e.g. an unmatched IPv6 bracket or port.
+        return ""

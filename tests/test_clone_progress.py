@@ -14,8 +14,9 @@ from rootcoz.repository import RepositoryManager
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["failed", "aborted", "completed"])
+@pytest.mark.parametrize("scheme", ["https", "git"])
 async def test_late_clone_updates_do_not_change_terminal_result(
-    tmp_path: Path, monkeypatch, status: str
+    tmp_path: Path, monkeypatch, status: str, scheme: str
 ) -> None:
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
     await storage.init_db()
@@ -24,7 +25,7 @@ async def test_late_clone_updates_do_not_change_terminal_result(
         "job",
         "slow",
         True,
-        url="https://user:secret@example.com/slow?token=hidden",  # pragma: allowlist secret
+        url=f"{scheme}://user:secret@example.com/slow?token=hidden",  # pragma: allowlist secret
         ref="main",
     )
     await storage.update_status("job", status, {"error": "cancelled"})
@@ -32,10 +33,10 @@ async def test_late_clone_updates_do_not_change_terminal_result(
     assert [
         (e["state"], e["url"], e["ref"]) for e in before["result"]["progress_log"]
     ] == [
-        ("cloning", "https://example.com/slow", "main"),
+        ("cloning", f"{scheme}://example.com/slow", "main"),
         (
             "failed" if status == "failed" else "cancelled",
-            "https://example.com/slow",
+            f"{scheme}://example.com/slow",
             "main",
         ),
     ]
@@ -208,6 +209,58 @@ async def test_clone_events_survive_refresh_with_sanitized_url_and_ref(
     ]
     assert all("url" not in e for e in result["progress_log"] if e["repo"] == "two")
     assert "secret" not in str(result) and "hidden" not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["cloned", "failed", "cancelled"])
+async def test_git_clone_url_survives_terminal_transition_and_refresh(
+    tmp_path: Path, monkeypatch, state: str
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {})
+    await storage.update_clone_progress(
+        "job",
+        "tests",
+        True,
+        url="git://user:secret@example.com/tests.git?token=hidden#fragment",  # pragma: allowlist secret
+        ref="main",
+    )
+    await storage.update_clone_progress("job", "tests", False, state=state)
+    result = (await storage.get_result("job"))["result"]
+    assert result["cloning_repos"] == []
+    assert [(e["state"], e["url"], e["ref"]) for e in result["progress_log"]] == [
+        ("cloning", "git://example.com/tests.git", "main"),
+        (state, "git://example.com/tests.git", "main"),
+    ]
+    assert "secret" not in str(result) and "hidden" not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "file:///tmp/repo",
+        "git:///repo",
+        "git://[broken/repo",
+        "git@example.com:repo",
+        "git://example.com:bad/repo",
+        "git://bad host/repo",
+    ],
+)
+async def test_clone_progress_withholds_malformed_or_unsafe_url(
+    tmp_path: Path, monkeypatch, url: str
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {})
+    await storage.update_clone_progress("job", "repo", True, url=url)
+    await storage.update_clone_progress("job", "repo", False)
+    assert all(
+        "url" not in entry
+        for entry in (await storage.get_result("job"))["result"]["progress_log"]
+    )
 
 
 @pytest.mark.asyncio

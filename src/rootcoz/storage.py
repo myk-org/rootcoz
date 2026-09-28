@@ -2095,13 +2095,9 @@ async def update_clone_progress(
     ref: str = "",
 ) -> None:
     """Persist one named clone transition and the active repository list."""
-    from urllib.parse import urlsplit, urlunsplit
+    from rootcoz.url_utils import sanitize_clone_url
 
-    from rootcoz.url_utils import sanitize_http_href
-
-    safe_url = sanitize_http_href(url)
-    if safe_url:
-        safe_url = urlunsplit(urlsplit(safe_url)._replace(query="", fragment=""))
+    safe_url = sanitize_clone_url(url)
 
     def patch(data: dict[str, Any]) -> None:
         names = set(data.get("cloning_repos") or [])

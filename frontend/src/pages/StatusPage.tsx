@@ -89,13 +89,19 @@ const terminalErrorTitles: Record<string, string> = {
   aborted: 'Analysis aborted',
 }
 
-function safeRepoHref(raw?: string): string | null {
-  const sanitized = sanitizeHttpHref(raw)
-  if (!sanitized) return null
-  const url = new URL(sanitized)
-  url.search = ''
-  url.hash = ''
-  return url.toString()
+function safeRepoDisplay(raw?: string): string | null {
+  if (!raw) return null
+  try {
+    const url = new URL(raw)
+    if (!url.hostname || !['http:', 'https:', 'git:'].includes(url.protocol)) return null
+    url.username = ''
+    url.password = ''
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return null
+  }
 }
 
 interface StepLogEntry {
@@ -289,9 +295,10 @@ export function StatusPage() {
   const peers = params?.peer_ai_configs
   const hasPeers = !!peers?.length
   const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
-  const testsRepoHref = safeRepoHref(testsRepoUrl)
+  const safeTestsRepoDisplay = safeRepoDisplay(testsRepoUrl)
+  const testsRepoHref = sanitizeHttpHref(safeTestsRepoDisplay)
   const testsRepoRef = (params?.tests_repo_ref ?? '').trim()
-  const testsRepoDisplay = testsRepoHref ?? (testsRepoUrl ? 'Invalid repository URL' : '')
+  const testsRepoDisplay = safeTestsRepoDisplay ?? (testsRepoUrl ? 'Invalid repository URL' : '')
   const testsRepoLabel = testsRepoDisplay
     ? (testsRepoRef ? `${testsRepoDisplay}:${testsRepoRef}` : testsRepoDisplay)
     : '—'
@@ -638,15 +645,16 @@ export function StatusPage() {
                             <ul id="clone-repos" hidden={!clonesExpanded} className="mt-1 space-y-1 border-l border-border-muted pl-3">
                               {step.repos.map(repo => {
                                 const config = params?.additional_repos?.find(item => item.name === repo.name)
-                                  ?? (testsRepoHref && new URL(testsRepoHref).pathname.split('/').pop()?.replace(/\.git$/, '') === repo.name
+                                  ?? (safeTestsRepoDisplay && new URL(safeTestsRepoDisplay).pathname.split('/').pop()?.replace(/\.git$/, '') === repo.name
                                     ? { url: params?.tests_repo_url, ref: params?.tests_repo_ref } : undefined)
                                   ?? (repo.name === 'tests' ? { url: params?.tests_repo_url, ref: params?.tests_repo_ref } : undefined)
-                                const href = safeRepoHref(repo.url ?? config?.url)
+                                const display = safeRepoDisplay(repo.url ?? config?.url)
+                                const href = sanitizeHttpHref(display)
                                 const ref = (repo.ref ?? config?.ref)?.trim() || 'default'
                                 return (
                                   <li key={repo.name} className="min-w-0 break-words text-text-secondary">
                                     <span className="font-medium text-text-primary">{repo.name}</span>
-                                    {' · '}{href && isSafeHref(href) ? <a href={href} target="_blank" rel="noopener noreferrer" className="break-all text-text-link hover:underline">{href}</a> : <span className="text-text-tertiary">URL unavailable</span>}
+                                    {' · '}{href && isSafeHref(href) ? <a href={href} target="_blank" rel="noopener noreferrer" className="break-all text-text-link hover:underline">{href}</a> : <span className="break-all text-text-tertiary">{display ?? 'URL unavailable'}</span>}
                                     {' · '}<span className="break-all">{ref}</span>
                                     <span className="ml-2 text-text-tertiary">{repo.state}</span>
                                   </li>

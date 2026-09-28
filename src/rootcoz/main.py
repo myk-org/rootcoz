@@ -113,6 +113,7 @@ from rootcoz.engine.core import (
     get_failure_signature,
     resolve_additional_repos,
     run_orchestrated_analysis,
+    safe_update_clone_progress,
     safe_update_progress,
     set_progress_callback,
 )
@@ -5046,14 +5047,32 @@ async def _reanalyze_failure_background(
                 repo_name = derive_test_repo_name(
                     str(tests_repo_url), additional_repos_list or []
                 )
-                await asyncio.to_thread(
-                    repo_manager.clone_into,
-                    str(tests_repo_url),
-                    repo_path / repo_name,
-                    depth=50,
-                    branch=tests_repo_ref,
-                    token=tests_repo_token or None,
+                await safe_update_clone_progress(
+                    job_id,
+                    repo_name,
+                    True,
+                    reanalysis=True,
+                    url=str(tests_repo_url),
+                    ref=tests_repo_ref,
                 )
+                outcome = "cancelled"
+                try:
+                    await asyncio.to_thread(
+                        repo_manager.clone_into,
+                        str(tests_repo_url),
+                        repo_path / repo_name,
+                        depth=50,
+                        branch=tests_repo_ref,
+                        token=tests_repo_token or None,
+                    )
+                    outcome = "cloned"
+                except Exception:
+                    outcome = "failed"
+                    raise
+                finally:
+                    await safe_update_clone_progress(
+                        job_id, repo_name, False, state=outcome, reanalysis=True
+                    )
                 cloned_repos[repo_name] = repo_path / repo_name
             except Exception:
                 logger.warning(
