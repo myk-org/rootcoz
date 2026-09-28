@@ -9,7 +9,11 @@ from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.models import AnalysisDetail, ChildJobAnalysis, FailedTest, FailureAnalysis
 from rootcoz.sources.base import CISourceResult
-from rootcoz.sources.jenkins_source import _analyze_child_job_inner
+from rootcoz.sources.jenkins_source import (
+    ChildJobResult,
+    _analyze_child_job_inner,
+    _normalize_child_results,
+)
 
 
 @pytest.mark.asyncio
@@ -217,6 +221,97 @@ async def test_pipeline_with_only_failed_child_groups_marks_parent_failed(
     assert "child_job_analyses" in row["result"], row["result"]
     assert row["result"]["child_job_analyses"][0]["all_groups_failed"] is True
     assert row["result"]["child_job_analyses"][0]["failures"]
+
+
+@pytest.mark.asyncio
+async def test_crashed_child_and_successful_sibling_complete_with_warning(
+    temp_db_path,
+) -> None:
+    from rootcoz.main import _process_ci_source_analysis
+    from rootcoz.models import UnifiedAnalyzeRequest
+
+    children = _normalize_child_results(
+        [("crashed", 2), ("ok", 3)],
+        [
+            RuntimeError("secret-api-key-value"),
+            ChildJobResult(
+                analysis=ChildJobAnalysis(
+                    job_name="ok",
+                    build_number=3,
+                    failures=[
+                        FailureAnalysis(
+                            test_name="test_ok",
+                            error="boom",
+                            analysis=AnalysisDetail(details="diagnosed"),
+                        )
+                    ],
+                )
+            ),
+        ],
+    )
+    source_result = CISourceResult(
+        failures=[],
+        child_job_infos=[("crashed", 2), ("ok", 3)],
+        identity={"job_name": "parent", "build_number": 1},
+    )
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch(
+            "rootcoz.sources.jenkins_source.JenkinsSource.requires_pre_fetch",
+            return_value=False,
+        ),
+        patch(
+            "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
+            new_callable=AsyncMock,
+            return_value=source_result,
+        ),
+        patch(
+            "rootcoz.sources.jenkins_source.JenkinsSource.analyze_children",
+            new_callable=AsyncMock,
+            return_value=([child.analysis for child in children], []),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "test"),
+        ),
+    ):
+        await storage.init_db()
+        await storage.save_result("parent", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="parent",
+            body=UnifiedAnalyzeRequest(
+                type="jenkins", job_name="parent", build_number=1
+            ),
+            merged=Settings(
+                jenkins_url="https://example.test",
+                jenkins_user="user",
+                jenkins_password="fake",  # pragma: allowlist secret
+            ),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="test",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("parent")
+    assert row["status"] == "completed", row["result"]
+    assert row["result"]["failed_analysis_groups"] == 1
+    assert row["result"]["child_job_analyses"][0]["all_groups_failed"] is True
+    assert (
+        row["result"]["child_job_analyses"][1]["failures"][0]["analysis"]["details"]
+        == "diagnosed"
+    )
+    assert "secret-api-key-value" not in str(row["result"])
 
 
 @pytest.mark.asyncio

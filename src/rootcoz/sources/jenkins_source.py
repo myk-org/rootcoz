@@ -116,7 +116,7 @@ def _normalize_child_results(
 ) -> list[ChildJobResult]:
     """Convert parallel child-analysis results into ChildJobResult objects.
 
-    Exceptions are turned into stub analyses with a descriptive ``note``.
+    Exceptions become failed stub analyses with a safe ``note``.
     """
     bundles: list[ChildJobResult] = []
     for i, result in enumerate(child_results):
@@ -135,6 +135,7 @@ def _normalize_child_results(
                         build_number=child_num,
                         jenkins_url="",
                         note="Child analysis failed; check server logs for details",
+                        all_groups_failed=True,
                     )
                 )
             )
