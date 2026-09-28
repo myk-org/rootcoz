@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useId } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
+import { credentialLabel } from '@/lib/analysisAi'
 import { ChevronDown } from 'lucide-react'
 
 export interface ModelOption {
@@ -224,7 +225,7 @@ export function ModelCombobox({
                   {model.verified === false && <span className="text-xs text-signal-amber">UNVERIFIED</span>}
                   {model.verified !== false && model.credential_sources?.length ? (
                     <span className="text-xs text-text-tertiary">
-                      {forceServer ? 'Server' : model.credential_sources.includes('user') && model.credential_sources.includes('server') ? canUseServer ? 'User + Server' : 'User + Server locked' : model.credential_sources.includes('user') ? 'User' : 'Server'}
+                      {credentialLabel([{ ...model, provider: '' }], false, forceServer, canUseServer)}
                     </span>
                   ) : null}
                   {model.source && (

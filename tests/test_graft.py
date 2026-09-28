@@ -1,13 +1,44 @@
 """Bounded Graft snapshots and read-only query routing."""
 
 import json
+import os
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from rootcoz.engine import graft
+
+
+def deterministic_disk_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Budget synthetic graphs by payload plus fixed directory cost, not host metadata."""
+
+    def size(
+        path: Path,
+        deadline: float | None = None,
+        *,
+        limit: int | None = None,
+        reject_symlinks: bool = True,
+    ) -> int:
+        total = 0
+        for directory, dirs, files in os.walk(path, followlinks=False):
+            for name in dirs + files:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("graph deadline")
+                entry = Path(directory) / name
+                if entry.is_symlink():
+                    if reject_symlinks:
+                        raise ValueError("graph contains symlink")
+                    continue
+                total += 20 if entry.is_dir() else len(entry.read_bytes())
+                if limit and total > limit:
+                    return total
+        return total
+
+    monkeypatch.setattr(graft, "_disk_size", size)
 
 
 def git(repo: Path, *args: str) -> None:
@@ -184,6 +215,7 @@ def test_failed_build_retry_and_marker(tmp_path, monkeypatch):
 
 
 def test_oversized_graph_followup_backoff_and_source_change(tmp_path, monkeypatch):
+    deterministic_disk_size(monkeypatch)
     workspace = tmp_path / "workspace"
     repo = workspace / "code"
     repo.mkdir(parents=True)
@@ -219,6 +251,7 @@ def test_oversized_graph_followup_backoff_and_source_change(tmp_path, monkeypatc
 
 
 def test_oversized_build_marker_bounds_followup_retries(tmp_path, monkeypatch):
+    deterministic_disk_size(monkeypatch)
     workspace = tmp_path / "workspace"
     repo = workspace / "code"
     repo.mkdir(parents=True)
@@ -401,10 +434,10 @@ def test_effective_repositories_all_indexed_discoverable_and_refreshable(
     for repo in roots.values():
         (repo / "a.py").write_text("changed")
     assert graft.roots_needing_index(setup.repo_path, roots) == roots
+    refreshed = graft.index_repositories(setup.repo_path, roots)
     assert {
-        name: result["status"]
-        for name, result in graft.index_repositories(setup.repo_path, roots).items()
-    } == dict.fromkeys(roots, "indexed")
+        name: result["status"] for name, result in refreshed.items()
+    } == dict.fromkeys(roots, "indexed"), refreshed
     assert graft.indexed_roots(setup.repo_path) == roots
     assert graft.roots_needing_index(setup.repo_path, roots) == {}
 
@@ -443,6 +476,7 @@ def test_all_repositories_indexed_and_unrelated_workspaces(tmp_path, monkeypatch
 
 
 def test_workspace_budget_skips_then_retries_after_cleanup(tmp_path, monkeypatch):
+    deterministic_disk_size(monkeypatch)
     workspace = tmp_path / "workspace"
     repos = {}
     for i in range(14):
@@ -510,6 +544,7 @@ def test_workspace_budget_skips_then_retries_after_cleanup(tmp_path, monkeypatch
 
 
 def test_active_build_bytes_are_not_reserved_twice(tmp_path, monkeypatch):
+    deterministic_disk_size(monkeypatch)
     workspace = tmp_path / "workspace"
     repos = {}
     for name in ("a", "b"):
@@ -547,6 +582,7 @@ def test_active_build_bytes_are_not_reserved_twice(tmp_path, monkeypatch):
 
 
 def test_budget_skip_backoff_and_capacity_recovery(tmp_path, monkeypatch):
+    deterministic_disk_size(monkeypatch)
     workspace = tmp_path / "workspace"
     repos = {}
     for name in ("a", "b"):
@@ -593,6 +629,7 @@ def test_budget_skip_backoff_and_capacity_recovery(tmp_path, monkeypatch):
 def test_budget_skip_on_rebuild_preserves_graph_and_retries_on_expiry(
     tmp_path, monkeypatch
 ):
+    deterministic_disk_size(monkeypatch)
     workspace = tmp_path / "workspace"
     repos = {}
     for name in ("a", "b"):

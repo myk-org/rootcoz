@@ -5645,11 +5645,40 @@ async def create_ai_session_with_source(
     return session_id
 
 
+class AiSessionCollisionError(ValueError):
+    """A sidecar session ID already belongs to an existing provenance record."""
+
+
 async def save_ai_session_source(
-    session_id: str, username: str, provider: str, source: str
+    session_id: str,
+    username: str,
+    provider: str,
+    source: str,
+    expected_account_id: int | None = None,
 ) -> None:
     """Remember the source of a sidecar session, never its key."""
     async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if expected_account_id is not None:
+            collision = await (
+                await db.execute(
+                    "SELECT 1 FROM ai_session_sources WHERE session_id = ?",
+                    (session_id,),
+                )
+            ).fetchone()
+            if collision:
+                raise AiSessionCollisionError("AI session ID already active")
+        if expected_account_id is not None:
+            account = await (
+                await db.execute(
+                    "SELECT 1 FROM users WHERE username = ? AND id = ?",
+                    (username, expected_account_id),
+                )
+            ).fetchone()
+            if not account:
+                raise LookupError(
+                    "AI session owner account changed during session creation"
+                )
         cursor = await db.execute(
             "INSERT INTO ai_session_sources "
             "(session_id, username, provider, credential_source, credential_generation) "
@@ -5659,7 +5688,7 @@ async def save_ai_session_source(
             (session_id, username, provider, source, provider, username),
         )
         if not cursor.rowcount:
-            raise ValueError("AI session ID already active")
+            raise AiSessionCollisionError("AI session ID already active")
         await db.commit()
 
 

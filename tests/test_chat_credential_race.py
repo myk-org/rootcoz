@@ -399,7 +399,11 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
     if admin:
         monkeypatch.setattr(chat, "init_admin_chat_session", rotate_during_init)
         monkeypatch.setattr(
-            main, "get_settings", lambda: SimpleNamespace(ai_provider="p", ai_model="m")
+            main,
+            "get_settings",
+            lambda: SimpleNamespace(
+                ai_provider="p", ai_model="m", force_server_credentials=False
+            ),
         )
         result = await main.init_admin_chat(
             SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))

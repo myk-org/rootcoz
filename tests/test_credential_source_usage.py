@@ -18,6 +18,7 @@ from rootcoz.token_tracking import build_token_usage_summary
 async def test_mixed_calls_resume_and_legacy(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "usage.db")
     await storage.init_db()
+    await storage.create_admin_user("alice")
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
     )

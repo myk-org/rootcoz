@@ -821,6 +821,7 @@ async def test_resumed_success_redacts_current_key_and_denies_rotated_key(
 
 @pytest.mark.asyncio
 async def test_resumed_chat_lost_session_still_retries(monkeypatch):
+    await storage.create_admin_user("alice")
     monkeypatch.setattr(
         storage, "can_user_use_server_providers", AsyncMock(return_value=True)
     )

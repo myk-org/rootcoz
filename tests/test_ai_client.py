@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from rootcoz import ai_client
+from rootcoz import ai_client, storage
 from rootcoz.ai_client import AIResult, normalize_provider
 from rootcoz.ai_client import call_ai as call_ai_under_test
 
@@ -93,6 +93,74 @@ async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
     )
     assert result.credential_source == "server"
     call.assert_awaited_once_with("prompt", ai_provider=provider, ai_model=model)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recreate", [False, True])
+async def test_server_session_discarded_when_account_changes_during_sidecar_call(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, recreate: bool
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sessions.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    ai_client.update_model_catalog([{"provider": "openai", "id": "model"}])
+    token = ai_client.ai_username.set("alice")
+    delete = AsyncMock()
+    monkeypatch.setattr(
+        ai_client, "get_sidecar_client", lambda: AsyncMock(delete_session=delete)
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+
+    async def sidecar_call(*args: object, **kwargs: object) -> AIResult:
+        await storage.delete_user("alice")
+        if recreate:
+            await storage.create_admin_user("alice")
+        return AIResult(success=True, text="reply", session_id="new-session")
+
+    monkeypatch.setattr(ai_client, "_call_ai", sidecar_call)
+    try:
+        with pytest.raises(LookupError, match="account changed"):
+            await call_ai_under_test("prompt", ai_provider="openai", ai_model="model")
+    finally:
+        ai_client.ai_username.reset(token)
+    delete.assert_awaited_once_with("new-session")
+    assert (
+        await storage.get_ai_session_source("new-session", "alice", "openai")
+        == "unknown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_session_collision_does_not_delete_existing_sidecar_session(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sessions.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.save_ai_session_source("existing", "alice", "openai", "server")
+    ai_client.update_model_catalog([{"provider": "openai", "id": "model"}])
+    token = ai_client.ai_username.set("alice")
+    delete = AsyncMock()
+    monkeypatch.setattr(
+        ai_client, "get_sidecar_client", lambda: AsyncMock(delete_session=delete)
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(
+        ai_client,
+        "_call_ai",
+        AsyncMock(
+            return_value=AIResult(success=True, text="reply", session_id="existing")
+        ),
+    )
+    try:
+        with pytest.raises(ValueError, match="already active"):
+            await call_ai_under_test("prompt", ai_provider="openai", ai_model="model")
+    finally:
+        ai_client.ai_username.reset(token)
+    delete.assert_not_awaited()
+    assert (
+        await storage.get_ai_session_source("existing", "alice", "openai") == "server"
+    )
 
 
 @pytest.mark.asyncio

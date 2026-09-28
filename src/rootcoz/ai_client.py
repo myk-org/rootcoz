@@ -759,14 +759,24 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
     )
 
 
-async def _remember_session_source(session_id: str, provider: str, source: str) -> None:
-    """Persist ownership before a new session can receive a prompt."""
-    try:
-        from rootcoz.storage import save_ai_session_source
+async def _remember_session_source(
+    session_id: str, provider: str, account_id: int
+) -> None:
+    """Persist server ownership or discard a session with no valid owner."""
+    from rootcoz.storage import AiSessionCollisionError, save_ai_session_source
 
-        await save_ai_session_source(session_id, ai_username.get(), provider, source)
+    try:
+        await save_ai_session_source(
+            session_id, ai_username.get(), provider, "server", account_id
+        )
+    except AiSessionCollisionError:
+        # The sidecar returned an ID already owned by another session.
+        raise
     except Exception:
-        logger.warning("Unable to save AI session source")
+        try:
+            await get_sidecar_client().delete_session(session_id)
+        except OSError, RuntimeError, ValueError, httpx.HTTPError:
+            logger.warning("Unable to clean up untracked AI session")
         raise
 
 
@@ -925,6 +935,11 @@ async def call_ai(
         source = "user" if key is not None else "server"
     if source == "server":
         await require_server_provider_grant()
+    if not session_id and source == "server":
+        from rootcoz.storage import get_user_by_username
+
+        account = await get_user_by_username(username) if username else None
+        account_id = account["id"] if account else -1
     if session_id and source == "user":
         # Only the current owner's provider key can redact a keyed session.
         key = await session_key(provider)
@@ -962,7 +977,7 @@ async def call_ai(
             )
     result.credential_source = source
     if not session_id and result.session_id and key is None:
-        await _remember_session_source(result.session_id, provider, source)
+        await _remember_session_source(result.session_id, provider, account_id)
     return result
 
 

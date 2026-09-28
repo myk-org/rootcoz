@@ -4246,6 +4246,23 @@ class TestAdminUsersChangeRole:
         assert output["role"] == "admin"
 
 
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        ([], None),
+        (["--can-use-server-providers"], True),
+        (["--no-can-use-server-providers"], False),
+    ],
+)
+def test_admin_users_approve_server_provider_grant(mock_client, option, expected):
+    mock_client.approve_user.return_value = {"username": "alice"}
+    result = runner.invoke(app, ["admin", "users", "approve", "alice", *option])
+    assert result.exit_code == 0
+    mock_client.approve_user.assert_called_once_with(
+        "alice", can_use_server_providers=expected
+    )
+
+
 def test_admin_users_set_server_provider_grant(mock_client):
     mock_client.admin_set_can_use_server_providers.return_value = {
         "username": "alice",

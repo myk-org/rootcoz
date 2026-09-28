@@ -11931,7 +11931,11 @@ def _cleanup_chat_state(key: str) -> None:
 
 
 async def _normalize_and_validate_ai_params(
-    ai_provider: str | None, ai_model: str | None
+    ai_provider: str | None,
+    ai_model: str | None,
+    *,
+    username: str,
+    force_server: bool,
 ) -> tuple[str | None, str | None]:
     """Normalize and validate AI provider/model from request body.
 
@@ -11950,7 +11954,13 @@ async def _normalize_and_validate_ai_params(
             detail="Both ai_provider and ai_model are required when either is set",
         )
     if provider and model:
-        return await _validate_catalog_pair(provider, model)
+        user_token = ai_username.set(username)
+        force_token = force_server_credentials.set(force_server)
+        try:
+            return await _validate_catalog_pair(provider, model)
+        finally:
+            force_server_credentials.reset(force_token)
+            ai_username.reset(user_token)
     return provider, model
 
 
@@ -12026,13 +12036,21 @@ async def send_chat_message(
     """
     _check_allow_list(request)
     _require_reviewer(request)
-    ai_provider, ai_model = await _normalize_and_validate_ai_params(
-        body.ai_provider, body.ai_model
-    )
-
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
         raise HTTPException(status_code=404, detail="Job not found")
+    params = stored["result"].get("request_params", {})
+    job_force = params.get("force_server_credentials")
+    ai_provider, ai_model = await _normalize_and_validate_ai_params(
+        body.ai_provider,
+        body.ai_model,
+        username=request.state.username,
+        force_server=(
+            job_force
+            if job_force is not None
+            else get_settings().force_server_credentials
+        ),
+    )
 
     # Insert user message + assistant placeholder atomically
     user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
@@ -12569,6 +12587,9 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                 username, ai_provider
             )
             token = ai_username.set(username)
+            force_token = force_server_credentials.set(
+                _admin_settings.force_server_credentials
+            )
             try:
                 session_id = await init_admin_chat_session(
                     ai_provider=ai_provider,
@@ -12577,6 +12598,7 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                     custom_tools=custom_tools,
                 )
             finally:
+                force_server_credentials.reset(force_token)
                 ai_username.reset(token)
             if session_id:
                 saved = await storage.add_chat_message(
@@ -12681,7 +12703,10 @@ async def send_admin_chat_message(
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
     ai_provider, ai_model = await _normalize_and_validate_ai_params(
-        body.ai_provider, body.ai_model
+        body.ai_provider,
+        body.ai_model,
+        username=request.state.username,
+        force_server=get_settings().force_server_credentials,
     )
 
     # Insert user message + assistant placeholder atomically
@@ -12730,7 +12755,6 @@ async def _process_admin_chat_message(
     is_admin: bool = True,
 ) -> None:
     """Background task: process a single admin chat message with AI."""
-    ai_username.set(username)
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
         build_admin_custom_tools,
@@ -12740,8 +12764,12 @@ async def _process_admin_chat_message(
     auth_header = ""
 
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
+        _admin_settings = get_settings()
+        user_token = ai_username.set(username)
+        force_token = force_server_credentials.set(
+            _admin_settings.force_server_credentials
+        )
         try:
-            _admin_settings = get_settings()
             ai_provider, ai_model = _resolve_chat_ai_config(
                 override_provider=ai_provider_override,
                 override_model=ai_model_override,
@@ -12901,6 +12929,8 @@ async def _process_admin_chat_message(
                     assistant_msg_id,
                 )
         finally:
+            force_server_credentials.reset(force_token)
+            ai_username.reset(user_token)
             _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
             # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
 
