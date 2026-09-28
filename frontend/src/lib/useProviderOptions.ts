@@ -19,6 +19,7 @@ const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: 
 /** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
 const catalogInflight = new Map<string, Promise<CatalogState>>()
 const catalogCache = new Map<string, CatalogState>()
+let catalogGeneration = 0
 /** Mounted useProviderCatalog consumers — notified on cache reset. */
 const catalogSubscribers = new Set<() => void>()
 
@@ -32,6 +33,7 @@ function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<Ca
   if (cached) return Promise.resolve(cached)
   const inflight = catalogInflight.get(cacheKey)
   if (inflight) return inflight
+  const generation = catalogGeneration
   const req = api
     .get<AiModelsResponse>(forceServer ? '/api/ai-models?force_server_credentials=true' : '/api/ai-models')
     .then((res) => {
@@ -43,7 +45,7 @@ function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<Ca
         enabled: providerKeys.filter((p) => (providers[p] ?? []).length > 0),
         providerStatus: res.provider_status ?? {},
       }
-      if (catalogInflight.get(cacheKey) === req) {
+      if (generation === catalogGeneration && catalogInflight.get(cacheKey) === req) {
         catalogCache.set(cacheKey, next)
         catalogInflight.delete(cacheKey)
       }
@@ -62,6 +64,7 @@ function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<Ca
  * so they refetch (login/logout/admin refresh/tests).
  */
 export function resetProviderCatalogCache(): void {
+  catalogGeneration++
   catalogInflight.clear()
   catalogCache.clear()
   // Wake every mounted hook — cacheKey alone does not change on refresh.
@@ -106,12 +109,13 @@ export function useProviderCatalog(forceServer = false): {
 
   useEffect(() => {
     let ignore = false
+    const generation = catalogGeneration
     loadProviderCatalog(cacheKey, forceServer)
       .then((next) => {
-        if (!ignore) setState({ key: cacheKey, catalog: next })
+        if (!ignore && generation === catalogGeneration) setState({ key: cacheKey, catalog: next })
       })
       .catch(() => {
-        if (!ignore) setState({ key: cacheKey, catalog: EMPTY_CATALOG })
+        if (!ignore && generation === catalogGeneration) setState({ key: cacheKey, catalog: EMPTY_CATALOG })
       })
     return () => {
       ignore = true

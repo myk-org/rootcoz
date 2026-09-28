@@ -1,11 +1,50 @@
 """Key-scoped catalog and forced server routing."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
 from rootcoz import ai_client, main, storage
+
+
+@pytest.mark.asyncio
+async def test_key_discovery_keeps_only_session_limits(monkeypatch):
+    monkeypatch.setattr(
+        ai_client,
+        "get_sidecar_client",
+        lambda: SimpleNamespace(
+            get_models_for_api_key=AsyncMock(
+                return_value={
+                    "modelListingSupported": True,
+                    "models": [
+                        {
+                            "provider": "google",
+                            "id": "new-model",
+                            "name": "New model",
+                            "capabilities": {
+                                "inputTokenLimit": 1000,
+                                "outputTokenLimit": 100,
+                                "extra": "do-not-expose",
+                            },
+                        }
+                    ],
+                }
+            )
+        ),
+    )
+    assert await ai_client.models_for_api_key("google", "secret") == {
+        "modelListingSupported": True,
+        "models": [
+            {
+                "provider": "google",
+                "id": "new-model",
+                "name": "New model",
+                "capabilities": {"inputTokenLimit": 1000, "outputTokenLimit": 100},
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -53,22 +92,11 @@ async def test_scoped_discovery_and_call_fail_closed(monkeypatch):
                 "can_use_server_providers": False,
                 "verified": True,
             },
-            {
-                "provider": "openai",
-                "id": "user-only",
-                "name": "User only",
-                "source": "api",
-                "credential_sources": ["user"],
-                "can_use_server_providers": False,
-                "verified": True,
-            },
         ]
         assert "xai" not in models
         assert secret not in str(models)
-        assert await ai_client.resolve_catalog_pair("openai", "user-only") == (
-            "openai",
-            "user-only",
-        )
+        with pytest.raises(ValueError, match="Unknown Pi-sidecar provider/model pair"):
+            await ai_client.resolve_catalog_pair("openai", "user-only")
         with pytest.raises(ValueError):
             await ai_client.resolve_catalog_pair("openai", "claude")
         ai_client.force_server_credentials.set(True)
@@ -77,6 +105,75 @@ async def test_scoped_discovery_and_call_fail_closed(monkeypatch):
         assert await ai_client.session_key("openai") is None
     finally:
         ai_client.force_server_credentials.set(False)
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_listed_unknown_requires_reliable_limits(monkeypatch):
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={"google": "secret"})
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["google"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(
+            return_value={
+                "modelListingSupported": True,
+                "models": [
+                    {
+                        "provider": "google",
+                        "id": "good",
+                        "capabilities": {
+                            "inputTokenLimit": 1000,
+                            "outputTokenLimit": 100,
+                        },
+                    },
+                    {
+                        "provider": "google",
+                        "id": "missing",
+                        "capabilities": {
+                            "inputTokenLimit": 1000,
+                        },
+                    },
+                    {
+                        "provider": "google",
+                        "id": "boolean",
+                        "capabilities": {
+                            "inputTokenLimit": True,
+                            "outputTokenLimit": 100,
+                        },
+                    },
+                    {
+                        "provider": "google",
+                        "id": "negative",
+                        "capabilities": {
+                            "inputTokenLimit": 1000,
+                            "outputTokenLimit": -1,
+                        },
+                    },
+                ],
+            }
+        ),
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [entry["id"] for entry in scoped["google"]] == ["good"]
+        assert scoped["google"][0]["verified"] is True
+        assert await ai_client.resolve_catalog_pair("google", "good") == (
+            "google",
+            "good",
+        )
+        for model in ("missing", "boolean", "negative"):
+            with pytest.raises(
+                ValueError, match="Unknown Pi-sidecar provider/model pair"
+            ):
+                await ai_client.resolve_catalog_pair("google", model)
+    finally:
         ai_client.ai_username.reset(token)
 
 

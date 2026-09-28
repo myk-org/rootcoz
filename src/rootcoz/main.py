@@ -1302,6 +1302,15 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
         try:
             ai_provider, ai_model = await _resolve_ai_config_allow_defer(body, merged)
             resolved_peers = await _validate_peer_configs(body, merged)
+        except Exception as exc:  # noqa: BLE001 — isolate each job's validation failure
+            reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            logger.warning("Cannot resume waiting job %s: %s", job["job_id"], reason)
+            await _fail_resumed_waiting_job(
+                job["job_id"],
+                result_data,
+                f"Cannot resume: AI/peer validation failed: {reason}",
+            )
+            continue
         finally:
             ai_username.reset(token)
         tests_repo_url_raw = resolve_tests_repo_url(body, merged)

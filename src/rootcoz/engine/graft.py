@@ -24,7 +24,6 @@ MAX_SECONDS = 30
 BUILD_SECONDS = 120
 FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
-MAX_REPOSITORIES = 10  # includes the primary test repository
 MAX_OUTPUT = 1024 * 1024
 MAX_GRAPH_BYTES = 40 * 1024 * 1024
 GRAFT = "/app/sidecar-helper/node_modules/.bin/graft"
@@ -350,16 +349,14 @@ def _index_one(
 def index_repositories(
     workspace: Path, cloned_repos: dict[str, Path]
 ) -> dict[str, Any]:
-    """Build up to ten repositories per workspace, with two concurrent builds."""
+    """Build cloned repositories with two concurrent builds."""
     workspace = Path(workspace).resolve()
-    names = iter(cloned_repos)
-    selected = list(islice(names, MAX_REPOSITORIES))
     with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=2) as pool:
         futures = {
             name: pool.submit(
                 _index_one, workspace, _root(workspace), name, cloned_repos[name]
             )
-            for name in selected
+            for name in cloned_repos
         }
         results = {}
         for name, future in futures.items():
@@ -367,9 +364,6 @@ def index_repositories(
                 results[name] = future.result()
             except Exception as exc:  # noqa: BLE001 - isolate and sanitize unexpected worker failures
                 results[name] = {"status": "failed", "reason": type(exc).__name__}
-    results.update(
-        {name: {"status": "skipped", "reason": "repository limit"} for name in names}
-    )
     return results
 
 
@@ -391,7 +385,6 @@ def log_index_outcomes(outcomes: dict[str, Any]) -> None:
         if status not in {"indexed", "unchanged", "skipped", "failed"}:
             status = "failed"
         if reason not in {
-            "repository limit",
             "invalid repository",
             "no eligible files",
             "invalid graph root",
@@ -620,7 +613,7 @@ def roots_needing_index(
     root = _root(workspace)
     with _workspace_install_lock(workspace):
         result = {}
-        for name, repo in islice(cloned_repos.items(), MAX_REPOSITORIES):
+        for name, repo in cloned_repos.items():
             if not _valid_repo(workspace, name, repo):
                 continue
             manifest = (

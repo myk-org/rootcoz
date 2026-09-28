@@ -333,7 +333,9 @@ def test_parallel_builds_and_isolation(tmp_path, monkeypatch):
     assert peak == 2
 
 
-def test_effective_repositories_fit_index_limit(tmp_path, monkeypatch):
+def test_effective_repositories_all_indexed_discoverable_and_refreshable(
+    tmp_path, monkeypatch
+):
     from rootcoz.engine.core import clone_additional_repos
     from rootcoz.models import AdditionalRepo
     from rootcoz.sources.base import setup_analysis_workspace
@@ -346,17 +348,17 @@ def test_effective_repositories_fit_index_limit(tmp_path, monkeypatch):
 
         def clone_into(self, url, target, **kwargs):
             target.mkdir(parents=True)
-            (target / ".git").mkdir()
+            git(target, "init")
             (target / "a.py").write_text("pass")
 
     manager = Manager()
     initial = [
         AdditionalRepo(name=f"initial-{i}", url=f"https://example.com/initial-{i}")
-        for i in range(9)
+        for i in range(13)
     ]
     effective = [
         AdditionalRepo(name=f"effective-{i}", url=f"https://example.com/effective-{i}")
-        for i in range(9)
+        for i in range(13)
     ]
 
     async def exercise():
@@ -378,20 +380,35 @@ def test_effective_repositories_fit_index_limit(tmp_path, monkeypatch):
     import asyncio
 
     setup = asyncio.run(exercise())
-    calls = []
 
-    def index(workspace, root, name, repo):
-        calls.append(name)
-        return {"status": "indexed"}
+    def fake_run(argv, **kwargs):
+        if "build" in argv:
+            Path(argv[2]).mkdir()
+        return subprocess.CompletedProcess(argv, 0, "", "")
 
-    monkeypatch.setattr(graft, "_index_one", index)
-    results = graft.index_repositories(setup.repo_path, setup.cloned_repos)
-    assert len(calls) == graft.MAX_REPOSITORIES == 10
-    assert all(result["status"] == "indexed" for result in results.values())
-    assert {effective_repo.name for effective_repo in effective} <= set(calls)
+    monkeypatch.setattr(graft, "_run", fake_run)
+    roots = setup.cloned_repos
+    assert len(roots) == 14
+    assert {effective_repo.name for effective_repo in effective} <= roots.keys()
+    assert graft.roots_needing_index(setup.repo_path, roots) == roots
+    assert {
+        name: result["status"]
+        for name, result in graft.index_repositories(setup.repo_path, roots).items()
+    } == dict.fromkeys(roots, "indexed")
+    assert graft.indexed_roots(setup.repo_path) == roots
+    assert graft.roots_needing_index(setup.repo_path, roots) == {}
+    for repo in roots.values():
+        (repo / "a.py").write_text("changed")
+    assert graft.roots_needing_index(setup.repo_path, roots) == roots
+    assert {
+        name: result["status"]
+        for name, result in graft.index_repositories(setup.repo_path, roots).items()
+    } == dict.fromkeys(roots, "indexed")
+    assert graft.indexed_roots(setup.repo_path) == roots
+    assert graft.roots_needing_index(setup.repo_path, roots) == {}
 
 
-def test_index_limit_and_unrelated_workspaces(tmp_path, monkeypatch):
+def test_all_repositories_indexed_and_unrelated_workspaces(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
     entered = threading.Event()
@@ -412,25 +429,16 @@ def test_index_limit_and_unrelated_workspaces(tmp_path, monkeypatch):
         fast = pool.submit(
             graft.index_repositories,
             tmp_path / "fast",
-            {str(i): tmp_path for i in range(12)},
+            {str(i): tmp_path for i in range(14)},
         )
         try:
             result = fast.result(timeout=2)
-            assert len([r for r in result.values() if r["status"] == "indexed"]) == 10
-            assert (
-                len(
-                    [
-                        r
-                        for r in result.values()
-                        if r.get("reason") == "repository limit"
-                    ]
-                )
-                == 2
-            )
+            assert len(result) == 14
+            assert all(r["status"] == "indexed" for r in result.values())
         finally:
             release.set()
         slow.result(timeout=2)
-    assert len(calls) == 11
+    assert len(calls) == 15
 
 
 def test_same_workspace_builds_do_not_overlap(tmp_path, monkeypatch):

@@ -4215,6 +4215,73 @@ class TestReconstructFromParams:
 class TestResumeWaitingJobs:
     """Tests for _resume_waiting_jobs helper."""
 
+    @pytest.mark.parametrize("failure", ["missing_submitter", "invalid_peer"])
+    async def test_validation_failure_does_not_block_next_job(
+        self, failure, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """Fail only the invalid waiting job; retain grants for the next one."""
+        from fastapi import HTTPException
+
+        from rootcoz.config import get_settings
+        from rootcoz.main import _resume_waiting_jobs
+        from rootcoz.models import AnalyzeRequest
+
+        grant = AsyncMock(return_value=True)
+        monkeypatch.setattr(storage, "can_user_use_server_providers", grant)
+        monkeypatch.setattr(
+            storage, "get_user_ai_credentials", AsyncMock(return_value={})
+        )
+        body = AnalyzeRequest(
+            job_name="my-job", build_number=1, ai_provider="gemini", ai_model="m"
+        )
+        params = _build_jenkins_request_params(body, get_settings(), "gemini", "m")
+        params["submitted_by"] = "admin"
+        first_params = dict(params)
+        if failure == "missing_submitter":
+            first_params.pop("submitted_by")
+        jobs = [
+            {
+                "job_id": job_id,
+                "result_data": {
+                    "job_name": "my-job",
+                    "build_number": 1,
+                    "request_params": request_params,
+                },
+            }
+            for job_id, request_params in (("bad", first_params), ("good", params))
+        ]
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+            ) as process,
+        ):
+            await storage.init_db()
+            for job in jobs:
+                await storage.save_result(
+                    job["job_id"], "http://j/1", "waiting", job["result_data"]
+                )
+            if failure == "invalid_peer":
+                monkeypatch.setattr(
+                    "rootcoz.main._validate_peer_configs",
+                    AsyncMock(
+                        side_effect=[HTTPException(422, "Invalid peer model"), None]
+                    ),
+                )
+            await _resume_waiting_jobs(jobs)
+            await asyncio.sleep(0)
+            bad = await storage.get_result("bad")
+            assert bad["status"] == "failed"
+            assert "request_params" in bad["result"]
+            assert (
+                "grant" if failure == "missing_submitter" else "Invalid peer model"
+            ) in bad["result"]["error"]
+            process.assert_called_once()
+            assert process.call_args.kwargs["job_id"] == "good"
+            assert (await storage.get_result("good"))["status"] == "waiting"
+            assert grant.await_count >= 1
+            assert all(call.args == ("admin",) for call in grant.await_args_list)
+
     async def test_resumes_valid_waiting_job(self, mock_settings, monkeypatch) -> None:
         """A waiting job with valid request_params spawns a background task."""
         monkeypatch.setattr(

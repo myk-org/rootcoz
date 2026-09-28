@@ -240,7 +240,17 @@ async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
     return {
         "modelListingSupported": response["modelListingSupported"],
         "models": [
-            {"id": m["id"], "name": m.get("name") or m["id"], "provider": provider}
+            {
+                "id": m["id"],
+                "name": m.get("name") or m["id"],
+                "provider": provider,
+                # Keep only the metadata the sidecar uses to construct unknown models.
+                "capabilities": {
+                    field: m.get("capabilities", {}).get(field)
+                    for field in ("inputTokenLimit", "outputTokenLimit")
+                    if isinstance(m.get("capabilities"), dict)
+                },
+            }
             for m in models
         ],
     }
@@ -304,12 +314,21 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 pairs.setdefault((provider, ""), {})  # Preserve manual-only provider.
             for entry in entries:
                 pair = (provider, entry["id"])
+                limits = entry.get("capabilities") or {}
+                constructible = pair in pairs or all(
+                    type(limits.get(field)) is int and 0 < limits[field] <= 2**53 - 1
+                    for field in ("inputTokenLimit", "outputTokenLimit")
+                )
+                if listing and not constructible:
+                    continue
                 if pair in pairs:
                     pairs[pair]["credential_sources"].insert(0, "user")
-                    pairs[pair]["verified"] = listing
+                    pairs[pair]["verified"] = True
                 else:
                     pairs[pair] = {
-                        **entry,
+                        "provider": provider,
+                        "id": entry["id"],
+                        "name": entry.get("name") or entry["id"],
                         "source": _source_for_sidecar(provider),
                         "credential_sources": ["user"],
                         "can_use_server_providers": allowed,

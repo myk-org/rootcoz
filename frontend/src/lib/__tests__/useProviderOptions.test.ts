@@ -97,6 +97,49 @@ describe('useProviderCatalog shared fetch', () => {
     again.unmount()
   })
 
+  it('ignores a pre-reset response while the refreshed request is pending', async () => {
+    const pending: Array<(value: unknown) => void> = []
+    getMock.mockImplementation(() => new Promise((resolve) => pending.push(resolve)))
+    const { result, unmount } = renderHook(() => useProviderCatalog())
+    expect(getMock).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resetProviderCatalogCache()
+      pending[0]({ providers: { claude: [{ id: 'old' }] } })
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(2))
+    expect(result.current.providerKeys).toEqual([])
+
+    await act(async () => {
+      pending[1]({ providers: { openai: [{ id: 'new' }] } })
+    })
+    expect(result.current.providerKeys).toEqual(['openai'])
+    const second = renderHook(() => useProviderCatalog())
+    expect(second.result.current.providerKeys).toEqual(['openai'])
+    expect(getMock).toHaveBeenCalledTimes(2)
+    second.unmount()
+    unmount()
+  })
+
+  it('keeps the refreshed catalog when the old response arrives last', async () => {
+    const pending: Array<(value: unknown) => void> = []
+    getMock.mockImplementation(() => new Promise((resolve) => pending.push(resolve)))
+    const { result, unmount } = renderHook(() => useProviderCatalog())
+    act(() => resetProviderCatalogCache())
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(2))
+
+    await act(async () => {
+      pending[1]({ providers: { openai: [{ id: 'new' }] } })
+    })
+    expect(result.current.providerKeys).toEqual(['openai'])
+    await act(async () => {
+      pending[0]({ providers: { claude: [{ id: 'old' }] } })
+    })
+    expect(result.current.providerKeys).toEqual(['openai'])
+    unmount()
+  })
+
   it('does not add diagnostic-only cursor to provider options', async () => {
     getMock.mockResolvedValue({
       providers: { openai: [{ id: 'gpt-5', name: 'GPT 5' }] },
