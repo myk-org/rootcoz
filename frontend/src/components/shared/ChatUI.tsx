@@ -102,7 +102,7 @@ export function ChatUI({
   const [forceServer, setForceServer] = useState(defaultForceServer)
   const effectiveForceServer = forceServer && canUseServerProviders
   const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
-  const cursorAuthStatus = useCursorAuthStatus()
+  const cursorAuthStatus = useCursorAuthStatus(effectiveForceServer)
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)

@@ -79,6 +79,20 @@ describe('useProviderCatalog shared fetch', () => {
     c.unmount()
   })
 
+  it('reads the Cursor banner status from the same catalog mode as the caller', async () => {
+    getMock.mockImplementation(async (path: string) => (path.endsWith('=true')
+      ? { providers: {}, provider_status: { cursor: { ok: true } } }
+      : { providers: {}, provider_status: { cursor: { ok: false, reason: 'unavailable', hint: 'down' } } }))
+    const serverMode = renderHook(() => useCursorAuthStatus(true))
+    await waitFor(() => expect(serverMode.result.current).toBeNull())
+    expect(getMock).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=true')
+    const userMode = renderHook(() => useCursorAuthStatus(false))
+    await waitFor(() => expect(userMode.result.current?.ok).toBe(false))
+    expect(getMock).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=false')
+    serverMode.unmount()
+    userMode.unmount()
+  })
+
   it('caches default and forced-server catalogs separately and clears both on reset', async () => {
     getMock.mockImplementation(async (path: string) => ({ providers: path.endsWith('=true') ? { claude: [{ id: 'sonnet' }] } : { openai: [{ id: 'gpt' }] } }))
     const regular = renderHook(() => useProviderCatalog())
