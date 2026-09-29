@@ -335,6 +335,13 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 - Process supervision: trap + monitor kills container if sidecar dies
 - Healthcheck covers both Python backend and sidecar
 
+**Version alignment — MANDATORY:**
+`@myk-org/pi-sidecar` (npm, `sidecar-helper/package.json`) and `pi-sidecar-client` (PyPI, `pyproject.toml`) are released together and share one version number. Bump both in the same change and regenerate **both** lockfiles (`npm install` and `uv lock`).
+- Never bump one without the other — a half-applied bump leaves two runtimes disagreeing with nothing reporting the error.
+- Never pin either with an exact version; use a range (`>=X.Y.Z`). An exact pin never moves, so no upstream fix can ever reach it. rootcoz sat on an exact `4.6.2` pin and missed the 4.6.4 manifest fix that cleared five transitive advisories.
+- Regenerating `sidecar-helper/package-lock.json` requires **deleting** it, not refreshing it. `npm install` preserves lock entries that still satisfy their ranges, so a stale transitive tree survives the bump and the result audits as if it were fixed. Use `git checkout -- sidecar-helper/package-lock.json && rm -rf node_modules package-lock.json && npm install`, then verify with `npm ls --all` (no `invalid`, `extraneous`, `missing`, or `UNMET`) and `npm pack @myk-org/pi-sidecar` (the published tarball must not ship an `npm-shrinkwrap.json`).
+- Do not add an `overrides` block to work around a stale lock. A range resolves correctly on its own; an override protects only this repo and leaves every other consumer exposed.
+
 ### Logging
 
 Uses `python-simple-logger`:
