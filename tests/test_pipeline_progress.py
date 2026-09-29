@@ -114,10 +114,13 @@ async def test_direct_and_child_failures_persist_scoped_group_count(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("child_success", [True, False])
+@pytest.mark.parametrize("child_success", [True, False, None])
 @pytest.mark.parametrize("fallback_crashes", [True, False])
 async def test_all_direct_groups_fail_preserves_child_report(
-    temp_db_path: Path, tmp_path: Path, child_success: bool, fallback_crashes: bool
+    temp_db_path: Path,
+    tmp_path: Path,
+    child_success: bool | None,
+    fallback_crashes: bool,
 ) -> None:
     from rootcoz.main import _process_ci_source_analysis
 
@@ -141,7 +144,11 @@ async def test_all_direct_groups_fail_preserves_child_report(
             ],
         )
     ]
-    source_result = CISourceResult(failures=failures, child_job_infos=[("leaf", 7)])
+    if child_success is None:
+        children = []
+    source_result = CISourceResult(
+        failures=failures, child_job_infos=[("leaf", 7)] if children else []
+    )
     with (
         patch.object(storage, "DB_PATH", temp_db_path),
         patch("rootcoz.main.create_source_from_request") as source,
@@ -179,7 +186,15 @@ async def test_all_direct_groups_fail_preserves_child_report(
             if fallback_crashes
             else nullcontext()
         ),
-        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock
+        ) as review,
+        patch(
+            "rootcoz.main._enrich_result_with_jira", new_callable=AsyncMock
+        ) as enrich,
+        patch(
+            "rootcoz.main.populate_failure_history", new_callable=AsyncMock
+        ) as history,
         patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
         patch(
             "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
@@ -210,17 +225,30 @@ async def test_all_direct_groups_fail_preserves_child_report(
         row = await storage.get_result("direct-child-failure")
     assert row["status"] == ("completed" if child_success else "failed"), row["result"]
     result = row["result"]
-    assert result["failed_analysis_groups"] == (1 if child_success else 2)
+    assert result["failed_analysis_groups"] == (
+        1 if child_success or not children else 2
+    )
     assert len(result["failures"]) == 1
     assert result["failures"][0]["analysis"]["details"] == (
         "Analysis failed; check server logs for details"
     )
-    assert result["child_job_analyses"][0]["failures"][0]["analysis"]["details"] == (
-        "diagnosed"
-        if child_success
-        else "Analysis failed; check server logs for details"
-    )
-    assert "1 group(s) failed" in result["summary"]
+    if children:
+        assert result["child_job_analyses"][0]["failures"][0]["analysis"][
+            "details"
+        ] == (
+            "diagnosed"
+            if child_success
+            else "Analysis failed; check server logs for details"
+        )
+    if child_success:
+        assert "1 group(s) failed" in result["summary"]
+        assert "error" not in result
+        review.assert_awaited_once()
+    else:
+        assert "All failure group(s) failed during analysis" in result["error"]
+        enrich.assert_not_awaited()
+        history.assert_not_awaited()
+        review.assert_not_awaited()  # No auto-review means no auto-push.
     assert "secret-provider-response" not in str(result)
 
 
@@ -234,6 +262,7 @@ async def test_all_direct_groups_fail_preserves_child_report(
         (False, True, True, False, False),
         (False, True, True, True, False),
         (False, True, False, False, True),
+        (True, True, False, False, True),
     ],
 )
 async def test_pipeline_jira_and_saving_stages(
@@ -344,8 +373,10 @@ async def test_pipeline_jira_and_saving_stages(
             return_value=jira_enabled,
         ),
         patch("rootcoz.main.enrich_with_jira_matches", side_effect=jira) as jira_mock,
-        patch("rootcoz.main.populate_failure_history", side_effect=saving),
-        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main.populate_failure_history", side_effect=saving) as history,
+        patch(
+            "rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock
+        ) as review,
         patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
         patch(
             "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
@@ -375,17 +406,24 @@ async def test_pipeline_jira_and_saving_stages(
         row = await storage.get_result("progress-pipeline")
         assert row["status"] == ("failed" if all_failed else "completed")
         assert row["result"]["status"] == row["status"]
-        assert row["result"]["passed_count"] == 1
+        if not all_failed:
+            assert row["result"]["passed_count"] == 1
         if partial or all_failed:
             assert len(row["result"]["failures"]) == (
                 4 if dedup else 1 if all_failed else 2
             )
             assert row["result"]["failed_analysis_groups"] == 1
-            assert "1 group(s) failed" in row["result"]["summary"]
-            assert (
-                f"{2 if dedup else 0 if all_failed else 1} analyzed successfully"
-                in row["result"]["summary"]
-            )
+            if all_failed:
+                assert (
+                    "All failure group(s) failed during analysis"
+                    in row["result"]["error"]
+                )
+            else:
+                assert "1 group(s) failed" in row["result"]["summary"]
+                assert (
+                    f"{2 if dedup else 1} analyzed successfully"
+                    in row["result"]["summary"]
+                )
             if dedup:
                 assert (
                     "Analyzed 4 test failures (2 unique errors)"
@@ -393,6 +431,10 @@ async def test_pipeline_jira_and_saving_stages(
                 )
         phases = [entry["phase"] for entry in row["result"]["progress_log"]]
         assert phases == ["fetching", "analyzing"] + (
-            ["enriching_jira"] if jira_enabled and keywords else []
-        ) + ["saving"]
-        assert jira_mock.await_count == int(jira_enabled and keywords)
+            ["enriching_jira"] if jira_enabled and keywords and not all_failed else []
+        ) + ([] if all_failed else ["saving"])
+        assert jira_mock.await_count == int(
+            jira_enabled and keywords and not all_failed
+        )
+        assert history.await_count == int(not all_failed)
+        assert review.await_count == int(not all_failed)
