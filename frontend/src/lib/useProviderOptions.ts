@@ -35,7 +35,7 @@ function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<Ca
   if (inflight) return inflight
   const generation = catalogGeneration
   const req = api
-    .get<AiModelsResponse>(forceServer ? '/api/ai-models?force_server_credentials=true' : '/api/ai-models')
+    .get<AiModelsResponse>(`/api/ai-models?force_server_credentials=${forceServer}`)
     .then((res) => {
       const providers = res.providers ?? {}
       const providerKeys = Object.keys(providers)

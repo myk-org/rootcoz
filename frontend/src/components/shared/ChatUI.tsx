@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent, type KeyboardEvent } from 'react'
-import { api } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import { useSSE } from '@/lib/SSEProvider'
 import { Button } from '@/components/ui/button'
-import { ProviderSelect } from '@/components/shared/ProviderSelect'
-import { ModelCombobox } from '@/components/shared/ModelCombobox'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { Toggle } from '@/components/shared/Toggle'
+import { isAnalysisAiAvailable } from '@/lib/analysisAi'
+import { useProviderCatalog, useCursorAuthStatus } from '@/lib/useProviderOptions'
+import { useAuth } from '@/lib/auth'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
-import { useProviderModels } from '@/hooks/useProviderModels'
-import { useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -36,6 +37,9 @@ export interface ChatMessage {
   created_at: string
 }
 
+type ChatHistory = { messages: ChatMessage[]; total: number; active_session_version: string; active_session?: { ai_provider: string; ai_model: string; credential_source: string } | null }
+type SessionChoice = { provider: string; model: string; forceServer: boolean }
+
 interface ChatUIProps {
   /** API base path — e.g. '/api/chat/job123' or '/api/admin/chat' */
   apiBasePath: string
@@ -47,6 +51,8 @@ interface ChatUIProps {
   defaultProvider?: string
   /** Initial AI model */
   defaultModel?: string
+  /** Initial credential source (admin settings) */
+  defaultForceServer?: boolean
   /** Empty state message */
   emptyMessage?: string
   /** Empty state subtitle */
@@ -74,19 +80,28 @@ export function ChatUI({
   header,
   defaultProvider = '',
   defaultModel = '',
+  defaultForceServer = false,
   emptyMessage = 'Start a conversation',
   emptySubtitle = '',
 }: ChatUIProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [error, setError] = useState('')
-  const [initComplete, setInitComplete] = useState(false)
+  const [sessionStarted, setSessionStarted] = useState(false)
+  const [sessionChoice, setSessionChoice] = useState<SessionChoice | null>(null)
+  const [starting, setStarting] = useState(false)
   const [initStepIndex, setInitStepIndex] = useState(0)
-  const [initError, setInitError] = useState('')
+  const [clearing, setClearing] = useState(false)
+  const [loadingHistory, setLoadingHistory] = useState(true)
+  const [historyFailed, setHistoryFailed] = useState(false)
+  const [historyRetry, setHistoryRetry] = useState(0)
 
   const [aiProvider, setAiProvider] = useState(() => normalizeProvider(defaultProvider))
   const [aiModel, setAiModel] = useState(defaultModel)
-  const { models: availableModels } = useProviderModels(aiProvider)
+  const { canUseServerProviders } = useAuth()
+  const [forceServer, setForceServer] = useState(defaultForceServer)
+  const effectiveForceServer = forceServer && canUseServerProviders
+  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
   const cursorAuthStatus = useCursorAuthStatus()
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
@@ -96,13 +111,42 @@ export function ChatUI({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pollGenerationRef = useRef(0)
+  const historyGenerationRef = useRef(0)
+  const clearingRef = useRef(false)
+  const preflightRef = useRef(false)
+  const sendInFlightRef = useRef(false)
+  const [sending, setSending] = useState(false)
+  const [waitingForReplyId, setWaitingForReplyId] = useState<number | null>(null)
+  const mountedRef = useRef(true)
+  const startInFlightRef = useRef(false)
+  const confirmedInitRef = useRef(false)
+  // Opaque version of the session currently rendered; a mismatch against a fresh GET
+  // means another tab replaced it, so New Session must not delete the replacement.
+  const sessionVersionRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const hasPending = messages.some(m => m.status === 'pending')
-  const needsProviderModel = !aiProvider || !aiModel
-  const canSend = Boolean(!needsProviderModel && input.trim() && !hasPending)
-  const sendBlockedReason = needsProviderModel
-    ? 'Select an AI provider and model before sending'
-    : hasPending
+  const awaitingReply = waitingForReplyId !== null && !messages.some(m => m.id === waitingForReplyId)
+  const sendBusy = sending || awaitingReply || hasPending
+
+  useEffect(() => {
+    if (waitingForReplyId !== null && messages.some(m => m.id === waitingForReplyId)) setWaitingForReplyId(null)
+  }, [messages, waitingForReplyId])
+
+  const historyIsCurrent = useCallback((generation: number) =>
+    mountedRef.current && !clearingRef.current && historyGenerationRef.current === generation, [])
+  const selectedModel = providers[aiProvider]?.find(model => model.id === aiModel)
+  const needsServerToggle = !effectiveForceServer && !!selectedModel && !selectedModel.credential_sources?.includes('user') && selectedModel.credential_sources?.includes('server')
+  const validPair = !needsServerToggle && isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders)
+  const canSend = Boolean(sessionStarted && !clearing && input.trim() && !sendBusy)
+  const sendBlockedReason = clearing ? 'Clearing chat session'
+    : !sessionStarted
+    ? 'Start Chat before sending'
+    : sendBusy
       ? 'Wait for the current reply to finish'
       : !input.trim()
         ? 'Type a message'
@@ -118,17 +162,30 @@ export function ChatUI({
   }, [defaultModel])
 
 
-  // Fetch messages with pagination (last 200)
-  const fetchMessages = useCallback(async (): Promise<ChatMessage[]> => {
-    const res = await api.get<{ messages: ChatMessage[]; total: number }>(apiBasePath)
-    if (res.total > 200) {
-      const lastPage = await api.get<{ messages: ChatMessage[]; total: number }>(
-        `${apiBasePath}?offset=${Math.max(res.total - 200, 0)}`
+  // Fetch messages with pagination (last 200); session metadata belongs to the first page.
+  const fetchMessages = useCallback(async (): Promise<{ history: ChatHistory; generation: number }> => {
+    const generation = historyGenerationRef.current
+    const history = await api.get<ChatHistory>(apiBasePath)
+    if (history.total > 200) {
+      const lastPage = await api.get<ChatHistory>(
+        `${apiBasePath}?offset=${Math.max(history.total - 200, 0)}`
       )
-      return lastPage.messages
+      return { history: { ...history, messages: lastPage.messages }, generation }
     }
-    return res.messages
+    return { history, generation }
   }, [apiBasePath])
+
+  const applySession = useCallback((active: ChatHistory['active_session'], version?: string) => {
+    sessionVersionRef.current = active ? version ?? null : null
+    if (!active) {
+      confirmedInitRef.current = false
+      setSessionChoice(null)
+      setSessionStarted(false)
+    } else {
+      setSessionChoice({ provider: active.ai_provider, model: active.ai_model, forceServer: active.credential_source === 'server' })
+      setSessionStarted(true)
+    }
+  }, [])
 
   // Cancel active polling
   const cancelPoll = useCallback(() => {
@@ -154,8 +211,8 @@ export function ChatUI({
         return
       }
       fetchMessages()
-        .then(msgs => {
-          if (pollGenerationRef.current !== generation) return
+        .then(({ history: { messages: msgs }, generation: historyGeneration }) => {
+          if (pollGenerationRef.current !== generation || !historyIsCurrent(historyGeneration)) return
           setMessages(msgs)
           // Check if the specific assistant message is no longer pending
           const hasResponse = msgs.some(m =>
@@ -169,7 +226,7 @@ export function ChatUI({
           }
         })
         .catch((err) => {
-          if (pollGenerationRef.current !== generation) return
+          if (pollGenerationRef.current !== generation || clearingRef.current || !mountedRef.current) return
           console.warn('[ChatUI] Poll fetch failed, retrying:', err instanceof Error ? err.message : 'unknown error')
           pollTimerRef.current = setTimeout(poll, 3000)
         })
@@ -177,38 +234,70 @@ export function ChatUI({
 
     // Start after short delay to give SSE a chance first
     pollTimerRef.current = setTimeout(poll, 2000)
-  }, [fetchMessages, cancelPoll])
+  }, [fetchMessages, cancelPoll, historyIsCurrent])
 
-  // Init workspace first, then load history
+  // History is readable without creating a workspace or AI session.
   useEffect(() => {
     let ignore = false
-    setInitComplete(false)
-    setInitError('')
-    setInitStepIndex(0)
-
-    // Step 1: Init (blocks until workspace + repos + session ready)
-    api.post<{ ready: boolean; session_id?: string }>(
-      `${apiBasePath}/init`, {}
-    )
-      .then(() => {
-        if (ignore) return
-        setInitStepIndex(1)
-        // Step 2: Load history only after init completes
-        return fetchMessages().then(msgs => {
-          if (ignore) return
+    const generation = historyGenerationRef.current
+    setLoadingHistory(true)
+    setHistoryFailed(false)
+    fetchMessages()
+      .then(({ history: res }) => {
+        if (ignore || !historyIsCurrent(generation)) return
+        const msgs = res.messages
+        if (!ignore && historyIsCurrent(generation)) {
           setMessages(msgs)
-          setInitStepIndex(2)
-          setInitComplete(true)
-        })
+          const active = res.active_session
+          if (active || !confirmedInitRef.current) applySession(active, res.active_session_version)
+          console.info('[ChatUI] Chat history loaded, active session:', !!active)
+        }
       })
-      .catch(err => {
-        if (ignore) return
-        setInitError(err instanceof Error ? err.message : 'Failed to initialize chat')
-        // Do NOT set initComplete — keep showing loading page with error + retry
-      })
-
+      .catch(err => { if (!ignore && historyIsCurrent(generation)) { setHistoryFailed(true); setError(err instanceof Error ? err.message : 'Failed to load chat history') } })
+      .finally(() => { if (!ignore && historyIsCurrent(generation)) setLoadingHistory(false) })
     return () => { ignore = true }
-  }, [apiBasePath, fetchMessages])
+  }, [fetchMessages, historyRetry, historyIsCurrent, applySession])
+
+  const handleStart = async () => {
+    if (startInFlightRef.current || confirmedInitRef.current || starting || clearing || loadingHistory || historyFailed || sessionStarted || !validPair) return
+    startInFlightRef.current = true
+    setStarting(true)
+    setInitStepIndex(0)
+    setError('')
+    console.info('[ChatUI] Starting chat session')
+    try {
+      const result = await api.post<{ ready: boolean; session_id?: string }>(`${apiBasePath}/init`, {
+        ai_provider: aiProvider, ai_model: aiModel, force_server_credentials: effectiveForceServer,
+      })
+      if (!mountedRef.current) return
+      if (!result.ready || !result.session_id) throw new Error('Chat session unavailable. Clear chat and Start a new session.')
+      confirmedInitRef.current = true
+      setSessionChoice({ provider: aiProvider, model: aiModel, forceServer: effectiveForceServer })
+      setSessionStarted(true)
+      setInitStepIndex(1)
+      console.info('[ChatUI] Chat session confirmed')
+      try {
+        const { history, generation } = await fetchMessages()
+        if (!historyIsCurrent(generation)) return
+        setMessages(history.messages)
+        if (history.active_session) sessionVersionRef.current = history.active_session_version
+        setInitStepIndex(2)
+        console.info('[ChatUI] Chat history loaded after start')
+      } catch (err) {
+        if (!mountedRef.current || clearingRef.current) return
+        setHistoryFailed(true)
+        setError(err instanceof Error ? err.message : 'Failed to load chat history')
+        console.warn('[ChatUI] Chat history failed after start')
+      }
+    } catch (err) {
+      if (!mountedRef.current) return
+      setError(err instanceof Error ? err.message : 'Failed to start chat')
+      console.warn('[ChatUI] Chat start failed')
+    } finally {
+      startInFlightRef.current = false
+      if (mountedRef.current) setStarting(false)
+    }
+  }
 
   // Cleanup repos when leaving chat (keep sessions)
   useEffect(() => {
@@ -223,25 +312,48 @@ export function ChatUI({
   fetchMessagesRef.current = fetchMessages
   const cancelPollRef = useRef(cancelPoll)
   cancelPollRef.current = cancelPoll
+  const historyIsCurrentRef = useRef(historyIsCurrent)
+  historyIsCurrentRef.current = historyIsCurrent
+
+  const syncHistory = useCallback(() => {
+    if (clearingRef.current) {
+      if (preflightRef.current) historyGenerationRef.current++
+      return
+    }
+    const generation = ++historyGenerationRef.current
+    fetchMessagesRef.current()
+      .then(({ history }) => {
+        if (!historyIsCurrentRef.current(generation)) return
+        setMessages(history.messages)
+        applySession(history.active_session, history.active_session_version)
+        setLoadingHistory(false)
+        setHistoryFailed(false)
+        console.info('[ChatUI] Chat synchronized, active session:', !!history.active_session)
+      })
+      .catch((err) => {
+        if (!historyIsCurrentRef.current(generation)) return
+        console.warn('[ChatUI] Failed to sync chat:', err instanceof Error ? err.message : 'unknown error')
+        setHistoryFailed(true)
+        setError(err instanceof Error ? err.message : 'Failed to sync chat')
+        setLoadingHistory(false)
+      })
+  }, [applySession])
 
   const chatEvents = useMemo(() => ({
     'chat-changed': () => {
       console.debug('[ChatUI] SSE chat-changed received, cancelling poll')
       cancelPollRef.current()
-      fetchMessagesRef.current()
-        .then(msgs => setMessages(msgs))
-        .catch((err) => { console.warn('[ChatUI] Failed to sync messages:', err instanceof Error ? err.message : 'unknown error') })
+      syncHistory()
     },
-  }), [])
+  }), [syncHistory])
 
   const chatSseOnReconnect = useCallback(() => {
     console.debug('[ChatUI] SSE reconnected')
-    fetchMessagesRef.current()
-      .then(msgs => setMessages(msgs))
-      .catch((err) => { console.warn('[ChatUI] Failed to sync messages:', err instanceof Error ? err.message : 'unknown error') })
-  }, [])
+    cancelPollRef.current()
+    syncHistory()
+  }, [syncHistory])
 
-  useSSE(initComplete ? sseTopic : null, chatEvents, { onReconnect: chatSseOnReconnect })
+  useSSE(sseTopic, chatEvents, { onReconnect: chatSseOnReconnect })
 
   // Auto-scroll
   useEffect(() => {
@@ -251,12 +363,10 @@ export function ChatUI({
   const handleSend = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
     const trimmed = input.trim()
-    if (!trimmed) return
-    if (!aiProvider || !aiModel) {
-      setError('Select both an AI provider and a model before sending.')
-      return
-    }
-
+    if (!trimmed || !sessionStarted || clearing || sendBusy || sendInFlightRef.current) return
+    sendInFlightRef.current = true
+    setSending(true)
+    console.info('[ChatUI] Sending message')
     setError('')
     setInput('')
 
@@ -266,10 +376,12 @@ export function ChatUI({
         assistant_message_id: number
       }>(apiBasePath, {
         message: trimmed,
-        ai_provider: aiProvider,
-        ai_model: aiModel,
+        ...(sessionChoice && { ai_provider: sessionChoice.provider, ai_model: sessionChoice.model }),
+        force_server_credentials: sessionChoice?.forceServer ?? null,
       })
 
+      if (!mountedRef.current) return
+      setWaitingForReplyId(res.assistant_message_id)
       // Add user message only — assistant placeholder arrives via SSE when processing starts
       setMessages(prev => {
         // Dedupe: SSE may have already synced this message from the server
@@ -293,12 +405,17 @@ export function ChatUI({
       // Start polling fallback in case SSE connection is dead
       startPollForResponse(res.assistant_message_id)
     } catch (err) {
+      if (!mountedRef.current) return
       setError(err instanceof Error ? err.message : 'Failed to send message')
       setInput(trimmed)
+      console.warn('[ChatUI] Send failed')
+    } finally {
+      sendInFlightRef.current = false
+      if (mountedRef.current) setSending(false)
     }
 
     inputRef.current?.focus()
-  }, [input, apiBasePath, aiProvider, aiModel, startPollForResponse])
+  }, [input, apiBasePath, sessionChoice, sessionStarted, clearing, sendBusy, startPollForResponse])
 
   const copyMessage = useCallback(async (content: string, msgId: number) => {
     try {
@@ -321,27 +438,56 @@ export function ChatUI({
   }, [messages])
 
   const handleNewSession = useCallback(async () => {
-    cancelPoll()
-    setInitComplete(false)
-    setInitStepIndex(0)
-    setInitError('')
-    setMessages([])
+    if (clearingRef.current || clearing || sendInFlightRef.current) return
+    clearingRef.current = true
+    historyGenerationRef.current++
+    setClearing(true)
     setError('')
+    let resync = false
     try {
-      await api.delete(apiBasePath)
-      setInitStepIndex(0)
-      await api.post(`${apiBasePath}/init`, {})
-      setInitStepIndex(1)
-      const msgs = await fetchMessages()
-      setMessages(msgs)
-      setInitStepIndex(2)
+      // This preflight catches visible changes; only a server-side conditional DELETE can
+      // protect an identical replacement or a session created after this GET.
+      preflightRef.current = true
+      const { history, generation } = await fetchMessages()
+      preflightRef.current = false
+      const active = history.active_session
+      if (!mountedRef.current || historyGenerationRef.current !== generation) {
+        resync = true
+        console.info('[ChatUI] New Session cancelled: history changed during preflight')
+        return
+      }
+      if (Boolean(active) !== sessionStarted || (active && (!sessionChoice || active.ai_provider !== sessionChoice.provider || active.ai_model !== sessionChoice.model || (active.credential_source === 'server') !== sessionChoice.forceServer || sessionVersionRef.current !== history.active_session_version))) {
+        setMessages(history.messages)
+        applySession(active, history.active_session_version)
+        console.info('[ChatUI] New Session cancelled: active session changed in another tab')
+        return
+      }
+      await api.delete(apiBasePath, undefined, { headers: { 'If-Match': history.active_session_version } })
+      historyGenerationRef.current++
+      confirmedInitRef.current = false
+      cancelPoll()
+      setWaitingForReplyId(null)
+      setSessionStarted(false)
+      setSessionChoice(null)
+      sessionVersionRef.current = null
+      setMessages([])
+      console.info('[ChatUI] Chat session cleared')
     } catch (err) {
-      setInitError(err instanceof Error ? err.message : 'Failed to start new session')
-      // Do NOT set initComplete — show error + retry on loading page
-      return
+      if (err instanceof ApiError && err.status === 409) {
+        resync = true
+        setError('Chat session changed in another tab. History refreshed; review it before clearing again.')
+        console.info('[ChatUI] Chat clear conflict, refreshing history')
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to clear chat')
+        console.warn('[ChatUI] Chat clear failed')
+      }
+    } finally {
+      preflightRef.current = false
+      clearingRef.current = false
+      setClearing(false)
+      if (resync && mountedRef.current) syncHistory()
     }
-    setInitComplete(true)
-  }, [apiBasePath, fetchMessages, cancelPoll])
+  }, [apiBasePath, cancelPoll, clearing, fetchMessages, sessionStarted, sessionChoice, applySession, syncHistory])
 
   const handleAbort = useCallback(async () => {
     try {
@@ -364,50 +510,6 @@ export function ChatUI({
     }
   }
 
-  if (!initComplete) {
-    const stepLabels = ['Create workspace & AI session', 'Load chat history']
-    return (
-      <div className="flex flex-col items-center justify-center h-[60vh] gap-4">
-        {!initError && <Loader2 className="h-8 w-8 animate-spin text-accent-blue" />}
-        <div className="text-center space-y-3">
-          <p className="text-sm font-medium text-text-primary">{INIT_STEPS[initStepIndex] ?? 'Initializing...'}</p>
-          <div className="flex flex-col gap-1.5 text-xs">
-            {stepLabels.map((label, i) => (
-              <StepIndicator
-                key={label}
-                label={label}
-                done={initStepIndex > i}
-                active={initStepIndex === i}
-              />
-            ))}
-          </div>
-        </div>
-        {initError && (
-          <div className="text-center space-y-2">
-            <p className="text-xs text-signal-red">{initError}</p>
-            <Button variant="ghost" size="sm" onClick={() => {
-              setInitError('')
-              setInitStepIndex(0)
-              api.post(`${apiBasePath}/init`, {})
-                .then(() => {
-                  setInitStepIndex(1)
-                  return fetchMessages()
-                })
-                .then(msgs => {
-                  if (msgs) setMessages(msgs)
-                  setInitStepIndex(2)
-                  setInitComplete(true)
-                })
-                .catch(err => setInitError(err instanceof Error ? err.message : 'Retry failed'))
-            }}>
-              Retry
-            </Button>
-          </div>
-        )}
-      </div>
-    )
-  }
-
   return (
     <TooltipProvider delayDuration={200}>
       <div className="flex flex-col h-[calc(100vh-6rem)]">
@@ -415,14 +517,21 @@ export function ChatUI({
         <div className="flex items-center justify-between border-b border-border-muted px-6 py-3 shrink-0">
           {header}
           <div className="flex items-center gap-3">
-            <ProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel(''); }} compact />
-            <ModelCombobox
-              value={aiModel}
-              onChange={setAiModel}
-              options={availableModels}
-              placeholder="Select a model"
-              className="w-[400px]"
-            />
+            {sessionStarted ? (
+              <span className="text-xs text-text-secondary">{sessionChoice
+                ? `${sessionChoice.provider} / ${sessionChoice.model}${sessionChoice.forceServer ? ' · Server' : ' · User'}`
+                : 'Existing session · selection pinned by server'}</span>
+            ) : <>
+              <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} /></div>
+              <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} /></div>
+              <div className="flex items-center gap-2 text-xs text-text-secondary">
+                <span>Use server credentials</span>
+                <Toggle checked={effectiveForceServer} onChange={setForceServer} label="Use server credentials" disabled={!canUseServerProviders} />
+              </div>
+              <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
+                {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
+              </Button>
+            </>}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
@@ -443,7 +552,7 @@ export function ChatUI({
               size="sm"
               className="h-7 px-3 text-xs"
               onClick={handleNewSession}
-              disabled={hasPending}
+              disabled={sendBusy || starting || clearing || loadingHistory}
             >
               New Session
             </Button>
@@ -456,21 +565,24 @@ export function ChatUI({
           </div>
         )}
 
-        {needsProviderModel && (
-          <div className="px-6 pt-2 shrink-0">
-            <p className="text-xs text-signal-orange" role="status">
-              {!aiProvider && !aiModel
-                ? 'Select an AI provider and a model before sending a message.'
-                : !aiProvider
-                  ? 'Select an AI provider before sending a message.'
-                  : 'Select a model before sending a message.'}
-            </p>
-          </div>
+        {!canUseServerProviders && !sessionStarted && (
+          <p className="px-6 pt-2 text-xs text-text-tertiary">Server credentials are restricted. Ask an admin for access, or use your own AI key.</p>
         )}
+        {!sessionStarted && !loadingHistory && (
+          <p className="px-6 pt-2 text-xs text-text-tertiary" role="status">{needsServerToggle && canUseServerProviders
+            ? 'Use server credentials to start with this model.'
+            : 'Select an available AI provider and model, then Start Chat. History remains visible until you clear it.'}</p>
+        )}
+        {starting && <div className="px-6 pt-2 text-xs" role="status">
+          <p>{INIT_STEPS[initStepIndex]}</p>
+          {['Create workspace & AI session', 'Load chat history'].map((label, i) =>
+            <StepIndicator key={label} label={label} done={initStepIndex > i} active={initStepIndex === i} />)}
+        </div>}
 
         {/* Messages area */}
         <div className="flex-1 flex flex-col overflow-y-auto px-6 py-4 space-y-4">
-          {messages.length === 0 && (
+          {loadingHistory && <p className="text-sm text-text-tertiary">Loading chat history...</p>}
+          {!loadingHistory && messages.length === 0 && (
             <div className="flex flex-col items-center justify-center flex-1 text-text-tertiary">
               <Bot className="h-12 w-12 mb-3 opacity-30" />
               <p className="text-sm">{emptyMessage}</p>
@@ -559,8 +671,9 @@ export function ChatUI({
 
         {/* Error */}
         {error && (
-          <div className="px-6 py-2">
+          <div className="px-6 py-2 flex items-center gap-2" role="alert">
             <p className="text-xs text-signal-red">{error}</p>
+            {historyFailed && <Button size="sm" variant="ghost" onClick={() => { setError(''); setHistoryRetry(n => n + 1) }}>Retry history</Button>}
           </div>
         )}
 
@@ -577,6 +690,7 @@ export function ChatUI({
                 el.style.height = `${Math.min(el.scrollHeight, 300)}px`
               }}
               onKeyDown={handleKeyDown}
+              disabled={!sessionStarted || clearing || sendBusy}
               placeholder="Ask a question... (Enter to send, Shift+Enter for newline)"
               className="flex-1 min-h-[44px] max-h-[300px] resize-y overflow-y-auto"
               rows={1}

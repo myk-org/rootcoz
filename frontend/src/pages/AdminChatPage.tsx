@@ -9,6 +9,7 @@ export function AdminChatPage() {
   const [defaults, setDefaults] = useState<{
     provider: string
     model: string
+    forceServer: boolean
   } | null>(null)
 
   useEffect(() => {
@@ -20,10 +21,11 @@ export function AdminChatPage() {
         setDefaults({
           provider: d.ai_provider ? normalizeProvider(d.ai_provider) : '',
           model: d.ai_model?.trim() || '',
+          forceServer: d.force_server_credentials === true,
         })
       })
       .catch(() => {
-        if (!ignore) setDefaults({ provider: '', model: '' })
+        if (!ignore) setDefaults({ provider: '', model: '', forceServer: false })
       })
     return () => {
       ignore = true
@@ -56,6 +58,7 @@ export function AdminChatPage() {
       header={header}
       defaultProvider={defaults.provider}
       defaultModel={defaults.model}
+      defaultForceServer={defaults.forceServer}
       emptyMessage="Ask about server analytics"
       emptySubtitle="Query failure trends, user activity, test history across all jobs"
     />

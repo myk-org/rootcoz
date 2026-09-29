@@ -8097,9 +8097,27 @@ class TestCursorStatusForClient:
 @pytest.mark.parametrize(
     "admin, forced", [(False, False), (False, True), (True, False), (True, True)]
 )
-async def test_chat_send_validates_with_sender_credentials(monkeypatch, admin, forced):
+async def test_chat_send_validates_with_sender_credentials(
+    monkeypatch, tmp_path, admin, forced
+):
     from rootcoz import ai_client, main
     from rootcoz.models import ChatMessageRequest
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "send.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.save_ai_session_source(
+        "sid", "alice", "openai", "server" if forced else "user"
+    )
+    await storage.add_chat_message(
+        main.ADMIN_CHAT_JOB_ID if admin else "job",
+        "assistant",
+        "",
+        username="alice",
+        ai_provider="openai",
+        ai_model="test-model",
+        session_id="sid",
+    )
 
     request = SimpleNamespace(
         state=SimpleNamespace(
@@ -8135,6 +8153,7 @@ async def test_chat_send_validates_with_sender_credentials(monkeypatch, admin, f
         return provider, model
 
     monkeypatch.setattr(main, "resolve_catalog_pair", validate)
+    ai_client._selected_credential_source.set("server" if forced else "user")
     send = main.send_admin_chat_message if admin else main.send_chat_message
     args = (
         ChatMessageRequest(
@@ -8171,17 +8190,19 @@ async def test_chat_send_validates_with_sender_credentials(monkeypatch, admin, f
 async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_path):
     from rootcoz import ai_client, main
     from rootcoz.engine import chat
+    from rootcoz.models import ChatInitRequest
 
-    monkeypatch.setattr(
-        main,
-        "get_settings",
-        lambda: SimpleNamespace(
-            ai_provider="openai", ai_model="test-model", force_server_credentials=True
-        ),
-    )
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "admin-init.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+
+    async def validate(provider, model):
+        ai_client._selected_credential_source.set("server")
+        return provider, model
+
+    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main.storage, "get_chat_messages", AsyncMock(return_value=[]))
-    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
     monkeypatch.setattr(
         main.storage, "get_user_ai_credential_generation", AsyncMock(return_value=None)
     )
@@ -8198,7 +8219,10 @@ async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_p
     request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))
     original_force = ai_client.force_server_credentials.set(False)
     try:
-        assert (await main.init_admin_chat(request))["session_id"] == "session"
+        body = ChatInitRequest(
+            ai_provider="openai", ai_model="test-model", force_server_credentials=True
+        )
+        assert (await main.init_admin_chat(request, body))["session_id"] == "session"
         assert seen == [("alice", True)]
         assert ai_client.force_server_credentials.get() is False
         monkeypatch.setattr(
@@ -8206,8 +8230,9 @@ async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_p
             "init_admin_chat_session",
             AsyncMock(side_effect=RuntimeError("unavailable")),
         )
+        await storage.delete_chat_messages(main.ADMIN_CHAT_JOB_ID, username="alice")
         with pytest.raises(RuntimeError, match="unavailable"):
-            await main.init_admin_chat(request)
+            await main.init_admin_chat(request, body)
         assert ai_client.force_server_credentials.get() is False
     finally:
         ai_client.force_server_credentials.reset(original_force)
@@ -8220,6 +8245,20 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
 ):
     from rootcoz import ai_client, main
     from rootcoz.engine import chat
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "admin-process.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.save_ai_session_source("sid", "alice", "openai", "server")
+    await storage.add_chat_message(
+        main.ADMIN_CHAT_JOB_ID,
+        "assistant",
+        "",
+        username="alice",
+        ai_provider="openai",
+        ai_model="test-model",
+        session_id="sid",
+    )
 
     monkeypatch.setattr(
         main,
@@ -8235,10 +8274,8 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
         main.storage, "get_user_ai_credential_generation", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(main.storage, "count_chat_messages", AsyncMock(return_value=0))
-    monkeypatch.setattr(main.storage, "get_chat_messages", AsyncMock(return_value=[]))
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_build_internal_server_url", lambda: "http://localhost")
-    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
     monkeypatch.setattr(chat, "build_admin_custom_tools", lambda **kwargs: [])
     monkeypatch.setattr(main.storage, "update_chat_message_content", AsyncMock())
     monkeypatch.setattr(main.storage, "update_chat_message_status", AsyncMock())
@@ -8262,6 +8299,7 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
         return True, "reply", "session"
 
     monkeypatch.setattr(chat, "admin_chat_with_ai", run)
+    ai_client._selected_credential_source.set("server")
     original_force = ai_client.force_server_credentials.set(False)
     original_user = ai_client.ai_username.set("previous")
     try:
@@ -8272,6 +8310,7 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
             ai_provider_override="openai",
             ai_model_override="test-model",
             username="alice",
+            force_server=True,
         )
         assert seen == [("alice", True)]
         assert ai_client.ai_username.get() == "previous"

@@ -17,6 +17,7 @@ from rootcoz.engine.chat import (
     build_system_prompt,
     build_welcome_message,
 )
+from rootcoz.models import ChatInitRequest
 from rootcoz.sources.jenkins_source import _extract_build_params
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
@@ -1201,7 +1202,15 @@ async def test_init_chat_under_barrier_rejects_deleting_job():
     main_mod._chat_jobs_deleting.add("gone-job")
     try:
         with pytest.raises(HTTPException) as exc:
-            await main_mod._init_chat_under_barrier("gone-job", "alice")
+            await main_mod._init_chat_under_barrier(
+                "gone-job",
+                "alice",
+                ChatInitRequest(
+                    ai_provider="claude",
+                    ai_model="sonnet-4",
+                    force_server_credentials=True,
+                ),
+            )
         assert exc.value.status_code == 404
     finally:
         main_mod._chat_jobs_deleting.discard("gone-job")
@@ -1385,6 +1394,7 @@ async def test_followup_indexes_only_new_or_missing_graph(
     )
     monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
     job_id = f"chat-index-{graph_state}"
+    await storage.create_user("alice", role="reviewer", can_use_server_providers=True)
     await storage.save_result(
         job_id,
         "",
@@ -1398,6 +1408,7 @@ async def test_followup_indexes_only_new_or_missing_graph(
             "request_params": params,
         },
     )
+    await _seed_chat_session(job_id)
     user_id, assistant_id = await storage.add_chat_message_pair(
         job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
     )
@@ -1477,6 +1488,8 @@ async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatc
             "ai_model": "sonnet-4",
         },
     )
+    await storage.create_user("alice", role="reviewer", can_use_server_providers=True)
+    await _seed_chat_session(job_id)
     _user_id, assistant_id = await storage.add_chat_message_pair(
         job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
     )
@@ -1570,7 +1583,20 @@ async def test_chat_init_releases_barrier_before_clone(setup_test_db, monkeypatc
     await storage.save_result(
         job_id, "", "completed", {"status": "completed", "summary": "t", "failures": []}
     )
-    init_task = asyncio.create_task(main_mod._init_chat_under_barrier(job_id, "alice"))
+    monkeypatch.setattr(
+        main_mod,
+        "_validate_chat_selection",
+        AsyncMock(return_value=("claude", "sonnet-4")),
+    )
+    init_task = asyncio.create_task(
+        main_mod._init_chat_under_barrier(
+            job_id,
+            "alice",
+            ChatInitRequest(
+                ai_provider="claude", ai_model="sonnet-4", force_server_credentials=True
+            ),
+        )
+    )
     await clone_started.wait()
     assert barrier_held_during_clone == [False]
     init_task.cancel()
@@ -1752,6 +1778,72 @@ class TestChatStorage:
 # ---------------------------------------------------------------------------
 
 
+async def _seed_chat_session(job_id: str, username: str = "alice") -> None:
+    """Persist an established server session for processor-only tests."""
+    from rootcoz.ai_client import _selected_credential_source
+
+    _selected_credential_source.set("server")
+    session_id = f"session-{job_id}"
+    await storage.save_ai_session_source(session_id, username, "claude", "server")
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username=username,
+        ai_provider="claude",
+        ai_model="sonnet-4",
+        session_id=session_id,
+    )
+
+
+async def _start_chat(
+    test_client, job_id: str, provider: str = "claude", model: str = "sonnet-4"
+) -> None:
+    """Start chat through the API with explicit server credentials."""
+    from rootcoz.engine import chat
+    from rootcoz.sources import chat_workspace
+
+    async def init_session(**kwargs):
+        session_id = f"session-{job_id}"
+        await storage.save_ai_session_source(
+            session_id, "admin", kwargs["ai_provider"], "server"
+        )
+        return session_id
+
+    with (
+        patch.object(
+            chat, "clone_chat_repos", new_callable=AsyncMock, return_value=False
+        ),
+        patch.object(
+            chat_workspace,
+            "setup_ci_build_workspace",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch.object(chat, "init_chat_session", side_effect=init_session),
+        patch(
+            "rootcoz.main._resolve_chat_credentials",
+            new_callable=AsyncMock,
+            return_value=("", "", "", "", ""),
+        ),
+        patch(
+            "rootcoz.main._create_ai_auth_header",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+    ):
+        response = test_client.post(
+            f"/api/chat/{job_id}/init",
+            json={
+                "ai_provider": provider,
+                "ai_model": model,
+                "force_server_credentials": True,
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["session_id"] == f"session-{job_id}"
+
+
 async def _save_job(temp_db_path: Path, job_id: str, result: dict | None = None):
     """Save a result via the storage layer with DB_PATH patched."""
     default_result = {"status": "completed", "summary": "test", "failures": []}
@@ -1783,6 +1875,7 @@ class TestChatEndpoints:
             "chat-send-job",
             {"ai_provider": "claude", "ai_model": "sonnet-4"},
         )
+        await _start_chat(test_client, "chat-send-job")
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
@@ -1803,8 +1896,8 @@ class TestChatEndpoints:
         # Background task runs: verify the assistant message was completed
         history = test_client.get("/api/chat/chat-send-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["content"] == "AI response here"
-        assert assistant_msgs[0]["status"] == "completed"
+        assert assistant_msgs[-1]["content"] == "AI response here"
+        assert assistant_msgs[-1]["status"] == "completed"
 
     async def test_send_chat_message_saves_history(
         self, test_client, temp_db_path: Path
@@ -1814,6 +1907,7 @@ class TestChatEndpoints:
             "chat-hist-job",
             {"ai_provider": "claude", "ai_model": "sonnet-4"},
         )
+        await _start_chat(test_client, "chat-hist-job")
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
@@ -1829,14 +1923,16 @@ class TestChatEndpoints:
         # Verify messages by fetching chat history
         response = test_client.get("/api/chat/chat-hist-job")
         data = response.json()
-        assert data["total"] == 2
-        assert data["messages"][0]["role"] == "user"
-        assert data["messages"][0]["content"] == "hello"
-        assert data["messages"][1]["role"] == "assistant"
-        assert data["messages"][1]["content"] == "first response"
+        assert data["total"] == 4  # hidden Start row, welcome, user, assistant
+        assert len(data["messages"]) == 3
+        assert data["messages"][1]["role"] == "user"
+        assert data["messages"][1]["content"] == "hello"
+        assert data["messages"][2]["role"] == "assistant"
+        assert data["messages"][2]["content"] == "first response"
 
     async def test_delete_chat_history(self, test_client, temp_db_path: Path):
         await _save_job(temp_db_path, "chat-del-job")
+        await _start_chat(test_client, "chat-del-job")
         # Add a message via POST
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
@@ -1850,28 +1946,33 @@ class TestChatEndpoints:
                     "ai_model": "sonnet-4",
                 },
             )
-        response = test_client.delete("/api/chat/chat-del-job")
+        version = test_client.get("/api/chat/chat-del-job").json()[
+            "active_session_version"
+        ]
+        response = test_client.delete(
+            "/api/chat/chat-del-job", headers={"If-Match": version}
+        )
         assert response.status_code == 200
-        assert response.json()["deleted"] == 2  # user + assistant
+        assert response.json()["deleted"] == 4  # Start, welcome, user, assistant
 
     def test_delete_chat_history_404(self, test_client):
         response = test_client.delete("/api/chat/nonexistent-job")
         assert response.status_code == 404
 
-    async def test_send_message_no_provider_queues_and_fails(
-        self, test_client, temp_db_path: Path
-    ):
-        """Without a provider, message is queued (202) but background processing fails."""
-        await _save_job(temp_db_path, "chat-noprov-job")
-        response = test_client.post(
-            "/api/chat/chat-noprov-job",
-            json={"message": "hello"},
+    async def test_send_message_requires_start(self, test_client, temp_db_path: Path):
+        """Sending without Start must not queue messages or inherit job settings."""
+        await _save_job(
+            temp_db_path,
+            "chat-noprov-job",
+            {"ai_provider": "claude", "ai_model": "sonnet-4"},
         )
-        assert response.status_code == 202
-        # Background task fails — assistant message should be marked failed
+        response = test_client.post(
+            "/api/chat/chat-noprov-job", json={"message": "hello"}
+        )
+        assert response.status_code == 409
+        assert "Start a new chat session" in response.json()["detail"]
         history = test_client.get("/api/chat/chat-noprov-job").json()
-        assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["status"] == "failed"
+        assert history["total"] == 0
 
     def test_send_message_404_for_missing_job(self, test_client):
         response = test_client.post(
@@ -1885,11 +1986,11 @@ class TestChatEndpoints:
     ):
         await _save_job(temp_db_path, "chat-badprov-job")
         response = test_client.post(
-            "/api/chat/chat-badprov-job",
+            "/api/chat/chat-badprov-job/init",
             json={
-                "message": "hello",
                 "ai_provider": "invalid-provider",
                 "ai_model": "x",
+                "force_server_credentials": True,
             },
         )
         assert response.status_code == 422
@@ -1900,6 +2001,7 @@ class TestChatEndpoints:
     ):
         """Legacy aliases retain their exact CLI sidecar provider route."""
         await _save_job(temp_db_path, "chat-alias-job")
+        await _start_chat(test_client, "chat-alias-job", "cursor-cli", "composer-1")
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
@@ -1915,13 +2017,14 @@ class TestChatEndpoints:
         assert response.status_code == 202
         history = test_client.get("/api/chat/chat-alias-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["ai_provider"] == "cli-cursor"
-        assert assistant_msgs[0]["ai_model"] == "composer-1"
+        assert assistant_msgs[-1]["ai_provider"] == "cli-cursor"
+        assert assistant_msgs[-1]["ai_model"] == "composer-1"
 
     async def test_send_message_normalizes_provider_case(
         self, test_client, temp_db_path: Path
     ):
         await _save_job(temp_db_path, "chat-case-job")
+        await _start_chat(test_client, "chat-case-job", "CURSOR", "composer-1")
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
@@ -1937,19 +2040,25 @@ class TestChatEndpoints:
         assert response.status_code == 202
         history = test_client.get("/api/chat/chat-case-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["ai_provider"] == "cursor"
-        assert assistant_msgs[0]["ai_model"] == "composer-1"
+        assert assistant_msgs[-1]["ai_provider"] == "cursor"
+        assert assistant_msgs[-1]["ai_model"] == "composer-1"
 
     async def test_send_message_provider_without_model_rejected(
         self, test_client, temp_db_path: Path
     ):
         await _save_job(temp_db_path, "chat-partial-job")
         response = test_client.post(
+            "/api/chat/chat-partial-job/init",
+            json={"ai_provider": "claude", "force_server_credentials": True},
+        )
+        assert response.status_code == 422
+        await _start_chat(test_client, "chat-partial-job")
+        response = test_client.post(
             "/api/chat/chat-partial-job",
             json={"message": "hello", "ai_provider": "claude"},
         )
         assert response.status_code == 422
-        assert "Both ai_provider and ai_model" in response.json()["detail"]
+        assert "Select both provider and model" in response.json()["detail"]
 
     async def test_send_message_ai_failure_marks_failed(
         self, test_client, temp_db_path: Path
@@ -1960,6 +2069,7 @@ class TestChatEndpoints:
             "chat-fail-job",
             {"ai_provider": "claude", "ai_model": "sonnet-4"},
         )
+        await _start_chat(test_client, "chat-fail-job")
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
         ) as mock_chat:
@@ -1976,11 +2086,12 @@ class TestChatEndpoints:
         # Background task processes failure — check history
         history = test_client.get("/api/chat/chat-fail-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
-        assert assistant_msgs[0]["status"] == "failed"
-        assert "AI CLI timed out" in assistant_msgs[0]["content"]
+        assert assistant_msgs[-1]["status"] == "failed"
+        assert "AI CLI timed out" in assistant_msgs[-1]["content"]
 
     async def test_get_chat_with_pagination(self, test_client, temp_db_path: Path):
         await _save_job(temp_db_path, "chat-page-job")
+        await _start_chat(test_client, "chat-page-job")
         # Add messages via multiple POST calls
         with patch(
             "rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock
@@ -1999,8 +2110,10 @@ class TestChatEndpoints:
         response = test_client.get("/api/chat/chat-page-job?limit=2&offset=0")
         assert response.status_code == 200
         data = response.json()
-        assert len(data["messages"]) == 2
-        assert data["total"] == 6
+        assert len(data["messages"]) == 1  # offset 0 includes the hidden Start row
+        assert data["total"] == 8  # Start, welcome, and three turns
+        page = test_client.get("/api/chat/chat-page-job?limit=2&offset=1").json()
+        assert len(page["messages"]) == 2
 
 
 class TestAdminChatArtifactEndpoints:
@@ -2107,7 +2220,8 @@ class TestAdminChatArtifactEndpoints:
         assert test_client.get(download_url).status_code == 200
 
         # Clear admin chat — should also clean up artifacts
-        test_client.delete("/api/admin/chat")
+        version = test_client.get("/api/admin/chat").json()["active_session_version"]
+        test_client.delete("/api/admin/chat", headers={"If-Match": version})
 
         # Artifact should be gone
         assert test_client.get(download_url).status_code == 404
@@ -2171,3 +2285,475 @@ class TestCiBuildDataForwarding:
             build_prompt_fn()
 
         assert mock_prompt.call_args.kwargs["ci_build_data_available"] is True
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_rotation_does_not_reactivate_older_server_chat(
+    test_client, temp_db_path, admin
+):
+    job_id = "__admin_chat__" if admin else "rotation-history-job"
+    path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
+    if not admin:
+        await _save_job(temp_db_path, job_id)
+    username, key = await storage.create_admin_user("rotation-owner")
+    test_client.cookies.clear()
+    headers = {"Authorization": f"Bearer {key}"}
+    await storage.update_user_ai_credential(username, "claude", "old-key")
+
+    # Persist the Start rows directly: the current API requires Clear before
+    # switching sources, so it cannot produce this legacy sequence itself.
+    for sid, source in (("older-server", "server"), ("newer-user", "user")):
+        await storage.save_ai_session_source(sid, username, "claude", source)
+        await storage.add_chat_message(
+            job_id,
+            "assistant",
+            "",
+            username=username,
+            ai_provider="claude",
+            ai_model="sonnet-4",
+            session_id=sid,
+        )
+    await storage.add_chat_message(
+        job_id, "user", "keep this history", username=username
+    )
+    await storage.update_user_ai_credential(username, "claude", "new-key")
+
+    history = test_client.get(path, headers=headers)
+    assert history.status_code == 200
+    assert history.json()["active_session"] is None
+    assert [msg["content"] for msg in history.json()["messages"]] == [
+        "keep this history"
+    ]
+    assert (
+        test_client.post(
+            path, json={"message": "do not resume"}, headers=headers
+        ).status_code
+        == 409
+    )
+    assert await storage.get_latest_chat_session(job_id, username) is None
+    assert (
+        await storage.get_ai_session_source("older-server", username, "claude")
+        == "server"
+    )
+
+    async def start(**kwargs):
+        await storage.save_ai_session_source(
+            "fresh-server", username, kwargs["ai_provider"], "server"
+        )
+        return "fresh-server"
+
+    with (
+        patch(
+            "rootcoz.main._validate_chat_selection",
+            new_callable=AsyncMock,
+            return_value=("claude", "sonnet-4"),
+        ),
+        patch(
+            "rootcoz.main._create_ai_auth_header",
+            new_callable=AsyncMock,
+            return_value="Bearer test",
+        ),
+        patch(
+            "rootcoz.main._resolve_chat_credentials",
+            new_callable=AsyncMock,
+            return_value=("", "", "", "", ""),
+        ),
+        patch("rootcoz.engine.chat.clone_chat_repos", new_callable=AsyncMock),
+        patch(
+            "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "rootcoz.engine.chat.init_admin_chat_session"
+            if admin
+            else "rootcoz.engine.chat.init_chat_session",
+            side_effect=start,
+        ),
+    ):
+        response = test_client.post(
+            f"{path}/init",
+            json={
+                "ai_provider": "claude",
+                "ai_model": "sonnet-4",
+                "force_server_credentials": True,
+            },
+            headers=headers,
+        )
+    assert response.status_code == 200, response.text
+    assert (
+        test_client.get(path, headers=headers).json()["active_session"][
+            "credential_source"
+        ]
+        == "server"
+    )
+
+
+@pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize("raises", [False, True])
+async def test_init_without_session_does_not_notify(
+    test_client, temp_db_path, admin, raises
+):
+    job_id = "failed-start-job" if not admin else "__admin_chat__"
+    path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
+    if not admin:
+        await _save_job(temp_db_path, job_id)
+    with (
+        patch(
+            "rootcoz.main._validate_chat_selection",
+            new_callable=AsyncMock,
+            return_value=("claude", "sonnet-4"),
+        ),
+        patch(
+            "rootcoz.main._create_ai_auth_header",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "rootcoz.main._resolve_chat_credentials",
+            new_callable=AsyncMock,
+            return_value=("", "", "", "", ""),
+        ),
+        patch("rootcoz.engine.chat.clone_chat_repos", new_callable=AsyncMock),
+        patch(
+            "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "rootcoz.engine.chat.init_admin_chat_session"
+            if admin
+            else "rootcoz.engine.chat.init_chat_session",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("session init failed") if raises else None,
+            return_value=None,
+        ),
+        patch("rootcoz.main.notify_chat_changed") as notify,
+    ):
+        if raises:
+            with pytest.raises(RuntimeError, match="session init failed"):
+                test_client.post(
+                    f"{path}/init",
+                    json={
+                        "ai_provider": "claude",
+                        "ai_model": "sonnet-4",
+                        "force_server_credentials": True,
+                    },
+                )
+        else:
+            response = test_client.post(
+                f"{path}/init",
+                json={
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                    "force_server_credentials": True,
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["session_id"] == ""
+        notify.assert_not_called()
+    assert test_client.get(path).json()["active_session"] is None
+
+
+@pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_orphan_history_can_start_without_losing_messages(
+    test_client, temp_db_path, admin, legacy
+):
+    job_id = "orphan-job" if not admin else "__admin_chat__"
+    path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
+    if not admin:
+        await _save_job(temp_db_path, job_id)
+    await storage.add_chat_message(job_id, "user", "older turn", username="admin")
+    if legacy:
+        await storage.add_chat_message(
+            job_id,
+            "assistant",
+            "",
+            username="admin",
+            ai_provider="claude",
+            ai_model="sonnet-4",
+            session_id="legacy-unowned",
+        )
+    history = test_client.get(path).json()
+    assert history["active_session"] is None
+    assert history["total"] == 1 + int(legacy)
+    assert [m["content"] for m in history["messages"]] == ["older turn"]
+    assert bool(await storage.get_latest_chat_session(job_id, "admin")) == legacy
+
+    async def create(**kwargs):
+        await storage.save_ai_session_source(
+            "new-orphan-session", "admin", kwargs["ai_provider"], "server"
+        )
+        return "new-orphan-session"
+
+    with (
+        patch(
+            "rootcoz.main._validate_chat_selection",
+            new_callable=AsyncMock,
+            return_value=("claude", "sonnet-4"),
+        ),
+        patch(
+            "rootcoz.main._create_ai_auth_header",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "rootcoz.engine.chat.init_admin_chat_session"
+            if admin
+            else "rootcoz.engine.chat.init_chat_session",
+            side_effect=create,
+        ) as init,
+        patch("rootcoz.engine.chat.clone_chat_repos", new_callable=AsyncMock),
+        patch(
+            "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "rootcoz.main._resolve_chat_credentials",
+            new_callable=AsyncMock,
+            return_value=("", "", "", "", ""),
+        ),
+        patch("rootcoz.main.notify_chat_changed") as notify,
+    ):
+        body = {
+            "ai_provider": "claude",
+            "ai_model": "sonnet-4",
+            "force_server_credentials": True,
+        }
+        first = test_client.post(f"{path}/init", json=body)
+        assert first.status_code == 200, first.text
+        assert first.json()["session_id"] == "new-orphan-session"
+        notify.assert_called_once_with(job_id, username="admin")
+        assert await storage.get_latest_chat_session(job_id, "admin") is not None
+        second = test_client.post(f"{path}/init", json=body)
+        assert second.status_code == 200, second.text
+        assert second.json()["session_id"] == first.json()["session_id"]
+        assert notify.call_count == 2
+        assert notify.call_args.args == (job_id,)
+        assert notify.call_args.kwargs == {"username": "admin"}
+        assert init.call_count == 1
+    history = test_client.get(path).json()
+    assert history["active_session"] == {
+        "ai_provider": "claude",
+        "ai_model": "sonnet-4",
+        "credential_source": "server",
+    }
+    assert "session_id" not in history["active_session"]
+    assert any(m["content"] == "older turn" for m in history["messages"])
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_clear_rejects_stale_same_model_session_without_leaking_id(
+    test_client, temp_db_path, admin
+):
+    job_id = "clear-race-job" if not admin else "__admin_chat__"
+    path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
+    if not admin:
+        await _save_job(temp_db_path, job_id)
+    username, key = await storage.create_admin_user("clear-race-owner")
+    test_client.cookies.clear()
+    headers = {"Authorization": f"Bearer {key}"}
+
+    async def start(sid):
+        await storage.save_ai_session_source(sid, username, "claude", "server")
+        await storage.add_chat_message(
+            job_id,
+            "assistant",
+            "",
+            username=username,
+            ai_provider="claude",
+            ai_model="sonnet-4",
+            session_id=sid,
+        )
+
+    await start("private-first-id")
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "visible reply",
+        username=username,
+        ai_provider="claude",
+        ai_model="sonnet-4",
+        session_id="private-first-id",
+    )
+    first = test_client.get(path, headers=headers).json()
+    old_version = first["active_session_version"]
+    assert old_version and "private-first-id" not in str(first)
+    assert test_client.delete(path, headers=headers).status_code == 409
+    await start(
+        "private-second-id"
+    )  # Another tab Started the same pair after preflight.
+    second = test_client.get(path, headers=headers).json()
+    assert second["active_session"] == first["active_session"]
+    assert second["active_session_version"] != old_version
+    assert "private-second-id" not in str(second)
+    assert "private-first-id" not in str(second)
+    assert (
+        test_client.delete(
+            path, headers={**headers, "If-Match": old_version}
+        ).status_code
+        == 409
+    )
+    assert await storage.get_latest_chat_session(job_id, username) is not None
+    assert (
+        test_client.delete(
+            path, headers={**headers, "If-Match": second["active_session_version"]}
+        ).status_code
+        == 200
+    )
+    assert await storage.get_latest_chat_session(job_id, username) is None
+    assert (
+        test_client.delete(
+            path, headers={**headers, "If-Match": second["active_session_version"]}
+        ).status_code
+        == 409
+    )
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_clear_none_version_only_matches_no_start(
+    test_client, temp_db_path, admin
+):
+    job_id = "clear-none-job" if not admin else "__admin_chat__"
+    path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
+    if not admin:
+        await _save_job(temp_db_path, job_id)
+    await storage.add_chat_message(job_id, "user", "orphan", username="admin")
+    version = test_client.get(path).json()["active_session_version"]
+    assert version
+    await storage.save_ai_session_source("new-after-empty", "admin", "claude", "server")
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username="admin",
+        ai_provider="claude",
+        ai_model="sonnet-4",
+        session_id="new-after-empty",
+    )
+    assert test_client.delete(path, headers={"If-Match": version}).status_code == 409
+    assert await storage.count_chat_messages(job_id, username="admin") == 2
+
+
+@pytest.mark.parametrize("admin", [False, True])
+async def test_clear_orphan_history_with_matching_none_version(
+    test_client, temp_db_path, admin
+):
+    job_id = "orphan-clear-job" if not admin else "__admin_chat__"
+    path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
+    if not admin:
+        await _save_job(temp_db_path, job_id)
+    await storage.add_chat_message(job_id, "user", "orphan", username="admin")
+    version = test_client.get(path).json()["active_session_version"]
+    response = test_client.delete(path, headers={"If-Match": version})
+    assert response.status_code == 200
+    assert response.json()["deleted"] == 1
+
+
+async def test_session_availability_checks_ownership_grant_and_key(
+    test_client, temp_db_path
+):
+    job_id = "availability-job"
+    path = f"/api/chat/{job_id}"
+    await _save_job(temp_db_path, job_id)
+    username, key = await storage.create_admin_user("session-owner")
+    test_client.cookies.clear()
+    await storage.change_user_role(username, "reviewer")
+    headers = {"Authorization": f"Bearer {key}"}
+    await storage.save_ai_session_source("sid-other", "admin", "claude", "server")
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username=username,
+        ai_provider="claude",
+        ai_model="sonnet-4",
+        session_id="sid-other",
+    )
+    assert test_client.get(path, headers=headers).json()["active_session"] is None
+
+    await storage.save_ai_session_source("sid-server", username, "claude", "server")
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username=username,
+        ai_provider="claude",
+        ai_model="sonnet-4",
+        session_id="sid-server",
+    )
+    assert test_client.get(path, headers=headers).json()["active_session"] is None
+    await storage.set_user_can_use_server_providers(username, True)
+    assert (
+        test_client.get(path, headers=headers).json()["active_session"][
+            "credential_source"
+        ]
+        == "server"
+    )
+    await storage.revoke_ai_session_source("sid-server")
+    assert test_client.get(path, headers=headers).json()["active_session"] is None
+
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username=username,
+        ai_provider="claude",
+        ai_model="sonnet-4",
+        session_id="legacy-unowned",
+    )
+    assert test_client.get(path, headers=headers).json()["active_session"] is None
+    await storage.update_user_ai_credential(username, "claude", "valid-user-key")
+    await storage.save_ai_session_source("sid-user", username, "claude", "user")
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username=username,
+        ai_provider="claude",
+        ai_model="sonnet-4",
+        session_id="sid-user",
+    )
+    assert (
+        test_client.get(path, headers=headers).json()["active_session"][
+            "credential_source"
+        ]
+        == "user"
+    )
+    with patch.object(
+        storage,
+        "get_user_ai_credential_with_generation",
+        new_callable=AsyncMock,
+        return_value=("   ", 1),
+    ):
+        assert test_client.get(path, headers=headers).json()["active_session"] is None
+    await storage.update_user_ai_credential(username, "claude", "rotated-user-key")
+    assert test_client.get(path, headers=headers).json()["active_session"] is None
+
+
+async def test_chat_availability_does_not_bypass_route_authorization(
+    test_client, temp_db_path
+):
+    await _save_job(temp_db_path, "authorized-job")
+    viewer, key = await storage.create_admin_user("history-viewer")
+    await storage.change_user_role(viewer, "viewer")
+    test_client.cookies.clear()
+    headers = {"Authorization": f"Bearer {key}"}
+    assert (
+        test_client.get("/api/chat/authorized-job", headers=headers).status_code == 200
+    )
+    assert test_client.get("/api/admin/chat", headers=headers).status_code == 403
+    assert (
+        test_client.post(
+            "/api/chat/authorized-job/init",
+            headers=headers,
+            json={
+                "ai_provider": "claude",
+                "ai_model": "sonnet-4",
+                "force_server_credentials": True,
+            },
+        ).status_code
+        == 403
+    )

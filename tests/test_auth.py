@@ -1409,6 +1409,11 @@ class TestRBACRoles:
         )
         resp = client.post(
             "/api/chat/fake-job-id/init",
+            json={
+                "ai_provider": "claude",
+                "ai_model": "sonnet-4",
+                "force_server_credentials": True,
+            },
             cookies=viewer_cookies,
         )
         assert resp.status_code == 403

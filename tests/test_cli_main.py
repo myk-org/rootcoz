@@ -4810,6 +4810,50 @@ class TestApiKeyOption:
 
 
 class TestChatCommands:
+    @pytest.mark.parametrize(
+        ("ready", "session_id"), [(True, "session-123"), (True, ""), (False, "sid")]
+    )
+    def test_chat_init_human_only_reports_active_session(
+        self, mock_client, ready, session_id
+    ):
+        mock_client.init_chat.return_value = {
+            "ready": ready,
+            "session_id": session_id,
+            "repo_names": ["repo-a"],
+            "api_key": "do-not-print",  # pragma: allowlist secret
+        }
+        result = runner.invoke(
+            app, ["chat", "init", "job-1", "--provider", "openai", "--model", "m"]
+        )
+        assert result.exit_code == 0
+        mock_client.init_chat.assert_called_once_with("job-1", "openai", "m", False)
+        assert ("Chat started" in result.output) is bool(session_id and ready)
+        assert ("Ready: True" in result.output) is bool(session_id and ready)
+        if not (session_id and ready):
+            assert "not started" in result.output.lower()
+        assert "repo-a" in result.output
+        assert "do-not-print" not in result.output
+
+    def test_chat_init_json_server_credentials(self, mock_client):
+        mock_client.init_chat.return_value = {"ready": True, "session_id": "sid"}
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "chat",
+                "init",
+                "job-1",
+                "-p",
+                "openai",
+                "-m",
+                "m",
+                "--server-credentials",
+            ],
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["session_id"] == "sid"
+        mock_client.init_chat.assert_called_once_with("job-1", "openai", "m", True)
+
     def test_chat_history(self, mock_client):
         mock_client.get_chat_history.return_value = {
             "messages": [
@@ -4881,7 +4925,11 @@ class TestChatCommands:
             )
         assert result.exit_code == 0
         mock_client.send_chat_message.assert_called_once_with(
-            "job-1", "Why did this test fail?", ai_provider="", ai_model=""
+            "job-1",
+            "Why did this test fail?",
+            ai_provider="",
+            ai_model="",
+            force_server_credentials=None,
         )
         assert "The test failed because of a null pointer." in result.output
 
@@ -4921,9 +4969,27 @@ class TestChatCommands:
             )
         assert result.exit_code == 0
         mock_client.send_chat_message.assert_called_once_with(
-            "job-1", "Explain the error", ai_provider="claude", ai_model="opus-4"
+            "job-1",
+            "Explain the error",
+            ai_provider="claude",
+            ai_model="opus-4",
+            force_server_credentials=None,
         )
         assert "The error is caused by a missing import." in result.output
+
+    def test_chat_send_server_credentials(self, mock_client):
+        mock_client.send_chat_message.return_value = {"user_message": {"id": 1}}
+        result = runner.invoke(
+            app, ["--json", "chat", "send", "job-1", "hello", "--server-credentials"]
+        )
+        assert result.exit_code == 0
+        mock_client.send_chat_message.assert_called_once_with(
+            "job-1",
+            "hello",
+            ai_provider="",
+            ai_model="",
+            force_server_credentials=True,
+        )
 
     def test_chat_send_json(self, mock_client):
         payload = {
@@ -4965,6 +5031,48 @@ class TestChatCommands:
 
 
 class TestAdminChatCommands:
+    @pytest.mark.parametrize(
+        ("ready", "session_id"), [(True, "session-123"), (True, ""), (False, "sid")]
+    )
+    def test_admin_chat_init_human_only_reports_active_session(
+        self, mock_client, ready, session_id
+    ):
+        mock_client.init_admin_chat.return_value = {
+            "ready": ready,
+            "session_id": session_id,
+            "api_key": "do-not-print",  # pragma: allowlist secret
+        }
+        result = runner.invoke(
+            app, ["admin-chat", "init", "--provider", "openai", "--model", "m"]
+        )
+        assert result.exit_code == 0
+        mock_client.init_admin_chat.assert_called_once_with("openai", "m", False)
+        assert "No results" not in result.output
+        assert ("Admin chat started" in result.output) is bool(session_id and ready)
+        assert ("Ready: True" in result.output) is bool(session_id and ready)
+        if not (session_id and ready):
+            assert "not started" in result.output.lower()
+        assert "do-not-print" not in result.output
+
+    def test_admin_chat_init_json_server_credentials(self, mock_client):
+        mock_client.init_admin_chat.return_value = {"ready": True, "session_id": "sid"}
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "admin-chat",
+                "init",
+                "-p",
+                "openai",
+                "-m",
+                "m",
+                "--server-credentials",
+            ],
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["session_id"] == "sid"
+        mock_client.init_admin_chat.assert_called_once_with("openai", "m", True)
+
     def test_admin_chat_history(self, mock_client):
         mock_client.get_admin_chat_history.return_value = {
             "messages": [
@@ -5035,7 +5143,7 @@ class TestAdminChatCommands:
             result = runner.invoke(app, ["admin-chat", "send", "Server status?"])
         assert result.exit_code == 0
         mock_client.send_admin_chat_message.assert_called_once_with(
-            "Server status?", ai_provider="", ai_model=""
+            "Server status?", ai_provider="", ai_model="", force_server_credentials=None
         )
         assert "All systems operational." in result.output
 
@@ -5075,9 +5183,22 @@ class TestAdminChatCommands:
             )
         assert result.exit_code == 0
         mock_client.send_admin_chat_message.assert_called_once_with(
-            "Explain", ai_provider="claude", ai_model="opus-4"
+            "Explain",
+            ai_provider="claude",
+            ai_model="opus-4",
+            force_server_credentials=None,
         )
         assert "The error is caused by a missing import." in result.output
+
+    def test_admin_chat_send_server_credentials(self, mock_client):
+        mock_client.send_admin_chat_message.return_value = {"user_message": {"id": 1}}
+        result = runner.invoke(
+            app, ["--json", "admin-chat", "send", "hello", "--server-credentials"]
+        )
+        assert result.exit_code == 0
+        mock_client.send_admin_chat_message.assert_called_once_with(
+            "hello", ai_provider="", ai_model="", force_server_credentials=True
+        )
 
     def test_admin_chat_send_json(self, mock_client):
         payload = {

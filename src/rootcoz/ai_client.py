@@ -39,6 +39,7 @@ force_server_credentials: ContextVar[bool] = ContextVar(
 _selected_credential_source: ContextVar[str] = ContextVar(
     "selected_credential_source", default=""
 )
+chat_session_source: ContextVar[str] = ContextVar("chat_session_source", default="")
 model_listing_status: ContextVar[dict[str, dict[str, bool]] | None] = ContextVar(
     "model_listing_status", default=None
 )
@@ -1003,7 +1004,9 @@ async def call_ai(
                 text="AI session unavailable",
                 error="AI session unavailable",
             )
-        if source == "unknown":
+        if source == "unknown" or (
+            chat_session_source.get() and source != chat_session_source.get()
+        ):
             return AIResult(
                 success=False,
                 text="AI session unavailable",
@@ -1011,6 +1014,13 @@ async def call_ai(
             )
     else:
         source = "user" if key is not None else "server"
+        if chat_session_source.get() and source != chat_session_source.get():
+            logger.info("Chat AI call rejected: selected credential source unavailable")
+            return AIResult(
+                success=False,
+                text="Chat credential unavailable; Start a new chat",
+                error="Chat credential unavailable; Start a new chat",
+            )
     if source == "server":
         await require_server_provider_grant()
     if not session_id and source == "server":
@@ -1056,6 +1066,16 @@ async def call_ai(
                 success=False,
                 text="AI session unavailable",
                 error="AI session unavailable",
+            )
+    if source == "server" and result.success and chat_session_source.get():
+        try:
+            await require_server_provider_grant()
+        except ValueError:
+            logger.info("Chat AI reply discarded after server grant changed")
+            return AIResult(
+                success=False,
+                text="Server provider access requires an administrator grant",
+                error="Server provider access requires an administrator grant",
             )
     result.credential_source = source
     if not session_id and result.session_id and key is None:

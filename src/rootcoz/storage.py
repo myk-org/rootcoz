@@ -1196,6 +1196,9 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "chat_messages", "status", "TEXT NOT NULL DEFAULT 'completed'"
         )
+        await _migrate_add_column(
+            db, "chat_messages", "session_revoked", "INTEGER NOT NULL DEFAULT 0"
+        )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user_status "
             "ON chat_messages (job_id, username, status)"
@@ -5768,15 +5771,26 @@ async def update_user_ai_credential(
         # atomically with the credential so later turns start fresh.
         sessions = await (
             await db.execute(
-                "SELECT DISTINCT session_id FROM chat_messages "
-                "WHERE username = ? AND ai_provider = ? AND session_id != ''",
+                "SELECT DISTINCT chat_messages.session_id FROM chat_messages "
+                "LEFT JOIN ai_session_sources ON ai_session_sources.session_id = chat_messages.session_id "
+                "WHERE chat_messages.username = ? AND chat_messages.ai_provider = ? "
+                "AND chat_messages.session_id != '' AND ("
+                "(ai_session_sources.username = chat_messages.username "
+                "AND ai_session_sources.provider = chat_messages.ai_provider "
+                "AND ai_session_sources.credential_source = 'user') "
+                "OR ai_session_sources.session_id IS NULL)",
                 (username, provider),
             )
         ).fetchall()
-        await db.execute(
-            "UPDATE chat_messages SET session_id = '' "
-            "WHERE username = ? AND ai_provider = ? AND session_id != ''",
-            (username, provider),
+        await db.executemany(
+            "INSERT OR IGNORE INTO ai_session_sources "
+            "(session_id, username, provider, credential_source) VALUES (?, ?, ?, 'revoked')",
+            [(row[0], username, provider) for row in sessions],
+        )
+        await db.executemany(
+            "UPDATE chat_messages SET session_id = '', session_revoked = 1 "
+            "WHERE username = ? AND ai_provider = ? AND session_id = ?",
+            [(username, provider, row[0]) for row in sessions],
         )
         # Keep tombstones if sidecar deletion fails: an old keyed session must
         # never become an unowned (legacy) session that can be resumed.
@@ -7098,6 +7112,21 @@ async def get_chat_messages(
         return [dict(row) for row in rows]
 
 
+async def get_latest_chat_session(job_id: str, username: str) -> dict[str, Any] | None:
+    """Return the latest Start, or None when its credential was revoked."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_provider, ai_model, session_id FROM chat_messages "
+                "WHERE job_id = ? AND username = ? AND role = 'assistant' "
+                "AND (session_id != '' OR session_revoked = 1) "
+                "ORDER BY id DESC LIMIT 1",
+                (job_id, username),
+            )
+        ).fetchone()
+    return dict(row) if row and row["session_id"] else None
+
+
 async def count_chat_messages(job_id: str, username: str = "") -> int:
     """Count total chat messages for a job."""
     async with _connect_db() as db:
@@ -7279,25 +7308,35 @@ async def complete_chat_message_if_generation(
     ai_model: str,
     session_id: str,
     credential_generation: int | None,
+    server_source: bool = False,
 ) -> bool:
-    """Complete a pending reply only while its user's credentials are current."""
+    """Complete a pending reply only while its credentials, grant and admin role are current."""
     async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE chat_messages SET content = ?, status = 'completed', "
             "ai_provider = ?, ai_model = ?, session_id = ? "
             "WHERE id = ? AND status = 'pending' AND "
-            "(? IS NULL OR EXISTS (SELECT 1 FROM users "
+            "(? = 1 OR ? IS NULL OR EXISTS (SELECT 1 FROM users "
             "WHERE username = chat_messages.username "
-            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?))",
+            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)) "
+            "AND (? = 0 OR chat_messages.username = 'admin' OR EXISTS "
+            "(SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND (role = 'admin' OR can_use_server_providers = 1))) "
+            "AND (chat_messages.job_id != '__admin_chat__' "
+            "OR chat_messages.username = 'admin' OR EXISTS "
+            "(SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND role = 'admin'))",
             (
                 content,
                 ai_provider,
                 ai_model,
                 session_id,
                 msg_id,
+                int(server_source),
                 credential_generation,
                 ai_provider,
                 credential_generation,
+                int(server_source),
             ),
         )
         await db.commit()

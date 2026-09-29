@@ -1397,6 +1397,14 @@ class FeedbackResponse(BaseModel):
     title: str = Field(description="Issue title as created")
 
 
+class ChatInitRequest(BaseModel):
+    """Explicit credential selection for a new job or admin chat session."""
+
+    ai_provider: str = Field(min_length=1)
+    ai_model: str = Field(min_length=1)
+    force_server_credentials: bool
+
+
 class ChatMessageRequest(BaseModel):
     """Request to send a chat message about an analyzed job."""
 
@@ -1415,11 +1423,15 @@ class ChatMessageRequest(BaseModel):
 
     ai_provider: str | None = Field(
         default=None,
-        description="AI provider to use for response (defaults to job's provider)",
+        description="Selected chat provider (must match the active session)",
     )
     ai_model: str | None = Field(
         default=None,
-        description="AI model to use for response (defaults to job's model)",
+        description="Selected chat model (must match the active session)",
+    )
+    force_server_credentials: bool | None = Field(
+        default=None,
+        description="Selected chat credential source (must match the active session)",
     )
 
 

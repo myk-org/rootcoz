@@ -65,12 +65,14 @@ it('updates a mounted new-analysis picker and submit after grant and revoke with
   await waitFor(() => expect(screen.getByRole('switch', { name: 'Use server credentials' })).toHaveAttribute('aria-checked', 'true'))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeEnabled())
   expect(get).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=true')
+  const unforcedCalls = get.mock.calls.filter(([path]) => path === '/api/ai-models?force_server_credentials=false').length
   granted = false
   act(() => window.dispatchEvent(new Event('focus')))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled())
   expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
+  await waitFor(() => expect(get.mock.calls.filter(([path]) => path === '/api/ai-models?force_server_credentials=false').length).toBeGreaterThan(unforcedCalls))
   await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
-  expect(screen.getByRole('option', { name: /Claude · Server$/ })).toHaveAttribute('data-disabled')
+  expect(await screen.findByRole('option', { name: /Claude · Server$/ })).toHaveAttribute('data-disabled')
   expect(post).not.toHaveBeenCalled()
 })
 

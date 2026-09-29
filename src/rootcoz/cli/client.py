@@ -65,6 +65,7 @@ class RootCozClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         accept_statuses: tuple[int, ...] = (200,),
     ) -> Any:
         """Send an HTTP request and return parsed JSON.
@@ -74,6 +75,7 @@ class RootCozClient:
             path: URL path (e.g. "/health").
             params: Query parameters.
             json: JSON body for POST/PUT.
+            headers: Extra request headers.
             accept_statuses: HTTP status codes treated as success.
 
         Returns:
@@ -87,7 +89,9 @@ class RootCozClient:
             params = {k: v for k, v in params.items() if v is not None and v != ""}
 
         try:
-            response = self._client.request(method, path, params=params, json=json)
+            response = self._client.request(
+                method, path, params=params, json=json, headers=headers
+            )
         except httpx.TimeoutException as exc:
             raise RootCozError(
                 status_code=0,
@@ -1298,9 +1302,23 @@ class RootCozClient:
 
     # -- Chat -----------------------------------------------------------------
 
-    def init_chat(self, job_id: str) -> dict[str, Any]:
-        """Initialize chat workspace. POST /api/chat/{job_id}/init"""
-        return self._request("POST", f"/api/chat/{job_id}/init")
+    def init_chat(
+        self,
+        job_id: str,
+        ai_provider: str,
+        ai_model: str,
+        force_server_credentials: bool = False,
+    ) -> dict[str, Any]:
+        """Start chat with an explicit provider/model and credential choice."""
+        return self._request(
+            "POST",
+            f"/api/chat/{job_id}/init",
+            json={
+                "ai_provider": ai_provider,
+                "ai_model": ai_model,
+                "force_server_credentials": force_server_credentials,
+            },
+        )
 
     def get_chat_history(
         self, job_id: str, limit: int = 200, offset: int = 0
@@ -1312,7 +1330,12 @@ class RootCozClient:
         return self._request("GET", f"/api/chat/{job_id}", params=params)
 
     def send_chat_message(
-        self, job_id: str, message: str, ai_provider: str = "", ai_model: str = ""
+        self,
+        job_id: str,
+        message: str,
+        ai_provider: str = "",
+        ai_model: str = "",
+        force_server_credentials: bool | None = None,
     ) -> dict[str, Any]:
         """Send a chat message and queue AI processing. POST /api/chat/{job_id}"""
         body: dict[str, Any] = {"message": message}
@@ -1320,13 +1343,18 @@ class RootCozClient:
             body["ai_provider"] = ai_provider
         if ai_model:
             body["ai_model"] = ai_model
+        if force_server_credentials is not None:
+            body["force_server_credentials"] = force_server_credentials
         return self._request(
             "POST", f"/api/chat/{job_id}", json=body, accept_statuses=(202,)
         )
 
     def clear_chat(self, job_id: str) -> dict[str, Any]:
-        """Clear chat history for a job. DELETE /api/chat/{job_id}"""
-        return self._request("DELETE", f"/api/chat/{job_id}")
+        """Conditionally clear the session observed by GET history."""
+        version = self.get_chat_history(job_id)["active_session_version"]
+        return self._request(
+            "DELETE", f"/api/chat/{job_id}", headers={"If-Match": version}
+        )
 
     def abort_chat(self, job_id: str) -> dict[str, Any]:
         """Abort the currently processing chat message. POST /api/chat/{job_id}/abort"""
@@ -1338,9 +1366,22 @@ class RootCozClient:
 
     # -- Admin Chat --------------------------------------------------------
 
-    def init_admin_chat(self) -> dict[str, Any]:
-        """Initialize admin chat workspace. POST /api/admin/chat/init"""
-        return self._request("POST", "/api/admin/chat/init")
+    def init_admin_chat(
+        self,
+        ai_provider: str,
+        ai_model: str,
+        force_server_credentials: bool = False,
+    ) -> dict[str, Any]:
+        """Start admin chat with an explicit credential choice."""
+        return self._request(
+            "POST",
+            "/api/admin/chat/init",
+            json={
+                "ai_provider": ai_provider,
+                "ai_model": ai_model,
+                "force_server_credentials": force_server_credentials,
+            },
+        )
 
     def get_admin_chat_history(
         self, limit: int = 200, offset: int = 0
@@ -1352,7 +1393,11 @@ class RootCozClient:
         return self._request("GET", "/api/admin/chat", params=params)
 
     def send_admin_chat_message(
-        self, message: str, ai_provider: str = "", ai_model: str = ""
+        self,
+        message: str,
+        ai_provider: str = "",
+        ai_model: str = "",
+        force_server_credentials: bool | None = None,
     ) -> dict[str, Any]:
         """Send admin chat message. POST /api/admin/chat"""
         body: dict[str, Any] = {"message": message}
@@ -1360,13 +1405,16 @@ class RootCozClient:
             body["ai_provider"] = ai_provider
         if ai_model:
             body["ai_model"] = ai_model
+        if force_server_credentials is not None:
+            body["force_server_credentials"] = force_server_credentials
         return self._request(
             "POST", "/api/admin/chat", json=body, accept_statuses=(202,)
         )
 
     def clear_admin_chat(self) -> dict[str, Any]:
-        """Clear admin chat history. DELETE /api/admin/chat"""
-        return self._request("DELETE", "/api/admin/chat")
+        """Conditionally clear the admin session observed by GET history."""
+        version = self.get_admin_chat_history()["active_session_version"]
+        return self._request("DELETE", "/api/admin/chat", headers={"If-Match": version})
 
     def abort_admin_chat(self) -> dict[str, Any]:
         """Abort admin chat. POST /api/admin/chat/abort"""

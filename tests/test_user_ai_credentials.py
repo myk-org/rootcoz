@@ -1388,7 +1388,11 @@ async def test_rotating_key_invalidates_only_owners_provider_sessions(
     await storage.init_db()
     await storage.create_admin_user("alice")
     await storage.create_admin_user("bob")
-    for user, provider in (("alice", "p"), ("alice", "other"), ("bob", "p")):
+    for user, provider, sid in (
+        ("alice", "p", "alice-p-sid"),
+        ("alice", "other", "alice-other-sid"),
+        ("bob", "p", "bob-p-sid"),
+    ):
         await storage.add_chat_message(
             job_id="job",
             role="assistant",
@@ -1396,18 +1400,20 @@ async def test_rotating_key_invalidates_only_owners_provider_sessions(
             username=user,
             ai_provider=provider,
             ai_model="m",
-            session_id="sid",
+            session_id=sid,
         )
     revoked = await storage.update_user_ai_credential("alice", "p", "new")
-    assert revoked == ["sid"]
+    assert revoked == ["alice-p-sid"]
     assert [
         m["session_id"]
         for m in await storage.get_chat_messages("job", username="alice")
-    ] == ["", "sid"]
+    ] == ["", "alice-other-sid"]
     assert (await storage.get_chat_messages("job", username="bob"))[0][
         "session_id"
-    ] == "sid"
-    assert await storage.update_user_ai_credential("alice", "other", "key") == ["sid"]
+    ] == "bob-p-sid"
+    assert await storage.update_user_ai_credential("alice", "other", "key") == [
+        "alice-other-sid"
+    ]
     assert await storage.update_user_ai_credential("alice", "other", None) == []
     assert all(
         not m["session_id"]

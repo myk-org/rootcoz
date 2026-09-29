@@ -2317,7 +2317,7 @@ class TestRootCozClientChat:
             return httpx.Response(200, json=response_data)
 
         client = _make_client(handler)
-        result = client.init_chat("test-job-id")
+        result = client.init_chat("test-job-id", "openai", "m")
         assert result["ready"] is True
         assert result["repos_cloned"] is True
         assert result["repo_names"] == ["test-repo"]
@@ -2378,6 +2378,7 @@ class TestRootCozClientChat:
             assert body["message"] == "Why did this test fail?"
             assert "ai_provider" not in body
             assert "ai_model" not in body
+            assert "force_server_credentials" not in body
             return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
@@ -2408,15 +2409,36 @@ class TestRootCozClientChat:
         )
         assert result["user_message"]["status"] == "completed"
 
-    def test_clear_chat(self):
+    @pytest.mark.parametrize("source", [True, False])
+    def test_send_chat_message_explicit_source(self, source):
         def handler(request):
-            assert request.method == "DELETE"
+            assert request.url.path == "/api/chat/job-1"
+            assert json.loads(request.content) == {
+                "message": "hello",
+                "force_server_credentials": source,
+            }
+            return httpx.Response(202, json={"queued": True})
+
+        assert _make_client(handler).send_chat_message(
+            "job-1", "hello", force_server_credentials=source
+        )["queued"]
+
+    def test_clear_chat(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.method)
             assert "/api/chat/job-1" in str(request.url)
+            if request.method == "GET":
+                return httpx.Response(
+                    200, json={"active_session_version": "opaque-job"}
+                )
+            assert request.headers["If-Match"] == "opaque-job"
             return httpx.Response(200, json={"deleted": 1})
 
         client = _make_client(handler)
-        result = client.clear_chat("job-1")
-        assert result["deleted"] == 1
+        assert client.clear_chat("job-1")["deleted"] == 1
+        assert calls == ["GET", "DELETE"]
 
     def test_get_chat_history_not_found(self):
         client = _make_client(
@@ -2430,6 +2452,41 @@ class TestRootCozClientChat:
 class TestRootCozClientAdminChat:
     """Tests for admin chat client methods."""
 
+    @pytest.mark.parametrize("source", [True, False])
+    def test_init_chat_explicit_selection(self, source):
+        with patch.object(
+            RootCozClient, "_request", return_value={"ready": True}
+        ) as request:
+            client = RootCozClient(server_url="http://localhost:8000")
+            client.init_chat("job", "openai", "m", force_server_credentials=source)
+            request.assert_called_once_with(
+                "POST",
+                "/api/chat/job/init",
+                json={
+                    "ai_provider": "openai",
+                    "ai_model": "m",
+                    "force_server_credentials": source,
+                },
+            )
+
+    @pytest.mark.parametrize("source", [True, False])
+    def test_init_admin_chat_explicit_selection(self, source):
+        def handler(request):
+            assert request.url.path == "/api/admin/chat/init"
+            assert json.loads(request.content) == {
+                "ai_provider": "openai",
+                "ai_model": "m",
+                "force_server_credentials": source,
+            }
+            return httpx.Response(200, json={"ready": True, "session_id": "sid"})
+
+        assert (
+            _make_client(handler).init_admin_chat(
+                "openai", "m", force_server_credentials=source
+            )["session_id"]
+            == "sid"
+        )
+
     def test_init_admin_chat(self):
         response_data = {"ready": True}
 
@@ -2439,7 +2496,7 @@ class TestRootCozClientAdminChat:
             return httpx.Response(200, json=response_data)
 
         client = _make_client(handler)
-        result = client.init_admin_chat()
+        result = client.init_admin_chat("openai", "m")
         assert result["ready"] is True
 
     def test_get_admin_chat_history(self):
@@ -2498,6 +2555,7 @@ class TestRootCozClientAdminChat:
             assert body["message"] == "Server status?"
             assert "ai_provider" not in body
             assert "ai_model" not in body
+            assert "force_server_credentials" not in body
             return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
@@ -2527,15 +2585,36 @@ class TestRootCozClientAdminChat:
         )
         assert result["user_message"]["status"] == "completed"
 
-    def test_clear_admin_chat(self):
+    @pytest.mark.parametrize("source", [True, False])
+    def test_send_admin_chat_message_explicit_source(self, source):
         def handler(request):
-            assert request.method == "DELETE"
+            assert request.url.path == "/api/admin/chat"
+            assert json.loads(request.content) == {
+                "message": "hello",
+                "force_server_credentials": source,
+            }
+            return httpx.Response(202, json={"queued": True})
+
+        assert _make_client(handler).send_admin_chat_message(
+            "hello", force_server_credentials=source
+        )["queued"]
+
+    def test_clear_admin_chat(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request.method)
             assert "/api/admin/chat" in str(request.url)
+            if request.method == "GET":
+                return httpx.Response(
+                    200, json={"active_session_version": "opaque-admin"}
+                )
+            assert request.headers["If-Match"] == "opaque-admin"
             return httpx.Response(200, json={"deleted": 3})
 
         client = _make_client(handler)
-        result = client.clear_admin_chat()
-        assert result["deleted"] == 3
+        assert client.clear_admin_chat()["deleted"] == 3
+        assert calls == ["GET", "DELETE"]
 
     def test_abort_admin_chat(self):
         def handler(request):
