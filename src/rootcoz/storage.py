@@ -6464,7 +6464,12 @@ async def _get_job_token_usage_totals(
         "SUM(cache_write_tokens) AS total_cache_write_tokens, "
         "SUM(total_tokens) AS total_tokens, "
         "CASE WHEN COUNT(cost_usd) = COUNT(*) THEN SUM(cost_usd) END AS total_cost_usd, "
-        "COALESCE(SUM(duration_ms), 0) AS total_duration_ms "
+        "COALESCE(SUM(duration_ms), 0) AS total_duration_ms, "
+        "CASE WHEN SUM(credential_source = 'user') > 0 "
+        "AND SUM(credential_source = 'server') > 0 THEN 'mixed' "
+        "WHEN SUM(credential_source = 'user') = COUNT(*) THEN 'user' "
+        "WHEN SUM(credential_source = 'server') = COUNT(*) THEN 'server' "
+        "ELSE 'unknown' END AS credential_source "
         "FROM ai_token_usage WHERE job_id = ?",
         (job_id,),
     )

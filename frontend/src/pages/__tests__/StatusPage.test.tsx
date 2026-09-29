@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { api } from '@/lib/api'
@@ -35,13 +35,28 @@ describe('StatusPage usage', () => {
   beforeEach(() => { vi.clearAllMocks(); onStatusChanged.current = undefined })
 
   it('shows live tokens and cost, refreshing on status SSE events', async () => {
-    get.mockResolvedValueOnce(result('running', usage)).mockResolvedValueOnce(result('running', { ...usage, total_input_tokens: 200, total_cost_usd: 0.5 }))
+    get.mockResolvedValueOnce({ ...result('running', { ...usage, calls: [{ provider: 'gemini', model: 'test', call_type: 'analysis', credential_source: 'user', input_tokens: 100, output_tokens: 20, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: 120, cost_usd: 0.25, duration_ms: 100 }] }), graft_estimated_tokens_saved: 1234 })
+      .mockResolvedValueOnce({ ...result('running', { ...usage, total_input_tokens: 200, total_cost_usd: 0.5, calls: [{ provider: 'gemini', model: 'test', call_type: 'analysis', credential_source: 'server', input_tokens: 200, output_tokens: 20, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: 220, cost_usd: 0.5, duration_ms: 100 }] }), graft_estimated_tokens_saved: 2345 })
     renderPage()
-    await waitFor(() => expect(screen.getByText(/100 in \/ 20 out · \$0.25/)).toBeInTheDocument())
+    const badge = await screen.findByText(/100 in \/ 20 out · \$0.25/)
+    fireEvent.focus(badge)
+    expect(screen.getAllByText('Credential source: User')[0]).toBeInTheDocument()
+    expect(screen.getAllByText(/Estimated Graft tokens saved: 1,234, estimate versus reading whole referenced files, not billed AI tokens/)[0]).toBeInTheDocument()
     await act(async () => { onStatusChanged.current?.() })
     await waitFor(() => expect(screen.getByText(/200 in \/ 20 out · \$0.50/)).toBeInTheDocument())
+    fireEvent.focus(screen.getByText(/200 in \/ 20 out · \$0.50/))
+    expect(screen.getAllByText('Credential source: Server')[0]).toBeInTheDocument()
+    expect(screen.getAllByText(/Estimated Graft tokens saved: 2,345, estimate versus/)[0]).toBeInTheDocument()
     expect(get).toHaveBeenCalledTimes(2)
     expect(get).toHaveBeenCalledWith('/results/job-1')
+  })
+
+  it('shows the aggregate source for a running job with no detailed calls', async () => {
+    get.mockResolvedValue(result('running', { ...usage, credential_source: 'user', calls: [] }))
+    renderPage()
+    const badge = await screen.findByText(/100 in \/ 20 out/)
+    fireEvent.focus(badge)
+    expect(screen.getAllByText('Credential source: User')[0]).toBeInTheDocument()
   })
 
   it.each(['failed', 'aborted'] as const)('retains usage for %s jobs', async status => {
@@ -59,8 +74,11 @@ describe('StatusPage usage', () => {
   it('shows Unavailable for unknown cost, not zero', async () => {
     get.mockResolvedValue(result('running', { ...usage, total_cost_usd: null }))
     renderPage()
-    await waitFor(() => expect(screen.getByText(/100 in \/ 20 out · Unavailable/)).toBeInTheDocument())
+    const badge = await screen.findByText(/100 in \/ 20 out · Unavailable/)
     expect(screen.queryByText(/\$0.00/)).not.toBeInTheDocument()
+    fireEvent.focus(badge)
+    expect(screen.getAllByText('Credential source: Unknown')[0]).toBeInTheDocument()
+    expect(screen.queryByText(/estimate versus reading whole/)).not.toBeInTheDocument()
   })
 
   it('groups clone transitions in one chronological stage and refreshes repo states via SSE', async () => {

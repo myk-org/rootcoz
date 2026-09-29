@@ -21,7 +21,7 @@ const usage: TokenUsageSummary = {
   calls: [],
 }
 
-function showReport(graftEstimatedTokensSaved?: number) {
+function showReport(graftEstimatedTokensSaved?: number, tokenUsage: TokenUsageSummary = usage) {
   const response: ResultResponse = {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '',
     base_url: null, result_url: null,
@@ -29,7 +29,7 @@ function showReport(graftEstimatedTokensSaved?: number) {
     result: {
       job_id: 'job-1', job_name: 'example', build_number: 1, jenkins_url: null,
       status: 'completed', summary: '', ai_provider: '', ai_model: '',
-      failures: [], child_job_analyses: [], token_usage: usage,
+      failures: [], child_job_analyses: [], token_usage: tokenUsage,
     },
   }
   vi.mocked(api.get).mockImplementation(async (path) => {
@@ -44,21 +44,51 @@ function showReport(graftEstimatedTokensSaved?: number) {
 }
 
 describe('report Graft estimate', () => {
-  it('shows a separate estimated savings badge with an explanation, without changing billed usage or cost', async () => {
+  it('shows Graft only inside the total usage tooltip, without changing billed usage or cost', async () => {
     showReport(1234)
-    const badge = await screen.findByText(/Estimated Graft tokens saved: 1\.2k/i)
-    expect(screen.getByText(/100 in \/ 50 out/)).toHaveTextContent('$0.02')
+    const badge = await screen.findByText(/100 in \/ 50 out/)
+    expect(badge).toHaveTextContent('$0.02')
+    expect(screen.queryByText(/Estimated Graft tokens saved/)).not.toBeInTheDocument()
     fireEvent.focus(badge)
-    expect((await screen.findAllByText(/estimate versus reading whole referenced files, not billed AI tokens/i)).length).toBeGreaterThan(0)
-    fireEvent.blur(badge)
-    fireEvent.focus(screen.getByText(/100 in \/ 50 out/))
-    expect((await screen.findAllByText('Total tokens: 150')).length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Total tokens: 150')[0]).toBeInTheDocument()
+    expect(screen.getAllByText(/Estimated Graft tokens saved: 1,234, estimate versus reading whole referenced files, not billed AI tokens/)[0]).toBeInTheDocument()
+    expect(screen.getAllByText('Credential source: Unknown')[0]).toBeInTheDocument()
   })
 
   it.each([0, undefined])('does not show a savings badge for %s', async (saved) => {
     showReport(saved)
     await waitFor(() => expect(screen.getByText('example')).toBeInTheDocument())
     expect(screen.queryByText(/Estimated Graft tokens saved/i)).not.toBeInTheDocument()
-    expect(screen.getByText(/100 in \/ 50 out/)).toHaveTextContent('$0.02')
+    const badge = screen.getByText(/100 in \/ 50 out/)
+    expect(badge).toHaveTextContent('$0.02')
+    fireEvent.focus(badge)
+    expect(screen.getAllByText('Credential source: Unknown')[0]).toBeInTheDocument()
+    expect(screen.queryByText(/1,234, estimate versus/)).not.toBeInTheDocument()
+  })
+
+  it('prefers the SQL aggregate even when detailed calls are absent', async () => {
+    showReport(undefined, { ...usage, credential_source: 'mixed', calls: [] })
+    const badge = await screen.findByText(/100 in \/ 50 out/)
+    fireEvent.focus(badge)
+    expect(screen.getAllByText('Credential source: Mixed')[0]).toBeInTheDocument()
+  })
+
+  it.each([
+    [['user'], 'User'],
+    [['server'], 'Server'],
+    [['user', 'server'], 'Mixed'],
+    [['user', 'unknown'], 'Unknown'],
+    [['server', undefined], 'Unknown'],
+    [[], 'Unknown'],
+  ] as const)('derives legacy source for %j as %s', async (sources, expected) => {
+    showReport(undefined, { ...usage, calls: sources.map(source => ({
+      provider: 'gemini', model: 'test', call_type: 'analysis', credential_source: source,
+      input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0,
+      total_tokens: 15, cost_usd: 0.01, duration_ms: 0,
+    })) })
+    const badge = await screen.findByText(/100 in \/ 50 out/)
+    fireEvent.focus(badge)
+    expect(screen.getAllByText(`Credential source: ${expected}`)[0]).toBeInTheDocument()
+    if (sources.length) expect(screen.getAllByText(/gemini\/test ·/)).toHaveLength(sources.length * 2)
   })
 })

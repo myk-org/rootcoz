@@ -195,7 +195,7 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
                 provider=rec["ai_provider"],
                 model=rec["ai_model"],
                 call_type=rec["call_type"],
-                credential_source=rec.get("credential_source", "unknown"),
+                credential_source=rec.get("credential_source") or "unknown",
                 input_tokens=rec["input_tokens"],
                 output_tokens=rec["output_tokens"],
                 cache_read_tokens=rec["cache_read_tokens"],
@@ -217,7 +217,17 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
         if rec["duration_ms"] is not None:
             total_duration += rec["duration_ms"]
 
+    sources = {rec.get("credential_source") or "unknown" for rec in records}
+    if {"user", "server"} <= sources:
+        credential_source = "mixed"
+    elif sources == {"user"}:
+        credential_source = "user"
+    elif sources == {"server"}:
+        credential_source = "server"
+    else:
+        credential_source = "unknown"
     return TokenUsageSummary(
+        credential_source=credential_source,
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         total_cache_read_tokens=total_cache_read,

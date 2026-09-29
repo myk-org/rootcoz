@@ -8,6 +8,7 @@ from pi_sidecar_client import AIResult, AITokenUsage
 from rootcoz.token_tracking import (
     build_token_usage_summary,
     record_ai_usage,
+    summarize_token_usage,
 )
 
 
@@ -143,6 +144,37 @@ class TestRecordAiUsage:
             assert mock_record.call_args.kwargs["response_chars"] == 12345
 
 
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [
+        (["user"], "user"),
+        (["server"], "server"),
+        (["user", "server", None], "mixed"),
+        (["user", "unknown"], "unknown"),
+        (["server", None], "unknown"),
+        ([], "unknown"),
+    ],
+)
+def test_per_failure_credential_source(sources, expected) -> None:
+    records = [
+        {
+            "ai_provider": "gemini",
+            "ai_model": "test",
+            "call_type": "primary",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": None,
+            "duration_ms": None,
+            "credential_source": source,
+        }
+        for source in sources
+    ]
+    assert summarize_token_usage(records).credential_source == expected
+
+
 class TestBuildTokenUsageSummary:
     """Tests for build_token_usage_summary."""
 
@@ -157,6 +189,7 @@ class TestBuildTokenUsageSummary:
             "total_tokens": 1000,
             "total_cost_usd": None,
             "total_duration_ms": 12,
+            "credential_source": "server",
         }
         record = {
             "ai_provider": "gemini",

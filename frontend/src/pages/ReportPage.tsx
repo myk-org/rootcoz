@@ -460,10 +460,7 @@ function ReportContent() {
             </Badge>
           )}
           {result.token_usage && (
-            <TokenUsageBadge usage={result.token_usage} />
-          )}
-          {state.graftEstimatedTokensSaved > 0 && (
-            <TokenUsageBadge graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
+            <TokenUsageBadge usage={result.token_usage} graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
           )}
           <div className="ml-auto flex items-center gap-3">
             {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (

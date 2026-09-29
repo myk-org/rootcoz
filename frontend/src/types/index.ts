@@ -456,6 +456,7 @@ export interface TokenUsageEntry {
 }
 
 export interface TokenUsageSummary {
+  credential_source?: 'user' | 'server' | 'mixed' | 'unknown'
   total_input_tokens: number
   total_output_tokens: number
   total_cache_read_tokens: number

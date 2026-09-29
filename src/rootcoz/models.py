@@ -664,6 +664,7 @@ class TokenUsageSummary(BaseModel):
     total_cost_usd: float | None = None
     total_duration_ms: int = 0
     total_calls: int = 0
+    credential_source: str = "unknown"
     calls: list[TokenUsageEntry] = Field(default_factory=list)
 
 

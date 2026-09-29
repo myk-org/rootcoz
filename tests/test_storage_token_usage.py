@@ -320,6 +320,38 @@ class TestRecordTokenUsage:
         assert records[0]["total_tokens"] == 450
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [
+        ([], None),
+        (["user"], "user"),
+        (["server"], "server"),
+        (["user", "server"], "mixed"),
+        (["user", "server", "unknown"], "mixed"),
+        (["user", "unknown"], "unknown"),
+        (["server", "unknown"], "unknown"),
+        (["unknown"], "unknown"),
+        ([""], "unknown"),
+        (["unexpected"], "unknown"),
+    ],
+)
+async def test_job_totals_credential_source(_storage, sources, expected) -> None:
+    for source in sources:
+        await storage.record_token_usage(
+            "credential-job", "gemini", "test", "analysis", credential_source=source
+        )
+    totals = await storage.get_job_token_usage_totals("credential-job")
+    if expected is None:
+        assert totals is None
+    else:
+        assert totals is not None
+        assert totals["credential_source"] == expected
+        detailed = await build_token_usage_summary("credential-job")
+        assert detailed is not None
+        assert detailed.credential_source == expected
+
+
 class TestGetTokenUsageForJob:
     @pytest.mark.asyncio
     async def test_returns_records_for_job(self, _storage) -> None:

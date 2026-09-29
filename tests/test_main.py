@@ -5607,6 +5607,33 @@ class TestLiveResultTokenUsage:
         mock_calls.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sources", "expected"),
+        [
+            (["user"], "user"),
+            (["user", "server"], "mixed"),
+            (["user", "unknown"], "unknown"),
+        ],
+    )
+    async def test_running_usage_credential_source_without_calls(
+        self, test_client, sources, expected
+    ):
+        await storage.save_result("live-source", "", "running", {"summary": "working"})
+        for source in sources:
+            await storage.record_token_usage(
+                "live-source", "gemini", "test", "analysis", credential_source=source
+            )
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job", new_callable=AsyncMock
+        ) as mock_calls:
+            response = test_client.get("/results/live-source")
+        assert response.status_code == 202
+        usage = response.json()["result"]["token_usage"]
+        assert usage["credential_source"] == expected
+        assert usage["calls"] == []
+        mock_calls.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("status", ["failed", "aborted"])
     async def test_terminal_persisted_usage_is_not_reloaded(self, test_client, status):
         persisted = {

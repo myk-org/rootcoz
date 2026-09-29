@@ -3,32 +3,20 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { formatCompactNumber, formatCost } from '@/lib/format'
 import type { TokenUsageSummary } from '@/types'
 
-type TokenUsageBadgeProps =
-  | { usage: TokenUsageSummary; graftEstimatedTokensSaved?: never }
-  | { usage?: never; graftEstimatedTokensSaved: number }
+type TokenUsageBadgeProps = { usage: TokenUsageSummary; graftEstimatedTokensSaved?: number }
 
 export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsageBadgeProps) {
-  if (graftEstimatedTokensSaved !== undefined) {
-    return (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span tabIndex={0} className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary cursor-help">
-            Estimated Graft tokens saved: {formatCompactNumber(graftEstimatedTokensSaved)}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>
-          {graftEstimatedTokensSaved.toLocaleString()} tokens saved, estimate versus reading whole referenced files, not billed AI tokens.
-        </TooltipContent>
-      </Tooltip>
-    )
-  }
-  if (!usage) return null
   const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
+  const sources = new Set(usage.calls.map(call => call.credential_source))
+  const source = usage.credential_source ?? (sources.has('user') && sources.has('server') ? 'mixed'
+    : sources.size === 1 && sources.has('user') ? 'user'
+      : sources.size === 1 && sources.has('server') ? 'server' : 'unknown')
+  const credentialSource = source === 'mixed' ? 'Mixed' : source === 'user' ? 'User' : source === 'server' ? 'Server' : 'Unknown'
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary">
+        <span tabIndex={0} className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary">
           <Zap className="h-3 w-3" />
           {formatCompactNumber(usage.total_input_tokens)} in / {formatCompactNumber(usage.total_output_tokens)} out
           {' · '}{cost}
@@ -41,6 +29,10 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
           {usage.total_cache_read_tokens > 0 && <p>Cache read: {usage.total_cache_read_tokens.toLocaleString()}</p>}
           {usage.total_cache_write_tokens > 0 && <p>Cache write: {usage.total_cache_write_tokens.toLocaleString()}</p>}
           <p>API calls: {usage.total_calls.toLocaleString()}</p>
+          <p>Credential source: {credentialSource}</p>
+          {graftEstimatedTokensSaved !== undefined && graftEstimatedTokensSaved > 0 && (
+            <p>Estimated Graft tokens saved: {graftEstimatedTokensSaved.toLocaleString()}, estimate versus reading whole referenced files, not billed AI tokens.</p>
+          )}
           {usage.calls.map((call, index) => (
             <p key={index}>{call.call_type} · {call.provider}/{call.model} · {call.credential_source ?? 'unknown'}: {call.total_tokens.toLocaleString()} tokens</p>
           ))}

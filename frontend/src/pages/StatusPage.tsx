@@ -520,7 +520,7 @@ export function StatusPage() {
               {data?.result?.token_usage && (
                 <Row label="USAGE / COST" value={
                   <TooltipProvider>
-                    <TokenUsageBadge usage={data.result.token_usage} />
+                    <TokenUsageBadge usage={data.result.token_usage} graftEstimatedTokensSaved={data.graft_estimated_tokens_saved} />
                   </TooltipProvider>
                 } />
               )}
