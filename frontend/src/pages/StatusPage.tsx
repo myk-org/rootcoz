@@ -517,10 +517,14 @@ export function StatusPage() {
               {mainAi && (
                 <Row label="MAIN AI" value={mainAi} mono />
               )}
-              {data?.result?.token_usage && (
-                <Row label="USAGE / COST" value={
+              {(data?.result?.token_usage || (data?.graft_estimated_tokens_saved ?? 0) > 0) && (
+                <Row label={data?.result?.token_usage ? 'USAGE / COST' : 'GRAFT SAVINGS'} value={
                   <TooltipProvider>
-                    <TokenUsageBadge usage={data.result.token_usage} graftEstimatedTokensSaved={data.graft_estimated_tokens_saved} />
+                    {data?.result?.token_usage ? (
+                      <TokenUsageBadge usage={data.result.token_usage} graftEstimatedTokensSaved={data.graft_estimated_tokens_saved} />
+                    ) : (
+                      <TokenUsageBadge graftEstimatedTokensSaved={data?.graft_estimated_tokens_saved ?? 0} />
+                    )}
                   </TooltipProvider>
                 } />
               )}

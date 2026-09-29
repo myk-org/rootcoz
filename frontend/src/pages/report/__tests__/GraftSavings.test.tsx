@@ -21,7 +21,7 @@ const usage: TokenUsageSummary = {
   calls: [],
 }
 
-function showReport(graftEstimatedTokensSaved?: number, tokenUsage: TokenUsageSummary = usage) {
+function showReport(graftEstimatedTokensSaved?: number, tokenUsage?: TokenUsageSummary) {
   const response: ResultResponse = {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '',
     base_url: null, result_url: null,
@@ -45,8 +45,9 @@ function showReport(graftEstimatedTokensSaved?: number, tokenUsage: TokenUsageSu
 
 describe('report Graft estimate', () => {
   it('shows Graft only inside the total usage tooltip, without changing billed usage or cost', async () => {
-    showReport(1234)
+    showReport(1234, usage)
     const badge = await screen.findByText(/100 in \/ 50 out/)
+    expect(screen.getAllByText(/100 in \/ 50 out/)).toHaveLength(1)
     expect(badge).toHaveTextContent('$0.02')
     expect(screen.queryByText(/Estimated Graft tokens saved/)).not.toBeInTheDocument()
     fireEvent.focus(badge)
@@ -56,14 +57,31 @@ describe('report Graft estimate', () => {
   })
 
   it.each([0, undefined])('does not show a savings badge for %s', async (saved) => {
-    showReport(saved)
+    showReport(saved, usage)
     await waitFor(() => expect(screen.getByText('example')).toBeInTheDocument())
     expect(screen.queryByText(/Estimated Graft tokens saved/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Graft saved/)).not.toBeInTheDocument()
     const badge = screen.getByText(/100 in \/ 50 out/)
     expect(badge).toHaveTextContent('$0.02')
     fireEvent.focus(badge)
     expect(screen.getAllByText('Credential source: Unknown')[0]).toBeInTheDocument()
     expect(screen.queryByText(/1,234, estimate versus/)).not.toBeInTheDocument()
+  })
+
+  it('shows one job-level savings-only badge without AI usage', async () => {
+    showReport(1234)
+    const badge = await screen.findByText(/Graft saved ~1,234 tokens/)
+    expect(screen.getAllByText(/Graft saved ~1,234 tokens/)).toHaveLength(1)
+    expect(screen.queryByText(/in \/ .* out/)).not.toBeInTheDocument()
+    fireEvent.focus(badge)
+    expect(screen.getAllByText(/Estimated Graft tokens saved: 1,234, estimate versus reading whole referenced files, not billed AI tokens/)[0]).toBeInTheDocument()
+    expect(screen.queryByText(/Credential source:/)).not.toBeInTheDocument()
+  })
+
+  it.each([0, undefined])('hides savings-only badge for %s without usage', async saved => {
+    showReport(saved)
+    await waitFor(() => expect(screen.getByText('example')).toBeInTheDocument())
+    expect(screen.queryByText(/Graft saved|Estimated Graft tokens saved/)).not.toBeInTheDocument()
   })
 
   it('prefers the SQL aggregate even when detailed calls are absent', async () => {

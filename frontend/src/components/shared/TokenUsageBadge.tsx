@@ -3,9 +3,28 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { formatCompactNumber, formatCost } from '@/lib/format'
 import type { TokenUsageSummary } from '@/types'
 
-type TokenUsageBadgeProps = { usage: TokenUsageSummary; graftEstimatedTokensSaved?: number }
+type TokenUsageBadgeProps =
+  | { usage: TokenUsageSummary; graftEstimatedTokensSaved?: number }
+  | { usage?: never; graftEstimatedTokensSaved: number }
 
 export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsageBadgeProps) {
+  const graftTooltip = graftEstimatedTokensSaved !== undefined && graftEstimatedTokensSaved > 0 && (
+    <p>Estimated Graft tokens saved: {graftEstimatedTokensSaved.toLocaleString()}, estimate versus reading whole referenced files, not billed AI tokens.</p>
+  )
+  if (!usage) {
+    if (!graftTooltip) return null
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span tabIndex={0} className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary">
+            <Zap className="h-3 w-3" /> Graft saved ~{graftEstimatedTokensSaved.toLocaleString()} tokens
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>{graftTooltip}</TooltipContent>
+      </Tooltip>
+    )
+  }
+
   const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
   const sources = new Set(usage.calls.map(call => call.credential_source))
   const source = usage.credential_source ?? (sources.has('user') && sources.has('server') ? 'mixed'
@@ -30,9 +49,7 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
           {usage.total_cache_write_tokens > 0 && <p>Cache write: {usage.total_cache_write_tokens.toLocaleString()}</p>}
           <p>API calls: {usage.total_calls.toLocaleString()}</p>
           <p>Credential source: {credentialSource}</p>
-          {graftEstimatedTokensSaved !== undefined && graftEstimatedTokensSaved > 0 && (
-            <p>Estimated Graft tokens saved: {graftEstimatedTokensSaved.toLocaleString()}, estimate versus reading whole referenced files, not billed AI tokens.</p>
-          )}
+          {graftTooltip}
           {usage.calls.map((call, index) => (
             <p key={index}>{call.call_type} · {call.provider}/{call.model} · {call.credential_source ?? 'unknown'}: {call.total_tokens.toLocaleString()} tokens</p>
           ))}

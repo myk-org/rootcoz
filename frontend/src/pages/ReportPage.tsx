@@ -459,9 +459,11 @@ function ReportContent() {
               {formatAiLabel(result.ai_provider, result.ai_model)}
             </Badge>
           )}
-          {result.token_usage && (
+          {result.token_usage ? (
             <TokenUsageBadge usage={result.token_usage} graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
-          )}
+          ) : state.graftEstimatedTokensSaved > 0 ? (
+            <TokenUsageBadge graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
+          ) : null}
           <div className="ml-auto flex items-center gap-3">
             {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
