@@ -1,5 +1,7 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
+import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip } from '@/components/shared/CredentialSourceLabel'
+import { useId } from 'react'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { useAuth } from '@/lib/auth'
 import { buildProviderOptions, normalizeProvider } from '@/lib/aiProviders'
@@ -13,19 +15,28 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
 }) {
   const { providers, providerStatus } = useProviderCatalog(forceServer)
   const { canUseServerProviders } = useAuth()
+  const hintId = useId()
   const options = buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
   const current = normalizeProvider(value)
   const available = options.some((option) => option.value === current)
+  const selectedLabel = credentialLabel(usableModels(providers, current, forceServer, providerStatus), allowsUnverified(providerStatus, current, forceServer), forceServer)
+  const hasDeniedServer = !canUseServerProviders && options.some((option) => credentialLabel(usableModels(providers, option.value, forceServer, providerStatus)).includes('Server'))
   return (
     <Select value={available ? current : undefined} onValueChange={onChange}>
-      <SelectTrigger aria-label={label}>
-        <SelectValue placeholder={current ? `${current} (unavailable)` : 'Select provider...'} />
-      </SelectTrigger>
+      {hasDeniedServer && <ServerAccessHint id={hintId} />}
+      <ServerAccessTooltip show={available && !canUseServerProviders && selectedLabel.includes('Server')}>
+        <SelectTrigger aria-label={label} aria-describedby={hasDeniedServer ? hintId : undefined}>
+          <SelectValue placeholder={current ? `${current} (unavailable)` : 'Select provider...'} />
+        </SelectTrigger>
+      </ServerAccessTooltip>
       <SelectContent>
         {options.map((option) => {
           const models = usableModels(providers, option.value, forceServer, providerStatus)
           const available = usableModels(providers, option.value, forceServer, providerStatus, canUseServerProviders).length > 0 || (!forceServer && allowsUnverified(providerStatus, option.value, false))
-          return <SelectItem key={option.value} value={option.value} disabled={!available}>{option.label} · {credentialLabel(models, allowsUnverified(providerStatus, option.value, forceServer), forceServer, canUseServerProviders)}{!available && ' · Ask an admin for access'}</SelectItem>
+          const source = credentialLabel(models, allowsUnverified(providerStatus, option.value, forceServer), forceServer)
+          return <ServerAccessTooltip key={option.value} show={!canUseServerProviders && source.includes('Server')} disabled={!available}>
+            <SelectItem value={option.value} disabled={!available}>{option.label} · <CredentialSourceLabel label={source} canUseServer={canUseServerProviders} /></SelectItem>
+          </ServerAccessTooltip>
         })}
       </SelectContent>
     </Select>

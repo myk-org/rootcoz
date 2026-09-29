@@ -581,7 +581,7 @@ export function NewAnalysisPage() {
               <span className="text-sm text-text-secondary">Use server credentials</span>
               <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
             </div>
-            {!canUseServerProviders && <p className="text-xs text-text-tertiary">Server credentials are locked. Ask an admin for access, or use your own AI key.</p>}
+            {!canUseServerProviders && <p className="text-xs text-text-tertiary">Server credentials are restricted. Ask an admin for access, or use your own AI key.</p>}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea

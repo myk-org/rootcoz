@@ -146,6 +146,58 @@ describe('StatusPage usage', () => {
     await waitFor(() => expect(timeline.textContent).toMatch(/extra · https:\/\/example.com\/extra.git · dev\s*failed/))
     expect(screen.getByText('extra')).toBeVisible()
     expect(screen.getAllByText('Cloning')).toHaveLength(1)
+    expect(screen.getByText('extra').closest('li')).toHaveClass('text-signal-red')
+    expect(screen.getByText('failed')).toHaveClass('text-signal-red')
+    const cloning = toggle.closest('[role="listitem"]')!
+    expect(cloning).toHaveClass('text-signal-red')
+    expect(cloning.querySelector('.text-signal-green')).toBeNull()
+    expect(cloning.querySelector('.text-signal-red')).toHaveTextContent('!')
+    expect(screen.getByText('tests').closest('li')).not.toHaveClass('text-signal-red')
+    expect(screen.getAllByText('Routing failure groups...').at(-1)!.closest('[role="listitem"]')).not.toHaveClass('text-signal-red')
+  })
+
+  it('restores failed clone styling after page refresh without marking cancelled repos failed', async () => {
+    const running = result('running')
+    get.mockResolvedValue({ ...running, result: { ...running.result!, progress_log: [
+      { phase: 'cloning', repo: 'broken', state: 'failed', timestamp: 1 },
+      { phase: 'cloning', repo: 'stopped', state: 'cancelled', timestamp: 2 },
+      { phase: 'routing', timestamp: 3 },
+    ] } })
+    renderPage()
+    const cloning = (await screen.findByText('Cloning')).closest('[role="listitem"]')!
+    expect(cloning).toHaveClass('text-signal-red')
+    expect(cloning.querySelector('.text-signal-green')).toBeNull()
+    expect(screen.getByText('broken').closest('li')).toHaveClass('text-signal-red')
+    expect(screen.getByText('stopped').closest('li')).not.toHaveClass('text-signal-red')
+    expect(screen.getAllByText('Routing failure groups...').at(-1)!.closest('[role="listitem"]')).not.toHaveClass('text-signal-red')
+  })
+
+  it('keeps the Cloning stage failed after a later successful transition for the same repo', async () => {
+    const running = result('running')
+    get.mockResolvedValue({ ...running, result: { ...running.result!, progress_log: [
+      { phase: 'cloning', repo: 'tests', state: 'failed', timestamp: 1 },
+      { phase: 'cloning', repo: 'tests', state: 'cloned', timestamp: 2 },
+      { phase: 'routing', timestamp: 3 },
+    ] } })
+    renderPage()
+    const cloning = (await screen.findByText('Cloning')).closest('[role="listitem"]')!
+    expect(cloning).toHaveClass('text-signal-red')
+    expect(cloning.querySelector('.text-signal-green')).toBeNull()
+    expect(screen.getByText('tests').closest('li')).not.toHaveClass('text-signal-red')
+  })
+
+  it('marks an earlier failed phase red while a later phase is still running', async () => {
+    const running = result('running')
+    get.mockResolvedValue({ ...running, result: { ...running.result!, progress_log: [
+      { phase: 'fetching', state: 'failed', timestamp: 1 },
+      { phase: 'routing', timestamp: 2 },
+    ] } })
+    renderPage()
+    const failed = (await screen.findAllByText('Fetching test results...')).at(-1)!.closest('[role="listitem"]')!
+    expect(failed).toHaveClass('text-signal-red')
+    expect(failed.querySelector('.text-signal-red')).toHaveTextContent('!')
+    expect(failed.querySelector('.text-signal-green')).toBeNull()
+    expect(screen.getAllByText('Routing failure groups...').at(-1)!.closest('[role="listitem"]')).not.toHaveClass('text-signal-red')
   })
 
   it('displays git clone URLs without credentials or query data, never as links, including rows with missing event URLs', async () => {

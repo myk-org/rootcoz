@@ -358,6 +358,14 @@ function ReportContent() {
     () => buildRepoUrls(result?.request_params),
     [result?.request_params],
   )
+  // The persisted log is append-only; later attempts supersede earlier failures.
+  const cloneStates = new Map<string, string>()
+  for (const event of result?.progress_log ?? []) {
+    if (event.phase === 'cloning' && event.repo && event.state) cloneStates.set(event.repo, event.state)
+  }
+  const failedClones = [...cloneStates]
+    .filter(([repo, status]) => status === 'failed' && !repo.includes('://') && !repo.includes('@'))
+    .map(([repo]) => repo)
   const reviewedCount = allTestKeys.filter((k) => state.reviews[k]?.reviewed).length
 
   /** Format the AI provider/model label for display. */
@@ -611,11 +619,14 @@ function ReportContent() {
         </div>
       )}
 
-      {result.source_warnings && result.source_warnings.length > 0 && (
-        <div className="rounded-lg border border-border-default bg-bg-secondary p-4 animate-slide-up">
-          <h2 className="text-xs font-display uppercase tracking-widest text-signal-orange mb-2">Source Warnings</h2>
+      {(failedClones.length > 0 || (result.source_warnings?.length ?? 0) > 0) && (
+        <div role="alert" className="rounded-lg border-l-4 border-l-signal-amber bg-signal-amber/5 p-4 animate-slide-up">
+          <h2 className="text-sm font-medium text-signal-amber mb-2">Source Warnings</h2>
           <ul className="list-disc pl-4 space-y-1 text-sm text-text-secondary">
-            {result.source_warnings.map((warning, i) => (
+            {failedClones.map((repo) => (
+              <li key={repo}>Repository clone failed: {repo}. Analysis results remain available below.</li>
+            ))}
+            {result.source_warnings?.map((warning, i) => (
               <li key={`sw-${i}`}>{warning}</li>
             ))}
           </ul>

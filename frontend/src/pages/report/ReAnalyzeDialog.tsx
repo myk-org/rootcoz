@@ -281,7 +281,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <span className="text-sm text-text-secondary">Use server credentials</span>
               <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
             </div>
-            {!canUseServerProviders && <p className="text-xs text-text-tertiary">{params?.force_server_credentials ? 'The original analysis used server credentials, but you no longer have access. Select a model available with your own AI key or ask an admin for access.' : 'Server credentials are locked. Ask an admin for access, or use your own AI key.'}</p>}
+            {!canUseServerProviders && <p className="text-xs text-text-tertiary">{params?.force_server_credentials ? 'The original analysis used server credentials, but you no longer have access. Select a model available with your own AI key or ask an admin for access.' : 'Server credentials are restricted. Ask an admin for access, or use your own AI key.'}</p>}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea

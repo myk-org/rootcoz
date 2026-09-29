@@ -8,6 +8,8 @@ import {
 } from '@/components/ui/select'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
+import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip } from '@/components/shared/CredentialSourceLabel'
+import { useId } from 'react'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
 import { useProviderOptions, useProviderCatalog } from '@/lib/useProviderOptions'
 import { usableModels, visibleModels, credentialLabel, allowsUnverified, analysisProviderIds } from '@/lib/analysisAi'
@@ -39,11 +41,13 @@ export function PeerConfigList({
   strict = false,
 }: PeerConfigListProps) {
   const { canUseServerProviders } = useAuth()
+  const hintId = useId()
   const legacyOptions = useProviderOptions(peerConfigs.map((p) => p.ai_provider))
   const { providers, providerStatus } = useProviderCatalog(forceServer)
   const providerOptions = strict
     ? buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
     : legacyOptions
+  const hasDeniedServer = strict && !canUseServerProviders && providerOptions.some((option) => credentialLabel(usableModels(providers, option.value, forceServer, providerStatus)).includes('Server'))
 
   const updatePeer = (id: string, patch: Partial<PeerConfigWithId>) => {
     setPeerConfigs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
@@ -62,15 +66,23 @@ export function PeerConfigList({
                 value={(!strict || providerOptions.some((option) => option.value === normalizeProvider(peer.ai_provider))) ? normalizeProvider(peer.ai_provider) || undefined : undefined}
                 onValueChange={(v) => updatePeer(peer.id, { ai_provider: v, ai_model: '' })}
               >
-                <SelectTrigger className="w-[160px]" aria-label={`Peer ${i + 1} provider`}>
-                  <SelectValue placeholder={peer.ai_provider ? `${peer.ai_provider} (unavailable)` : 'Select provider'} />
-                </SelectTrigger>
+                {hasDeniedServer && <ServerAccessHint id={`${hintId}-${i}`} />}
+                <ServerAccessTooltip show={strict && !canUseServerProviders && credentialLabel(usableModels(providers, peer.ai_provider, forceServer, providerStatus)).includes('Server')}>
+                  <SelectTrigger className="w-[160px]" aria-label={`Peer ${i + 1} provider`} aria-describedby={hasDeniedServer ? `${hintId}-${i}` : undefined}>
+                    <SelectValue placeholder={peer.ai_provider ? `${peer.ai_provider} (unavailable)` : 'Select provider'} />
+                  </SelectTrigger>
+                </ServerAccessTooltip>
                 <SelectContent>
-                  {providerOptions.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value} disabled={strict && !usableModels(providers, opt.value, forceServer, providerStatus, canUseServerProviders).length && !(!forceServer && allowsUnverified(providerStatus, opt.value, false))}>
-                      {opt.label}{strict ? ` · ${credentialLabel(usableModels(providers, opt.value, forceServer, providerStatus), allowsUnverified(providerStatus, opt.value, forceServer), forceServer, canUseServerProviders)}` : ''}
-                    </SelectItem>
-                  ))}
+                  {providerOptions.map((opt) => {
+                    const models = usableModels(providers, opt.value, forceServer, providerStatus)
+                    const available = !strict || !!usableModels(providers, opt.value, forceServer, providerStatus, canUseServerProviders).length || (!forceServer && allowsUnverified(providerStatus, opt.value, false))
+                    const source = credentialLabel(models, allowsUnverified(providerStatus, opt.value, forceServer), forceServer)
+                    return <ServerAccessTooltip key={opt.value} show={strict && !canUseServerProviders && source.includes('Server')} disabled={!available}>
+                      <SelectItem value={opt.value} disabled={!available}>
+                        {opt.label}{strict && <> · <CredentialSourceLabel label={source} canUseServer={canUseServerProviders} /></>}
+                      </SelectItem>
+                    </ServerAccessTooltip>
+                  })}
                 </SelectContent>
               </Select>
               <div className="flex-1" />

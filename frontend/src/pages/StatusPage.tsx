@@ -108,6 +108,7 @@ interface StepLogEntry {
   phase: string
   label: string
   timestamp: string
+  failed?: boolean
   repos?: Array<{ name: string; state: string; url?: string; ref?: string }>
 }
 
@@ -248,6 +249,7 @@ export function StatusPage() {
         if (!steps.some(step => step.phase === 'cloning')) {
           steps.push({ phase: 'cloning', label: 'Cloning', timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(), repos: [] })
         }
+        if (entry.state === 'failed') steps.find(step => step.phase === 'cloning')!.failed = true
         if (entry.repo) updateClone(entry.repo, entry.state ?? 'cloning', entry.url, entry.ref)
         // Older jobs contain active-name snapshots rather than per-repo transitions.
         if (entry.repos) {
@@ -257,14 +259,17 @@ export function StatusPage() {
           for (const name of entry.repos) updateClone(name, 'cloning')
         }
       } else {
-        steps.push({ phase: entry.phase, label: getPhaseLabel(entry.phase) ?? entry.phase, timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString() })
+        steps.push({ phase: entry.phase, label: getPhaseLabel(entry.phase) ?? entry.phase, timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(), failed: entry.state === 'failed' || entry.phase === 'failed' })
       }
     }
     for (const name of data?.result?.cloning_repos ?? []) {
       if (!clones.has(name)) updateClone(name, 'cloning')
     }
     const cloneStep = steps.find(step => step.phase === 'cloning')
-    if (cloneStep) cloneStep.repos = [...clones.values()]
+    if (cloneStep) {
+      cloneStep.repos = [...clones.values()]
+      cloneStep.failed ||= cloneStep.repos.some(repo => repo.state === 'failed')
+    }
     return steps
   }, [rawProgressLog, data?.result?.cloning_repos])
 
@@ -624,15 +629,16 @@ export function StatusPage() {
                 <div ref={logContainerRef} role="list" aria-label="Progress" tabIndex={0} className="max-h-[min(60vh,36rem)] overflow-y-auto px-3 py-2 space-y-1">
                   {stepLog.map((step, i) => {
                     const isLatest = i === stepLog.length - 1
+                    const failed = step.failed || (isLatest && (displayStatus === 'failed' || displayStatus === 'timeout'))
                     return (
-                      <div role="listitem" key={i} className={`min-w-0 flex flex-wrap items-start gap-2 text-xs ${isLatest ? 'text-signal-blue' : 'text-text-tertiary'}`}>
+                      <div role="listitem" key={i} className={`min-w-0 flex flex-wrap items-start gap-2 text-xs ${failed ? 'text-signal-red' : isLatest ? 'text-signal-blue' : 'text-text-tertiary'}`}>
                         <span className="shrink-0 font-mono text-[10px] text-text-tertiary/60">
                           {step.timestamp}
                         </span>
-                        {isLatest && isActive ? (
-                          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-signal-blue mt-0.5" />
-                        ) : isLatest && (displayStatus === 'failed' || displayStatus === 'timeout') ? (
+                        {failed ? (
                           <span className="shrink-0 text-signal-red mt-0.5">!</span>
+                        ) : isLatest && isActive ? (
+                          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-signal-blue mt-0.5" />
                         ) : (
                           <span className="shrink-0 text-signal-green mt-0.5">{'\u2713'}</span>
                         )}
@@ -656,11 +662,11 @@ export function StatusPage() {
                                 const href = sanitizeHttpHref(display)
                                 const ref = (repo.ref ?? config?.ref)?.trim() || 'default'
                                 return (
-                                  <li key={repo.name} className="min-w-0 break-words text-text-secondary">
-                                    <span className="font-medium text-text-primary">{repo.name}</span>
+                                  <li key={repo.name} className={`min-w-0 break-words ${repo.state === 'failed' ? 'text-signal-red' : 'text-text-secondary'}`}>
+                                    <span className={`font-medium ${repo.state === 'failed' ? 'text-signal-red' : 'text-text-primary'}`}>{repo.name}</span>
                                     {' · '}{href && isSafeHref(href) ? <a href={href} target="_blank" rel="noopener noreferrer" className="break-all text-text-link hover:underline">{href}</a> : <span className="break-all text-text-tertiary">{display ?? 'URL unavailable'}</span>}
                                     {' · '}<span className="break-all">{ref}</span>
-                                    <span className="ml-2 text-text-tertiary">{repo.state}</span>
+                                    <span className={`ml-2 ${repo.state === 'failed' ? 'text-signal-red' : 'text-text-tertiary'}`}>{repo.state}</span>
                                   </li>
                                 )
                               })}
