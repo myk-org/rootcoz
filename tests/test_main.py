@@ -6011,6 +6011,308 @@ class TestReAnalyzeFailure:
         assert failure["status"] == "FAILED"
 
     @pytest.mark.asyncio
+    async def test_reanalyze_usage_isolated_by_attempt_and_child(
+        self, test_client
+    ) -> None:
+        """Re-analysis changes only its card; job totals retain all attempts."""
+        from pi_sidecar_client import AIResult, AITokenUsage
+
+        from rootcoz.token_tracking import failure_group_usage, record_ai_usage
+
+        job_id = "job-attempt-scopes"
+        top = [
+            FailureAnalysis(
+                test_name=f"top-{index}",
+                error="same error",
+                error_signature="same-signature",
+                analysis=AnalysisDetail(details="old"),
+            ).model_dump(mode="json")
+            for index in range(2)
+        ]
+        child_failure = FailureAnalysis(
+            test_name="child",
+            error="same error",
+            error_signature="same-signature",
+            analysis=AnalysisDetail(details="old"),
+        ).model_dump(mode="json")
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "failures": top,
+                "child_job_analyses": [
+                    {
+                        "job_name": "runner",
+                        "build_number": 7,
+                        "failures": [child_failure],
+                    }
+                ],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+        for child_name, child_build, tokens in (("", 0, 10), ("runner", 7, 20)):
+            await storage.record_token_usage(
+                job_id=job_id,
+                ai_provider="claude",
+                ai_model="opus",
+                call_type="primary",
+                input_tokens=tokens,
+                error_signature="same-signature",
+                child_job_name=child_name,
+                child_build_number=child_build,
+            )
+
+        async def analyze_replacement(**kwargs):
+            with failure_group_usage(kwargs["job_id"], "same-signature"):
+                await record_ai_usage(
+                    kwargs["job_id"],
+                    AIResult(
+                        success=True,
+                        text="new",
+                        usage=AITokenUsage(
+                            input_tokens=5, provider="claude", model="opus"
+                        ),
+                    ),
+                    "primary",
+                )
+            return [
+                FailureAnalysis(
+                    test_name=kwargs["failures"][0].test_name,
+                    error="same error",
+                    error_signature="same-signature",
+                    analysis=AnalysisDetail(details="new"),
+                )
+            ]
+
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group", side_effect=analyze_replacement
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            for failure_id in (child_failure["id"], top[0]["id"]):
+                response = test_client.post(f"/api/failures/{failure_id}/re-analyze")
+                assert response.status_code == 202
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    current = (await storage.get_result(job_id))["result"]
+                    target = (
+                        current["child_job_analyses"][0]["failures"][0]
+                        if failure_id == child_failure["id"]
+                        else current["failures"][0]
+                    )
+                    if target["analysis"]["details"] == "new":
+                        break
+                else:
+                    pytest.fail("re-analysis did not complete")
+                assert target["usage_attempt"]
+                assert target["token_usage"]["total_input_tokens"] == 5
+                assert target["previous_analyses"][0]["token_usage"][
+                    "total_input_tokens"
+                ] == (20 if failure_id == child_failure["id"] else 10)
+                assert "reanalysis_status" not in target["previous_analyses"][0]
+                if failure_id == child_failure["id"]:
+                    assert (
+                        current["failures"][0]["token_usage"]["total_input_tokens"]
+                        == 10
+                    )
+                    assert (
+                        current["failures"][1]["token_usage"]["total_input_tokens"]
+                        == 10
+                    )
+            # A second attempt on the same failure archives the first attempt's usage.
+            first_attempt = current["failures"][0]["usage_attempt"]
+            response = test_client.post(f"/api/failures/{top[0]['id']}/re-analyze")
+            assert response.status_code == 202
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                current = (await storage.get_result(job_id))["result"]
+                if current["failures"][0].get("usage_attempt") != first_attempt:
+                    break
+            else:
+                pytest.fail("second re-analysis did not complete")
+            archived = current["failures"][0]["previous_analyses"][0]
+            assert archived["usage_attempt"] == first_attempt
+            assert archived["token_usage"]["total_input_tokens"] == 5
+            assert "reanalysis_status" not in archived
+            result = test_client.get(f"/results/{job_id}").json()["result"]
+            assert result["token_usage"]["total_input_tokens"] == 45
+            assert result["token_usage"]["total_calls"] == 5
+            assert result["failures"][0]["token_usage"]["total_input_tokens"] == 5
+            assert result["failures"][1]["token_usage"]["total_input_tokens"] == 10
+            assert (
+                result["child_job_analyses"][0]["failures"][0]["token_usage"][
+                    "total_input_tokens"
+                ]
+                == 5
+            )
+            rows = await storage.get_token_usage_for_job(job_id)
+            reanalyses = [row for row in rows if row["call_type"] == "reanalysis"]
+            assert {row["failure_id"] for row in reanalyses} == {
+                top[0]["id"],
+                child_failure["id"],
+            }
+            child_call = next(
+                row for row in reanalyses if row["failure_id"] == child_failure["id"]
+            )
+            assert (child_call["child_job_name"], child_call["child_build_number"]) == (
+                "runner",
+                7,
+            )
+            assert (
+                child_call["usage_attempt"]
+                == result["child_job_analyses"][0]["failures"][0]["usage_attempt"]
+            )
+
+            # A failed attempt must not replace the last successful card usage.
+            async def failing_replacement(**kwargs):
+                with failure_group_usage(kwargs["job_id"], "same-signature"):
+                    await record_ai_usage(
+                        kwargs["job_id"],
+                        AIResult(
+                            success=True,
+                            text="partial",
+                            usage=AITokenUsage(input_tokens=5),
+                        ),
+                        "primary",
+                    )
+                raise RuntimeError("simulated analysis error")
+
+            with patch(
+                "rootcoz.main.analyze_failure_group", side_effect=failing_replacement
+            ):
+                response = test_client.post(f"/api/failures/{top[0]['id']}/re-analyze")
+                assert response.status_code == 202
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    result = (await storage.get_result(job_id))["result"]
+                    if result["failures"][0].get("reanalysis_status") == "failed":
+                        break
+                else:
+                    pytest.fail("failed re-analysis did not finish")
+            assert (
+                result["failures"][0]["usage_attempt"]
+                == current["failures"][0]["usage_attempt"]
+            )
+            assert result["failures"][0]["token_usage"]["total_input_tokens"] == 5
+            assert result["token_usage"]["total_calls"] == 6
+            assert result["token_usage"]["total_input_tokens"] == 50
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_history", [False, True])
+    async def test_legacy_reanalysis_does_not_archive_mixed_primary_usage(
+        self, test_client, has_history: bool
+    ) -> None:
+        from pi_sidecar_client import AIResult, AITokenUsage
+
+        from rootcoz.token_tracking import failure_group_usage, record_ai_usage
+
+        job_id = f"legacy-reanalysis-archive-{has_history}"
+        failure = FailureAnalysis(
+            test_name="old",
+            error="same",
+            error_signature="same",
+            analysis=AnalysisDetail(details="prior"),
+        ).model_dump(mode="json")
+        if has_history:
+            failure["previous_analyses"] = [{"analysis": {"details": "older"}}]
+        await storage.record_token_usage(
+            job_id,
+            "claude",
+            "test",
+            "primary",
+            input_tokens=10,
+            error_signature="same",
+        )
+        await storage.record_token_usage(
+            job_id,
+            "claude",
+            "test",
+            "primary",
+            input_tokens=20,
+            error_signature="same",
+        )
+        await storage.save_result(
+            job_id,
+            status="completed",
+            result={
+                "failures": [failure, {"id": "sibling", "error_signature": "same"}],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        # A legacy result may already contain an inflated materialized card value.
+        await storage.patch_result_json(
+            job_id,
+            lambda result: result["failures"][0].update(
+                token_usage={"total_input_tokens": 30}
+            ),
+        )
+
+        async def analyze_replacement(**kwargs):
+            with failure_group_usage(kwargs["job_id"], "same"):
+                await record_ai_usage(
+                    kwargs["job_id"],
+                    AIResult(
+                        success=True, text="ok", usage=AITokenUsage(input_tokens=5)
+                    ),
+                    "primary",
+                )
+            return [
+                FailureAnalysis(
+                    test_name="old",
+                    error="same",
+                    error_signature="same",
+                    analysis=AnalysisDetail(details="new"),
+                )
+            ]
+
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group", side_effect=analyze_replacement
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{failure['id']}/re-analyze")
+            assert response.status_code == 202, response.json()
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                current = (await storage.get_result(job_id))["result"]
+                if current["failures"][0].get("usage_attempt"):
+                    break
+            else:
+                pytest.fail("re-analysis did not finish")
+        target = current["failures"][0]
+        assert target["token_usage"]["total_input_tokens"] == 5
+        assert target["previous_analyses"][0].get("token_usage") is None
+        assert current["failures"][1]["token_usage"] is None
+        assert current["token_usage"]["total_input_tokens"] == 35
+        assert current["token_usage"]["total_calls"] == 3
+
+    @pytest.mark.asyncio
     async def test_reanalyze_additional_repo_persists_and_notifies_clone_progress(
         self, test_client, tmp_path, monkeypatch
     ) -> None:

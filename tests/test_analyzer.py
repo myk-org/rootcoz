@@ -2937,7 +2937,7 @@ async def test_run_orchestrated_analysis_success(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_orchestrated_analysis_ai_failure(tmp_path: Path) -> None:
-    """run_orchestrated_analysis must not turn failed calls into completed analyses."""
+    """Failed calls produce visible placeholders without a success classification."""
     f1 = FailedTest(test_name="test_a", error_message="err_a")
     groups = {"sig_1": [f1]}
 
@@ -2950,15 +2950,22 @@ async def test_run_orchestrated_analysis_ai_failure(tmp_path: Path) -> None:
             new_callable=AsyncMock,
             return_value=mock_result,
         ),
-        pytest.raises(RuntimeError, match="AI analysis failed"),
     ):
-        await run_orchestrated_analysis(
+        analyses, patterns = await run_orchestrated_analysis(
             groups=groups,
             console_context="console",
             repo_path=tmp_path,
             ai_provider="test",
             ai_model="test-model",
         )
+    assert len(analyses) == 1
+    assert analyses[0].test_name == "test_a"
+    assert analyses[0].error_signature == "sig_1"
+    assert (
+        analyses[0].analysis.details == "Analysis failed; check server logs for details"
+    )
+    assert not analyses[0].analysis.classification
+    assert patterns == []
 
 
 @pytest.mark.asyncio

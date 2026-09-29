@@ -10,7 +10,7 @@ from pi_sidecar_client import AIResult
 
 from rootcoz import storage
 from rootcoz.engine.core import run_orchestrated_analysis, safe_update_progress
-from rootcoz.models import FailedTest
+from rootcoz.models import AnalysisDetail, FailedTest, FailureAnalysis
 
 
 @pytest.mark.asyncio
@@ -105,6 +105,87 @@ async def test_fallback_per_group_progress(tmp_path: Path) -> None:
         "analyzing_failures (group 1/2)",
         "analyzing_failures (group 2/2)",
     ]
+
+
+@pytest.mark.asyncio
+async def test_fallback_group_failure_keeps_success_and_test_placeholders(
+    tmp_path: Path,
+) -> None:
+    from rootcoz.main import _run_per_group_analysis
+
+    groups = {
+        "good": [FailedTest(test_name="good", error_message="ok")],
+        "bad": [
+            FailedTest(test_name=name, error_message="secret")
+            for name in ("bad1", "bad2")
+        ],
+    }
+    good = FailureAnalysis(
+        test_name="good",
+        error="ok",
+        error_signature="good",
+        analysis=AnalysisDetail(details="diagnosed"),
+    )
+    with patch(
+        "rootcoz.main.analyze_failure_group",
+        new_callable=AsyncMock,
+        side_effect=[[good], RuntimeError("secret-provider-response")],
+    ) as analyze:
+        analyses = await _run_per_group_analysis(
+            groups=groups,
+            console_context="",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="model",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job",
+            additional_repos=None,
+            max_concurrent_ai_calls=1,
+            auth_header="",
+        )
+
+    assert analyze.await_count == 2
+    assert analyses[0] == good
+    assert [a.test_name for a in analyses[1:]] == ["bad1", "bad2"]
+    assert all(a.error_signature == "bad" for a in analyses[1:])
+    assert all(
+        a.analysis.details == "Analysis failed; check server logs for details"
+        and not a.analysis.classification
+        for a in analyses[1:]
+    )
+    assert "secret-provider-response" not in str(analyses)
+
+
+@pytest.mark.asyncio
+async def test_fallback_empty_group_marks_each_test_failed(tmp_path: Path) -> None:
+    from rootcoz.main import _run_per_group_analysis
+
+    with patch(
+        "rootcoz.main.analyze_failure_group", new_callable=AsyncMock, return_value=[]
+    ):
+        analyses = await _run_per_group_analysis(
+            groups={"empty": [FailedTest(test_name="missing", error_message="boom")]},
+            console_context="",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="model",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job",
+            additional_repos=None,
+            max_concurrent_ai_calls=1,
+            auth_header="",
+        )
+    assert len(analyses) == 1
+    assert analyses[0].error_signature == "empty"
+    assert (
+        analyses[0].analysis.details == "Analysis failed; check server logs for details"
+    )
 
 
 @pytest.mark.asyncio

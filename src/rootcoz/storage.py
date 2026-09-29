@@ -1078,6 +1078,12 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "ai_token_usage", "child_build_number", "INTEGER NOT NULL DEFAULT 0"
         )
+        await _migrate_add_column(
+            db, "ai_token_usage", "failure_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "usage_attempt", "TEXT NOT NULL DEFAULT ''"
+        )
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ai_session_sources (
                 session_id TEXT PRIMARY KEY,
@@ -1847,8 +1853,10 @@ async def _attach_failure_usage(
 
     rows = await (
         await db.execute(
-            "SELECT * FROM ai_token_usage WHERE job_id = ? AND call_type = 'primary' "
-            "AND error_signature != '' ORDER BY created_at, rowid",
+            "SELECT * FROM ai_token_usage WHERE job_id = ? "
+            "AND ((call_type = 'primary' AND error_signature != '') "
+            "OR (call_type = 'reanalysis' AND usage_attempt != '')) "
+            "ORDER BY created_at, rowid",
             (job_id,),
         )
     ).fetchall()
@@ -6405,6 +6413,8 @@ async def record_token_usage(
     error_signature: str = "",
     child_job_name: str = "",
     child_build_number: int = 0,
+    failure_id: str = "",
+    usage_attempt: str = "",
 ) -> str:
     """Record a single AI call's token usage. Returns the record ID."""
     record_id = str(uuid.uuid4())
@@ -6415,8 +6425,8 @@ async def record_token_usage(
             "(id, job_id, ai_provider, ai_model, call_type, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
             "prompt_chars, response_chars, credential_source, error_signature, "
-            "child_job_name, child_build_number) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "child_job_name, child_build_number, failure_id, usage_attempt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -6433,9 +6443,11 @@ async def record_token_usage(
                 prompt_chars,
                 response_chars,
                 credential_source,
-                error_signature if call_type == "primary" else "",
-                child_job_name if call_type == "primary" else "",
-                child_build_number if call_type == "primary" else 0,
+                error_signature if call_type in ("primary", "reanalysis") else "",
+                child_job_name if call_type in ("primary", "reanalysis") else "",
+                child_build_number if call_type in ("primary", "reanalysis") else 0,
+                failure_id if call_type == "reanalysis" else "",
+                usage_attempt if call_type == "reanalysis" else "",
             ),
         )
         await db.commit()

@@ -2336,6 +2336,23 @@ def _parse_cross_failure_response(
     return patterns
 
 
+def _failed_group_analyses(
+    signature: str, failures: list[FailedTest]
+) -> list[FailureAnalysis]:
+    """Keep failed tests visible without exposing the provider error as analysis."""
+    return [
+        FailureAnalysis(
+            test_name=f.test_name,
+            error=f.error_message,
+            error_signature=signature,
+            analysis=AnalysisDetail(
+                details="Analysis failed; check server logs for details"
+            ),
+        )
+        for f in failures
+    ]
+
+
 async def run_orchestrated_analysis(
     *,
     groups: dict[str, list[FailedTest]],
@@ -2365,8 +2382,7 @@ async def run_orchestrated_analysis(
     When custom agents exist in the workspace, a routing call assigns
     specialist agents to groups; the AI is pointed at the agent file to read.
 
-    When the AI call fails or returns empty text, returns fallback
-    ``AnalysisDetail`` objects for all groups with the error details.
+    Failed groups produce per-test placeholders; successful groups remain intact.
 
     Args:
         groups: Failure groups keyed by error signature.
@@ -2532,32 +2548,17 @@ async def run_orchestrated_analysis(
                     type(result).__name__,
                     safe_exception_frames(result),
                 )
-                # A failed group is not an AI classification. Keep its tests visible
-                # without inventing a success or exposing provider response text.
-                all_analyses.extend(
-                    FailureAnalysis(
-                        test_name=f.test_name,
-                        error=f.error_message,
-                        error_signature=sig,
-                        analysis=AnalysisDetail(
-                            details="Analysis failed; check server logs for details"
-                        ),
-                    )
-                    for f in failures
-                )
+                all_analyses.extend(_failed_group_analyses(sig, failures))
                 continue
             all_analyses.extend(result)
             if result:
                 group_results.append((sig, result[0].analysis))
             else:
-                group_results.append(
-                    (sig, AnalysisDetail(details="No analysis returned"))
-                )
+                logger.warning("Analysis group %s returned no analyses", sig)
+                all_analyses.extend(_failed_group_analyses(sig, failures))
 
         if not group_results:
-            raise RuntimeError(
-                "AI analysis failed. Check provider credentials and try again."
-            ) from None
+            logger.warning("No successful direct analysis groups for job=%s", job_id)
 
         # Cross-failure pattern detection (only when multiple successful groups)
         cross_patterns: list[CrossFailurePattern] = []

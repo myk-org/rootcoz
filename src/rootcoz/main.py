@@ -106,6 +106,7 @@ from rootcoz.encryption import (
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
+    _failed_group_analyses,
     analyze_failure_group,
     clone_additional_repos,
     copy_rootcoz_pi_resources,
@@ -241,7 +242,12 @@ from rootcoz.storage import (
     stamp_build_url,
     update_status,
 )
-from rootcoz.token_tracking import build_token_usage_summary, set_usage_callback
+from rootcoz.token_tracking import (
+    build_token_usage_summary,
+    child_usage_scope,
+    reanalysis_usage_scope,
+    set_usage_callback,
+)
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -3573,22 +3579,23 @@ async def _run_per_group_analysis(
         len(groups),
     )
 
-    failures = [result for result in results if isinstance(result, Exception)]
-    if failures:
-        from rootcoz.engine.chat import safe_exception_frames
+    from rootcoz.engine.chat import safe_exception_frames
 
-        for failure in failures:
+    all_analyses: list[FailureAnalysis] = []
+    for (signature, failures), result in zip(groups.items(), results):
+        if isinstance(result, Exception):
             logger.error(
-                "Failed to analyze failure group: %s\n%s",
-                type(failure).__name__,
-                safe_exception_frames(failure),
+                "Failed to analyze fallback group %s: %s\n%s",
+                signature,
+                type(result).__name__,
+                safe_exception_frames(result),
             )
-        raise RuntimeError(
-            "AI analysis failed. Check provider credentials and try again."
-        )
-    all_analyses: list[Any] = []
-    for result in results:
-        all_analyses.extend(result)
+            all_analyses.extend(_failed_group_analyses(signature, failures))
+        elif result:
+            all_analyses.extend(result)
+        else:
+            logger.warning("Fallback group %s returned no analyses", signature)
+            all_analyses.extend(_failed_group_analyses(signature, failures))
     return all_analyses
 
 
@@ -3611,6 +3618,7 @@ async def _analyze_failures_or_exit(
     auth_header: str,
     groups: dict[str, list[Any]],
     source_result: CISourceResult | None,
+    child_job_analyses: list[ChildJobAnalysis] | None = None,
     extra_labels: list[str] | None = None,
 ) -> tuple[list[Any], list[Any], int, list[CrossFailurePattern]] | None:
     """Resolve console-only / no-failure / junit analysis paths.
@@ -3768,12 +3776,20 @@ async def _analyze_failures_or_exit(
                 type(fallback_exc).__name__,
                 safe_exception_frames(fallback_exc),
             )
-            all_analyses = []
+            all_analyses = [
+                analysis
+                for signature, failures in groups.items()
+                for analysis in _failed_group_analyses(signature, failures)
+            ]
 
     unique_errors = len(groups)
 
-    # If no analyses were produced, treat the entire job as failed
-    if not all_analyses:
+    # Only fail when neither direct groups nor children produced an analysis.
+    from rootcoz.sources.jenkins_source import child_has_successful_analysis
+
+    if not all_analyses and not any(
+        child_has_successful_analysis(c) for c in (child_job_analyses or [])
+    ):
         error_msg = (
             f"All failure group(s) failed during analysis "
             f"({len(test_failures)} test failures, {unique_errors} unique errors)"
@@ -3789,6 +3805,13 @@ async def _analyze_failures_or_exit(
         fail_data = fail_result.model_dump(mode="json")
         fail_data["error"] = fail_result.summary
         fail_data["job_name"] = display_name
+        if child_job_analyses:
+            fail_data["child_job_analyses"] = [
+                c.model_dump(mode="json") for c in child_job_analyses
+            ]
+        fail_data["failed_analysis_groups"] = len(groups) + _count_failed_child_groups(
+            child_job_analyses or []
+        )
         _stamp_result_metadata(fail_data, source_result)
         await _preserve_request_params(job_id, fail_data)
         await _attach_token_usage(job_id, fail_data)
@@ -4102,6 +4125,8 @@ async def _process_ci_source_analysis(
                 )
 
         # Handle child jobs (Jenkins pipeline sub-jobs)
+        from rootcoz.sources.jenkins_source import child_has_successful_analysis
+
         child_job_analyses: list[ChildJobAnalysis] = []
         child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] = []
         if source_result.child_job_infos and source is not None:
@@ -4123,8 +4148,6 @@ async def _process_ci_source_analysis(
 
             # Pipeline/orchestrator: failed children, no direct test failures
             if child_job_analyses and not test_failures:
-                from rootcoz.sources.jenkins_source import child_has_successful_analysis
-
                 analyzed_children = [
                     c for c in child_job_analyses if child_has_successful_analysis(c)
                 ]
@@ -4271,6 +4294,7 @@ async def _process_ci_source_analysis(
             auth_header=auth_header,
             groups=groups,
             source_result=source_result,
+            child_job_analyses=child_job_analyses,
             extra_labels=extra_labels,
         )
         if analysis_result_tuple is None:
@@ -4287,7 +4311,10 @@ async def _process_ci_source_analysis(
         ]
         failed_analyses = len({a.error_signature for a in failed_tests})
         analysis_status: Literal["completed", "failed"] = (
-            "completed" if len(all_analyses) > len(failed_tests) else "failed"
+            "completed"
+            if len(all_analyses) > len(failed_tests)
+            or any(child_has_successful_analysis(child) for child in child_job_analyses)
+            else "failed"
         )
         if failed_analyses and not child_job_analyses:
             logger.warning(
@@ -5346,29 +5373,48 @@ async def _reanalyze_failure_background(
 
         server_url = _build_internal_server_url()
 
-        # Analyze the single failure
-        analyses = await analyze_failure_group(
-            failures=[test_failure],
-            console_context=console_context,
-            repo_path=repo_path,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=ai_call_timeout,
-            custom_prompt=raw_prompt,
-            artifacts_context=artifacts_context,
-            server_url=server_url,
-            job_id=job_id,
-            peer_ai_configs=peer_ai_configs,
-            peer_analysis_max_rounds=peer_analysis_max_rounds,
-            additional_repos=cloned_repos or None,
-            max_concurrent_ai_calls=max_concurrent_ai_calls,
-            auth_header=auth_header,
-        )
+        # Scope only this attempt's AI calls, not clone/refetch or result writes.
+        with (
+            reanalysis_usage_scope(failure_uuid) as usage_attempt,
+            child_usage_scope(child_job_name, child_build_number)
+            if child_job_name
+            else contextlib.nullcontext(),
+        ):
+            analyses = await analyze_failure_group(
+                failures=[test_failure],
+                console_context=console_context,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=ai_call_timeout,
+                custom_prompt=raw_prompt,
+                artifacts_context=artifacts_context,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=peer_analysis_max_rounds,
+                additional_repos=cloned_repos or None,
+                max_concurrent_ai_calls=max_concurrent_ai_calls,
+                auth_header=auth_header,
+            )
 
         if not analyses:
             raise RuntimeError("analyze_failure_group returned no results")
 
         new_analysis = analyses[0]
+        # get_result attaches the original card's usage without changing storage.
+        current = await get_result(job_id, strip_sensitive=False)
+        previous_usage = None
+        if current and current.get("result"):
+            previous = _find_failure_by_uuid_in_result(current["result"], failure_uuid)
+            if previous:
+                previous_usage = previous.get("token_usage")
+        if previous_usage is None:
+            logger.info(
+                "Previous analysis usage unavailable for failure %s in job %s",
+                failure_uuid,
+                job_id,
+            )
 
         # Patch the failure in the parent job result on success
         def _patch_success(result_data: dict[str, Any]) -> None:
@@ -5388,6 +5434,12 @@ async def _reanalyze_failure_background(
                 prev_entry.pop("reanalysis_status", None)
                 prev_entry.pop("reanalyzed_with", None)
                 prev_entry.pop("reanalysis_error", None)
+                # Raw stored snapshots can contain legacy mixed primary totals.
+                # Only archive usage recalculated from attributable call rows.
+                prev_entry.pop("token_usage", None)
+                if previous_usage is not None:
+                    prev_entry["token_usage"] = previous_usage
+                # Keep the previous attempt ID for archived usage, if any.
                 # Tag: this analysis was superseded by a re-analysis using the new provider/model
                 prev_entry["_superseded_by"] = {
                     "ai_provider": ai_provider,
@@ -5408,6 +5460,9 @@ async def _reanalyze_failure_background(
             # Replace with new analysis
             new_data = new_analysis.model_dump(mode="json")
             failure["analysis"] = new_data.get("analysis")
+            failure["usage_attempt"] = usage_attempt
+            # The persisted usage summary belongs to the previous analysis.
+            failure.pop("token_usage", None)
             if new_data.get("peer_debate"):
                 failure["peer_debate"] = new_data["peer_debate"]
             else:

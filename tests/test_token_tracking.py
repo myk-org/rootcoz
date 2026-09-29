@@ -7,6 +7,8 @@ from pi_sidecar_client import AIResult, AITokenUsage
 
 from rootcoz.token_tracking import (
     build_token_usage_summary,
+    failure_group_usage,
+    reanalysis_usage_scope,
     record_ai_usage,
     summarize_token_usage,
 )
@@ -57,6 +59,8 @@ class TestRecordAiUsage:
                 error_signature="",
                 child_job_name="",
                 child_build_number=0,
+                failure_id="",
+                usage_attempt="",
             )
 
     @pytest.mark.asyncio
@@ -126,6 +130,29 @@ class TestRecordAiUsage:
             assert call_kwargs["ai_provider"] == "gemini"
             assert call_kwargs["ai_model"] == "2.5-pro"
             assert call_kwargs["call_type"] == "peer_review"
+
+    @pytest.mark.asyncio
+    async def test_reanalysis_scope_marks_primary_only_and_resets(self) -> None:
+        result = AIResult(success=True, text="ok", usage=AITokenUsage(input_tokens=3))
+        with patch(
+            "rootcoz.token_tracking.storage.record_token_usage", new_callable=AsyncMock
+        ) as mock_record:
+            with (
+                reanalysis_usage_scope("failure-uuid"),
+                failure_group_usage("job-1", "signature"),
+            ):
+                await record_ai_usage("job-1", result, "primary")
+                await record_ai_usage("job-1", result, "peer")
+            with failure_group_usage("job-1", "signature"):
+                await record_ai_usage("job-1", result, "primary")
+        first, second, third = (call.kwargs for call in mock_record.call_args_list)
+        assert first["call_type"] == "reanalysis"
+        assert first["failure_id"] == "failure-uuid"
+        assert first["usage_attempt"]
+        assert second["call_type"] == "peer"
+        assert second["error_signature"] == ""
+        assert third["call_type"] == "primary"
+        assert third["error_signature"] == "signature"
 
     @pytest.mark.asyncio
     async def test_records_correct_response_chars(self) -> None:

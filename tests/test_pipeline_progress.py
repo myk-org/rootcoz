@@ -1,5 +1,6 @@
 """Pipeline stage boundaries persist without duplicate phase entries."""
 
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import AsyncMock, PropertyMock, patch
 
@@ -110,6 +111,117 @@ async def test_direct_and_child_failures_persist_scoped_group_count(
         row = await storage.get_result("direct-child")
     assert row["status"] == "completed", row["result"]
     assert row["result"]["failed_analysis_groups"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_success", [True, False])
+@pytest.mark.parametrize("fallback_crashes", [True, False])
+async def test_all_direct_groups_fail_preserves_child_report(
+    temp_db_path: Path, tmp_path: Path, child_success: bool, fallback_crashes: bool
+) -> None:
+    from rootcoz.main import _process_ci_source_analysis
+
+    failures = [FailedTest(test_name="direct", error_message="boom")]
+    children = [
+        ChildJobAnalysis(
+            job_name="leaf",
+            build_number=7,
+            all_groups_failed=not child_success,
+            failures=[
+                FailureAnalysis(
+                    test_name="child",
+                    error="boom",
+                    error_signature="child-sig",
+                    analysis=AnalysisDetail(
+                        details="diagnosed"
+                        if child_success
+                        else "Analysis failed; check server logs for details"
+                    ),
+                )
+            ],
+        )
+    ]
+    source_result = CISourceResult(failures=failures, child_job_infos=[("leaf", 7)])
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch(
+            "rootcoz.main.run_orchestrated_analysis",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("orchestrator failed"),
+        ),
+        patch(
+            "rootcoz.main.analyze_failure_group",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("secret-provider-response"),
+        ),
+        (
+            patch(
+                "rootcoz.main._run_per_group_analysis",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("fallback crashed"),
+            )
+            if fallback_crashes
+            else nullcontext()
+        ),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=(children, []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result("direct-child-failure", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="direct-child-failure",
+            body=UnifiedAnalyzeRequest(type="raw", failures=failures),
+            merged=Settings(),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("direct-child-failure")
+    assert row["status"] == ("completed" if child_success else "failed"), row["result"]
+    result = row["result"]
+    assert result["failed_analysis_groups"] == (1 if child_success else 2)
+    assert len(result["failures"]) == 1
+    assert result["failures"][0]["analysis"]["details"] == (
+        "Analysis failed; check server logs for details"
+    )
+    assert result["child_job_analyses"][0]["failures"][0]["analysis"]["details"] == (
+        "diagnosed"
+        if child_success
+        else "Analysis failed; check server logs for details"
+    )
+    assert "1 group(s) failed" in result["summary"]
+    assert "secret-provider-response" not in str(result)
 
 
 @pytest.mark.asyncio

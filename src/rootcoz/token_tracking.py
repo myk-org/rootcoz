@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
+from uuid import uuid4
 
 from pi_sidecar_client import AIResult
 from simple_logger.logger import get_logger
@@ -26,11 +27,25 @@ _group_context: ContextVar[tuple[str, str] | None] = ContextVar(
 _child_context: ContextVar[tuple[str, int] | None] = ContextVar(
     "child_usage_scope", default=None
 )
+_reanalysis_context: ContextVar[tuple[str, str] | None] = ContextVar(
+    "reanalysis_usage_scope", default=None
+)
+
+
+@contextmanager
+def reanalysis_usage_scope(failure_id: str) -> Iterator[str]:
+    """Tag primary calls in one re-analysis attempt for a single failure."""
+    attempt = str(uuid4())
+    token = _reanalysis_context.set((failure_id, attempt))
+    try:
+        yield attempt
+    finally:
+        _reanalysis_context.reset(token)
 
 
 @contextmanager
 def child_usage_scope(job_name: str, build_number: int) -> Iterator[None]:
-    """Scope primary usage to a Jenkins child build, including nested analyses."""
+    """Scope attributable usage to a Jenkins child build, including nested analyses."""
     token = _child_context.set((job_name, build_number))
     try:
         yield
@@ -49,8 +64,9 @@ def failure_group_usage(job_id: str, error_signature: str) -> Iterator[None]:
 
 
 def attach_failure_usage(result: dict[str, Any], records: list[dict[str, Any]]) -> None:
-    """Attach per-signature primary usage to every matching failure, without splitting it."""
+    """Attach attributable group or attempt usage; withhold ambiguous legacy totals."""
     grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
+    attempts: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for record in records:
         if record["call_type"] == "primary" and record.get("error_signature"):
             key = (
@@ -59,10 +75,60 @@ def attach_failure_usage(result: dict[str, Any], records: list[dict[str, Any]]) 
                 record["error_signature"],
             )
             grouped[key].append(record)
+        elif record["call_type"] == "reanalysis" and record.get("usage_attempt"):
+            attempts[(record["failure_id"], record["usage_attempt"])].append(record)
 
+    # Old re-analysis rows look exactly like original primary calls. More than
+    # one row in a scope cannot prove which calls belong to the original, even
+    # when a failed retry left no history. Original AI retries can also produce
+    # multiple rows; withholding them is safer than claiming an exact amount.
+    ambiguous_scopes = {key for key, calls in grouped.items() if len(calls) > 1}
+
+    def collect_history(
+        node: dict[str, Any], child_name: str = "", build_number: int = 0
+    ) -> None:
+        for failure in node.get("failures") or []:
+            if not isinstance(failure, dict) or not failure.get("error_signature"):
+                continue
+            signature = failure["error_signature"]
+            history = failure.get("previous_analyses") or []
+            if failure.get("previous_analysis"):
+                history = [*history, failure["previous_analysis"]]
+            untagged = sum(
+                not isinstance(entry, dict) or not entry.get("usage_attempt")
+                for entry in history
+            )
+            if child_name and (
+                untagged > 1 or (history and not failure.get("usage_attempt"))
+            ):
+                # Legacy child re-analysis lacked child scope: its rows may
+                # contaminate the parent, not an original child-scoped row.
+                ambiguous_scopes.add(("", 0, signature))
+                if len(grouped.get((child_name, build_number, signature), [])) > 1:
+                    ambiguous_scopes.add((child_name, build_number, signature))
+            elif untagged > 1 or (history and not failure.get("usage_attempt")):
+                ambiguous_scopes.add((child_name, build_number, signature))
+        for child in (node.get("child_job_analyses") or []) + (
+            node.get("failed_children") or []
+        ):
+            collect_history(
+                child, child.get("job_name") or "", child.get("build_number") or 0
+            )
+
+    collect_history(result)
+    if ambiguous_scopes:
+        logger.info(
+            "Withholding ambiguous legacy primary usage for %d scoped signatures",
+            len(ambiguous_scopes),
+        )
     summaries = {
         key: summarize_token_usage(calls).model_dump(mode="json")
         for key, calls in grouped.items()
+        if key not in ambiguous_scopes
+    }
+    attempt_summaries = {
+        key: summarize_token_usage(calls).model_dump(mode="json")
+        for key, calls in attempts.items()
     }
 
     def apply(
@@ -71,8 +137,13 @@ def attach_failure_usage(result: dict[str, Any], records: list[dict[str, Any]]) 
         for failure in node.get("failures") or []:
             if isinstance(failure, dict):
                 signature: str = failure.get("error_signature") or ""
-                failure["token_usage"] = summaries.get(
-                    (child_name, build_number, signature)
+                scope = (child_name, build_number, signature)
+                attempt = failure.get("usage_attempt")
+                failure_id: str = failure.get("id") or ""
+                failure["token_usage"] = (
+                    attempt_summaries.get((failure_id, attempt))
+                    if attempt
+                    else summaries.get(scope)
                 )
         for child in (node.get("child_job_analyses") or []) + (
             node.get("failed_children") or []
@@ -109,13 +180,14 @@ async def record_ai_usage(
         resolved_provider = (usage.provider if usage else "") or ai_provider
         resolved_model = (usage.model if usage else "") or ai_model
 
+        reanalysis = _reanalysis_context.get() if call_type == "primary" else None
         group = _group_context.get() if call_type == "primary" else None
         child = _child_context.get() if group and group[0] == job_id else None
         await storage.record_token_usage(
             job_id=job_id,
             ai_provider=resolved_provider,
             ai_model=resolved_model,
-            call_type=call_type,
+            call_type="reanalysis" if reanalysis else call_type,
             input_tokens=usage.input_tokens if usage else 0,
             output_tokens=usage.output_tokens if usage else 0,
             cache_read_tokens=usage.cache_read_tokens if usage else 0,
@@ -128,9 +200,16 @@ async def record_ai_usage(
             error_signature=group[1] if group and group[0] == job_id else "",
             child_job_name=child[0] if child else "",
             child_build_number=child[1] if child else 0,
+            failure_id=reanalysis[0] if reanalysis else "",
+            usage_attempt=reanalysis[1] if reanalysis else "",
         )
         if group and group[0] == job_id:
-            logger.info("Recorded primary usage for job %s group %s", job_id, group[1])
+            logger.info(
+                "Recorded %s usage for job %s group %s",
+                "reanalysis" if reanalysis else "primary",
+                job_id,
+                group[1],
+            )
         if _on_usage_recorded:
             _on_usage_recorded(job_id)
     except Exception:

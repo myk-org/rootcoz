@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from git.exc import GitCommandError
+
 from rootcoz.engine.core import get_failure_signature
 from rootcoz.models import (
     AdditionalRepo,
@@ -511,16 +513,39 @@ async def setup_analysis_workspace(
             )
             outcome = "cancelled"
             try:
-                await asyncio.to_thread(
-                    repo_manager.clone_into,
-                    str(tests_repo_url),
-                    repo_path / repo_name,
-                    depth=50,
-                    branch=tests_repo_ref,
-                    token=tests_repo_token or None,
+                clone_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        repo_manager.clone_into,
+                        str(tests_repo_url),
+                        repo_path / repo_name,
+                        depth=50,
+                        branch=tests_repo_ref,
+                        token=tests_repo_token or None,
+                    )
                 )
+                try:
+                    # wait() does not cancel the thread worker with this task.
+                    await asyncio.wait({clone_task})
+                    clone_task.result()
+                except asyncio.CancelledError:
+                    # A cancelled await cannot stop a running clone. Repeated
+                    # cancellations must not allow workspace cleanup to race it.
+                    while not clone_task.done():
+                        try:
+                            await asyncio.wait({clone_task})
+                        except asyncio.CancelledError:
+                            continue
+                    if not clone_task.cancelled() and clone_task.exception():
+                        logger.warning(
+                            "Test repository clone worker failed after cancellation (%s)",
+                            type(clone_task.exception()).__name__,
+                        )
+                    logger.info(
+                        "Test repository clone worker joined after cancellation"
+                    )
+                    raise
                 outcome = "cloned"
-            except Exception:
+            except GitCommandError, OSError, ValueError, RuntimeError, TypeError:
                 outcome = "failed"
                 raise
             finally:
@@ -536,11 +561,10 @@ async def setup_analysis_workspace(
                 f"\nTest repository cloned from: "
                 f"{redact_url(str(tests_repo_url))} (at {repo_name}/)"
             )
-        except Exception as exc:
+        except (GitCommandError, OSError, ValueError, RuntimeError, TypeError) as exc:
             logger.warning(
                 "Failed to clone test repository (%s)",
                 type(exc).__name__,
-                exc_info=True,
             )
             repo_context = "\nFailed to clone repository (details redacted)"
 
