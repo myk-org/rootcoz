@@ -3557,3 +3557,36 @@ class TestOrchestratorEmptyFallback:
         # code_fix should be preserved — compatible with CODE ISSUE
         assert analysis.code_fix is not None and analysis.code_fix is not False
         assert analysis.code_fix.file == "src/Test.java"
+
+
+class TestRoundUsageCredentialSource:
+    """Embedded round badges must label the source the call actually used."""
+
+    def test_round_usage_carries_the_recorded_credential_source(self) -> None:
+        from pi_sidecar_client import AITokenUsage
+
+        from rootcoz.peer_analysis import _round_usage
+
+        result = AIResult(
+            success=True,
+            text="ok",
+            usage=AITokenUsage(input_tokens=5, output_tokens=1, cost_usd=0.02),
+        )
+        result.credential_source = "server"
+        entry = _round_usage(result, "gemini", "pro", "peer")
+        assert entry.credential_source == "server"
+
+    def test_round_usage_falls_back_to_unknown_when_uncalled(self) -> None:
+        from pi_sidecar_client import AITokenUsage
+
+        from rootcoz.peer_analysis import _round_usage
+
+        result = AIResult(
+            success=True,
+            text="ok",
+            usage=AITokenUsage(input_tokens=1, output_tokens=1),
+        )
+        assert (
+            _round_usage(result, "gemini", "pro", "revision").credential_source
+            == "unknown"
+        )

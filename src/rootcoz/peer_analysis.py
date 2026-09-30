@@ -59,6 +59,9 @@ def _round_usage(
         provider=usage.provider or provider,
         model=usage.model or model,
         call_type=call_type,
+        # Matches what record_usage stores for the same call, so the report
+        # badge agrees with the call instead of showing Unknown.
+        credential_source=getattr(result, "credential_source", "unknown"),
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         cache_read_tokens=usage.cache_read_tokens,
