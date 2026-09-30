@@ -92,16 +92,31 @@ async def test_scoped_discovery_and_call_fail_closed(monkeypatch):
                 "can_use_server_providers": False,
                 "verified": True,
             },
+            {
+                "provider": "openai",
+                "id": "user-only",
+                "name": "User only",
+                "source": "api",
+                "credential_sources": ["user"],
+                "can_use_server_providers": False,
+                "verified": True,
+            },
         ]
         assert "xai" not in models
         assert secret not in str(models)
         with pytest.raises(ValueError, match="Unknown Pi-sidecar provider/model pair"):
-            await ai_client.resolve_catalog_pair("openai", "user-only")
+            await ai_client.resolve_catalog_pair("openai", "not-listed-anywhere")
+        # A key-listed model without token limits is still usable; the sidecar
+        # reports no capabilities for key-scoped discovery.
+        assert await ai_client.resolve_catalog_pair("openai", "user-only") == (
+            "openai",
+            "user-only",
+        )
         with pytest.raises(ValueError):
             await ai_client.resolve_catalog_pair("openai", "claude")
         ai_client.force_server_credentials.set(True)
         with pytest.raises(ValueError):
-            await ai_client.resolve_catalog_pair("openai", "user-only")
+            await ai_client.resolve_catalog_pair("openai", "not-listed-anywhere")
         assert await ai_client.session_key("openai") is None
     finally:
         ai_client.force_server_credentials.set(False)
@@ -306,5 +321,99 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
             "openai",
             "manual",
         )
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_key_listed_models_without_capabilities_stay_usable(monkeypatch):
+    """Regression: pi-sidecar reports no capabilities for key-scoped discovery.
+
+    Treating absent limits as unusable dropped every user-key model, so a stored
+    key produced zero selectable models and the provider vanished from the picker
+    (observed on prod for openai in v4.5.0).
+    """
+    # The provider is absent from the server catalog, as it is on prod.
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "secret"})
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(
+            return_value={
+                "modelListingSupported": True,
+                "models": [
+                    {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
+                    {
+                        "provider": "openai",
+                        "id": "gpt-5.6-luna",
+                        "name": "gpt-5.6-luna",
+                    },
+                ],
+            }
+        ),
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [entry["id"] for entry in scoped["openai"]] == [
+            "gpt-4o-mini",
+            "gpt-5.6-luna",
+        ]
+        assert all(
+            entry["credential_sources"] == ["user"] for entry in scoped["openai"]
+        )
+        assert await ai_client.resolve_catalog_pair("openai", "gpt-5.6-luna") == (
+            "openai",
+            "gpt-5.6-luna",
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_declared_but_unusable_limits_are_still_rejected(monkeypatch):
+    """Absence is fine; a declared-but-broken limit is not."""
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={"google": "secret"})
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["google"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(
+            return_value={
+                "modelListingSupported": True,
+                "models": [
+                    {
+                        "provider": "google",
+                        "id": "unlisted",
+                        "name": "No limits declared",
+                    },
+                    {
+                        "provider": "google",
+                        "id": "absurd",
+                        "name": "Beyond safe integer",
+                        "capabilities": {
+                            "inputTokenLimit": 2**53,
+                            "outputTokenLimit": 100,
+                        },
+                    },
+                ],
+            }
+        ),
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [entry["id"] for entry in scoped["google"]] == ["unlisted"]
     finally:
         ai_client.ai_username.reset(token)

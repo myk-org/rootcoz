@@ -391,11 +391,22 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             for entry in entries:
                 pair = (provider, entry["id"])
                 limits = entry.get("capabilities") or {}
-                constructible = pair in pairs or all(
-                    type(limits.get(field)) is int and 0 < limits[field] <= 2**53 - 1
+                declared = [
+                    limits.get(field)
                     for field in ("inputTokenLimit", "outputTokenLimit")
+                ]
+                present = [value for value in declared if value is not None]
+                # pi-sidecar reports no capabilities for key-scoped discovery, so
+                # absence must stay usable. A limit that is declared but partial,
+                # non-integer, or beyond the safe range still breaks token math.
+                unusable = bool(present) and (
+                    len(present) != 2
+                    or any(
+                        type(value) is not int or not 0 < value <= 2**53 - 1
+                        for value in present
+                    )
                 )
-                if listing and not constructible:
+                if listing and not (pair in pairs or not unusable):
                     continue
                 if pair in pairs:
                     pairs[pair]["credential_sources"].insert(0, "user")
