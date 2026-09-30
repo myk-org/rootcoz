@@ -325,6 +325,28 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
         ai_client.ai_username.reset(token)
 
 
+def _mock_key_discovery(monkeypatch, provider, discovery, catalog=None):
+    """Point the user-key path at a single provider with one discovery response.
+
+    Keeps every key-scoped test on the same mock wiring, so a change to how
+    discovery is stubbed is made once.
+    """
+    monkeypatch.setattr(
+        ai_client, "_get_model_catalog", AsyncMock(return_value=catalog or [])
+    )
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(return_value={provider: "secret"}),
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=[provider])
+    )
+    monkeypatch.setattr(
+        ai_client, "models_for_api_key", AsyncMock(return_value=discovery)
+    )
+
+
 @pytest.mark.asyncio
 async def test_key_listed_models_without_capabilities_stay_usable(monkeypatch):
     """Regression: pi-sidecar reports no capabilities for key-scoped discovery.
@@ -334,29 +356,20 @@ async def test_key_listed_models_without_capabilities_stay_usable(monkeypatch):
     (observed on prod for openai in v4.5.0).
     """
     # The provider is absent from the server catalog, as it is on prod.
-    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "secret"})
-    )
-    monkeypatch.setattr(
-        ai_client, "supported_key_providers", AsyncMock(return_value=["openai"])
-    )
-    monkeypatch.setattr(
-        ai_client,
-        "models_for_api_key",
-        AsyncMock(
-            return_value={
-                "modelListingSupported": True,
-                "models": [
-                    {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
-                    {
-                        "provider": "openai",
-                        "id": "gpt-5.6-luna",
-                        "name": "gpt-5.6-luna",
-                    },
-                ],
-            }
-        ),
+    _mock_key_discovery(
+        monkeypatch,
+        "openai",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
+                {
+                    "provider": "openai",
+                    "id": "gpt-5.6-luna",
+                    "name": "gpt-5.6-luna",
+                },
+            ],
+        },
     )
     token = ai_client.ai_username.set("alice")
     try:
@@ -379,37 +392,28 @@ async def test_key_listed_models_without_capabilities_stay_usable(monkeypatch):
 @pytest.mark.asyncio
 async def test_declared_but_unusable_limits_are_still_rejected(monkeypatch):
     """Absence is fine; a declared-but-broken limit is not."""
-    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        storage, "get_user_ai_credentials", AsyncMock(return_value={"google": "secret"})
-    )
-    monkeypatch.setattr(
-        ai_client, "supported_key_providers", AsyncMock(return_value=["google"])
-    )
-    monkeypatch.setattr(
-        ai_client,
-        "models_for_api_key",
-        AsyncMock(
-            return_value={
-                "modelListingSupported": True,
-                "models": [
-                    {
-                        "provider": "google",
-                        "id": "unlisted",
-                        "name": "No limits declared",
+    _mock_key_discovery(
+        monkeypatch,
+        "google",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {
+                    "provider": "google",
+                    "id": "unlisted",
+                    "name": "No limits declared",
+                },
+                {
+                    "provider": "google",
+                    "id": "absurd",
+                    "name": "Beyond safe integer",
+                    "capabilities": {
+                        "inputTokenLimit": 2**53,
+                        "outputTokenLimit": 100,
                     },
-                    {
-                        "provider": "google",
-                        "id": "absurd",
-                        "name": "Beyond safe integer",
-                        "capabilities": {
-                            "inputTokenLimit": 2**53,
-                            "outputTokenLimit": 100,
-                        },
-                    },
-                ],
-            }
-        ),
+                },
+            ],
+        },
     )
     token = ai_client.ai_username.set("alice")
     try:
@@ -422,33 +426,24 @@ async def test_declared_but_unusable_limits_are_still_rejected(monkeypatch):
 @pytest.mark.asyncio
 async def test_status_reports_models_the_key_actually_yielded(monkeypatch):
     """A key that stored but surfaced nothing must not look ready."""
-    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "secret"})
-    )
-    monkeypatch.setattr(
-        ai_client, "supported_key_providers", AsyncMock(return_value=["openai"])
-    )
-    monkeypatch.setattr(
-        ai_client,
-        "models_for_api_key",
-        AsyncMock(
-            return_value={
-                "modelListingSupported": True,
-                "models": [
-                    {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
-                    {
-                        "provider": "openai",
-                        "id": "broken",
-                        "name": "Broken",
-                        "capabilities": {
-                            "inputTokenLimit": 2**53,
-                            "outputTokenLimit": 1,
-                        },
+    _mock_key_discovery(
+        monkeypatch,
+        "openai",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
+                {
+                    "provider": "openai",
+                    "id": "broken",
+                    "name": "Broken",
+                    "capabilities": {
+                        "inputTokenLimit": 2**53,
+                        "outputTokenLimit": 1,
                     },
-                ],
-            }
-        ),
+                },
+            ],
+        },
     )
     token = ai_client.ai_username.set("alice")
     try:
@@ -465,26 +460,17 @@ async def test_status_reports_models_the_key_actually_yielded(monkeypatch):
 @pytest.mark.asyncio
 async def test_status_counts_distinct_model_ids(monkeypatch):
     """A discovery response repeating an ID must not inflate model_count."""
-    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "secret"})
-    )
-    monkeypatch.setattr(
-        ai_client, "supported_key_providers", AsyncMock(return_value=["openai"])
-    )
-    monkeypatch.setattr(
-        ai_client,
-        "models_for_api_key",
-        AsyncMock(
-            return_value={
-                "modelListingSupported": True,
-                "models": [
-                    {"provider": "openai", "id": "dup", "name": "Dup"},
-                    {"provider": "openai", "id": "dup", "name": "Dup again"},
-                    {"provider": "openai", "id": "other", "name": "Other"},
-                ],
-            }
-        ),
+    _mock_key_discovery(
+        monkeypatch,
+        "openai",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {"provider": "openai", "id": "dup", "name": "Dup"},
+                {"provider": "openai", "id": "dup", "name": "Dup again"},
+                {"provider": "openai", "id": "other", "name": "Other"},
+            ],
+        },
     )
     token = ai_client.ai_username.set("alice")
     try:
@@ -498,19 +484,8 @@ async def test_status_counts_distinct_model_ids(monkeypatch):
 @pytest.mark.asyncio
 async def test_manual_only_key_reports_zero_without_listing_support(monkeypatch):
     """No listing + no suggestions means manual entry, not a dead key."""
-    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        storage,
-        "get_user_ai_credentials",
-        AsyncMock(return_value={"mystery": "secret"}),
-    )
-    monkeypatch.setattr(
-        ai_client, "supported_key_providers", AsyncMock(return_value=["mystery"])
-    )
-    monkeypatch.setattr(
-        ai_client,
-        "models_for_api_key",
-        AsyncMock(return_value={"modelListingSupported": False, "models": []}),
+    _mock_key_discovery(
+        monkeypatch, "mystery", {"modelListingSupported": False, "models": []}
     )
     token = ai_client.ai_username.set("alice")
     try:

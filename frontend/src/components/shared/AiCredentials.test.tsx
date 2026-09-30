@@ -3,12 +3,14 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { api } from '@/lib/api'
 import { AiCredentials } from './AiCredentials'
+import type { ProviderStatus } from '@/types'
 
 Element.prototype.scrollIntoView = vi.fn()
 
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), put: vi.fn(), delete: vi.fn() } }))
 const catalogMocks = vi.hoisted(() => ({
-  providerStatus: {} as Record<string, { has_api_key?: boolean; model_count?: number }>,
+  // Reuse the real status shape so a new field cannot drift out of the mock.
+  providerStatus: {} as Record<string, ProviderStatus>,
 }))
 
 vi.mock('@/lib/useProviderOptions', () => ({
@@ -51,7 +53,7 @@ describe('AiCredentials', () => {
     await user.click(picker)
     // A configured provider stays listed, marked as configured: hiding it made a
     // saved key look like it had been lost.
-    expect((await screen.findAllByRole('option', /openai\/custom.*configured/)).length).toBeGreaterThan(0)
+    expect((await screen.findAllByRole('option', { name: /openai\/custom.*configured/ })).length).toBeGreaterThan(0)
     await user.click(await screen.findByRole('option', { name: 'other' }))
     await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
     await user.type(screen.getByLabelText('API key'), 'second-secret')
@@ -185,7 +187,7 @@ describe('AiCredentials with a configured but unusable key', () => {
     )
     // The key must still be reachable, not silently hidden.
     await user.click(await screen.findByRole('combobox', { name: 'AI provider' }))
-    expect((await screen.findAllByRole('option', /openai\/custom.*configured/)).length).toBeGreaterThan(0)
+    expect((await screen.findAllByRole('option', { name: /openai\/custom.*configured/ })).length).toBeGreaterThan(0)
   })
 
   it('stays quiet for a manual-only key that cannot list models', async () => {
