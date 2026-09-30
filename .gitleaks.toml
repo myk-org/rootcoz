@@ -19,6 +19,9 @@ paths = [
     '''tests/test_auth\.py''',
     '''tests/test_debug_request_logging\.py''',
     '''tests/test_feedback\.py''',
+    # Holds a fake key-shaped fixture that must stay realistic for the
+    # credential-leak assertion in test_retry_log_does_not_leak_provider_error.
+    '''tests/test_analyzer\.py''',
 ]
 # Migration idempotency keys are not secrets
 regexTarget = "line"

@@ -1550,12 +1550,15 @@ def _is_empty_ai_text(result: AIResult) -> bool:
 # Auth and session faults do not resolve themselves; a second attempt only
 # repeats the failure. A redacted user-key failure arrives as "AI call failed",
 # which is deliberately absent here so a recoverable failure stays retryable.
+# Both spellings of the invalid-key marker are listed because the sidecar and the
+# credential-verification path use different ones.
 _NON_RETRYABLE_AI_ERRORS = (
     "session not found",
     "authentication required",
     "not authenticated",
     "not logged in",
     "invalid api key",
+    "invalid_api_key",
 )
 
 
@@ -1660,17 +1663,26 @@ async def _call_ai_with_retry(
             # A provider stream can end without a terminal event after the model
             # has already emitted a full analysis, discarding it as a failure.
             # That is transport-level, and a second attempt usually completes.
-            detail = f"{result.error or ''} {result.text or ''}".lower()
+            # Only the transport error decides recoverability: result.text is
+            # model-authored analysis and may quote a phrase that reads like an
+            # auth failure without the call being one.
+            detail = (result.error or "").lower()
             recoverable = not any(
                 marker in detail for marker in _NON_RETRYABLE_AI_ERRORS
             )
             if not recoverable or attempt >= max_attempts:
                 break
+            # Never log the provider error text. On a server-credential call it
+            # passes through unredacted and may echo a key, and this engine is
+            # shared by the user-key path too.
             logger.warning(
-                "AI call failed (attempt=%d/%d); retrying recoverable failure: %s",
+                "AI call failed (attempt=%d/%d); retrying recoverable failure: "
+                "provider=%s, model=%s, job_id=%s",
                 attempt,
                 max_attempts,
-                (result.error or "unknown error")[:200],
+                ai_provider,
+                ai_model,
+                job_id,
             )
             continue
 
