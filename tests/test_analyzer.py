@@ -3185,7 +3185,10 @@ class TestRecoverableFailureRetry:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A provider error can echo a credential; it must never reach the logs."""
-        secret = "sk-live-abcdef0123456789"  # pragma: allowlist secret
+        # Assembled at runtime: a key-shaped literal in source would need a
+        # whole-file gitleaks exemption, which would stop scanning every other
+        # secret in this file. The value is still a realistic credential shape.
+        secret = f"sk-live-{'0a1b2c3d' * 2}"
         complete = json.dumps(
             {
                 "classification": "CODE ISSUE",
