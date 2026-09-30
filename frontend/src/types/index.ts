@@ -109,6 +109,7 @@ export interface PeerRound {
   pattern: string
   details: string
   agrees_with_orchestrator: boolean | null
+  token_usage?: TokenUsageEntry | null
 }
 
 export interface PeerDebate {
@@ -135,6 +136,7 @@ export interface FailureAnalysis {
   error: string
   analysis: AnalysisDetail
   error_signature: string
+  token_usage?: TokenUsageSummary | null
   peer_debate?: PeerDebate | null
   previous_analysis?: AnalysisDetail | null
   previous_analyses?: PreviousAnalysis[] | null
@@ -153,6 +155,7 @@ export interface ChildJobAnalysis {
   failures: FailureAnalysis[]
   failed_children: ChildJobAnalysis[]
   note: string | null
+  all_groups_failed?: boolean
   passed_count?: number
   skipped_count?: number
   failed_count?: number
@@ -181,7 +184,9 @@ export interface AnalysisResult {
   error?: string
   source_warnings?: string[]
   cross_failure_patterns?: CrossFailurePattern[]
-  progress_log?: Array<{ phase: string; timestamp: number }>
+  failed_analysis_groups?: number
+  progress_log?: Array<{ phase: string; timestamp: number; repos?: string[]; repo?: string; url?: string; ref?: string; state?: 'cloning' | 'cloned' | 'failed' | 'cancelled' }>
+  cloning_repos?: string[]
   progress_phase?: string
   request_params?: {
     force_server_credentials?: boolean
@@ -451,6 +456,7 @@ export interface TokenUsageEntry {
 }
 
 export interface TokenUsageSummary {
+  credential_source?: 'user' | 'server' | 'mixed' | 'unknown'
   total_input_tokens: number
   total_output_tokens: number
   total_cache_read_tokens: number

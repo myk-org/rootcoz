@@ -2855,6 +2855,9 @@ def ai_keys_list(json_output: bool = _JSON_OPTION) -> None:
 @ai_keys_app.command("set")
 def ai_keys_set(
     provider: str = typer.Argument(help="Exact AI provider ID."),
+    model: str = typer.Option(
+        ..., "--model", help="Model ID to verify the key against."
+    ),
     stdin: bool = typer.Option(False, "--stdin", help="Read key from standard input."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -2868,15 +2871,26 @@ def ai_keys_set(
         raise typer.Exit(1)
     _set_json(json_output)
     try:
-        _get_client().set_ai_credential(provider, api_key)
+        response = _get_client().set_ai_credential(provider, api_key, model)
     except RootCozError as err:
         _handle_error(
             RootCozError(err.status_code, err.detail.replace(api_key, "[REDACTED]"))
         )
-    logging.getLogger(__name__).info("Saved AI credential for provider %s", provider)
-    print_output(
-        {"status": "saved"}, columns=["status"], as_json=_state.get("json", False)
+    outcome = response.get("outcome", "inconclusive")
+    logging.getLogger(__name__).info(
+        "AI credential verification for provider %s: %s", provider, outcome
     )
+    message = {
+        "rejected": "Check the key and selected model; existing credential unchanged.",
+        "inconclusive": "Try again when the provider is available; existing credential unchanged.",
+    }.get(outcome)
+    print_output(
+        {"status": outcome, **({"message": message} if message else {})},
+        columns=["status", "message"] if message else ["status"],
+        as_json=_state.get("json", False),
+    )
+    if outcome != "accepted":
+        raise typer.Exit(1)
 
 
 @ai_keys_app.command("delete")
@@ -3680,21 +3694,34 @@ def metadata_preview(
 # -- Chat ---------------------------------------------------------------------
 
 
+def _echo_chat_start(data: dict[str, Any], label: str) -> None:
+    """Report whether an init response actually established a session."""
+    started = bool(data.get("session_id")) and bool(data.get("ready"))
+    logging.getLogger(__name__).info("%s init completed: started=%s", label, started)
+    if started:
+        typer.echo("Ready: True")
+        typer.echo(f"{label} started. You can now send messages.")
+    else:
+        typer.echo(f"{label} not started (no active session).")
+
+
 @chat_app.command("init")
 def chat_init(
     job_id: str = typer.Argument(help="Job ID to initialize chat for."),
+    ai_provider: str = typer.Option(..., "--provider", "-p", help="AI provider."),
+    ai_model: str = typer.Option(..., "--model", "-m", help="AI model."),
+    force_server_credentials: bool = typer.Option(False, "--server-credentials"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Initialize chat workspace (clone repos)."""
+    """Start chat with an explicit model and credential source."""
     data = _run_client_command(
         json_output,
-        lambda c: c.init_chat(job_id),
+        lambda c: c.init_chat(job_id, ai_provider, ai_model, force_server_credentials),
         emit_output=False,
     )
     if not _state.get("json", False):
-        ready = data.get("ready", False)
+        _echo_chat_start(data, "Chat")
         repos = data.get("repo_names", [])
-        typer.echo(f"Ready: {ready}")
         if repos:
             typer.echo(f"Repos: {', '.join(repos)}")
         else:
@@ -3736,6 +3763,7 @@ def chat_send(
     message: str = typer.Argument(help="Message to send."),
     ai_provider: str = typer.Option("", "--provider", "-p", help="AI provider."),
     ai_model: str = typer.Option("", "--model", "-m", help="AI model."),
+    force_server_credentials: bool | None = typer.Option(None, "--server-credentials"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a chat message and queue AI processing."""
@@ -3744,7 +3772,11 @@ def chat_send(
     data = _run_client_command(
         json_output,
         lambda c: c.send_chat_message(
-            job_id, message, ai_provider=ai_provider, ai_model=ai_model
+            job_id,
+            message,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            force_server_credentials=force_server_credentials,
         ),
         emit_output=False,
     )
@@ -3839,26 +3871,42 @@ admin_chat_app = typer.Typer(help="Admin server-wide chat.", no_args_is_help=Tru
 app.add_typer(admin_chat_app, name="admin-chat")
 
 
+@admin_chat_app.command("init")
+def admin_chat_init(
+    ai_provider: str = typer.Option(..., "--provider", "-p"),
+    ai_model: str = typer.Option(..., "--model", "-m"),
+    force_server_credentials: bool = typer.Option(False, "--server-credentials"),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Start an admin chat explicitly."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.init_admin_chat(ai_provider, ai_model, force_server_credentials),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        _echo_chat_start(data, "Admin chat")
+
+
 @admin_chat_app.command("send")
 def admin_chat_send(
     message: str = typer.Argument(help="Message to send."),
     ai_provider: str = typer.Option("", "--provider", "-p", help="AI provider."),
     ai_model: str = typer.Option("", "--model", "-m", help="AI model."),
+    force_server_credentials: bool | None = typer.Option(None, "--server-credentials"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a message to the admin server chat."""
     import time
 
     client = _get_client()
-    # Init best-effort — workspace may already exist; send still proceeds
-    try:
-        client.init_admin_chat()
-    except RootCozError as exc:
-        _ = exc
     data = _run_client_command(
         json_output,
         lambda c: c.send_admin_chat_message(
-            message, ai_provider=ai_provider, ai_model=ai_model
+            message,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            force_server_credentials=force_server_credentials,
         ),
         emit_output=False,
     )

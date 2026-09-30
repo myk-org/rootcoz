@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from git.exc import GitCommandError
+
 from rootcoz.engine.core import get_failure_signature
 from rootcoz.models import (
     AdditionalRepo,
@@ -504,25 +506,65 @@ async def setup_analysis_workspace(
             repo_name = derive_test_repo_name(
                 str(tests_repo_url), additional_repos_list
             )
-            await asyncio.to_thread(
-                repo_manager.clone_into,
-                str(tests_repo_url),
-                repo_path / repo_name,
-                depth=50,
-                branch=tests_repo_ref,
-                token=tests_repo_token or None,
+            from rootcoz.engine.core import safe_update_clone_progress
+
+            await safe_update_clone_progress(
+                job_id, repo_name, True, url=str(tests_repo_url), ref=tests_repo_ref
             )
+            outcome = "cancelled"
+            try:
+                clone_task = asyncio.create_task(
+                    asyncio.to_thread(
+                        repo_manager.clone_into,
+                        str(tests_repo_url),
+                        repo_path / repo_name,
+                        depth=50,
+                        branch=tests_repo_ref,
+                        token=tests_repo_token or None,
+                    )
+                )
+                try:
+                    # wait() does not cancel the thread worker with this task.
+                    await asyncio.wait({clone_task})
+                    clone_task.result()
+                except asyncio.CancelledError:
+                    # A cancelled await cannot stop a running clone. Repeated
+                    # cancellations must not allow workspace cleanup to race it.
+                    while not clone_task.done():
+                        try:
+                            await asyncio.wait({clone_task})
+                        except asyncio.CancelledError:
+                            continue
+                    if not clone_task.cancelled() and clone_task.exception():
+                        logger.warning(
+                            "Test repository clone worker failed after cancellation (%s)",
+                            type(clone_task.exception()).__name__,
+                        )
+                    logger.info(
+                        "Test repository clone worker joined after cancellation"
+                    )
+                    raise
+                outcome = "cloned"
+            except GitCommandError, OSError, ValueError, RuntimeError, TypeError:
+                outcome = "failed"
+                raise
+            finally:
+                if outcome == "cloned":
+                    await safe_update_clone_progress(job_id, repo_name, False)
+                else:
+                    await safe_update_clone_progress(
+                        job_id, repo_name, False, state=outcome
+                    )
             cloned_repos[repo_name] = repo_path / repo_name
             logger.info("Test repo cloned successfully into %s/", repo_name)
             repo_context = (
                 f"\nTest repository cloned from: "
                 f"{redact_url(str(tests_repo_url))} (at {repo_name}/)"
             )
-        except Exception as exc:
+        except (GitCommandError, OSError, ValueError, RuntimeError, TypeError) as exc:
             logger.warning(
                 "Failed to clone test repository (%s)",
                 type(exc).__name__,
-                exc_info=True,
             )
             repo_context = "\nFailed to clone repository (details redacted)"
 
@@ -726,9 +768,19 @@ async def run_console_only_analysis(
             auth_header=auth_header,
         )
         return True, results, ""
-    except Exception as exc:
-        logger.exception("Console-only analysis failed")
-        return False, [], str(exc)
+    except (RuntimeError, ValueError, OSError, TypeError) as exc:
+        from rootcoz.engine.chat import safe_exception_frames
+
+        logger.error(
+            "Console-only analysis failed: %s\n%s",
+            type(exc).__name__,
+            safe_exception_frames(exc),
+        )
+        return (
+            False,
+            [],
+            "AI analysis failed. Check provider credentials and try again.",
+        )
 
 
 def resolve_display_build_id(result_data: dict[str, Any]) -> str | int:

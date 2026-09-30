@@ -26,10 +26,10 @@ export function analysisProviderIds(providers: Record<string, AiModel[]>, status
   )
 }
 
-export function credentialLabel(models: AiModel[], manualUser = false, forceServer = false, canUseServer = true): string {
+export function credentialLabel(models: AiModel[], manualUser = false, forceServer = false): string {
   const sources = new Set(models.flatMap((model) => model.credential_sources ?? []).filter((source) => !forceServer || source === 'server'))
   if (manualUser) sources.add('user')
-  return sources.has('user') && sources.has('server') ? (canUseServer ? 'User + Server' : 'User + Server locked') : sources.has('user') ? 'User' : canUseServer ? 'Server' : 'Server locked'
+  return sources.has('user') && sources.has('server') ? 'User + Server' : sources.has('user') ? 'User' : 'Server'
 }
 
 export function isAnalysisAiAvailable(providers: Record<string, AiModel[]>, status: Record<string, ProviderStatus>, provider: string, model: string, forceServer: boolean, canUseServer = true): boolean {

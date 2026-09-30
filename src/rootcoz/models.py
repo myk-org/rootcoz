@@ -542,6 +542,7 @@ class PeerRound(BaseModel):
     agrees_with_orchestrator: bool | None = (
         None  # None = failed/excluded from consensus
     )
+    token_usage: TokenUsageEntry | None = None
 
 
 class PeerDebate(BaseModel):
@@ -571,6 +572,10 @@ class FailureAnalysis(BaseModel):
     peer_debate: PeerDebate | None = Field(
         default=None,
         description="Peer debate trail (present only when peer analysis was used)",
+    )
+    token_usage: TokenUsageSummary | None = Field(
+        default=None,
+        description="Primary AI usage for this failure's signature; shared by group members",
     )
 
     @field_validator("analysis", mode="before")
@@ -616,6 +621,9 @@ class ChildJobAnalysis(BaseModel):
     note: str | None = Field(
         default=None, description="Additional notes (e.g., max depth reached)"
     )
+    all_groups_failed: bool = Field(
+        default=False, description="Every attempted AI group for this child failed"
+    )
     passed_count: int = Field(default=0, description="Number of passed tests")
     skipped_count: int = Field(default=0, description="Number of skipped tests")
     failed_count: int = Field(default=0, description="Number of failed tests")
@@ -634,6 +642,7 @@ class TokenUsageEntry(BaseModel):
     provider: str = ""
     model: str = ""
     call_type: str = ""
+    error_signature: str = ""
     credential_source: str = "unknown"
     input_tokens: int = 0
     output_tokens: int = 0
@@ -655,6 +664,7 @@ class TokenUsageSummary(BaseModel):
     total_cost_usd: float | None = None
     total_duration_ms: int = 0
     total_calls: int = 0
+    credential_source: str = "unknown"
     calls: list[TokenUsageEntry] = Field(default_factory=list)
 
 
@@ -1387,6 +1397,14 @@ class FeedbackResponse(BaseModel):
     title: str = Field(description="Issue title as created")
 
 
+class ChatInitRequest(BaseModel):
+    """Explicit credential selection for a new job or admin chat session."""
+
+    ai_provider: str = Field(min_length=1)
+    ai_model: str = Field(min_length=1)
+    force_server_credentials: bool
+
+
 class ChatMessageRequest(BaseModel):
     """Request to send a chat message about an analyzed job."""
 
@@ -1405,11 +1423,15 @@ class ChatMessageRequest(BaseModel):
 
     ai_provider: str | None = Field(
         default=None,
-        description="AI provider to use for response (defaults to job's provider)",
+        description="Selected chat provider (must match the active session)",
     )
     ai_model: str | None = Field(
         default=None,
-        description="AI model to use for response (defaults to job's model)",
+        description="Selected chat model (must match the active session)",
+    )
+    force_server_credentials: bool | None = Field(
+        default=None,
+        description="Selected chat credential source (must match the active session)",
     )
 
 

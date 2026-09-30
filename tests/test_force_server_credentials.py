@@ -9,7 +9,11 @@ from pi_sidecar_client import SidecarClient
 
 from rootcoz import ai_client, main, storage
 from rootcoz.config import Settings
-from rootcoz.models import ReAnalyzeFailureRequest, UnifiedAnalyzeRequest
+from rootcoz.models import (
+    ChatInitRequest,
+    ReAnalyzeFailureRequest,
+    UnifiedAnalyzeRequest,
+)
 
 
 @pytest.mark.parametrize(
@@ -133,7 +137,7 @@ async def test_overlay_updates_background_credential_scope(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("saved,current", [(True, False), (False, True)])
-async def test_job_chat_init_and_resume_keep_saved_scope(
+async def test_job_chat_init_and_resume_use_explicit_chat_scope(
     saved, current, tmp_path, monkeypatch
 ):
     from rootcoz.engine import chat
@@ -168,8 +172,17 @@ async def test_job_chat_init_and_resume_keep_saved_scope(
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
     seen = []
 
+    async def validate(provider, model):
+        ai_client._selected_credential_source.set("server" if not saved else "user")
+        return provider, model
+
+    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+
     async def init(**kwargs):
         seen.append(ai_client.force_server_credentials.get())
+        await storage.save_ai_session_source(
+            "sid", "alice", "openai", "server" if not saved else "user"
+        )
         return "sid"
 
     async def send(**kwargs):
@@ -179,7 +192,13 @@ async def test_job_chat_init_and_resume_keep_saved_scope(
 
     monkeypatch.setattr(chat, "init_chat_session", init)
     monkeypatch.setattr(chat, "chat_with_ai", send)
-    await main._init_chat_under_barrier("job", "alice")
+    await main._init_chat_under_barrier(
+        "job",
+        "alice",
+        ChatInitRequest(
+            ai_provider="openai", ai_model="m", force_server_credentials=not saved
+        ),
+    )
     user, assistant = await storage.add_chat_message_pair(
         "job", "hello", username="alice", ai_provider="openai", ai_model="m"
     )
@@ -188,11 +207,11 @@ async def test_job_chat_init_and_resume_keep_saved_scope(
         user_msg_id=user,
         assistant_msg_id=assistant,
         message="hello",
-        ai_provider_override=None,
-        ai_model_override=None,
+        ai_provider_override="openai",
+        ai_model_override="m",
         username="alice",
     )
-    assert seen == [saved, saved]
+    assert seen == [not saved, not saved]
 
 
 @pytest.mark.asyncio

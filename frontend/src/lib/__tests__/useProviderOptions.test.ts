@@ -52,7 +52,7 @@ describe('useProviderCatalog shared fetch', () => {
     const c = renderHook(() => useCursorAuthStatus())
 
     expect(getMock).toHaveBeenCalledTimes(1)
-    expect(getMock).toHaveBeenCalledWith('/api/ai-models')
+    expect(getMock).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=false')
 
     await act(async () => {
       resolveGet({
@@ -79,8 +79,22 @@ describe('useProviderCatalog shared fetch', () => {
     c.unmount()
   })
 
+  it('reads the Cursor banner status from the same catalog mode as the caller', async () => {
+    getMock.mockImplementation(async (path: string) => (path.endsWith('=true')
+      ? { providers: {}, provider_status: { cursor: { ok: true } } }
+      : { providers: {}, provider_status: { cursor: { ok: false, reason: 'unavailable', hint: 'down' } } }))
+    const serverMode = renderHook(() => useCursorAuthStatus(true))
+    await waitFor(() => expect(serverMode.result.current).toBeNull())
+    expect(getMock).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=true')
+    const userMode = renderHook(() => useCursorAuthStatus(false))
+    await waitFor(() => expect(userMode.result.current?.ok).toBe(false))
+    expect(getMock).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=false')
+    serverMode.unmount()
+    userMode.unmount()
+  })
+
   it('caches default and forced-server catalogs separately and clears both on reset', async () => {
-    getMock.mockImplementation(async (path: string) => ({ providers: path.includes('force_server_credentials') ? { claude: [{ id: 'sonnet' }] } : { openai: [{ id: 'gpt' }] } }))
+    getMock.mockImplementation(async (path: string) => ({ providers: path.endsWith('=true') ? { claude: [{ id: 'sonnet' }] } : { openai: [{ id: 'gpt' }] } }))
     const regular = renderHook(() => useProviderCatalog())
     const forced = renderHook(() => useProviderCatalog(true))
     await waitFor(() => expect(regular.result.current.providerKeys).toEqual(['openai']))
@@ -95,6 +109,15 @@ describe('useProviderCatalog shared fetch', () => {
     regular.unmount()
     forced.unmount()
     again.unmount()
+  })
+
+  it('requests an unforced catalog when the server default is forced', async () => {
+    getMock.mockImplementation(async (path: string) => path === '/api/ai-models?force_server_credentials=false'
+      ? { providers: { openai: [{ id: 'gpt', credential_sources: ['user'] }] } }
+      : { providers: { claude: [{ id: 'sonnet', credential_sources: ['server'] }] } })
+    const { result } = renderHook(() => useProviderCatalog(false))
+    await waitFor(() => expect(result.current.providerKeys).toEqual(['openai']))
+    expect(getMock).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=false')
   })
 
   it('ignores a pre-reset response while the refreshed request is pending', async () => {

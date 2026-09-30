@@ -5104,6 +5104,63 @@ class TestProgressPhaseTracking:
     """Tests for progress_phase updates during shared CI source analysis."""
 
     @pytest.mark.asyncio
+    async def test_active_fetch_running_before_fetch_and_preserves_waiting(
+        self, temp_db_path: Path
+    ) -> None:
+        """Pending work becomes running on fetch; waiting remains waiting until fetch."""
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+            wait_for_completion=True,
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com",
+            jenkins_user="user",
+            jenkins_password=FAKE_JENKINS_PASSWORD,
+            wait_for_completion=True,
+        )
+        statuses: list[str] = []
+
+        async def wait(_source, _job_id):
+            statuses.append((await storage.get_result("fetch-job"))["status"])
+
+        async def fetch(_source):
+            row = await storage.get_result("fetch-job")
+            statuses.append(row["status"])
+            assert row["result"]["progress_phase"] == "fetching"
+            return CISourceResult(failures=[], skip_analysis=True)
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch("rootcoz.sources.jenkins_source.JenkinsSource.pre_fetch", wait),
+            patch("rootcoz.sources.jenkins_source.JenkinsSource.fetch", fetch),
+            _patch_preflight(),
+        ):
+            await storage.init_db()
+            await storage.save_result("fetch-job", "", "pending", {"job_name": "test"})
+            await _process_ci_source_analysis(
+                job_id="fetch-job",
+                body=body,
+                merged=merged,
+                display_name="test",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+        assert statuses == ["waiting", "running"]
+
     async def test_progress_phases_with_jenkins_wait(self, temp_db_path: Path) -> None:
         """Waiting path emits waiting_for_jenkins progress phase."""
         from rootcoz.main import _process_ci_source_analysis
@@ -5550,6 +5607,33 @@ class TestLiveResultTokenUsage:
         mock_calls.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sources", "expected"),
+        [
+            (["user"], "user"),
+            (["user", "server"], "mixed"),
+            (["user", "unknown"], "unknown"),
+        ],
+    )
+    async def test_running_usage_credential_source_without_calls(
+        self, test_client, sources, expected
+    ):
+        await storage.save_result("live-source", "", "running", {"summary": "working"})
+        for source in sources:
+            await storage.record_token_usage(
+                "live-source", "gemini", "test", "analysis", credential_source=source
+            )
+        with patch(
+            "rootcoz.storage.get_token_usage_for_job", new_callable=AsyncMock
+        ) as mock_calls:
+            response = test_client.get("/results/live-source")
+        assert response.status_code == 202
+        usage = response.json()["result"]["token_usage"]
+        assert usage["credential_source"] == expected
+        assert usage["calls"] == []
+        mock_calls.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("status", ["failed", "aborted"])
     async def test_terminal_persisted_usage_is_not_reloaded(self, test_client, status):
         persisted = {
@@ -5925,6 +6009,839 @@ class TestReAnalyzeFailure:
         )
         assert failure["duration"] == 12.5
         assert failure["status"] == "FAILED"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_usage_isolated_by_attempt_and_child(
+        self, test_client
+    ) -> None:
+        """Re-analysis changes only its card; job totals retain all attempts."""
+        from pi_sidecar_client import AIResult, AITokenUsage
+
+        from rootcoz.token_tracking import failure_group_usage, record_ai_usage
+
+        job_id = "job-attempt-scopes"
+        top = [
+            FailureAnalysis(
+                test_name=f"top-{index}",
+                error="same error",
+                error_signature="same-signature",
+                analysis=AnalysisDetail(details="old"),
+            ).model_dump(mode="json")
+            for index in range(2)
+        ]
+        child_failure = FailureAnalysis(
+            test_name="child",
+            error="same error",
+            error_signature="same-signature",
+            analysis=AnalysisDetail(details="old"),
+        ).model_dump(mode="json")
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "failures": top,
+                "child_job_analyses": [
+                    {
+                        "job_name": "runner",
+                        "build_number": 7,
+                        "failures": [child_failure],
+                    }
+                ],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+        for child_name, child_build, tokens in (("", 0, 10), ("runner", 7, 20)):
+            await storage.record_token_usage(
+                job_id=job_id,
+                ai_provider="claude",
+                ai_model="opus",
+                call_type="primary",
+                input_tokens=tokens,
+                error_signature="same-signature",
+                child_job_name=child_name,
+                child_build_number=child_build,
+            )
+
+        async def analyze_replacement(**kwargs):
+            with failure_group_usage(kwargs["job_id"], "same-signature"):
+                await record_ai_usage(
+                    kwargs["job_id"],
+                    AIResult(
+                        success=True,
+                        text="new",
+                        usage=AITokenUsage(
+                            input_tokens=5, provider="claude", model="opus"
+                        ),
+                    ),
+                    "primary",
+                )
+            return [
+                FailureAnalysis(
+                    test_name=kwargs["failures"][0].test_name,
+                    error="same error",
+                    error_signature="same-signature",
+                    analysis=AnalysisDetail(details="new"),
+                )
+            ]
+
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group", side_effect=analyze_replacement
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            for failure_id in (child_failure["id"], top[0]["id"]):
+                response = test_client.post(f"/api/failures/{failure_id}/re-analyze")
+                assert response.status_code == 202
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    current = (await storage.get_result(job_id))["result"]
+                    target = (
+                        current["child_job_analyses"][0]["failures"][0]
+                        if failure_id == child_failure["id"]
+                        else current["failures"][0]
+                    )
+                    if target["analysis"]["details"] == "new":
+                        break
+                else:
+                    pytest.fail("re-analysis did not complete")
+                assert target["usage_attempt"]
+                assert target["token_usage"]["total_input_tokens"] == 5
+                assert target["previous_analyses"][0]["token_usage"][
+                    "total_input_tokens"
+                ] == (20 if failure_id == child_failure["id"] else 10)
+                assert "reanalysis_status" not in target["previous_analyses"][0]
+                if failure_id == child_failure["id"]:
+                    assert (
+                        current["failures"][0]["token_usage"]["total_input_tokens"]
+                        == 10
+                    )
+                    assert (
+                        current["failures"][1]["token_usage"]["total_input_tokens"]
+                        == 10
+                    )
+            # A second attempt on the same failure archives the first attempt's usage.
+            first_attempt = current["failures"][0]["usage_attempt"]
+            response = test_client.post(f"/api/failures/{top[0]['id']}/re-analyze")
+            assert response.status_code == 202
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                current = (await storage.get_result(job_id))["result"]
+                if current["failures"][0].get("usage_attempt") != first_attempt:
+                    break
+            else:
+                pytest.fail("second re-analysis did not complete")
+            archived = current["failures"][0]["previous_analyses"][0]
+            assert archived["usage_attempt"] == first_attempt
+            assert archived["token_usage"]["total_input_tokens"] == 5
+            assert "reanalysis_status" not in archived
+            result = test_client.get(f"/results/{job_id}").json()["result"]
+            assert result["token_usage"]["total_input_tokens"] == 45
+            assert result["token_usage"]["total_calls"] == 5
+            assert result["failures"][0]["token_usage"]["total_input_tokens"] == 5
+            assert result["failures"][1]["token_usage"]["total_input_tokens"] == 10
+            assert (
+                result["child_job_analyses"][0]["failures"][0]["token_usage"][
+                    "total_input_tokens"
+                ]
+                == 5
+            )
+            rows = await storage.get_token_usage_for_job(job_id)
+            reanalyses = [row for row in rows if row["call_type"] == "reanalysis"]
+            assert {row["failure_id"] for row in reanalyses} == {
+                top[0]["id"],
+                child_failure["id"],
+            }
+            child_call = next(
+                row for row in reanalyses if row["failure_id"] == child_failure["id"]
+            )
+            assert (child_call["child_job_name"], child_call["child_build_number"]) == (
+                "runner",
+                7,
+            )
+            assert (
+                child_call["usage_attempt"]
+                == result["child_job_analyses"][0]["failures"][0]["usage_attempt"]
+            )
+
+            # A failed attempt must not replace the last successful card usage.
+            async def failing_replacement(**kwargs):
+                with failure_group_usage(kwargs["job_id"], "same-signature"):
+                    await record_ai_usage(
+                        kwargs["job_id"],
+                        AIResult(
+                            success=True,
+                            text="partial",
+                            usage=AITokenUsage(input_tokens=5),
+                        ),
+                        "primary",
+                    )
+                raise RuntimeError("simulated analysis error")
+
+            with patch(
+                "rootcoz.main.analyze_failure_group", side_effect=failing_replacement
+            ):
+                response = test_client.post(f"/api/failures/{top[0]['id']}/re-analyze")
+                assert response.status_code == 202
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    result = (await storage.get_result(job_id))["result"]
+                    if result["failures"][0].get("reanalysis_status") == "failed":
+                        break
+                else:
+                    pytest.fail("failed re-analysis did not finish")
+            assert (
+                result["failures"][0]["usage_attempt"]
+                == current["failures"][0]["usage_attempt"]
+            )
+            assert result["failures"][0]["token_usage"]["total_input_tokens"] == 5
+            assert result["token_usage"]["total_calls"] == 6
+            assert result["token_usage"]["total_input_tokens"] == 50
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("has_history", [False, True])
+    async def test_legacy_reanalysis_does_not_archive_mixed_primary_usage(
+        self, test_client, has_history: bool
+    ) -> None:
+        from pi_sidecar_client import AIResult, AITokenUsage
+
+        from rootcoz.token_tracking import failure_group_usage, record_ai_usage
+
+        job_id = f"legacy-reanalysis-archive-{has_history}"
+        failure = FailureAnalysis(
+            test_name="old",
+            error="same",
+            error_signature="same",
+            analysis=AnalysisDetail(details="prior"),
+        ).model_dump(mode="json")
+        if has_history:
+            failure["previous_analyses"] = [{"analysis": {"details": "older"}}]
+        await storage.record_token_usage(
+            job_id,
+            "claude",
+            "test",
+            "primary",
+            input_tokens=10,
+            error_signature="same",
+        )
+        await storage.record_token_usage(
+            job_id,
+            "claude",
+            "test",
+            "primary",
+            input_tokens=20,
+            error_signature="same",
+        )
+        await storage.save_result(
+            job_id,
+            status="completed",
+            result={
+                "failures": [failure, {"id": "sibling", "error_signature": "same"}],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        # A legacy result may already contain an inflated materialized card value.
+        await storage.patch_result_json(
+            job_id,
+            lambda result: result["failures"][0].update(
+                token_usage={"total_input_tokens": 30}
+            ),
+        )
+
+        async def analyze_replacement(**kwargs):
+            with failure_group_usage(kwargs["job_id"], "same"):
+                await record_ai_usage(
+                    kwargs["job_id"],
+                    AIResult(
+                        success=True, text="ok", usage=AITokenUsage(input_tokens=5)
+                    ),
+                    "primary",
+                )
+            return [
+                FailureAnalysis(
+                    test_name="old",
+                    error="same",
+                    error_signature="same",
+                    analysis=AnalysisDetail(details="new"),
+                )
+            ]
+
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group", side_effect=analyze_replacement
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{failure['id']}/re-analyze")
+            assert response.status_code == 202, response.json()
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                current = (await storage.get_result(job_id))["result"]
+                if current["failures"][0].get("usage_attempt"):
+                    break
+            else:
+                pytest.fail("re-analysis did not finish")
+        target = current["failures"][0]
+        assert target["token_usage"]["total_input_tokens"] == 5
+        assert target["previous_analyses"][0].get("token_usage") is None
+        assert current["failures"][1]["token_usage"] is None
+        assert current["token_usage"]["total_input_tokens"] == 35
+        assert current["token_usage"]["total_calls"] == 3
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_additional_repo_persists_and_notifies_clone_progress(
+        self, test_client, tmp_path, monkeypatch
+    ) -> None:
+        import asyncio
+
+        from rootcoz import storage
+        from rootcoz.engine.core import set_progress_callback
+
+        fa = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="old"),
+        )
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "reanalyze.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-clone",
+            "",
+            "completed",
+            {
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                        "additional_repos": [
+                            {"name": "extra", "url": "https://example.com/extra"}
+                        ],
+                    }
+                ),
+            },
+        )
+        events = []
+        set_progress_callback(lambda job: events.append(job))
+        new = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="new"),
+        )
+        try:
+            with (
+                patch("rootcoz.main.RepositoryManager"),
+                patch("rootcoz.main.copy_rootcoz_pi_resources"),
+                patch(
+                    "rootcoz.engine.core.asyncio.to_thread",
+                    new_callable=AsyncMock,
+                    return_value=tmp_path / "extra",
+                ),
+                patch(
+                    "rootcoz.main.analyze_failure_group",
+                    new_callable=AsyncMock,
+                    return_value=[new],
+                ),
+                patch(
+                    "rootcoz.main._create_ai_auth_header",
+                    new_callable=AsyncMock,
+                    return_value="",
+                ),
+            ):
+                response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    if (stored := await storage.get_result("job-clone")) and (
+                        stored["result"]["failures"][0]
+                        .get("analysis", {})
+                        .get("details")
+                        == "new"
+                    ):
+                        break
+            assert response.status_code == 202
+            assert (await storage.get_result("job-clone"))["result"][
+                "cloning_repos"
+            ] == []
+            assert any(
+                entry["repos"] == ["extra"]
+                for entry in (await storage.get_result("job-clone"))["result"][
+                    "progress_log"
+                ]
+            )
+            assert events.count("job-clone") >= 2
+            assert (await storage.get_result("job-clone"))["result"].get(
+                "progress_phase"
+            ) != "cloning"
+        finally:
+            set_progress_callback(lambda _job: None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["completed", "failed", "aborted"])
+    @pytest.mark.parametrize("clone_fails", [False, True])
+    async def test_reanalyze_test_repo_records_clone_outcome(
+        self, test_client, tmp_path, monkeypatch, clone_fails, status
+    ) -> None:
+        import asyncio
+
+        from rootcoz import storage
+        from rootcoz.engine.core import set_progress_callback
+
+        fa = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="old"),
+        )
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "reanalyze-tests.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-tests-clone",
+            "",
+            status,
+            {
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                        "tests_repo_url": "https://user:secret@example.com/tests",  # pragma: allowlist secret
+                        "tests_repo_ref": "main",
+                    }
+                ),
+            },
+        )
+        new = FailureAnalysis(
+            test_name="test_clone",
+            error="failure",
+            analysis=AnalysisDetail(details="new"),
+        )
+        events: list[str] = []
+        set_progress_callback(events.append)
+        try:
+            with (
+                patch("rootcoz.main.RepositoryManager") as manager,
+                patch("rootcoz.main.copy_rootcoz_pi_resources"),
+                patch(
+                    "rootcoz.main.analyze_failure_group",
+                    new_callable=AsyncMock,
+                    return_value=[new],
+                ),
+                patch(
+                    "rootcoz.main._create_ai_auth_header",
+                    new_callable=AsyncMock,
+                    return_value="",
+                ),
+            ):
+                manager.return_value.create_workspace.return_value = (
+                    tmp_path / "workspace"
+                )
+                if clone_fails:
+                    manager.return_value.clone_into.side_effect = RuntimeError(
+                        "clone failed"
+                    )
+                response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+                for _ in range(50):
+                    await asyncio.sleep(0.1)
+                    result = (await storage.get_result("job-tests-clone"))["result"]
+                    if (
+                        result.get("failures", [{}])[0]
+                        .get("analysis", {})
+                        .get("details")
+                        == "new"
+                    ):
+                        break
+            assert response.status_code == 202
+            assert result["cloning_repos"] == []
+            assert (await storage.get_result("job-tests-clone"))["status"] == status
+            assert [
+                (e["repo"], e["state"], e["url"], e["ref"])
+                for e in result["progress_log"]
+            ] == [
+                ("tests", "cloning", "https://example.com/tests", "main"),
+                (
+                    "tests",
+                    "failed" if clone_fails else "cloned",
+                    "https://example.com/tests",
+                    "main",
+                ),
+            ]
+            assert events.count("job-tests-clone") >= 2
+            assert "secret" not in str(result["progress_log"])
+        finally:
+            set_progress_callback(lambda _job: None)
+
+    @pytest.mark.asyncio
+    async def test_two_failures_reanalyze_same_repo_concurrently(
+        self, test_client, tmp_path, monkeypatch
+    ) -> None:
+        import asyncio
+
+        from rootcoz import storage
+
+        failures = [
+            FailureAnalysis(
+                test_name=name, error="failure", analysis=AnalysisDetail(details="old")
+            )
+            for name in ("one", "two")
+        ]
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "concurrent-reanalysis.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-concurrent",
+            "",
+            "failed",
+            {
+                "progress_phase": "failed",
+                "failures": [fa.model_dump(mode="json") for fa in failures],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                        "tests_repo_url": "https://example.com/tests",
+                        "tests_repo_ref": "main",
+                    }
+                ),
+            },
+        )
+        from threading import Event
+
+        entered = Event()
+        release = Event()
+        cloned = 0
+
+        async def clone(*_args, **_kwargs):
+            nonlocal cloned
+            cloned += 1
+            if cloned == 2:
+                entered.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+
+        new = [
+            FailureAnalysis(
+                test_name=fa.test_name,
+                error="failure",
+                analysis=AnalysisDetail(details="new"),
+            )
+            for fa in failures
+        ]
+        with (
+            patch("rootcoz.main.RepositoryManager") as manager,
+            patch("rootcoz.main.copy_rootcoz_pi_resources"),
+            patch("rootcoz.main.asyncio.to_thread", side_effect=clone),
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                side_effect=lambda *_a, **_k: new,
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+        ):
+            manager.return_value.create_workspace.return_value = tmp_path / "workspace"
+            try:
+                for fa in failures:
+                    assert (
+                        test_client.post(
+                            f"/api/failures/{fa.id}/re-analyze"
+                        ).status_code
+                        == 202
+                    )
+                for _ in range(50):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.1)
+                assert entered.is_set()
+                running = (await storage.get_result("job-concurrent"))["result"]
+                assert running["cloning_repos"] == ["tests"]
+                assert (
+                    len([e for e in running["progress_log"] if e["state"] == "cloning"])
+                    == 2
+                )
+            finally:
+                release.set()
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                result = (await storage.get_result("job-concurrent"))["result"]
+                if (
+                    len([e for e in result["progress_log"] if e["state"] == "cloned"])
+                    == 2
+                ):
+                    break
+            assert (await storage.get_result("job-concurrent"))["status"] == "failed"
+            assert result["cloning_repos"] == [], result["progress_log"]
+            assert (
+                len([e for e in result["progress_log"] if e["state"] == "cloned"]) == 2
+            )
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_cancelled_test_repo_records_terminal_clone(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import asyncio
+
+        from rootcoz import storage
+        from rootcoz.main import _reanalyze_failure_background
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "cancel-tests.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-cancel-tests",
+            "",
+            "completed",
+            {"failures": [{"id": "failure-id", "reanalysis_status": "running"}]},
+        )
+        from threading import Event
+
+        started = Event()
+        release = Event()
+        finished = Event()
+
+        def clone(*_args, **_kwargs):
+            started.set()
+            release.wait()
+            finished.set()
+
+        task = None
+        try:
+            with (
+                patch("rootcoz.main.RepositoryManager") as manager,
+                patch(
+                    "rootcoz.main._create_ai_auth_header",
+                    new_callable=AsyncMock,
+                    return_value="",
+                ),
+            ):
+                manager.return_value.create_workspace.return_value = (
+                    tmp_path / "workspace"
+                )
+                manager.return_value.clone_into.side_effect = clone
+                task = asyncio.create_task(
+                    _reanalyze_failure_background(
+                        "job-cancel-tests",
+                        "failure-id",
+                        {},
+                        "claude",
+                        "opus",
+                        None,
+                        "",
+                        None,
+                        0,
+                        "https://example.com/tests",
+                        "main",
+                        "",
+                        None,
+                        "admin",
+                        1,
+                    )
+                )
+                assert await asyncio.to_thread(started.wait, 2)
+                task.cancel()
+                await asyncio.sleep(0.05)
+                assert not finished.is_set()
+                assert not task.done()
+                task.cancel()  # Repeated cancellation must not abandon the worker.
+                await asyncio.sleep(0)
+                assert not task.done()
+                assert not manager.return_value.cleanup.called
+                running = (await storage.get_result("job-cancel-tests"))["result"]
+                assert running["cloning_repos"] == ["tests"]
+                assert [entry["state"] for entry in running["progress_log"]] == [
+                    "cloning"
+                ]
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 2)
+                assert finished.is_set()
+                manager.return_value.cleanup.assert_called_once()
+            result = (await storage.get_result("job-cancel-tests"))["result"]
+            assert result["cloning_repos"] == []
+            assert [
+                (entry["repo"], entry["state"]) for entry in result["progress_log"]
+            ] == [
+                ("tests", "cloning"),
+                ("tests", "cancelled"),
+            ]
+        finally:
+            release.set()
+            if task is not None and not task.done():
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+    @pytest.mark.parametrize(
+        ("failure", "stderr_message", "expected_cause"),
+        [
+            ("git", "Authentication failed", "Authentication failed"),
+            ("basic", "Authentication failed", "Authentication failed"),
+            (
+                "git",
+                "Remote branch missing not found in upstream origin",
+                "Branch or ref not found",
+            ),
+            (
+                "git",
+                "pathspec 'missing' did not match any file(s) known to git",
+                "Branch or ref not found",
+            ),
+            (
+                "git",
+                "SSL certificate problem: certificate verify failed",
+                "SSL verification failed",
+            ),
+            ("git", "Permission denied (publickey)", "Permission denied"),
+            (
+                "git",
+                "Could not resolve host: example.com",
+                "Network DNS resolution failed",
+            ),
+            ("git", "repository not found", "Repository not found"),
+            ("git", "unexpected failure", "Git command failed"),
+            ("invalid_url", "", "Invalid repository URL scheme"),
+            ("unknown", "", "Clone worker failed"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_reanalyze_cancelled_clone_logs_safe_cause_and_frames(
+        self, tmp_path, monkeypatch, failure, stderr_message, expected_cause
+    ) -> None:
+        import asyncio
+        from threading import Event
+
+        from git.exc import GitCommandError
+
+        from rootcoz import storage
+        from rootcoz.main import _reanalyze_failure_background
+        from rootcoz.repository import _validate_repo_url
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "cancel-failed.db")
+        await storage.init_db()
+        await storage.save_result(
+            "job-cancel-failed",
+            "",
+            "completed",
+            {"failures": [{"id": "failure-id", "reanalysis_status": "running"}]},
+        )
+        started, release = Event(), Event()
+        secret = "clone-secret-12345"  # pragma: allowlist secret
+        userinfo = "alice:password"  # pragma: allowlist secret
+        url = f"https://{userinfo}@example.com/tests?access_token={secret}"
+        if failure == "invalid_url":
+            url = f"ftp://{userinfo}@example.com/tests?access_token={secret}"
+
+        def clone(*_args, **_kwargs):
+            started.set()
+            release.wait(2)
+            if failure == "invalid_url":
+                _validate_repo_url(url)
+            if failure == "unknown":
+                raise RuntimeError(f"unexpected credential opaque-secret-789 in {url}")
+            raise GitCommandError(
+                f"git clone https://x-token-auth:{secret}@example.com/tests",
+                128,
+                stderr=(
+                    f"fatal: {stderr_message} for '{url}'; "
+                    + (
+                        "Authorization: Basic dXNlcjpwYXNz; opaque-secret-789"
+                        if failure == "basic"
+                        else "Authorization: Bearer other-secret-456; api_key=extra-secret-789"
+                    )
+                ),
+            )
+
+        with (
+            patch("rootcoz.main.RepositoryManager") as manager,
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.logger.warning") as warning,
+        ):
+            manager.return_value.create_workspace.return_value = tmp_path / "workspace"
+            manager.return_value.clone_into.side_effect = clone
+            task = asyncio.create_task(
+                _reanalyze_failure_background(
+                    "job-cancel-failed",
+                    "failure-id",
+                    {},
+                    "claude",
+                    "opus",
+                    None,
+                    "",
+                    None,
+                    0,
+                    url,
+                    "main",
+                    secret,
+                    None,
+                    "admin",
+                    1,
+                )
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                task.cancel()
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        log = "\n".join(
+            str(arg) for call in warning.call_args_list for arg in call.args
+        )
+        assert " in clone" in log
+        assert "[path]:" in log
+        assert expected_cause in log
+        assert (
+            "GitCommandError"
+            if failure in ("git", "basic")
+            else "ValueError"
+            if failure == "invalid_url"
+            else "RuntimeError"
+        ) in log
+        for leaked in (
+            secret,
+            "example.com",
+            "ftp://",
+            "opaque-secret-789",
+            "dXNlcjpwYXNz",
+            "alice",
+            "password",
+            "access_token=",
+            "x-token-auth",
+            "other-secret-456",
+            "extra-secret-789",
+        ):
+            assert leaked not in log
+        assert all(not call.kwargs.get("exc_info") for call in warning.call_args_list)
 
     @pytest.mark.asyncio
     async def test_re_analyze_failure_defers_ai_with_tests_repo(
@@ -7180,9 +8097,27 @@ class TestCursorStatusForClient:
 @pytest.mark.parametrize(
     "admin, forced", [(False, False), (False, True), (True, False), (True, True)]
 )
-async def test_chat_send_validates_with_sender_credentials(monkeypatch, admin, forced):
+async def test_chat_send_validates_with_sender_credentials(
+    monkeypatch, tmp_path, admin, forced
+):
     from rootcoz import ai_client, main
     from rootcoz.models import ChatMessageRequest
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "send.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.save_ai_session_source(
+        "sid", "alice", "openai", "server" if forced else "user"
+    )
+    await storage.add_chat_message(
+        main.ADMIN_CHAT_JOB_ID if admin else "job",
+        "assistant",
+        "",
+        username="alice",
+        ai_provider="openai",
+        ai_model="test-model",
+        session_id="sid",
+    )
 
     request = SimpleNamespace(
         state=SimpleNamespace(
@@ -7218,6 +8153,7 @@ async def test_chat_send_validates_with_sender_credentials(monkeypatch, admin, f
         return provider, model
 
     monkeypatch.setattr(main, "resolve_catalog_pair", validate)
+    ai_client._selected_credential_source.set("server" if forced else "user")
     send = main.send_admin_chat_message if admin else main.send_chat_message
     args = (
         ChatMessageRequest(
@@ -7254,17 +8190,19 @@ async def test_chat_send_validates_with_sender_credentials(monkeypatch, admin, f
 async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_path):
     from rootcoz import ai_client, main
     from rootcoz.engine import chat
+    from rootcoz.models import ChatInitRequest
 
-    monkeypatch.setattr(
-        main,
-        "get_settings",
-        lambda: SimpleNamespace(
-            ai_provider="openai", ai_model="test-model", force_server_credentials=True
-        ),
-    )
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "admin-init.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+
+    async def validate(provider, model):
+        ai_client._selected_credential_source.set("server")
+        return provider, model
+
+    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main.storage, "get_chat_messages", AsyncMock(return_value=[]))
-    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
     monkeypatch.setattr(
         main.storage, "get_user_ai_credential_generation", AsyncMock(return_value=None)
     )
@@ -7281,7 +8219,10 @@ async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_p
     request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))
     original_force = ai_client.force_server_credentials.set(False)
     try:
-        assert (await main.init_admin_chat(request))["session_id"] == "session"
+        body = ChatInitRequest(
+            ai_provider="openai", ai_model="test-model", force_server_credentials=True
+        )
+        assert (await main.init_admin_chat(request, body))["session_id"] == "session"
         assert seen == [("alice", True)]
         assert ai_client.force_server_credentials.get() is False
         monkeypatch.setattr(
@@ -7289,8 +8230,9 @@ async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_p
             "init_admin_chat_session",
             AsyncMock(side_effect=RuntimeError("unavailable")),
         )
+        await storage.delete_chat_messages(main.ADMIN_CHAT_JOB_ID, username="alice")
         with pytest.raises(RuntimeError, match="unavailable"):
-            await main.init_admin_chat(request)
+            await main.init_admin_chat(request, body)
         assert ai_client.force_server_credentials.get() is False
     finally:
         ai_client.force_server_credentials.reset(original_force)
@@ -7303,6 +8245,20 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
 ):
     from rootcoz import ai_client, main
     from rootcoz.engine import chat
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "admin-process.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.save_ai_session_source("sid", "alice", "openai", "server")
+    await storage.add_chat_message(
+        main.ADMIN_CHAT_JOB_ID,
+        "assistant",
+        "",
+        username="alice",
+        ai_provider="openai",
+        ai_model="test-model",
+        session_id="sid",
+    )
 
     monkeypatch.setattr(
         main,
@@ -7318,10 +8274,8 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
         main.storage, "get_user_ai_credential_generation", AsyncMock(return_value=None)
     )
     monkeypatch.setattr(main.storage, "count_chat_messages", AsyncMock(return_value=0))
-    monkeypatch.setattr(main.storage, "get_chat_messages", AsyncMock(return_value=[]))
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_build_internal_server_url", lambda: "http://localhost")
-    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
     monkeypatch.setattr(chat, "build_admin_custom_tools", lambda **kwargs: [])
     monkeypatch.setattr(main.storage, "update_chat_message_content", AsyncMock())
     monkeypatch.setattr(main.storage, "update_chat_message_status", AsyncMock())
@@ -7345,6 +8299,7 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
         return True, "reply", "session"
 
     monkeypatch.setattr(chat, "admin_chat_with_ai", run)
+    ai_client._selected_credential_source.set("server")
     original_force = ai_client.force_server_credentials.set(False)
     original_user = ai_client.ai_username.set("previous")
     try:
@@ -7355,6 +8310,7 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
             ai_provider_override="openai",
             ai_model_override="test-model",
             username="alice",
+            force_server=True,
         )
         assert seen == [("alice", True)]
         assert ai_client.ai_username.get() == "previous"

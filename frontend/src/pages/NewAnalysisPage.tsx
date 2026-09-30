@@ -10,6 +10,7 @@ import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { isAnalysisFormAiUnavailable } from '@/lib/analysisAi'
+import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -581,7 +582,7 @@ export function NewAnalysisPage() {
               <span className="text-sm text-text-secondary">Use server credentials</span>
               <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
             </div>
-            {!canUseServerProviders && <p className="text-xs text-text-tertiary">Server credentials are locked. Ask an admin for access, or use your own AI key.</p>}
+            {!canUseServerProviders && <CredentialAccessNotice className="mt-2" />}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea

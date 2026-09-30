@@ -64,6 +64,14 @@ describe('Layout', () => {
     expect(screen.getByText('Dashboard Content')).toBeDefined()
   })
 
+  it('lets the scroll area shrink below its content width', () => {
+    // The layout row is overflow-hidden, so without min-w-0 the scroll area
+    // keeps its intrinsic width and wide filter rows (History) get clipped.
+    const { container } = renderLayout()
+    const wrapper = container.querySelector('main')?.parentElement
+    expect(wrapper?.className).toContain('min-w-0')
+  })
+
   it('renders the RootCoz logo in the header', () => {
     renderLayout()
     expect(screen.getByText('RootCoz')).toBeDefined()

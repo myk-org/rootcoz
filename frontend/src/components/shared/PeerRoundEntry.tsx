@@ -1,17 +1,19 @@
 import { useState } from 'react'
-import type { PeerRound } from '@/types'
+import type { PeerRound, TokenUsageSummary } from '@/types'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
 import { LinkedText } from '@/components/shared/LinkedText'
+import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 
 interface PeerRoundEntryProps {
   entry: PeerRound
   repoUrls: RepoUrl[]
   compact?: boolean
+  primaryUsage?: TokenUsageSummary | null
 }
 
-export function PeerRoundEntry({ entry, repoUrls, compact = false }: PeerRoundEntryProps) {
+export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage }: PeerRoundEntryProps) {
   const [detailsExpanded, setDetailsExpanded] = useState(false)
   const isOrchestrator = entry.role === 'orchestrator'
 
@@ -31,6 +33,25 @@ export function PeerRoundEntry({ entry, repoUrls, compact = false }: PeerRoundEn
           {entry.ai_provider}/{entry.ai_model}
         </span>
         <ClassificationBadge classification={entry.classification} className="text-[10px]" />
+        {isOrchestrator && entry.round === 1 && primaryUsage ? (
+          <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary">
+            Primary (shared) <TokenUsageBadge usage={primaryUsage} />
+          </span>
+        ) : entry.token_usage ? (
+          <TokenUsageBadge usage={{
+            total_input_tokens: entry.token_usage.input_tokens,
+            total_output_tokens: entry.token_usage.output_tokens,
+            total_cache_read_tokens: entry.token_usage.cache_read_tokens,
+            total_cache_write_tokens: entry.token_usage.cache_write_tokens,
+            total_tokens: entry.token_usage.total_tokens,
+            total_cost_usd: entry.token_usage.cost_usd,
+            total_duration_ms: entry.token_usage.duration_ms ?? 0,
+            total_calls: 1,
+            calls: [entry.token_usage],
+          }} />
+        ) : (
+          <span className="text-[10px] text-text-tertiary">Usage unavailable</span>
+        )}
         {!isOrchestrator && entry.agrees_with_orchestrator !== null && (
           <Badge variant={entry.agrees_with_orchestrator ? 'success' : 'destructive'} className="text-[10px]">
             {entry.agrees_with_orchestrator ? 'Agrees' : 'Disagrees'}

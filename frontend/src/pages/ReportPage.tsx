@@ -358,6 +358,14 @@ function ReportContent() {
     () => buildRepoUrls(result?.request_params),
     [result?.request_params],
   )
+  // The persisted log is append-only; later attempts supersede earlier failures.
+  const cloneStates = new Map<string, string>()
+  for (const event of result?.progress_log ?? []) {
+    if (event.phase === 'cloning' && event.repo && event.state) cloneStates.set(event.repo, event.state)
+  }
+  const failedClones = [...cloneStates]
+    .filter(([repo, status]) => status === 'failed' && !repo.includes('://') && !repo.includes('@'))
+    .map(([repo]) => repo)
   const reviewedCount = allTestKeys.filter((k) => state.reviews[k]?.reviewed).length
 
   /** Format the AI provider/model label for display. */
@@ -459,12 +467,11 @@ function ReportContent() {
               {formatAiLabel(result.ai_provider, result.ai_model)}
             </Badge>
           )}
-          {result.token_usage && (
-            <TokenUsageBadge usage={result.token_usage} />
-          )}
-          {state.graftEstimatedTokensSaved > 0 && (
+          {result.token_usage ? (
+            <TokenUsageBadge usage={result.token_usage} graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
+          ) : state.graftEstimatedTokensSaved > 0 ? (
             <TokenUsageBadge graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
-          )}
+          ) : null}
           <div className="ml-auto flex items-center gap-3">
             {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
@@ -580,8 +587,17 @@ function ReportContent() {
         </div>
       )}
 
+      {result.failed_analysis_groups ? (
+        <div role="alert" className="rounded-lg border-l-4 border-l-signal-amber bg-signal-amber/5 p-4 animate-slide-up">
+          <h2 className="text-sm font-medium text-signal-amber">Partial analysis</h2>
+          <p className="mt-1 text-xs text-text-secondary">
+            {result.failed_analysis_groups} group(s) failed; check server logs. Successful analyses remain available below.
+          </p>
+        </div>
+      ) : null}
+
       {/* ---- Zero-failure banner ---- */}
-      {totalFailures === 0 && result.status === 'completed' && !submitted && (
+      {totalFailures === 0 && result.status === 'completed' && !submitted && !result.failed_analysis_groups && (
         <div className="rounded-lg border-l-4 border-l-signal-green bg-signal-green/5 p-4 animate-slide-up">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="h-5 w-5 text-signal-green" />
@@ -603,11 +619,14 @@ function ReportContent() {
         </div>
       )}
 
-      {result.source_warnings && result.source_warnings.length > 0 && (
-        <div className="rounded-lg border border-border-default bg-bg-secondary p-4 animate-slide-up">
-          <h2 className="text-xs font-display uppercase tracking-widest text-signal-orange mb-2">Source Warnings</h2>
+      {(failedClones.length > 0 || (result.source_warnings?.length ?? 0) > 0) && (
+        <div role="alert" className="rounded-lg border-l-4 border-l-signal-amber bg-signal-amber/5 p-4 animate-slide-up">
+          <h2 className="text-sm font-medium text-signal-amber mb-2">Source Warnings</h2>
           <ul className="list-disc pl-4 space-y-1 text-sm text-text-secondary">
-            {result.source_warnings.map((warning, i) => (
+            {failedClones.map((repo) => (
+              <li key={repo}>Repository clone failed: {repo}. Analysis results remain available below.</li>
+            ))}
+            {result.source_warnings?.map((warning, i) => (
               <li key={`sw-${i}`}>{warning}</li>
             ))}
           </ul>

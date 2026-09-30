@@ -329,6 +329,25 @@ def test_failed_source_scan_backoff_and_new_repo(tmp_path, monkeypatch):
     }
 
 
+def test_workspace_size_ignores_disappearing_peer_graph(tmp_path, monkeypatch):
+    root = tmp_path / "graphs"
+    peer = root / "peer"
+    peer.mkdir(parents=True)
+    transient = peer / "graph"
+    transient.write_text("old")
+    original_lstat = Path.lstat
+
+    def lstat(path, *args, **kwargs):
+        if path == transient and transient.exists():
+            transient.unlink()  # Peer rebuild removes its old graph during the scan.
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    assert graft._workspace_graph_size(root) >= 0
+    transient.write_text("old")
+    assert graft._disk_size(peer, limit=0, reject_symlinks=False) >= 0
+
+
 def test_parallel_builds_and_isolation(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     repos = {}

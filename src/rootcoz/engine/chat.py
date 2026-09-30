@@ -1209,6 +1209,13 @@ async def _create_chat_session(
         sidecar_provider, sidecar_model = await resolve_catalog_pair(
             ai_provider, ai_model
         )
+        from rootcoz.ai_client import _selected_credential_source, chat_session_source
+
+        if (
+            chat_session_source.get()
+            and _selected_credential_source.get() != chat_session_source.get()
+        ):
+            raise ValueError("Chat credential source changed during Start")
         create_kwargs: dict[str, Any] = {
             "provider": sidecar_provider,
             "model": sidecar_model,
@@ -1220,13 +1227,15 @@ async def _create_chat_session(
         if restrict_tools:
             create_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
-        from rootcoz.ai_client import _selected_credential_source, session_key
+        from rootcoz.ai_client import session_key
 
         key = (
             await session_key(sidecar_provider)
             if _selected_credential_source.get() == "user"
             else None
         )
+        if _selected_credential_source.get() == "user" and key is None:
+            raise ValueError("User AI credential unavailable; Start a new chat")
         if key is not None:
             create_kwargs["api_key"] = key
         else:
@@ -1352,8 +1361,19 @@ async def _chat_with_ai_impl(
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
     result = await call_ai(prompt, **call_kwargs)
 
-    # If session was lost, retry with fresh session
-    if not result.success and session_id and "not found" in result.text.lower():
+    # A revoked or switched chat source must never be rebuilt under another identity.
+    from rootcoz.ai_client import chat_session_source
+
+    if (
+        not result.success
+        and session_id
+        and "not found" in result.text.lower()
+        and result.text != "AI session unavailable"
+        and (
+            not chat_session_source.get()
+            or result.credential_source == chat_session_source.get()
+        )
+    ):
         logger.warning("%s: session lost, rebuilding with full context", log_prefix)
         await result.record_usage(
             request_id=request_id,

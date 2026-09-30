@@ -1,6 +1,7 @@
 """Per-user AI credential storage and sidecar boundary checks."""
 
 import base64
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -175,6 +176,221 @@ async def test_discovery_failure_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["accepted", "rejected", "inconclusive"])
+async def test_verify_replacement_only_saves_accepted(tmp_path, monkeypatch, outcome):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "verify.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "openai", "previous-key")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    from rootcoz import ai_client
+
+    verify = AsyncMock(return_value=outcome)
+    monkeypatch.setattr(ai_client, "verify_ai_key", verify)
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    response = await main.set_user_ai_credential(
+        "openai",
+        main.AiCredentialInput(
+            api_key="replacement-key",  # pragma: allowlist secret
+            model="gpt-4o",
+        ),
+        request,
+    )
+    assert outcome.encode() in response.body
+    if outcome == "rejected":
+        assert b"Check the key" in response.body
+    if outcome == "inconclusive":
+        assert b"Try again" in response.body
+    assert b"replacement-key" not in response.body
+    assert response.headers["cache-control"] == "no-store"
+    verify.assert_awaited_once_with("openai", "gpt-4o", "replacement-key")
+    assert (await storage.get_user_ai_credentials("alice"))["openai"] == (
+        "replacement-key" if outcome == "accepted" else "previous-key"
+    )
+
+
+@pytest.mark.asyncio
+async def test_credential_strips_model_before_verification(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "model.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    verify = AsyncMock(return_value="accepted")
+    monkeypatch.setattr(ai_client, "verify_ai_key", verify)
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    await main.set_user_ai_credential(
+        "openai",
+        main.AiCredentialInput(
+            api_key="candidate-key",  # pragma: allowlist secret
+            model=" gpt-4o ",
+        ),
+        request,
+    )
+    verify.assert_awaited_once_with("openai", "gpt-4o", "candidate-key")
+    assert (await storage.get_user_ai_credentials("alice"))["openai"] == "candidate-key"
+
+
+@pytest.mark.asyncio
+async def test_live_verification_transport_timeout_preserves_key(monkeypatch):
+    def handler(request):
+        raise httpx.ReadTimeout("candidate-key")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://sidecar"
+    ) as http:
+        monkeypatch.setattr(
+            ai_client, "get_sidecar_client", lambda: SimpleNamespace(_client=http)
+        )
+        assert (
+            await ai_client.verify_ai_key("openai", "gpt-4o", "candidate-key")
+            == "inconclusive"
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_verification_uses_key_and_cleans_session(monkeypatch):
+    import httpx
+
+    from rootcoz import ai_client
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.method == "POST" and request.url.path == "/sessions":
+            candidate_key = json.loads(request.content)["api_key"]
+            assert candidate_key == "candidate-key"  # pragma: allowlist secret
+            return httpx.Response(201, json={"session_id": "test-session"})
+        if request.method == "POST":
+            return httpx.Response(200, json={"text": "OK"})
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://sidecar"
+    ) as http:
+        client = SimpleNamespace(_client=http, delete_session=AsyncMock())
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+        assert (
+            await ai_client.verify_ai_key("openai", "gpt-4o", "candidate-key")
+            == "accepted"
+        )
+        client.delete_session.assert_awaited_once_with("test-session")
+        assert [r.url.path for r in requests] == [
+            "/sessions",
+            "/sessions/test-session/prompt",
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,error,expected",
+    [
+        (401, "invalid_api_key", "rejected"),
+        (403, "model access denied candidate-key", "inconclusive"),
+        (403, "403 unauthorized candidate-key", "inconclusive"),
+        (403, "invalid_api_key candidate-key", "rejected"),
+        (503, "outage", "inconclusive"),
+    ],
+)
+async def test_live_verification_failure_is_safe(monkeypatch, code, error, expected):
+    import httpx
+
+    from rootcoz import ai_client
+
+    def handler(request):
+        return httpx.Response(code, json={"error": f"{error} candidate-key"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://sidecar"
+    ) as http:
+        monkeypatch.setattr(
+            ai_client, "get_sidecar_client", lambda: SimpleNamespace(_client=http)
+        )
+        assert (
+            await ai_client.verify_ai_key("openai", "gpt-4o", "candidate-key")
+            == expected
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "code,error,expected",
+    [
+        (200, "401 invalid_api_key", "rejected"),
+        (400, "invalid_api_key", "rejected"),
+        (200, "rate limit", "inconclusive"),
+        (200, "403 model access denied candidate-key", "inconclusive"),
+        (403, "model access denied candidate-key", "inconclusive"),
+        (403, "invalid_api_key candidate-key", "rejected"),
+    ],
+)
+async def test_prompt_auth_failure_never_saves(monkeypatch, code, error, expected):
+    def handler(request):
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "test-session"})
+        return httpx.Response(code, json={"error": error})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://sidecar"
+    ) as http:
+        sidecar = SimpleNamespace(_client=http, delete_session=AsyncMock())
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: sidecar)
+        assert (
+            await ai_client.verify_ai_key("openai", "gpt-4o", "candidate-key")
+            == expected
+        )
+        sidecar.delete_session.assert_awaited_once_with("test-session")
+
+
+@pytest.mark.asyncio
+async def test_model_restriction_preserves_stored_key_and_hides_provider_error(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "restricted.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "openai", "previous-key")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+
+    def handler(request):
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "test-session"})
+        return httpx.Response(
+            403, json={"error": "403 model access denied candidate-key"}
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://sidecar"
+    ) as http:
+        monkeypatch.setattr(
+            ai_client,
+            "get_sidecar_client",
+            lambda: SimpleNamespace(_client=http, delete_session=AsyncMock()),
+        )
+        request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+        response = await main.set_user_ai_credential(
+            "openai",
+            main.AiCredentialInput(
+                api_key="candidate-key",  # pragma: allowlist secret
+                model="restricted",
+            ),
+            request,
+        )
+    assert b'"outcome":"inconclusive"' in response.body
+    assert b"candidate-key" not in response.body
+    assert b"model access denied" not in response.body
+    assert "candidate-key" not in caplog.text
+    assert "model access denied" not in caplog.text
+    assert (await storage.get_user_ai_credentials("alice"))["openai"] == "previous-key"
+
+
+@pytest.mark.asyncio
 async def test_api_status_redacts_and_rejects_unsupported(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "api.db")
     await storage.init_db()
@@ -183,7 +399,8 @@ async def test_api_status_redacts_and_rejects_unsupported(tmp_path, monkeypatch)
         main, "supported_key_providers", AsyncMock(return_value=["custom"])
     )
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
-    body = main.AiCredentialInput(api_key="private-value")
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
+    body = main.AiCredentialInput(api_key="private-value", model="m")
     response = await main.set_user_ai_credential("custom", body, request)
     assert response.headers["cache-control"] == "no-store"
     status = await main.get_user_ai_credentials(request)
@@ -209,13 +426,17 @@ async def test_openai_key_without_server_auth_or_catalog_models(tmp_path, monkey
     ]
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(ai_client, "list_models", AsyncMock(return_value=[]))
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     assert (await main.get_user_ai_credentials(request)).body == (
         b'{"providers":[{"provider":"openai","configured":false}]}'
     )
     await main.set_user_ai_credential(
         "openai",
-        main.AiCredentialInput(api_key="user-key"),  # pragma: allowlist secret
+        main.AiCredentialInput(
+            api_key="user-key",  # pragma: allowlist secret
+            model="m",
+        ),
         request,
     )
     assert (await main.get_user_ai_credentials(request)).body == (
@@ -1007,6 +1228,7 @@ async def test_credential_mutations_require_reviewer(tmp_path, monkeypatch):
     await storage.init_db()
     await storage.create_admin_user("alice")
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     for role in ("viewer", "reviewer", "operator", "admin"):
         request = SimpleNamespace(state=SimpleNamespace(username="alice", role=role))
         await main.get_user_ai_credentials(request)
@@ -1014,7 +1236,8 @@ async def test_credential_mutations_require_reviewer(tmp_path, monkeypatch):
             lambda request=request: main.set_user_ai_credential(
                 "p",
                 main.AiCredentialInput(
-                    api_key="valid-value"  # pragma: allowlist secret
+                    api_key="valid-value",  # pragma: allowlist secret
+                    model="m",
                 ),
                 request,
             ),
@@ -1067,11 +1290,12 @@ async def test_rotating_credential_deletes_sidecar_session(tmp_path, monkeypatch
     )
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
     sidecar = AsyncMock()
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     monkeypatch.setattr("pi_sidecar_client.get_sidecar_client", lambda: sidecar)
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     new_key = "new-value"  # pragma: allowlist secret
     await main.set_user_ai_credential(
-        "p", main.AiCredentialInput(api_key=new_key), request
+        "p", main.AiCredentialInput(api_key=new_key, model="m"), request
     )
     sidecar.delete_session.assert_awaited_once_with("sid")
     assert (await storage.get_chat_messages("job", username="alice"))[0][
@@ -1164,7 +1388,11 @@ async def test_rotating_key_invalidates_only_owners_provider_sessions(
     await storage.init_db()
     await storage.create_admin_user("alice")
     await storage.create_admin_user("bob")
-    for user, provider in (("alice", "p"), ("alice", "other"), ("bob", "p")):
+    for user, provider, sid in (
+        ("alice", "p", "alice-p-sid"),
+        ("alice", "other", "alice-other-sid"),
+        ("bob", "p", "bob-p-sid"),
+    ):
         await storage.add_chat_message(
             job_id="job",
             role="assistant",
@@ -1172,18 +1400,20 @@ async def test_rotating_key_invalidates_only_owners_provider_sessions(
             username=user,
             ai_provider=provider,
             ai_model="m",
-            session_id="sid",
+            session_id=sid,
         )
     revoked = await storage.update_user_ai_credential("alice", "p", "new")
-    assert revoked == ["sid"]
+    assert revoked == ["alice-p-sid"]
     assert [
         m["session_id"]
         for m in await storage.get_chat_messages("job", username="alice")
-    ] == ["", "sid"]
+    ] == ["", "alice-other-sid"]
     assert (await storage.get_chat_messages("job", username="bob"))[0][
         "session_id"
-    ] == "sid"
-    assert await storage.update_user_ai_credential("alice", "other", "key") == ["sid"]
+    ] == "bob-p-sid"
+    assert await storage.update_user_ai_credential("alice", "other", "key") == [
+        "alice-other-sid"
+    ]
     assert await storage.update_user_ai_credential("alice", "other", None) == []
     assert all(
         not m["session_id"]
@@ -1318,13 +1548,14 @@ async def test_unreadable_credential_map_refuses_list_set_delete_and_preserves_d
             )
             await db.commit()
     monkeypatch.setattr(main, "supported_key_providers", AsyncMock(return_value=["p"]))
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     new_key = "new-value"  # pragma: allowlist secret
     with caplog.at_level(logging.WARNING):
         for operation in (
             lambda: main.get_user_ai_credentials(request),
             lambda: main.set_user_ai_credential(
-                "p", main.AiCredentialInput(api_key=new_key), request
+                "p", main.AiCredentialInput(api_key=new_key, model="m"), request
             ),
             lambda: main.delete_user_ai_credential("p", request),
         ):
@@ -1385,14 +1616,15 @@ async def test_js_blank_key_rejected_before_storage(monkeypatch):
         with pytest.raises(HTTPException) as exc:
             await main.set_user_ai_credential(
                 "p",
-                main.AiCredentialInput(api_key=blank),
+                main.AiCredentialInput(api_key=blank, model="m"),
                 SimpleNamespace(state=SimpleNamespace(username="alice", role="admin")),
             )
         assert exc.value.status_code == 400
     update.assert_not_awaited()
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     await main.set_user_ai_credential(
         "p",
-        main.AiCredentialInput(api_key="\u200b\ufefflong-enough"),
+        main.AiCredentialInput(api_key="\u200b\ufefflong-enough", model="m"),
         SimpleNamespace(state=SimpleNamespace(username="alice", role="admin")),
     )
     update.assert_awaited_once()

@@ -6,7 +6,14 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz import storage
-from rootcoz.token_tracking import build_token_usage_summary
+from rootcoz.token_tracking import (
+    attach_failure_usage,
+    build_token_usage_summary,
+    child_usage_scope,
+    failure_group_usage,
+    reanalysis_usage_scope,
+    record_ai_usage,
+)
 
 
 @pytest.fixture
@@ -22,6 +29,618 @@ def _storage(temp_db_path, _init_db):
     """Patch DB_PATH for all storage calls in the test."""
     with patch.object(storage, "DB_PATH", temp_db_path):
         yield
+
+
+@pytest.mark.asyncio
+async def test_group_usage_correlates_concurrent_primary_calls_only(_storage) -> None:
+    from types import SimpleNamespace
+
+    from rootcoz.models import AnalysisResult, FailureAnalysis
+
+    async def call(signature: str, tokens: int) -> None:
+        with failure_group_usage("group-job", signature):
+            await asyncio.sleep(0)
+            usage = SimpleNamespace(
+                provider="claude",
+                model="test",
+                input_tokens=tokens,
+                output_tokens=1,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
+                cost_usd=tokens / 100,
+                duration_ms=10,
+            )
+            await record_ai_usage(
+                "group-job",
+                SimpleNamespace(success=True, usage=usage, text="ok"),
+                "primary",
+                prompt_chars=tokens,
+            )
+            await storage.record_token_usage(
+                "group-job",
+                "claude",
+                "test",
+                "agent_routing",
+                input_tokens=300,
+                cost_usd=3,
+            )
+
+    await asyncio.gather(call("a", 10), call("b", 20))
+    records = await storage.get_token_usage_for_job("group-job")
+    assert sorted(
+        (r["call_type"], r["error_signature"]) for r in records if r["prompt_chars"]
+    ) == [("primary", "a"), ("primary", "b")]
+    assert all(
+        r["error_signature"] == "" for r in records if r["call_type"] == "agent_routing"
+    )
+
+    def failure(name: str, signature: str) -> dict:
+        return FailureAnalysis(
+            test_name=name, error="oops", analysis="ok", error_signature=signature
+        ).model_dump(mode="json")
+
+    result = AnalysisResult(
+        job_id="group-job", status="completed", summary="ok"
+    ).model_dump(mode="json")
+    result["failures"] = [
+        failure("one", "a"),
+        failure("two", "a"),
+        failure("three", "b"),
+        failure("old", "c"),
+    ]
+    await storage.save_result("group-job", status="completed", result=result)
+    saved = (await storage.get_result("group-job"))["result"]
+    assert [
+        f["token_usage"]["total_calls"] if f["token_usage"] else None
+        for f in saved["failures"]
+    ] == [1, 1, 1, None]
+    assert saved["token_usage"]["total_calls"] == len(records)
+    assert saved["token_usage"]["total_cost_usd"] == pytest.approx(6.3)
+    assert saved["failures"][0]["token_usage"]["total_cost_usd"] == pytest.approx(0.1)
+    assert saved["failures"][2]["token_usage"]["total_cost_usd"] == pytest.approx(0.2)
+    assert saved["failures"][0]["token_usage"]["total_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_child_failures_share_group_usage_and_stale_values_are_cleared(
+    _storage,
+) -> None:
+    await storage.record_token_usage(
+        "child",
+        "claude",
+        "test",
+        "primary",
+        input_tokens=7,
+        cost_usd=0.07,
+        error_signature="same",
+    )
+    child = {
+        "failures": [
+            {"error_signature": "same", "token_usage": {"total_calls": 999}},
+            {"error_signature": "other", "token_usage": {"total_calls": 999}},
+        ],
+        "failed_children": [{"failures": [{"error_signature": "same"}]}],
+    }
+    await storage.save_result(
+        "child", status="completed", result={"child_job_analyses": [child]}
+    )
+    failures = (await storage.get_result("child"))["result"]["child_job_analyses"][0]
+    assert failures["failures"][0]["token_usage"]["total_calls"] == 1
+    assert failures["failures"][1]["token_usage"] is None
+    assert (
+        failures["failed_children"][0]["failures"][0]["token_usage"]["total_cost_usd"]
+        == 0.07
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_primary_usage_is_not_attributed(_storage) -> None:
+    from rootcoz.models import AnalysisResult, FailureAnalysis
+
+    result = AnalysisResult(
+        job_id="legacy",
+        status="completed",
+        summary="ok",
+        failures=[
+            FailureAnalysis(
+                test_name="old", error="error", analysis="ok", error_signature="a"
+            )
+        ],
+    ).model_dump(mode="json")
+    await storage.record_token_usage(
+        "legacy",
+        "claude",
+        "test",
+        "primary",
+        cost_usd=2,
+        input_tokens=10,
+    )
+    await storage.save_result("legacy", status="completed", result=result)
+    saved = (await storage.get_result("legacy"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    assert saved["token_usage"]["total_cost_usd"] == 2
+
+
+@pytest.mark.asyncio
+async def test_child_usage_is_scoped_by_child_build_and_signature(_storage) -> None:
+    from types import SimpleNamespace
+
+    usage = SimpleNamespace(
+        provider="claude",
+        model="test",
+        input_tokens=5,
+        output_tokens=1,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        cost_usd=0.05,
+        duration_ms=1,
+    )
+
+    async def record(name: str, build: int) -> None:
+        with child_usage_scope(name, build), failure_group_usage("pipeline", "same"):
+            await asyncio.sleep(0)
+            await record_ai_usage(
+                "pipeline",
+                SimpleNamespace(success=True, usage=usage, text="ok"),
+                "primary",
+            )
+
+    await asyncio.gather(record("alpha", 1), record("beta", 1), record("alpha", 2))
+    records = await storage.get_token_usage_for_job("pipeline")
+    assert {(r["child_job_name"], r["child_build_number"]) for r in records} == {
+        ("alpha", 1),
+        ("beta", 1),
+        ("alpha", 2),
+    }
+    result = {
+        "failures": [{"error_signature": "same"}],
+        "child_job_analyses": [
+            {
+                "job_name": name,
+                "build_number": build,
+                "failures": [{"error_signature": "same"}, {"error_signature": "same"}],
+            }
+            for name, build in [("alpha", 1), ("beta", 1), ("alpha", 2)]
+        ],
+    }
+    await storage.save_result("pipeline", status="completed", result=result)
+    saved = (await storage.get_result("pipeline"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    for child in saved["child_job_analyses"]:
+        assert [f["token_usage"]["total_calls"] for f in child["failures"]] == [1, 1]
+    assert saved["token_usage"]["total_calls"] == 3
+
+
+def test_shared_signature_usage_does_not_mix_children() -> None:
+    records = [
+        {
+            "call_type": "primary",
+            "error_signature": "same",
+            "child_job_name": "a",
+            "child_build_number": 1,
+            "ai_provider": "test",
+            "ai_model": "test",
+            "input_tokens": 2,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 2,
+            "cost_usd": None,
+            "duration_ms": None,
+        },
+    ]
+    result = {
+        "child_job_analyses": [
+            {
+                "job_name": "a",
+                "build_number": 1,
+                "failures": [{"error_signature": "same"}],
+            },
+            {
+                "job_name": "b",
+                "build_number": 1,
+                "failures": [{"error_signature": "same"}],
+            },
+        ]
+    }
+    attach_failure_usage(result, records)
+    assert (
+        result["child_job_analyses"][0]["failures"][0]["token_usage"]["total_calls"]
+        == 1
+    )
+    assert result["child_job_analyses"][1]["failures"][0]["token_usage"] is None
+
+
+@pytest.mark.asyncio
+async def test_reanalysis_replaces_only_target_card_usage_and_keeps_job_totals(
+    _storage,
+) -> None:
+    from types import SimpleNamespace
+
+    usage = SimpleNamespace(
+        provider="claude",
+        model="test",
+        input_tokens=20,
+        output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        cost_usd=0.2,
+        duration_ms=1,
+    )
+    await storage.record_token_usage(
+        "pipeline",
+        "claude",
+        "test",
+        "primary",
+        input_tokens=10,
+        cost_usd=0.1,
+        error_signature="same",
+        child_job_name="child",
+        child_build_number=1,
+    )
+    result = {
+        "failures": [{"id": "parent-id", "error_signature": "same"}],
+        "child_job_analyses": [
+            {
+                "job_name": "child",
+                "build_number": 1,
+                "failures": [
+                    {
+                        "id": "changed",
+                        "error_signature": "same",
+                        "previous_analyses": [{"analysis": "old"}],
+                    },
+                    {"id": "untouched", "error_signature": "same"},
+                ],
+            }
+        ],
+    }
+    with (
+        child_usage_scope("child", 1),
+        reanalysis_usage_scope("changed") as old_attempt,
+        failure_group_usage("pipeline", "same"),
+    ):
+        await record_ai_usage(
+            "pipeline", SimpleNamespace(success=True, usage=usage, text="ok"), "primary"
+        )
+    # A subsequent successful re-analysis replaces the earlier attempt rather than accumulating it.
+    usage.input_tokens = 30
+    with (
+        child_usage_scope("child", 1),
+        reanalysis_usage_scope("changed") as current_attempt,
+        failure_group_usage("pipeline", "same"),
+    ):
+        await record_ai_usage(
+            "pipeline", SimpleNamespace(success=True, usage=usage, text="ok"), "primary"
+        )
+    assert old_attempt != current_attempt
+    records = await storage.get_token_usage_for_job("pipeline")
+    assert [
+        (r["call_type"], r["child_job_name"], r["child_build_number"]) for r in records
+    ] == [
+        ("primary", "child", 1),
+        ("reanalysis", "child", 1),
+        ("reanalysis", "child", 1),
+    ]
+    result["child_job_analyses"][0]["failures"][0]["usage_attempt"] = current_attempt
+    await storage.save_result("pipeline", status="completed", result=result)
+    saved = (await storage.get_result("pipeline"))["result"]
+    child_failures = saved["child_job_analyses"][0]["failures"]
+    assert saved["failures"][0]["token_usage"] is None
+    assert child_failures[0]["token_usage"]["total_input_tokens"] == 30
+    assert child_failures[0]["token_usage"]["total_calls"] == 1
+    assert child_failures[1]["token_usage"]["total_input_tokens"] == 10
+    assert saved["token_usage"]["total_input_tokens"] == 60
+    assert saved["token_usage"]["total_calls"] == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_reanalysis_history_never_attributes_mixed_primary_usage(
+    _storage,
+) -> None:
+    for child_name, tokens in (("", 10), ("runner", 20)):
+        await storage.record_token_usage(
+            "legacy-mixed",
+            "claude",
+            "test",
+            "primary",
+            input_tokens=tokens,
+            error_signature="same",
+            child_job_name=child_name,
+            child_build_number=7 if child_name else 0,
+        )
+    # Older re-analyses wrote primary rows without a failure ID, attempt, or child scope.
+    await storage.record_token_usage(
+        "legacy-mixed",
+        "claude",
+        "test",
+        "primary",
+        input_tokens=30,
+        error_signature="same",
+    )
+    result = {
+        "failures": [
+            {
+                "id": "top",
+                "error_signature": "same",
+                "token_usage": {"total_input_tokens": 999},
+            },
+            {"id": "sibling", "error_signature": "same"},
+        ],
+        "child_job_analyses": [
+            {
+                "job_name": "runner",
+                "build_number": 7,
+                "failures": [
+                    {
+                        "id": "old",
+                        "error_signature": "same",
+                        "previous_analyses": [
+                            {
+                                "analysis": "old",
+                                "token_usage": {"total_input_tokens": 20},
+                            }
+                        ],
+                    },
+                    {"id": "child-sibling", "error_signature": "same"},
+                ],
+            }
+        ],
+    }
+    await storage.save_result("legacy-mixed", status="completed", result=result)
+    saved = (await storage.get_result("legacy-mixed"))["result"]
+    assert [f["token_usage"] for f in saved["failures"]] == [None, None]
+    assert [
+        f["token_usage"]["total_input_tokens"]
+        for f in saved["child_job_analyses"][0]["failures"]
+    ] == [20, 20]
+    assert (
+        saved["child_job_analyses"][0]["failures"][0]["previous_analyses"][0][
+            "token_usage"
+        ]["total_input_tokens"]
+        == 20
+    )
+    assert saved["token_usage"]["total_input_tokens"] == 60
+    assert saved["token_usage"]["total_calls"] == 3
+
+
+@pytest.mark.asyncio
+async def test_failed_legacy_retry_without_history_withholds_card_but_keeps_job_total(
+    _storage,
+) -> None:
+    for tokens in (10, 20):
+        await storage.record_token_usage(
+            "failed-legacy",
+            "claude",
+            "test",
+            "primary",
+            input_tokens=tokens,
+            error_signature="same",
+        )
+    await storage.save_result(
+        "failed-legacy",
+        status="completed",
+        result={"failures": [{"id": "original", "error_signature": "same"}]},
+    )
+    saved = (await storage.get_result("failed-legacy"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    assert saved["token_usage"]["total_input_tokens"] == 30
+    assert saved["token_usage"]["total_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_top_history_does_not_hide_child_original_with_same_signature(
+    _storage,
+) -> None:
+    for child_name, tokens in (("", 10), ("runner", 17)):
+        await storage.record_token_usage(
+            "scoped-history",
+            "claude",
+            "test",
+            "primary",
+            input_tokens=tokens,
+            error_signature="same",
+            child_job_name=child_name,
+            child_build_number=7 if child_name else 0,
+        )
+    await storage.save_result(
+        "scoped-history",
+        status="completed",
+        result={
+            "failures": [
+                {
+                    "error_signature": "same",
+                    "previous_analyses": [{"analysis": "old"}],
+                }
+            ],
+            "child_job_analyses": [
+                {
+                    "job_name": "runner",
+                    "build_number": 7,
+                    "failures": [{"error_signature": "same"}],
+                }
+            ],
+        },
+    )
+    saved = (await storage.get_result("scoped-history"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    assert (
+        saved["child_job_analyses"][0]["failures"][0]["token_usage"][
+            "total_input_tokens"
+        ]
+        == 17
+    )
+    assert saved["token_usage"]["total_input_tokens"] == 27
+
+
+@pytest.mark.asyncio
+async def test_known_archived_snapshot_survives_ambiguous_current_card(
+    _storage,
+) -> None:
+    for tokens in (10, 20):
+        await storage.record_token_usage(
+            "archived-known",
+            "claude",
+            "test",
+            "primary",
+            input_tokens=tokens,
+            error_signature="same",
+        )
+    await storage.save_result(
+        "archived-known",
+        status="completed",
+        result={
+            "failures": [
+                {
+                    "error_signature": "same",
+                    "previous_analyses": [
+                        {"analysis": "old", "token_usage": {"total_input_tokens": 4}}
+                    ],
+                }
+            ]
+        },
+    )
+    saved = (await storage.get_result("archived-known"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    assert (
+        saved["failures"][0]["previous_analyses"][0]["token_usage"][
+            "total_input_tokens"
+        ]
+        == 4
+    )
+    assert (await storage.get_result("archived-known"))["result"]["failures"][0][
+        "previous_analyses"
+    ][0]["token_usage"]["total_input_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_legacy_archived_snapshot_is_not_rewritten_on_read(
+    _storage,
+) -> None:
+    for tokens in (10, 20):
+        await storage.record_token_usage(
+            "archived-mixed",
+            "claude",
+            "test",
+            "primary",
+            input_tokens=tokens,
+            error_signature="same",
+        )
+    await storage.save_result(
+        "archived-mixed",
+        status="completed",
+        result={
+            "failures": [
+                {
+                    "id": "existing-id",
+                    "error_signature": "same",
+                    "usage_attempt": "modern",
+                    "previous_analyses": [
+                        {"analysis": "old", "token_usage": {"total_input_tokens": 30}}
+                    ],
+                }
+            ]
+        },
+    )
+    # A previously persisted legacy sum is not proof of an exact per-attempt
+    # amount. Reads must not overwrite a stored snapshot without provenance.
+    async with storage._connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT result_json FROM results WHERE job_id = ?", ("archived-mixed",)
+            )
+        ).fetchone()
+    before = row["result_json"]
+    saved = (await storage.get_result("archived-mixed"))["result"]
+    assert (
+        saved["failures"][0]["previous_analyses"][0]["token_usage"][
+            "total_input_tokens"
+        ]
+        == 30
+    )
+    async with storage._connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT result_json FROM results WHERE job_id = ?", ("archived-mixed",)
+            )
+        ).fetchone()
+    assert row["result_json"] == before
+
+
+@pytest.mark.asyncio
+async def test_child_legacy_history_can_contaminate_unscoped_top_level_only(
+    _storage,
+) -> None:
+    for child_name, tokens in (("", 20), ("runner", 17)):
+        await storage.record_token_usage(
+            "child-history",
+            "claude",
+            "test",
+            "primary",
+            input_tokens=tokens,
+            error_signature="same",
+            child_job_name=child_name,
+            child_build_number=7 if child_name else 0,
+        )
+    await storage.save_result(
+        "child-history",
+        status="completed",
+        result={
+            "failures": [{"error_signature": "same"}],
+            "child_job_analyses": [
+                {
+                    "job_name": "runner",
+                    "build_number": 7,
+                    "failures": [
+                        {
+                            "error_signature": "same",
+                            "previous_analyses": [{"analysis": "older"}],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    saved = (await storage.get_result("child-history"))["result"]
+    assert saved["failures"][0]["token_usage"] is None
+    assert (
+        saved["child_job_analyses"][0]["failures"][0]["token_usage"][
+            "total_input_tokens"
+        ]
+        == 17
+    )
+    assert saved["token_usage"]["total_input_tokens"] == 37
+
+
+@pytest.mark.asyncio
+async def test_failed_reanalysis_keeps_prior_card_usage(_storage) -> None:
+    await storage.record_token_usage(
+        "job",
+        "claude",
+        "test",
+        "primary",
+        input_tokens=10,
+        error_signature="signature",
+    )
+    with reanalysis_usage_scope("failure-id") as attempt:
+        await storage.record_token_usage(
+            "job",
+            "claude",
+            "test",
+            "reanalysis",
+            input_tokens=30,
+            error_signature="signature",
+            failure_id="failure-id",
+            usage_attempt=attempt,
+        )
+    await storage.save_result(
+        "job",
+        status="completed",
+        result={"failures": [{"id": "failure-id", "error_signature": "signature"}]},
+    )
+    saved = (await storage.get_result("job"))["result"]
+    assert saved["failures"][0]["token_usage"]["total_input_tokens"] == 10
+    assert saved["token_usage"]["total_input_tokens"] == 40
 
 
 class TestRecordTokenUsage:
@@ -92,6 +711,38 @@ class TestRecordTokenUsage:
         )
         records = await storage.get_token_usage_for_job("job-3")
         assert records[0]["total_tokens"] == 450
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [
+        ([], None),
+        (["user"], "user"),
+        (["server"], "server"),
+        (["user", "server"], "mixed"),
+        (["user", "server", "unknown"], "mixed"),
+        (["user", "unknown"], "unknown"),
+        (["server", "unknown"], "unknown"),
+        (["unknown"], "unknown"),
+        ([""], "unknown"),
+        (["unexpected"], "unknown"),
+    ],
+)
+async def test_job_totals_credential_source(_storage, sources, expected) -> None:
+    for source in sources:
+        await storage.record_token_usage(
+            "credential-job", "gemini", "test", "analysis", credential_source=source
+        )
+    totals = await storage.get_job_token_usage_totals("credential-job")
+    if expected is None:
+        assert totals is None
+    else:
+        assert totals is not None
+        assert totals["credential_source"] == expected
+        detailed = await build_token_usage_summary("credential-job")
+        assert detailed is not None
+        assert detailed.credential_source == expected
 
 
 class TestGetTokenUsageForJob:

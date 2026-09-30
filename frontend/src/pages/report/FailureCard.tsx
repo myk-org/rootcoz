@@ -17,6 +17,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
+import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { LinkedText } from '@/components/shared/LinkedText'
 import { PeerDebateSection } from './PeerDebateSection'
 import { ReviewToggle } from './ReviewToggle'
@@ -223,6 +224,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const { copiedKey: copiedSection, copy: copyToClipboard } = useClipboard()
 
   const rep = group.tests[0]
+  const usage = rep.token_usage
   const analysis = rep.analysis
 
   const { showSuggestion: showBugReviewSuggestion, loading: bugReviewLoading, error: bugReviewError, maybeSuggest: maybeSuggestBugReview, dismissSuggestion: dismissBugReviewSuggestion, confirmSuggestion: confirmBugReviewSuggestion } = useReviewSuggestion({
@@ -495,6 +497,14 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               </div>
             )}
 
+            {usage && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-text-tertiary">
+                <span>{group.count > 1 ? 'Shared group usage' : 'Primary AI usage'}</span>
+                <TokenUsageBadge usage={usage} />
+                <span>Job total includes other AI calls; card usage is not additive.</span>
+              </div>
+            )}
+
             {/* Error */}
             <div>
               <CopyableSectionHeader title="Error" content={rep.error} sectionId="error" copiedSection={copiedSection} onCopy={copyToClipboard} />
@@ -623,7 +633,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             })()}
 
             {/* Peer debate trail */}
-            {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} />}
+            {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} primaryUsage={usage} />}
 
             {/* ACTIONS line: AI selector, Re-analyze, issue buttons, include links */}
             <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border-muted">

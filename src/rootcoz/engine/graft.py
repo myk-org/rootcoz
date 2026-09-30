@@ -55,9 +55,13 @@ def _disk_size(
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("graph deadline")
             entry = Path(directory) / file
-            if entry.is_symlink() and reject_symlinks:
-                raise ValueError("graph contains symlink")
-            total += entry.lstat().st_size
+            try:
+                if entry.is_symlink() and reject_symlinks:
+                    raise ValueError("graph contains symlink")
+                total += entry.lstat().st_size
+            except FileNotFoundError:
+                # A peer build may replace this graph while counting workspace usage.
+                continue
             if limit and total > limit:
                 return total
     return total
@@ -67,12 +71,18 @@ def _workspace_graph_size(root: Path) -> int:
     """Measure graph storage without following symlinks in unrelated directories."""
     if not root.is_dir() or root.is_symlink():
         return 0
-    return sum(
-        _disk_size(item, limit=0, reject_symlinks=False)
-        if item.is_dir() and not item.is_symlink()
-        else item.lstat().st_size
-        for item in root.iterdir()
-    )
+    total = 0
+    for item in root.iterdir():
+        try:
+            total += (
+                _disk_size(item, limit=0, reject_symlinks=False)
+                if item.is_dir() and not item.is_symlink()
+                else item.lstat().st_size
+            )
+        except FileNotFoundError:
+            # Another repo's rebuild can remove its old graph during this scan.
+            continue
+    return total
 
 
 def _bounded(

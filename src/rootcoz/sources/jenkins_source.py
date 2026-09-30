@@ -28,7 +28,6 @@ from rootcoz.engine.core import (
     analyze_failure_group,
     derive_error_details,
     extract_relevant_console_lines,
-    format_exception_with_type,
     get_failure_signature,
 )
 from rootcoz.error_messages import make_user_friendly_error
@@ -49,6 +48,7 @@ from rootcoz.sources.base import (
     run_console_only_analysis,
     write_console_output_file,
 )
+from rootcoz.token_tracking import child_usage_scope
 from rootcoz.utils import (
     JENKINS_CONNECTIVITY_EXCEPTIONS,
     is_jenkins_connectivity_error,
@@ -116,17 +116,17 @@ def _normalize_child_results(
 ) -> list[ChildJobResult]:
     """Convert parallel child-analysis results into ChildJobResult objects.
 
-    Exceptions are turned into stub analyses with a descriptive ``note``.
+    Exceptions become failed stub analyses with a safe ``note``.
     """
     bundles: list[ChildJobResult] = []
     for i, result in enumerate(child_results):
         if isinstance(result, Exception):
             child_name, child_num = failed_children[i]
             logger.error(
-                "Child job %s #%d analysis failed: %s",
+                "Child job %s #%d analysis failed (%s)",
                 child_name,
                 child_num,
-                format_exception_with_type(result),
+                type(result).__name__,
             )
             bundles.append(
                 ChildJobResult(
@@ -134,7 +134,8 @@ def _normalize_child_results(
                         job_name=child_name,
                         build_number=child_num,
                         jenkins_url="",
-                        note=make_user_friendly_error(result),
+                        note="Child analysis failed; check server logs for details",
+                        all_groups_failed=True,
                     )
                 )
             )
@@ -1306,7 +1307,15 @@ async def _analyze_grouped_failures(
     group_list = list(failure_groups.values())
     for i, result in enumerate(group_results):
         if isinstance(result, Exception):
+            from rootcoz.engine.chat import safe_exception_frames
+
             failed_groups += 1
+            logger.error(
+                "Child failure group %d raised %s\n%s",
+                i + 1,
+                type(result).__name__,
+                safe_exception_frames(result),
+            )
             for tf in group_list[i]:
                 failures.append(
                     FailureAnalysis(
@@ -1314,7 +1323,7 @@ async def _analyze_grouped_failures(
                         error=tf.error_message,
                         error_signature=get_failure_signature(tf),
                         analysis=AnalysisDetail(
-                            details=f"Analysis failed: {format_exception_with_type(result)}"
+                            details="Analysis failed; check server logs for details"
                         ),
                     )
                 )
@@ -1396,6 +1405,15 @@ async def _ingest_child_job_inner(
             failed_count=failed_count,
         ),
         test_entry_scopes=own_scopes,
+    )
+
+
+def child_has_successful_analysis(child: ChildJobAnalysis) -> bool:
+    """Whether a child tree contains at least one successful AI analysis."""
+    if child.all_groups_failed or child.note:
+        return False
+    return bool(child.failures) or any(
+        child_has_successful_analysis(nested) for nested in child.failed_children
     )
 
 
@@ -1508,33 +1526,41 @@ async def _analyze_child_job_inner(
 
     # If we have test failures, group by signature and analyze unique groups
     if test_failures:
-        failures, unique_errors, failed_groups = await _analyze_grouped_failures(
-            test_failures,
-            console_context=console_context,
-            repo_path=repo_path,
-            artifacts_context=child_artifacts_context,
-            group_label_prefix=job_name,
-            additional_repos=additional_repos,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=ai_call_timeout,
-            custom_prompt=custom_prompt,
-            server_url=server_url,
-            job_id=job_id,
-            peer_ai_configs=peer_ai_configs,
-            peer_analysis_max_rounds=peer_analysis_max_rounds,
-            max_concurrent_ai_calls=max_concurrent_ai_calls,
-            auth_header=auth_header,
-        )
+        with child_usage_scope(job_name, build_number):
+            failures, unique_errors, failed_groups = await _analyze_grouped_failures(
+                test_failures,
+                console_context=console_context,
+                repo_path=repo_path,
+                artifacts_context=child_artifacts_context,
+                group_label_prefix=job_name,
+                additional_repos=additional_repos,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=ai_call_timeout,
+                custom_prompt=custom_prompt,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=peer_analysis_max_rounds,
+                max_concurrent_ai_calls=max_concurrent_ai_calls,
+                auth_header=auth_header,
+            )
 
         # Propagate all-failed-groups note
         if unique_errors > 0 and failed_groups == unique_errors:
+            logger.warning(
+                "All %d analysis groups failed for child %s #%d",
+                unique_errors,
+                job_name,
+                build_number,
+            )
             return ChildJobResult(
                 analysis=ChildJobAnalysis(
                     job_name=job_name,
                     build_number=build_number,
                     jenkins_url=jenkins_url,
                     note=f"All {unique_errors} analysis group(s) failed",
+                    all_groups_failed=True,
                     failures=failures,
                     passed_count=_passed_count,
                     skipped_count=_skipped_count,
@@ -1570,38 +1596,39 @@ async def _analyze_child_job_inner(
         )
 
     # No structured test failures - fall back to single AI analysis of console output
-    success, failures, error_text = await run_console_only_analysis(
-        test_name=f"{job_name}#{build_number}",
-        console_context=console_context,
-        artifacts_context=child_artifacts_context,
-        repo_path=repo_path,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        ai_call_timeout=ai_call_timeout,
-        custom_prompt=custom_prompt,
-        server_url=server_url,
-        job_id=job_id,
-        additional_repos=additional_repos,
-        auth_header=auth_header,
-        call_type="child_console",
-        peer_ai_configs=peer_ai_configs,
-        peer_analysis_max_rounds=peer_analysis_max_rounds,
-        max_concurrent_ai_calls=max_concurrent_ai_calls,
-    )
+    with child_usage_scope(job_name, build_number):
+        success, failures, _error_text = await run_console_only_analysis(
+            test_name=f"{job_name}#{build_number}",
+            console_context=console_context,
+            artifacts_context=child_artifacts_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=ai_call_timeout,
+            custom_prompt=custom_prompt,
+            server_url=server_url,
+            job_id=job_id,
+            additional_repos=additional_repos,
+            auth_header=auth_header,
+            call_type="child_console",
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+        )
 
     if not success:
         logger.error(
-            "Console-only analysis failed for %s #%d: %s",
+            "Console-only analysis failed for %s #%d",
             job_name,
             build_number,
-            error_text,
         )
         return ChildJobResult(
             analysis=ChildJobAnalysis(
                 job_name=job_name,
                 build_number=build_number,
                 jenkins_url=jenkins_url,
-                note=make_user_friendly_error(error_text),
+                note="Child console analysis failed; check server logs for details",
+                all_groups_failed=True,
                 passed_count=_passed_count,
                 skipped_count=_skipped_count,
                 failed_count=_failed_count,

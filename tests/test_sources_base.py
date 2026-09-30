@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+import threading
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from rootcoz.sources.base import (
     CISource,
@@ -12,6 +18,179 @@ from rootcoz.sources.base import (
 )
 from rootcoz.sources.jenkins_source import JenkinsSource
 from rootcoz.sources.prow_source import ProwSource
+
+
+@pytest.mark.asyncio
+async def test_workspace_clone_reports_test_repo_start_and_end(tmp_path: Path) -> None:
+    from rootcoz.sources.base import setup_analysis_workspace
+
+    manager = MagicMock()
+    manager.create_workspace.return_value = tmp_path
+    started = asyncio.Event()
+    release = asyncio.Event()
+    events: list[tuple[str, bool]] = []
+
+    async def clone(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+
+    async def progress(_job_id: str, name: str, active: bool, **_kwargs) -> None:
+        events.append((name, active))
+
+    with (
+        patch("rootcoz.sources.base.asyncio.to_thread", side_effect=clone),
+        patch("rootcoz.engine.core.safe_update_clone_progress", side_effect=progress),
+    ):
+        task = asyncio.create_task(
+            setup_analysis_workspace(
+                manager, tests_repo_url="https://example.com/tests", job_id="job"
+            )
+        )
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            assert events == [("tests", True)]
+        finally:
+            release.set()
+        await task
+    assert events == [("tests", True), ("tests", False)]
+
+
+@pytest.mark.asyncio
+async def test_workspace_failed_clone_reports_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from rootcoz import storage
+    from rootcoz.sources.base import setup_analysis_workspace
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {})
+    manager = MagicMock()
+    manager.create_workspace.return_value = tmp_path
+    manager.clone_into.side_effect = RuntimeError("clone failed")
+    await setup_analysis_workspace(
+        manager,
+        tests_repo_url="https://user:secret@example.com/tests",  # pragma: allowlist secret
+        tests_repo_ref="main",
+        job_id="job",
+    )
+    result = (await storage.get_result("job"))["result"]
+    assert result["cloning_repos"] == []
+    assert [(e["repo"], e["state"]) for e in result["progress_log"]] == [
+        ("tests", "cloning"),
+        ("tests", "failed"),
+    ]
+    assert [(e["url"], e["ref"]) for e in result["progress_log"]] == [
+        ("https://example.com/tests", "main"),
+        ("https://example.com/tests", "main"),
+    ]
+    assert "secret" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_workspace_cancelled_clone_reports_cancelled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from rootcoz import storage
+    from rootcoz.sources.base import setup_analysis_workspace
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {})
+    manager = MagicMock()
+    manager.create_workspace.return_value = tmp_path
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def clone(*_args, **_kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+
+    manager.clone_into.side_effect = clone
+    task = asyncio.create_task(
+        setup_analysis_workspace(
+            manager, tests_repo_url="https://example.com/tests", job_id="job"
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    result = (await storage.get_result("job"))["result"]
+    assert result["cloning_repos"] == []
+    assert [(e["repo"], e["state"]) for e in result["progress_log"]] == [
+        ("tests", "cloning"),
+        ("tests", "cancelled"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+@pytest.mark.parametrize("worker_fails", [False, True])
+async def test_cancelled_thread_clone_finishes_before_progress_and_cleanup(
+    tmp_path: Path, repeat_cancel: bool, worker_fails: bool, caplog
+) -> None:
+    from rootcoz.sources.base import setup_analysis_workspace
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    events: list[str] = []
+    manager = MagicMock()
+    manager.create_workspace.return_value = workspace
+
+    def clone(_url: str, target: Path, **_kwargs) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "test did not release clone thread"
+        assert workspace.exists(), "workspace was removed while clone was running"
+        if worker_fails:
+            events.append("worker finished")
+            raise RuntimeError("secret=not-for-logs")
+        target.mkdir()
+        events.append("worker finished")
+
+    def cleanup() -> None:
+        events.append("cleanup")
+        shutil.rmtree(workspace)
+
+    async def progress(_job: str, _repo: str, active: bool, **_kwargs) -> None:
+        events.append("cloning" if active else "cancelled")
+
+    manager.clone_into.side_effect = clone
+    manager.cleanup.side_effect = cleanup
+
+    async def caller() -> None:
+        try:
+            await setup_analysis_workspace(
+                manager, tests_repo_url="https://example.com/tests", job_id="job"
+            )
+        finally:
+            manager.cleanup()
+
+    with patch("rootcoz.engine.core.safe_update_clone_progress", side_effect=progress):
+        task = asyncio.create_task(caller())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            await asyncio.sleep(0.02)
+            if repeat_cancel:
+                task.cancel()
+                await asyncio.sleep(0.02)
+            assert events == ["cloning"]
+            assert not task.done()
+            assert workspace.exists()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+    assert events == ["cloning", "worker finished", "cancelled", "cleanup"]
+    assert "not-for-logs" not in caplog.text
 
 
 class TestLinkArtifactsToWorkspace:

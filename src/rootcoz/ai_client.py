@@ -39,6 +39,7 @@ force_server_credentials: ContextVar[bool] = ContextVar(
 _selected_credential_source: ContextVar[str] = ContextVar(
     "selected_credential_source", default=""
 )
+chat_session_source: ContextVar[str] = ContextVar("chat_session_source", default="")
 model_listing_status: ContextVar[dict[str, dict[str, bool]] | None] = ContextVar(
     "model_listing_status", default=None
 )
@@ -217,6 +218,79 @@ async def list_models(provider: str = "") -> list[dict[str, Any]]:
 _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
     Path(__file__).with_name("pi_model_suggestions.json").read_text()
 )
+
+
+async def verify_ai_key(provider: str, model: str, key: str) -> str:
+    """Probe a submitted key with a real sidecar turn, without storing it."""
+    client = get_sidecar_client()
+    session_id = None
+    outcome = "inconclusive"
+
+    def auth_error(response: httpx.Response) -> bool:
+        if response.status_code == 401:
+            return True
+        try:
+            payload = response.json()
+            error = (
+                str(payload.get("error", "")).lower()
+                if isinstance(payload, dict)
+                else ""
+            )
+        except ValueError:
+            return False
+        return any(marker in error for marker in ("invalid_api_key", "invalid api key"))
+
+    try:
+        response = await client._client.post(
+            "/sessions",
+            json={
+                "provider": provider,
+                "model": model,
+                "api_key": key,
+                "system_prompt": "Reply briefly.",
+                "cwd": tempfile.gettempdir(),
+                "tools": [],
+            },
+            timeout=30,
+        )
+        if auth_error(response):
+            outcome = "rejected"
+        elif response.status_code in (200, 201):
+            session_id = response.json()["session_id"]
+            result = await client._client.post(
+                f"/sessions/{quote(session_id, safe='')}/prompt",
+                json={"message": "Say OK."},
+                timeout=30,
+            )
+            if auth_error(result):
+                outcome = "rejected"
+            elif result.status_code == 200:
+                data = result.json()
+                if (
+                    not data.get("error")
+                    and isinstance(data.get("text"), str)
+                    and data["text"].strip()
+                ):
+                    outcome = "accepted"
+    except (
+        httpx.HTTPError,
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as _exc:
+        pass  # Transport and malformed responses cannot prove a key is bad.
+    finally:
+        if session_id:
+            try:
+                await client.delete_session(session_id)
+            except (httpx.HTTPError, OSError, RuntimeError, ValueError) as _exc:
+                logger.warning("Unable to clean up credential verification session")
+        logger.info(
+            "AI credential verification: provider=%s outcome=%s", provider, outcome
+        )
+    return outcome
 
 
 async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
@@ -930,7 +1004,9 @@ async def call_ai(
                 text="AI session unavailable",
                 error="AI session unavailable",
             )
-        if source == "unknown":
+        if source == "unknown" or (
+            chat_session_source.get() and source != chat_session_source.get()
+        ):
             return AIResult(
                 success=False,
                 text="AI session unavailable",
@@ -938,6 +1014,13 @@ async def call_ai(
             )
     else:
         source = "user" if key is not None else "server"
+        if chat_session_source.get() and source != chat_session_source.get():
+            logger.info("Chat AI call rejected: selected credential source unavailable")
+            return AIResult(
+                success=False,
+                text="Chat credential unavailable; Start a new chat",
+                error="Chat credential unavailable; Start a new chat",
+            )
     if source == "server":
         await require_server_provider_grant()
     if not session_id and source == "server":
@@ -983,6 +1066,16 @@ async def call_ai(
                 success=False,
                 text="AI session unavailable",
                 error="AI session unavailable",
+            )
+    if source == "server" and result.success and chat_session_source.get():
+        try:
+            await require_server_provider_grant()
+        except ValueError:
+            logger.info("Chat AI reply discarded after server grant changed")
+            return AIResult(
+                success=False,
+                text="Server provider access requires an administrator grant",
+                error="Server provider access requires an administrator grant",
             )
     result.credential_source = source
     if not session_id and result.session_id and key is None:

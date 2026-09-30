@@ -35,7 +35,7 @@ function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<Ca
   if (inflight) return inflight
   const generation = catalogGeneration
   const req = api
-    .get<AiModelsResponse>(forceServer ? '/api/ai-models?force_server_credentials=true' : '/api/ai-models')
+    .get<AiModelsResponse>(`/api/ai-models?force_server_credentials=${forceServer}`)
     .then((res) => {
       const providers = res.providers ?? {}
       const providerKeys = Object.keys(providers)
@@ -147,9 +147,13 @@ export function useProviderOptions(
   }, [providerKeys, currentKey, providerStatus])
 }
 
-/** Cursor auth banner copy when provider_status.cursor.ok === false. */
-export function useCursorAuthStatus(): ProviderStatus | null {
-  const { providerStatus } = useProviderCatalog()
+/**
+ * Cursor auth banner copy when provider_status.cursor.ok === false.
+ * Pass the caller's credential mode so the banner matches the catalog the
+ * caller actually selects models from.
+ */
+export function useCursorAuthStatus(forceServer = false): ProviderStatus | null {
+  const { providerStatus } = useProviderCatalog(forceServer)
   const st = providerStatus.cursor
   if (!st || st.ok) return null
   return st

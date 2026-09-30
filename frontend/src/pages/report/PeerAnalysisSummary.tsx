@@ -14,6 +14,7 @@ interface FailureWithDebate {
   siblingTestNames: string[]
   jobLabel: string  // e.g. "job-name #42" or empty for top-level
   debate: PeerDebate
+  primaryUsage?: FailureAnalysis['token_usage']
 }
 
 /** Recursively collect failures with peer_debate, deduplicating by error_signature.
@@ -41,6 +42,7 @@ function collectDebateFailures(
         siblingTestNames: [],
         jobLabel,
         debate: f.peer_debate,
+        primaryUsage: f.token_usage,
       })
     }
   }
@@ -156,8 +158,8 @@ export function PeerAnalysisSummary({
       {/* Expanded content: per-failure debate timeline */}
       {expanded && (
         <div className="border-t border-border-muted p-4 space-y-4">
-          {debateFailures.map(({ id, testName, siblingTestNames, jobLabel, debate }) => (
-            <DebateEntry key={id} testName={testName} siblingTestNames={siblingTestNames} jobLabel={jobLabel} debate={debate} repoUrls={repoUrls} />
+          {debateFailures.map(({ id, testName, siblingTestNames, jobLabel, debate, primaryUsage }) => (
+            <DebateEntry key={id} testName={testName} siblingTestNames={siblingTestNames} jobLabel={jobLabel} debate={debate} primaryUsage={primaryUsage} repoUrls={repoUrls} />
           ))}
         </div>
       )}
@@ -166,7 +168,7 @@ export function PeerAnalysisSummary({
 }
 
 /** A single failure's debate entry within the summary. */
-function DebateEntry({ testName, siblingTestNames, jobLabel, debate, repoUrls }: { testName: string; siblingTestNames: string[]; jobLabel: string; debate: PeerDebate; repoUrls: RepoUrl[] }) {
+function DebateEntry({ testName, siblingTestNames, jobLabel, debate, primaryUsage, repoUrls }: { testName: string; siblingTestNames: string[]; jobLabel: string; debate: PeerDebate; primaryUsage?: FailureAnalysis['token_usage']; repoUrls: RepoUrl[] }) {
   const [timelineOpen, setTimelineOpen] = useState(false)
   const groupedRounds = useMemo(() => groupPeerRounds(debate.rounds), [debate.rounds])
 
@@ -224,8 +226,8 @@ function DebateEntry({ testName, siblingTestNames, jobLabel, debate, repoUrls }:
                 Round {roundNum}
               </p>
               <div className="space-y-2">
-                {entries.map((entry) => (
-                  <PeerRoundEntry key={`r${roundNum}-${entry.role}-${entry.ai_provider}-${entry.ai_model}`} entry={entry} repoUrls={repoUrls} compact />
+                {entries.map((entry, index) => (
+                  <PeerRoundEntry key={`r${roundNum}-${index}`} entry={entry} repoUrls={repoUrls} primaryUsage={primaryUsage} compact />
                 ))}
               </div>
             </div>

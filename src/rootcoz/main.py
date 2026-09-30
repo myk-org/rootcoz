@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import copy
+import hashlib
 import hmac
 import json
 import logging
@@ -102,10 +103,12 @@ from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
     encrypt_sensitive_fields,
+    get_hmac_secret,
     strip_sensitive_from_response,
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
+    _failed_group_analyses,
     analyze_failure_group,
     clone_additional_repos,
     copy_rootcoz_pi_resources,
@@ -113,6 +116,7 @@ from rootcoz.engine.core import (
     get_failure_signature,
     resolve_additional_repos,
     run_orchestrated_analysis,
+    safe_update_clone_progress,
     safe_update_progress,
     set_progress_callback,
 )
@@ -141,6 +145,7 @@ from rootcoz.models import (
     BaseAnalysisRequest,
     BulkDeleteRequest,
     BulkJobMetadataRequest,
+    ChatInitRequest,
     ChatMessageRequest,
     ChildJobAnalysis,
     ClassifyTestRequest,
@@ -158,6 +163,7 @@ from rootcoz.models import (
     OverrideClassificationRequest,
     OverridePatternRequest,
     PreviewIssueRequest,
+    ProductBugReport,
     PushSubscriptionRequest,
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
@@ -239,7 +245,12 @@ from rootcoz.storage import (
     stamp_build_url,
     update_status,
 )
-from rootcoz.token_tracking import build_token_usage_summary, set_usage_callback
+from rootcoz.token_tracking import (
+    build_token_usage_summary,
+    child_usage_scope,
+    reanalysis_usage_scope,
+    set_usage_callback,
+)
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -2703,6 +2714,17 @@ async def _enrich_result_with_jira(
         return
 
     all_failures = _collect_all_failures(failures)
+    if not any(
+        isinstance(failure.analysis.product_bug_report, ProductBugReport)
+        and failure.analysis.product_bug_report.jira_search_keywords
+        for failure in all_failures
+    ):
+        logger.debug(
+            "Skipping Jira enrichment without product bug keywords for job=%s", job_id
+        )
+        return
+    await safe_update_progress(job_id, "enriching_jira")
+    logger.info("Enriching failures with Jira for job=%s", job_id)
     await enrich_with_jira_matches(
         all_failures,
         settings,
@@ -2788,6 +2810,14 @@ async def _auto_assign_metadata(
         )
 
 
+async def _ai_admin_role_current(username: str) -> bool:
+    """Check the live role, not a role captured when chat was queued."""
+    if username == "admin":  # Bootstrap admin has no users row.
+        return True
+    user = await storage.get_user_by_username(username)
+    return bool(user and user["role"] == "admin")
+
+
 async def _create_ai_auth_header(username: str, is_admin: bool = False) -> str:
     """Create a short-lived session token for AI internal API calls.
 
@@ -2796,11 +2826,20 @@ async def _create_ai_auth_header(username: str, is_admin: bool = False) -> str:
     if not username:
         return ""
     try:
+        if is_admin and not await _ai_admin_role_current(username):
+            logger.info("AI admin session denied: user %s is no longer admin", username)
+            return ""
         session_token = await storage.create_session(
             username,
             is_admin=is_admin,
             ttl_hours=_AI_SESSION_TTL_HOURS,
         )
+        if is_admin and not await _ai_admin_role_current(username):
+            await storage.delete_session(session_token)
+            logger.info(
+                "AI admin session discarded: user %s is no longer admin", username
+            )
+            return ""
         return f"Bearer {session_token}"
     except Exception:
         logger.warning("Failed to create AI session for history access", exc_info=True)
@@ -3519,8 +3558,15 @@ async def _run_per_group_analysis(
     Returns:
         Flat list of FailureAnalysis objects from all groups.
     """
-    coroutines: list[Coroutine[Any, Any, Any]] = [
-        analyze_failure_group(
+
+    async def _analyze_group(group_failures: list[Any], number: int) -> list[Any]:
+        await safe_update_progress(
+            job_id, f"analyzing_failures (group {number}/{len(groups)})"
+        )
+        logger.info(
+            "Analyzing fallback group %d/%d for job=%s", number, len(groups), job_id
+        )
+        return await analyze_failure_group(
             failures=group_failures,
             console_context=console_context,
             repo_path=repo_path,
@@ -3538,7 +3584,10 @@ async def _run_per_group_analysis(
             auth_header=auth_header,
             all_groups=groups,
         )
-        for _sig, group_failures in groups.items()
+
+    coroutines: list[Coroutine[Any, Any, Any]] = [
+        _analyze_group(group_failures, number)
+        for number, group_failures in enumerate(groups.values(), 1)
     ]
 
     results = await run_parallel_with_limit(
@@ -3550,12 +3599,23 @@ async def _run_per_group_analysis(
         len(groups),
     )
 
-    all_analyses: list[Any] = []
-    for result in results:
+    from rootcoz.engine.chat import safe_exception_frames
+
+    all_analyses: list[FailureAnalysis] = []
+    for (signature, failures), result in zip(groups.items(), results):
         if isinstance(result, Exception):
-            logger.error("Failed to analyze failure group: %s", result, exc_info=result)
-        else:
+            logger.error(
+                "Failed to analyze fallback group %s: %s\n%s",
+                signature,
+                type(result).__name__,
+                safe_exception_frames(result),
+            )
+            all_analyses.extend(_failed_group_analyses(signature, failures))
+        elif result:
             all_analyses.extend(result)
+        else:
+            logger.warning("Fallback group %s returned no analyses", signature)
+            all_analyses.extend(_failed_group_analyses(signature, failures))
     return all_analyses
 
 
@@ -3578,6 +3638,7 @@ async def _analyze_failures_or_exit(
     auth_header: str,
     groups: dict[str, list[Any]],
     source_result: CISourceResult | None,
+    child_job_analyses: list[ChildJobAnalysis] | None = None,
     extra_labels: list[str] | None = None,
 ) -> tuple[list[Any], list[Any], int, list[CrossFailurePattern]] | None:
     """Resolve console-only / no-failure / junit analysis paths.
@@ -3700,12 +3761,16 @@ async def _analyze_failures_or_exit(
             peer_ai_configs=peer_ai_configs,
             peer_analysis_max_rounds=merged.peer_analysis_max_rounds,
         )
-    except Exception:
-        logger.exception(
-            "Orchestrated analysis failed for job_id=%s; "
-            "falling back to per-group analysis",
+    except (RuntimeError, ValueError, OSError, TypeError) as exc:
+        from rootcoz.engine.chat import safe_exception_frames
+
+        logger.warning(
+            "Orchestrated analysis failed for job_id=%s; falling back to per-group analysis (%s)\n%s",
             job_id,
+            type(exc).__name__,
+            safe_exception_frames(exc),
         )
+        logger.debug("Retrying analysis per group for job_id=%s", job_id)
         try:
             all_analyses = await _run_per_group_analysis(
                 groups=groups,
@@ -3724,17 +3789,27 @@ async def _analyze_failures_or_exit(
                 max_concurrent_ai_calls=merged.max_concurrent_ai_calls,
                 auth_header=auth_header,
             )
-        except Exception:
-            logger.exception(
-                "Fallback per-group analysis also failed for job_id=%s",
+        except (RuntimeError, ValueError, OSError, TypeError) as fallback_exc:
+            logger.error(
+                "Fallback per-group analysis failed for job_id=%s (%s)\n%s",
                 job_id,
+                type(fallback_exc).__name__,
+                safe_exception_frames(fallback_exc),
             )
-            all_analyses = []
+            all_analyses = [
+                analysis
+                for signature, failures in groups.items()
+                for analysis in _failed_group_analyses(signature, failures)
+            ]
 
     unique_errors = len(groups)
 
-    # If no analyses were produced, treat the entire job as failed
-    if not all_analyses:
+    # Placeholders keep failed tests visible but are not successful analyses.
+    from rootcoz.sources.jenkins_source import child_has_successful_analysis
+
+    if not any(not _is_failed_analysis(a) for a in all_analyses) and not any(
+        child_has_successful_analysis(c) for c in (child_job_analyses or [])
+    ):
         error_msg = (
             f"All failure group(s) failed during analysis "
             f"({len(test_failures)} test failures, {unique_errors} unique errors)"
@@ -3743,13 +3818,21 @@ async def _analyze_failures_or_exit(
         fail_result = FailureAnalysisResult(
             job_id=job_id,
             status="failed",
-            summary=make_user_friendly_error(error_msg),
+            summary=error_msg,
             ai_provider=ai_provider,
             ai_model=ai_model,
+            failures=all_analyses,
         )
         fail_data = fail_result.model_dump(mode="json")
         fail_data["error"] = fail_result.summary
         fail_data["job_name"] = display_name
+        if child_job_analyses:
+            fail_data["child_job_analyses"] = [
+                c.model_dump(mode="json") for c in child_job_analyses
+            ]
+        fail_data["failed_analysis_groups"] = len(groups) + _count_failed_child_groups(
+            child_job_analyses or []
+        )
         _stamp_result_metadata(fail_data, source_result)
         await _preserve_request_params(job_id, fail_data)
         await _attach_token_usage(job_id, fail_data)
@@ -3761,6 +3844,30 @@ async def _analyze_failures_or_exit(
         return None
 
     return all_analyses, test_failures, unique_errors, cross_failure_patterns
+
+
+def _is_failed_analysis(failure: FailureAnalysis) -> bool:
+    """Identify the placeholder produced when a failure group cannot be analyzed."""
+    return (
+        failure.analysis.details == "Analysis failed; check server logs for details"
+        and not failure.analysis.classification
+    )
+
+
+def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
+    """Count failed signatures within each child build, including nested builds."""
+    total = 0
+    for child in children:
+        signatures = {
+            failure.error_signature
+            for failure in child.failures
+            if _is_failed_analysis(failure)
+        }
+        total += len(signatures)
+        if child.all_groups_failed and not child.failures:
+            total += 1  # Console-only child analysis has no failure signature.
+        total += _count_failed_child_groups(child.failed_children)
+    return total
 
 
 async def _process_ci_source_analysis(
@@ -3827,7 +3934,12 @@ async def _process_ci_source_analysis(
                 notify_job_status_changed(job_id)
                 return
 
-        # Fetch failures from source
+        # Fetch failures from source. Waiting jobs switch only after pre-fetch completes.
+        await update_status(job_id, "running")
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        await safe_update_progress(job_id, "fetching")
         source_result = await source.fetch()
         logger.debug(
             f"Source fetch complete: {len(source_result.failures)} failures, "
@@ -4002,8 +4114,11 @@ async def _process_ci_source_analysis(
                 repo_manager,
                 additional_repos_list,
                 repo_path,
+                job_id=job_id,
             )
             cloned_repos.update(additional_repos_cloned)
+
+        await safe_update_progress(job_id, "analyzing")
 
         # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
         if cloned_repos:
@@ -4037,6 +4152,8 @@ async def _process_ci_source_analysis(
                 )
 
         # Handle child jobs (Jenkins pipeline sub-jobs)
+        from rootcoz.sources.jenkins_source import child_has_successful_analysis
+
         child_job_analyses: list[ChildJobAnalysis] = []
         child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] = []
         if source_result.child_job_infos and source is not None:
@@ -4059,9 +4176,7 @@ async def _process_ci_source_analysis(
             # Pipeline/orchestrator: failed children, no direct test failures
             if child_job_analyses and not test_failures:
                 analyzed_children = [
-                    c
-                    for c in child_job_analyses
-                    if (c.failures or c.failed_children) and not c.note
+                    c for c in child_job_analyses if child_has_successful_analysis(c)
                 ]
                 if not analyzed_children:
                     summary = f"All {len(child_job_analyses)} child job analyses failed"
@@ -4101,7 +4216,7 @@ async def _process_ci_source_analysis(
                     )
 
                 # Enrich child failures before saving
-                if _resolve_enable_jira(body, merged):
+                if _resolve_enable_jira(body, merged) and merged.jira_enabled:
                     await _enrich_result_with_jira(
                         child_job_analyses,
                         merged,
@@ -4132,6 +4247,15 @@ async def _process_ci_source_analysis(
                 result_data["child_job_analyses"] = [
                     c.model_dump(mode="json") for c in child_job_analyses
                 ]
+                result_data["failed_analysis_groups"] = _count_failed_child_groups(
+                    child_job_analyses
+                )
+                if result_data["failed_analysis_groups"]:
+                    logger.warning(
+                        "Analysis job %s: %d child group(s) failed",
+                        job_id,
+                        result_data["failed_analysis_groups"],
+                    )
                 _stamp_result_metadata(result_data, source_result)
                 await _preserve_request_params(job_id, result_data)
                 await _attach_token_usage(job_id, result_data)
@@ -4145,6 +4269,8 @@ async def _process_ci_source_analysis(
                     )
 
                 # Persist top-level + child-scoped test entries
+                await safe_update_progress(job_id, "saving")
+                logger.info("Saving child job analysis for job=%s", job_id)
                 _top_entries = source_result.test_entry_dicts()
                 await replace_job_test_entries(job_id, _top_entries, child_test_scopes)
                 _apply_cached_test_counts(result_data, _top_entries, child_test_scopes)
@@ -4195,6 +4321,7 @@ async def _process_ci_source_analysis(
             auth_header=auth_header,
             groups=groups,
             source_result=source_result,
+            child_job_analyses=child_job_analyses,
             extra_labels=extra_labels,
         )
         if analysis_result_tuple is None:
@@ -4203,11 +4330,28 @@ async def _process_ci_source_analysis(
             analysis_result_tuple
         )
 
+        failed_tests = [a for a in all_analyses if _is_failed_analysis(a)]
+        failed_analyses = len({a.error_signature for a in failed_tests})
+        analysis_status: Literal["completed", "failed"] = (
+            "completed"
+            if len(all_analyses) > len(failed_tests)
+            or any(child_has_successful_analysis(child) for child in child_job_analyses)
+            else "failed"
+        )
+        if failed_analyses and not child_job_analyses:
+            logger.warning(
+                "Analysis job %s: %d group(s) failed; status=%s",
+                job_id,
+                failed_analyses,
+                analysis_status,
+            )
         summary = (
             f"Analyzed {len(test_failures)} test failures "
             f"({unique_errors} unique errors). "
-            f"{len(all_analyses)} analyzed successfully."
+            f"{len(all_analyses) - len(failed_tests)} analyzed successfully."
         )
+        if failed_analyses:
+            summary += f" {failed_analyses} group(s) failed; check server logs."
         if child_job_analyses:
             summary = (
                 f"{summary} Additionally, {len(child_job_analyses)} failed child "
@@ -4220,7 +4364,7 @@ async def _process_ci_source_analysis(
         logger.debug(
             f"Enriching with Jira matches (enable_jira={_resolve_enable_jira(body, merged)})"
         )
-        if _resolve_enable_jira(body, merged):
+        if _resolve_enable_jira(body, merged) and merged.jira_enabled:
             await _enrich_result_with_jira(
                 enrich_targets, merged, ai_provider, ai_model, job_id=job_id
             )
@@ -4249,7 +4393,7 @@ async def _process_ci_source_analysis(
 
         analysis_result = FailureAnalysisResult(
             job_id=job_id,
-            status="completed",
+            status=analysis_status,
             summary=summary,
             ai_provider=ai_provider,
             ai_model=ai_model,
@@ -4259,6 +4403,15 @@ async def _process_ci_source_analysis(
         )
 
         result_data = analysis_result.model_dump(mode="json")
+        result_data["failed_analysis_groups"] = (
+            failed_analyses + _count_failed_child_groups(child_job_analyses)
+        )
+        if child_job_analyses and result_data["failed_analysis_groups"]:
+            logger.warning(
+                "Analysis job %s: %d failed group(s) across direct and child scopes",
+                job_id,
+                result_data["failed_analysis_groups"],
+            )
         result_data["job_name"] = display_name
         if child_job_analyses:
             result_data["child_job_analyses"] = [
@@ -4272,6 +4425,8 @@ async def _process_ci_source_analysis(
         await _attach_token_usage(job_id, result_data)
 
         # Populate failure history and auto-review BEFORE marking completed
+        await safe_update_progress(job_id, "saving")
+        logger.info("Saving analysis for job=%s", job_id)
         try:
             await populate_failure_history(job_id, result_data)
         except Exception:
@@ -4311,7 +4466,7 @@ async def _process_ci_source_analysis(
                 exc_info=True,
             )
 
-        await update_status(job_id, "completed", result_data)
+        await update_status(job_id, analysis_status, result_data)
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
@@ -4941,14 +5096,137 @@ async def _reanalyze_failure_background(
                 repo_name = derive_test_repo_name(
                     str(tests_repo_url), additional_repos_list or []
                 )
-                await asyncio.to_thread(
-                    repo_manager.clone_into,
-                    str(tests_repo_url),
-                    repo_path / repo_name,
-                    depth=50,
-                    branch=tests_repo_ref,
-                    token=tests_repo_token or None,
+                await safe_update_clone_progress(
+                    job_id,
+                    repo_name,
+                    True,
+                    reanalysis=True,
+                    operation_id=f"{failure_uuid}:tests",
+                    url=str(tests_repo_url),
+                    ref=tests_repo_ref,
                 )
+                outcome = "cancelled"
+                try:
+                    clone_task = asyncio.create_task(
+                        asyncio.to_thread(
+                            repo_manager.clone_into,
+                            str(tests_repo_url),
+                            repo_path / repo_name,
+                            depth=50,
+                            branch=tests_repo_ref,
+                            token=tests_repo_token or None,
+                        )
+                    )
+                    try:
+                        # wait() leaves the worker running if this await is cancelled.
+                        await asyncio.wait({clone_task})
+                        clone_task.result()
+                    except asyncio.CancelledError:
+                        # A cancelled await does not stop the thread. Keep the workspace
+                        # until the worker exits, even if cancellation is repeated.
+                        while not clone_task.done():
+                            try:
+                                await asyncio.wait({clone_task})
+                            except asyncio.CancelledError:
+                                continue
+                        if not clone_task.cancelled() and (
+                            clone_error := clone_task.exception()
+                        ):
+                            # Exception text, stderr and traceback filenames can all
+                            # contain attacker-controlled URLs, headers or paths.
+                            if isinstance(clone_error, GitCommandError):
+                                # Match only fixed phrases; stderr may embed credentials.
+                                stderr = (clone_error.stderr or "").lower()
+                                cause = "Git command failed"
+                                for patterns, label in (
+                                    (
+                                        ("authentication failed",),
+                                        "Authentication failed",
+                                    ),
+                                    (
+                                        (
+                                            "remote branch",
+                                            "pathspec",
+                                            "bad revision",
+                                            "not a valid ref",
+                                        ),
+                                        "Branch or ref not found",
+                                    ),
+                                    (
+                                        (
+                                            "ssl certificate",
+                                            "certificate verify",
+                                            "server verification failed",
+                                        ),
+                                        "SSL verification failed",
+                                    ),
+                                    (("permission denied",), "Permission denied"),
+                                    (
+                                        (
+                                            "could not resolve host",
+                                            "name or service not known",
+                                        ),
+                                        "Network DNS resolution failed",
+                                    ),
+                                    (
+                                        (
+                                            "repository not found",
+                                            "not a git repository",
+                                        ),
+                                        "Repository not found",
+                                    ),
+                                ):
+                                    if any(pattern in stderr for pattern in patterns):
+                                        cause = label
+                                        break
+                            elif isinstance(clone_error, ValueError) and str(
+                                clone_error
+                            ).startswith("Invalid repository URL scheme."):
+                                cause = "Invalid repository URL scheme"
+                            else:
+                                cause = "Clone worker failed"
+                            frames = []
+                            tb = clone_error.__traceback__
+                            while tb:
+                                name = tb.tb_frame.f_code.co_name
+                                if name not in {
+                                    "clone",
+                                    "clone_into",
+                                    "_validate_repo_url",
+                                }:
+                                    name = "frame"
+                                filename = tb.tb_frame.f_code.co_filename
+                                source_dir = str(Path(__file__).parent) + os.sep
+                                location = (
+                                    filename.removeprefix(source_dir)
+                                    if filename.startswith(source_dir)
+                                    else "[path]"
+                                )
+                                frames.append(f"{location}:{tb.tb_lineno} in {name}")
+                                tb = tb.tb_next
+                            logger.warning(
+                                "Test repository clone failed during cancellation: %s: %s\n%s",
+                                type(clone_error).__name__,
+                                cause,
+                                "\n".join(frames),
+                            )
+                        logger.info(
+                            "Test repository clone worker joined after cancellation"
+                        )
+                        raise
+                    outcome = "cloned"
+                except Exception:
+                    outcome = "failed"
+                    raise
+                finally:
+                    await safe_update_clone_progress(
+                        job_id,
+                        repo_name,
+                        False,
+                        state=outcome,
+                        reanalysis=True,
+                        operation_id=f"{failure_uuid}:tests",
+                    )
                 cloned_repos[repo_name] = repo_path / repo_name
             except Exception:
                 logger.warning(
@@ -5034,6 +5312,9 @@ async def _reanalyze_failure_background(
                 repo_manager,
                 additional_repos_list,
                 repo_path,
+                job_id=job_id,
+                reanalysis=True,
+                operation_id=failure_uuid,
             )
             cloned_repos.update(additional_repos_cloned)
 
@@ -5114,29 +5395,48 @@ async def _reanalyze_failure_background(
 
         server_url = _build_internal_server_url()
 
-        # Analyze the single failure
-        analyses = await analyze_failure_group(
-            failures=[test_failure],
-            console_context=console_context,
-            repo_path=repo_path,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=ai_call_timeout,
-            custom_prompt=raw_prompt,
-            artifacts_context=artifacts_context,
-            server_url=server_url,
-            job_id=job_id,
-            peer_ai_configs=peer_ai_configs,
-            peer_analysis_max_rounds=peer_analysis_max_rounds,
-            additional_repos=cloned_repos or None,
-            max_concurrent_ai_calls=max_concurrent_ai_calls,
-            auth_header=auth_header,
-        )
+        # Scope only this attempt's AI calls, not clone/refetch or result writes.
+        with (
+            reanalysis_usage_scope(failure_uuid) as usage_attempt,
+            child_usage_scope(child_job_name, child_build_number)
+            if child_job_name
+            else contextlib.nullcontext(),
+        ):
+            analyses = await analyze_failure_group(
+                failures=[test_failure],
+                console_context=console_context,
+                repo_path=repo_path,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=ai_call_timeout,
+                custom_prompt=raw_prompt,
+                artifacts_context=artifacts_context,
+                server_url=server_url,
+                job_id=job_id,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=peer_analysis_max_rounds,
+                additional_repos=cloned_repos or None,
+                max_concurrent_ai_calls=max_concurrent_ai_calls,
+                auth_header=auth_header,
+            )
 
         if not analyses:
             raise RuntimeError("analyze_failure_group returned no results")
 
         new_analysis = analyses[0]
+        # get_result attaches the original card's usage without changing storage.
+        current = await get_result(job_id, strip_sensitive=False)
+        previous_usage = None
+        if current and current.get("result"):
+            previous = _find_failure_by_uuid_in_result(current["result"], failure_uuid)
+            if previous:
+                previous_usage = previous.get("token_usage")
+        if previous_usage is None:
+            logger.info(
+                "Previous analysis usage unavailable for failure %s in job %s",
+                failure_uuid,
+                job_id,
+            )
 
         # Patch the failure in the parent job result on success
         def _patch_success(result_data: dict[str, Any]) -> None:
@@ -5156,6 +5456,12 @@ async def _reanalyze_failure_background(
                 prev_entry.pop("reanalysis_status", None)
                 prev_entry.pop("reanalyzed_with", None)
                 prev_entry.pop("reanalysis_error", None)
+                # Raw stored snapshots can contain legacy mixed primary totals.
+                # Only archive usage recalculated from attributable call rows.
+                prev_entry.pop("token_usage", None)
+                if previous_usage is not None:
+                    prev_entry["token_usage"] = previous_usage
+                # Keep the previous attempt ID for archived usage, if any.
                 # Tag: this analysis was superseded by a re-analysis using the new provider/model
                 prev_entry["_superseded_by"] = {
                     "ai_provider": ai_provider,
@@ -5176,6 +5482,9 @@ async def _reanalyze_failure_background(
             # Replace with new analysis
             new_data = new_analysis.model_dump(mode="json")
             failure["analysis"] = new_data.get("analysis")
+            failure["usage_attempt"] = usage_attempt
+            # The persisted usage summary belongs to the previous analysis.
+            failure.pop("token_usage", None)
             if new_data.get("peer_debate"):
                 failure["peer_debate"] = new_data["peer_debate"]
             else:
@@ -9736,6 +10045,7 @@ async def _cleanup_revoked_ai_sessions() -> None:
 
 class AiCredentialInput(BaseModel):
     api_key: SecretStr
+    model: str
 
 
 @app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
@@ -9765,12 +10075,32 @@ async def set_user_ai_credential(
         valid = False
     if not valid:
         raise HTTPException(status_code=400, detail="API key must be 8-1024 characters")
-    try:
-        sessions = await storage.update_user_ai_credential(username, provider, key)
-    except storage.UnreadableAiCredentialsError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await _revoke_ai_sessions(sessions)
-    return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+    from rootcoz.ai_client import verify_ai_key
+
+    model = body.model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Select a model to verify the key")
+    outcome = await verify_ai_key(provider, model, key)
+    if outcome == "accepted":
+        try:
+            sessions = await storage.update_user_ai_credential(username, provider, key)
+        except storage.UnreadableAiCredentialsError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await _revoke_ai_sessions(sessions)
+    message = {
+        "rejected": "Check the key and selected model; existing credential unchanged.",
+        "inconclusive": "Try again when the provider is available; existing credential unchanged.",
+    }.get(outcome)
+    return JSONResponse(
+        content=strip_sensitive_from_response(
+            {
+                "outcome": outcome,
+                "ok": outcome == "accepted",
+                **({"message": message} if message else {}),
+            }
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.delete(
@@ -11443,6 +11773,135 @@ def _build_ci_workspace_params(
     }
 
 
+def _require_explicit_chat_source(source: str, force_server: bool) -> None:
+    """Reject a server-only model when chat explicitly selected user credentials."""
+    if source == "server" and not force_server:
+        raise HTTPException(
+            status_code=422,
+            detail="This model requires server credentials; select Server and Start again",
+        )
+
+
+async def _validate_chat_selection(
+    body: ChatInitRequest, username: str
+) -> tuple[str, str]:
+    """Validate the chosen pair as this user, never as the analysis job."""
+    provider, model = await _normalize_and_validate_ai_params(
+        body.ai_provider,
+        body.ai_model,
+        username=username,
+        force_server=body.force_server_credentials,
+    )
+    if not provider or not model:
+        raise HTTPException(status_code=422, detail="Select an AI provider and model")
+    from rootcoz.ai_client import _selected_credential_source
+
+    source = _selected_credential_source.get()
+    if body.force_server_credentials and source != "server":
+        raise HTTPException(
+            status_code=422, detail="Server credential selection unavailable"
+        )
+    _require_explicit_chat_source(source, body.force_server_credentials)
+    if source == "server":
+        token = ai_username.set(username)
+        try:
+            from rootcoz.ai_client import require_server_provider_grant
+
+            await require_server_provider_grant()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            ai_username.reset(token)
+    elif source != "user":
+        raise HTTPException(
+            status_code=422, detail="Chat credential source unavailable"
+        )
+    logger.debug(
+        "Chat selection validated for user=%s provider=%s source=%s",
+        username,
+        provider,
+        source,
+    )
+    return provider, model
+
+
+async def _available_chat_session(job_id: str, username: str) -> dict[str, str] | None:
+    """Describe only a session the current owner can still use."""
+    active = await storage.get_latest_chat_session(job_id, username)
+    if not active:
+        return None
+    try:
+        source = await storage.get_ai_session_source(
+            active["session_id"], username, active["ai_provider"]
+        )
+        if source == "server":
+            if not await storage.can_user_use_server_providers(username):
+                return None
+        elif source == "user":
+            from pi_sidecar_client import _validate_api_key
+
+            key, generation = await storage.get_user_ai_credential_with_generation(
+                username, active["ai_provider"]
+            )
+            if not key or generation is None or _validate_api_key(key):
+                return None
+        else:
+            return None
+    except ValueError, LookupError, OSError:
+        logger.debug("Chat session unavailable for user=%s", username)
+        return None
+    return {
+        "ai_provider": active["ai_provider"],
+        "ai_model": active["ai_model"],
+        "credential_source": source,
+    }
+
+
+async def _current_chat_choice(
+    job_id: str, username: str
+) -> tuple[dict[str, Any], bool]:
+    """Load the selected session and its persisted credential source."""
+    active = await storage.get_latest_chat_session(job_id, username)
+    if not active:
+        raise HTTPException(status_code=409, detail="Start a new chat session first")
+    try:
+        source = await storage.get_ai_session_source(
+            active["session_id"], username, active["ai_provider"]
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409, detail="Chat session unavailable; start a new chat"
+        ) from exc
+    if source not in ("user", "server"):
+        raise HTTPException(
+            status_code=409, detail="Chat session unavailable; start a new chat"
+        )
+    return active, source == "server"
+
+
+async def _check_chat_session_choice(
+    job_id: str,
+    username: str,
+    provider: str,
+    model: str,
+    force_server: bool | None,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, bool]:
+    """Pin chat turns to the last Start's owner, model and credential source."""
+    if allow_empty and not await _available_chat_session(job_id, username):
+        return "", False
+    active, selected_force = await _current_chat_choice(job_id, username)
+    if (provider, model) != (active["ai_provider"], active["ai_model"]) or (
+        force_server is not None and force_server != selected_force
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Clear chat and Start a new session to change model or credentials",
+        )
+    return active["session_id"], selected_force
+
+
 async def _resolve_chat_credentials(
     decrypted_params: dict[str, Any], username: str
 ) -> tuple[str, str, str, str, str]:
@@ -11484,6 +11943,35 @@ async def _resolve_chat_credentials(
 # -- Chat endpoints --
 
 
+def _chat_session_version(job_id: str, username: str, session_id: str | None) -> str:
+    """Opaque, scoped version for conditional chat clears; never expose session IDs."""
+    payload = json.dumps([job_id, username, session_id], separators=(",", ":"))
+    return hmac.new(
+        get_hmac_secret().encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+async def _current_chat_session_version(job_id: str, username: str) -> str:
+    active = await storage.get_latest_chat_session(job_id, username)
+    return _chat_session_version(
+        job_id, username, active["session_id"] if active else None
+    )
+
+
+async def _require_chat_clear_version(
+    job_id: str, username: str, request: Request
+) -> None:
+    """Call while holding the per-user chat lock shared with Start."""
+    supplied = request.headers.get("if-match", "")
+    current = await _current_chat_session_version(job_id, username)
+    if not supplied or not hmac.compare_digest(supplied, current):
+        logger.info("Chat clear conflict for job %s, user %s", job_id, username)
+        raise HTTPException(
+            status_code=409,
+            detail="Chat session changed; refresh history before clearing",
+        )
+
+
 @app.get("/api/chat/{job_id}", operation_id="getChatHistory")
 async def get_chat_history(
     job_id: str,
@@ -11498,18 +11986,28 @@ async def get_chat_history(
         raise HTTPException(status_code=404, detail="Job not found")
 
     username = getattr(request.state, "username", "")
-    messages = await storage.get_chat_messages(
-        job_id, limit=limit, offset=offset, username=username
+    async with _hold_chat_lock(f"{job_id}:{username}"):
+        messages = await storage.get_chat_messages(
+            job_id, limit=limit, offset=offset, username=username
+        )
+        # Filter out hidden init messages (empty content + completed status, used for session_id storage)
+        # Keep pending messages even if empty (they show "Thinking..." in the UI)
+        messages = [
+            {k: v for k, v in m.items() if k != "session_id"}
+            for m in messages
+            if m.get("content") or m.get("status") in ("pending", "failed")
+        ]
+        total = await storage.count_chat_messages(job_id, username=username)
+        active = await _available_chat_session(job_id, username)
+        version = await _current_chat_session_version(job_id, username)
+    return strip_sensitive_from_response(
+        {
+            "messages": messages,
+            "total": total,
+            "active_session": active,
+            "active_session_version": version,
+        }
     )
-    # Filter out hidden init messages (empty content + completed status, used for session_id storage)
-    # Keep pending messages even if empty (they show "Thinking..." in the UI)
-    messages = [
-        m
-        for m in messages
-        if m.get("content") or m.get("status") in ("pending", "failed")
-    ]
-    total = await storage.count_chat_messages(job_id, username=username)
-    return {"messages": messages, "total": total}
 
 
 async def _index_chat_repositories(
@@ -11524,7 +12022,9 @@ async def _index_chat_repositories(
     log_index_outcomes(await asyncio.to_thread(index_repositories, workspace, repos))
 
 
-async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]:
+async def _init_chat_under_barrier(
+    job_id: str, username: str, body: ChatInitRequest
+) -> dict[str, Any]:
     """Initialize chat workspace; hold the lifecycle barrier only for short checks.
 
     Slow clone/session work runs without the barrier so job deletion can cancel
@@ -11548,6 +12048,15 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             raise HTTPException(status_code=404, detail="Job not found")
         result_data = stored["result"]
         params = result_data.get("request_params", {})
+        ai_provider, ai_model = await _validate_chat_selection(body, username)
+        existing_session_id, _ = await _check_chat_session_choice(
+            job_id,
+            username,
+            ai_provider,
+            ai_model,
+            body.force_server_credentials,
+            allow_empty=True,
+        )
         workspace = ensure_chat_workspace(job_id, username=username)
 
     decrypted_params: dict[str, Any] = {}
@@ -11557,21 +12066,6 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         logger.warning("Failed to decrypt request_params for chat init", exc_info=True)
 
     _settings = get_settings()
-    force_server_credentials.set(
-        params.get("force_server_credentials")
-        if params.get("force_server_credentials") is not None
-        else getattr(_settings, "force_server_credentials", False)
-    )
-    ai_provider = (
-        result_data.get("ai_provider", "")
-        or params.get("ai_provider", "")
-        or _settings.ai_provider
-    )
-    ai_model = (
-        result_data.get("ai_model", "")
-        or params.get("ai_model", "")
-        or _settings.ai_model
-    )
 
     (
         jira_url,
@@ -11581,7 +12075,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         github_repo,
     ) = await _resolve_chat_credentials(decrypted_params, username)
 
-    session_id: str | None = ""
+    session_id: str | None = existing_session_id
     _raise_if_chat_job_deleted(job_id)
     await clone_chat_repos(workspace, decrypted_params, user_repo_token=github_token)
     repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
@@ -11595,8 +12089,7 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         settings=_settings,
     )
     _raise_if_chat_job_deleted(job_id)
-    existing = await storage.get_chat_messages(job_id, limit=1, username=username)
-    if not existing:
+    if not await _available_chat_session(job_id, username):
         custom_tools: list[dict[str, Any]] = []
         auth_header = await _create_ai_auth_header(username)
         if auth_header:
@@ -11621,10 +12114,16 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
         from rootcoz.engine.chat import graph_http_tools
 
         custom_tools.extend(graph_http_tools(workspace, job_id))
-        credential_generation = await storage.get_user_ai_credential_generation(
-            username, ai_provider
+        credential_generation = (
+            None
+            if body.force_server_credentials
+            else await storage.get_user_ai_credential_generation(username, ai_provider)
         )
+        from rootcoz.ai_client import _selected_credential_source, chat_session_source
+
         token = ai_username.set(username)
+        force_token = force_server_credentials.set(body.force_server_credentials)
+        source_token = chat_session_source.set(_selected_credential_source.get())
         try:
             session_id = await init_chat_session(
                 job_id=job_id,
@@ -11638,7 +12137,9 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
                 ci_build_data_available=ci_build_data_available,
             )
         finally:
+            chat_session_source.reset(source_token)
             ai_username.reset(token)
+            force_server_credentials.reset(force_token)
         if job_id in _chat_jobs_deleting and session_id:
             await _discard_unsaved_ai_session(session_id, username, ai_provider)
         _raise_if_chat_job_deleted(job_id)
@@ -11665,13 +12166,20 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
             jira_available=bool(jira_url and jira_token),
             github_available=bool(github_token and github_repo),
         )
-        await storage.add_chat_message(
-            job_id=job_id,
-            role="assistant",
-            content=welcome_text,
-            username=username,
-            status="completed",
-        )
+        if session_id:
+            # The previous session is gone, so its welcome is stale chrome.
+            # A dead session's welcome would otherwise accumulate in history on
+            # every credential or grant change. No session_id here: the init
+            # placeholder above is the session marker, and a welcome carrying one
+            # would take over as the latest Start.
+            await storage.delete_chat_welcome_messages(job_id, username)
+            await storage.add_chat_message(
+                job_id=job_id,
+                role="assistant",
+                content=welcome_text,
+                username=username,
+                status="completed",
+            )
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
@@ -11697,13 +12205,22 @@ async def _init_chat_under_barrier(job_id: str, username: str) -> dict[str, Any]
 
 
 @app.post("/api/chat/{job_id}/init", operation_id="initChat")
-async def init_chat(job_id: str, request: Request) -> dict[str, Any]:
+async def init_chat(
+    job_id: str, request: Request, body: ChatInitRequest | None = None
+) -> dict[str, Any]:
     """Initialize chat workspace: create directory, clone repos, and start AI session."""
     _check_allow_list(request)
     _require_reviewer(request)
+    if body is None:
+        raise HTTPException(
+            status_code=422, detail="Select provider, model and credential source"
+        )
     username = getattr(request.state, "username", "")
     async with _track_chat_job_task(job_id), _hold_chat_lock(f"{job_id}:{username}"):
-        return await _init_chat_under_barrier(job_id, username)
+        result = await _init_chat_under_barrier(job_id, username, body)
+        if result["session_id"]:
+            notify_chat_changed(job_id, username=username)
+        return result
 
 
 @app.post("/api/chat/{job_id}/close", operation_id="closeChat")
@@ -11954,6 +12471,9 @@ async def _normalize_and_validate_ai_params(
             detail="Both ai_provider and ai_model are required when either is set",
         )
     if provider and model:
+        from rootcoz.ai_client import _selected_credential_source
+
+        _selected_credential_source.set("")
         user_token = ai_username.set(username)
         force_token = force_server_credentials.set(force_server)
         try:
@@ -12039,27 +12559,41 @@ async def send_chat_message(
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
         raise HTTPException(status_code=404, detail="Job not found")
-    params = stored["result"].get("request_params", {})
-    job_force = params.get("force_server_credentials")
-    ai_provider, ai_model = await _normalize_and_validate_ai_params(
-        body.ai_provider,
-        body.ai_model,
-        username=request.state.username,
-        force_server=(
-            job_force
-            if job_force is not None
-            else get_settings().force_server_credentials
-        ),
-    )
+    async with _hold_chat_lock(f"{job_id}:{request.state.username}"):
+        if bool(body.ai_provider) != bool(body.ai_model):
+            raise HTTPException(
+                status_code=422, detail="Select both provider and model"
+            )
+        session, selected_force = await _current_chat_choice(
+            job_id, request.state.username
+        )
+        ai_provider, ai_model = await _normalize_and_validate_ai_params(
+            body.ai_provider or session["ai_provider"],
+            body.ai_model or session["ai_model"],
+            username=request.state.username,
+            force_server=selected_force,
+        )
+        if ai_provider is None or ai_model is None:
+            raise HTTPException(
+                status_code=422, detail="Select both provider and model"
+            )
+        from rootcoz.ai_client import _selected_credential_source
 
-    # Insert user message + assistant placeholder atomically
-    user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
-        job_id=job_id,
-        user_content=body.message,
-        username=request.state.username,
-        ai_provider=ai_provider or "",
-        ai_model=ai_model or "",
-    )
+        _require_explicit_chat_source(_selected_credential_source.get(), selected_force)
+        await _check_chat_session_choice(
+            job_id,
+            request.state.username,
+            ai_provider,
+            ai_model,
+            body.force_server_credentials,
+        )
+        user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
+            job_id=job_id,
+            user_content=body.message,
+            username=request.state.username,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
     logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
 
     notify_chat_changed(job_id, username=request.state.username)
@@ -12075,6 +12609,7 @@ async def send_chat_message(
         ai_model_override=ai_model,
         username=request.state.username,
         is_admin=bool(getattr(request.state, "is_admin", False)),
+        force_server=selected_force,
     )
 
     return {
@@ -12099,9 +12634,11 @@ async def _process_chat_message(
     ai_model_override: str | None,
     username: str,
     is_admin: bool = False,
+    force_server: bool | None = None,
 ) -> None:
     """Background task: process a single chat message with AI."""
     ai_username.set(username)
+    from rootcoz.ai_client import chat_session_source
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         chat_with_ai,
@@ -12112,6 +12649,7 @@ async def _process_chat_message(
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
     auth_header = ""
+    source_token = None
 
     async with _track_chat_job_task(job_id):
         try:
@@ -12141,23 +12679,21 @@ async def _process_chat_message(
                         params = result_data.get("request_params", {})
 
                         _chat_settings = get_settings()
-                        force_server_credentials.set(
-                            params.get("force_server_credentials")
-                            if params.get("force_server_credentials") is not None
-                            else _chat_settings.force_server_credentials
+                        ai_provider, ai_model = ai_provider_override, ai_model_override
+                        if not ai_provider or not ai_model:
+                            raise ValueError("Chat selection missing")
+                        session_id, selected_force = await _check_chat_session_choice(
+                            job_id, username, ai_provider, ai_model, force_server
                         )
-                        ai_provider, ai_model = _resolve_chat_ai_config(
-                            override_provider=ai_provider_override,
-                            override_model=ai_model_override,
-                            settings_provider=_chat_settings.ai_provider,
-                            settings_model=_chat_settings.ai_model,
-                            result_data=result_data,
-                            request_params=params,
-                            is_admin=is_admin,
+                        force_server_credentials.set(selected_force)
+                        source_token = chat_session_source.set(
+                            "server" if selected_force else "user"
                         )
 
                         credential_generation = (
-                            await storage.get_user_ai_credential_generation(
+                            None
+                            if selected_force
+                            else await storage.get_user_ai_credential_generation(
                                 username, ai_provider
                             )
                         )
@@ -12178,7 +12714,7 @@ async def _process_chat_message(
                         # Find session_id from the last completed assistant message
                         # Scan all_history (not filtered history) because the init
                         # message has empty content but carries the session_id
-                        last_session_id = None
+                        last_session_id = session_id
                         for msg in reversed(all_history):
                             if (
                                 msg.get("role") == "assistant"
@@ -12345,6 +12881,22 @@ async def _process_chat_message(
                         )
                         return
 
+                    if (
+                        selected_force
+                        and not await storage.can_user_use_server_providers(username)
+                    ):
+                        logger.info(
+                            "Chat: server grant revoked before completion for user=%s",
+                            username,
+                        )
+                        await _fail_chat_assistant_placeholder(
+                            assistant_msg_id,
+                            job_id,
+                            username,
+                            "Server provider access requires an administrator grant",
+                        )
+                        return
+
                     current_status = await storage.get_chat_message_status(
                         assistant_msg_id
                     )
@@ -12366,6 +12918,7 @@ async def _process_chat_message(
                         ai_model=ai_model,
                         session_id=new_session_id or "",
                         credential_generation=credential_generation,
+                        server_source=selected_force,
                     )
                     if not saved:
                         await _discard_unsaved_chat_response(
@@ -12408,6 +12961,8 @@ async def _process_chat_message(
             )
             raise
         finally:
+            if source_token is not None:
+                chat_session_source.reset(source_token)
             _cleanup_chat_state(f"{job_id}:{username}")
             _discard_idle_chat_job_barrier(job_id)
             # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers
@@ -12430,6 +12985,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
     # Acquire the per-user chat lock to prevent tearing down workspace
     # while a background worker is still processing
     async with _hold_chat_lock(f"{job_id}:{username}"):
+        await _require_chat_clear_version(job_id, username, request)
         count = await storage.delete_chat_messages(job_id, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(job_id, username=username)
@@ -12492,6 +13048,11 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
     _require_admin(request)
 
     body = await request.json()
+    if not await _ai_admin_role_current(request.state.username):
+        logger.info(
+            "Admin DB query denied after role change for %s", request.state.username
+        )
+        raise HTTPException(status_code=403, detail="Admin access required")
     sql = body.get("sql", "").strip()
     if not sql:
         raise HTTPException(status_code=400, detail="Empty query")
@@ -12537,22 +13098,38 @@ async def get_admin_chat_history(
     """Get admin chat history."""
     _require_admin(request)
     username = getattr(request.state, "username", "")
-    messages = await storage.get_chat_messages(
-        ADMIN_CHAT_JOB_ID, limit=limit, offset=offset, username=username
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
+        messages = await storage.get_chat_messages(
+            ADMIN_CHAT_JOB_ID, limit=limit, offset=offset, username=username
+        )
+        messages = [
+            {k: v for k, v in m.items() if k != "session_id"}
+            for m in messages
+            if m.get("content") or m.get("status") in ("pending", "failed")
+        ]
+        total = await storage.count_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
+        active = await _available_chat_session(ADMIN_CHAT_JOB_ID, username)
+        version = await _current_chat_session_version(ADMIN_CHAT_JOB_ID, username)
+    return strip_sensitive_from_response(
+        {
+            "messages": messages,
+            "total": total,
+            "active_session": active,
+            "active_session_version": version,
+        }
     )
-    messages = [
-        m
-        for m in messages
-        if m.get("content") or m.get("status") in ("pending", "failed")
-    ]
-    total = await storage.count_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
-    return {"messages": messages, "total": total}
 
 
 @app.post("/api/admin/chat/init", operation_id="initAdminChat")
-async def init_admin_chat(request: Request) -> dict[str, Any]:
+async def init_admin_chat(
+    request: Request, body: ChatInitRequest | None = None
+) -> dict[str, Any]:
     """Initialize admin chat workspace and AI session."""
     _require_admin(request)
+    if body is None:
+        raise HTTPException(
+            status_code=422, detail="Select provider, model and credential source"
+        )
     from rootcoz.engine.chat import (
         build_admin_custom_tools,
         ensure_chat_workspace,
@@ -12560,18 +13137,19 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
     )
 
     username = getattr(request.state, "username", "")
-    _admin_settings = get_settings()
-    ai_provider = _admin_settings.ai_provider
-    ai_model = _admin_settings.ai_model
-
-    workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
-
     session_id: str | None = ""
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
-        existing = await storage.get_chat_messages(
-            ADMIN_CHAT_JOB_ID, limit=1, username=username
+        ai_provider, ai_model = await _validate_chat_selection(body, username)
+        session_id, _ = await _check_chat_session_choice(
+            ADMIN_CHAT_JOB_ID,
+            username,
+            ai_provider,
+            ai_model,
+            body.force_server_credentials,
+            allow_empty=True,
         )
-        if not existing:
+        workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+        if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
             auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
@@ -12582,14 +13160,24 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                 )
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
+                if not await _ai_admin_role_current(username):
+                    raise HTTPException(status_code=403, detail="Admin access required")
 
-            credential_generation = await storage.get_user_ai_credential_generation(
-                username, ai_provider
+            credential_generation = (
+                None
+                if body.force_server_credentials
+                else await storage.get_user_ai_credential_generation(
+                    username, ai_provider
+                )
             )
+            from rootcoz.ai_client import (
+                _selected_credential_source,
+                chat_session_source,
+            )
+
             token = ai_username.set(username)
-            force_token = force_server_credentials.set(
-                _admin_settings.force_server_credentials
-            )
+            force_token = force_server_credentials.set(body.force_server_credentials)
+            source_token = chat_session_source.set(_selected_credential_source.get())
             try:
                 session_id = await init_admin_chat_session(
                     ai_provider=ai_provider,
@@ -12598,6 +13186,7 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                     custom_tools=custom_tools,
                 )
             finally:
+                chat_session_source.reset(source_token)
                 force_server_credentials.reset(force_token)
                 ai_username.reset(token)
             if session_id:
@@ -12616,6 +13205,8 @@ async def init_admin_chat(request: Request) -> dict[str, Any]:
                     await _discard_unsaved_ai_session(session_id, username, ai_provider)
                     session_id = None
     logger.info("Admin chat init: workspace=%s, session=%s", workspace, session_id)
+    if session_id:
+        notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
     return {"ready": True, "session_id": session_id or ""}
 
 
@@ -12702,21 +13293,41 @@ async def send_admin_chat_message(
 ) -> dict[str, Any]:
     """Queue an admin chat message for AI processing."""
     _require_admin(request)
-    ai_provider, ai_model = await _normalize_and_validate_ai_params(
-        body.ai_provider,
-        body.ai_model,
-        username=request.state.username,
-        force_server=get_settings().force_server_credentials,
-    )
+    async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{request.state.username}"):
+        if bool(body.ai_provider) != bool(body.ai_model):
+            raise HTTPException(
+                status_code=422, detail="Select both provider and model"
+            )
+        session, selected_force = await _current_chat_choice(
+            ADMIN_CHAT_JOB_ID, request.state.username
+        )
+        ai_provider, ai_model = await _normalize_and_validate_ai_params(
+            body.ai_provider or session["ai_provider"],
+            body.ai_model or session["ai_model"],
+            username=request.state.username,
+            force_server=selected_force,
+        )
+        if ai_provider is None or ai_model is None:
+            raise HTTPException(
+                status_code=422, detail="Select both provider and model"
+            )
+        from rootcoz.ai_client import _selected_credential_source
 
-    # Insert user message + assistant placeholder atomically
-    user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
-        job_id=ADMIN_CHAT_JOB_ID,
-        user_content=body.message,
-        username=request.state.username,
-        ai_provider=ai_provider or "",
-        ai_model=ai_model or "",
-    )
+        _require_explicit_chat_source(_selected_credential_source.get(), selected_force)
+        await _check_chat_session_choice(
+            ADMIN_CHAT_JOB_ID,
+            request.state.username,
+            ai_provider,
+            ai_model,
+            body.force_server_credentials,
+        )
+        user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
+            job_id=ADMIN_CHAT_JOB_ID,
+            user_content=body.message,
+            username=request.state.username,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+        )
     logger.info("Admin chat: queued user message %d", user_msg_id)
 
     notify_chat_changed(ADMIN_CHAT_JOB_ID, username=request.state.username)
@@ -12729,7 +13340,7 @@ async def send_admin_chat_message(
         ai_provider_override=ai_provider,
         ai_model_override=ai_model,
         username=request.state.username,
-        is_admin=True,
+        force_server=selected_force,
     )
 
     return {
@@ -12752,9 +13363,10 @@ async def _process_admin_chat_message(
     ai_provider_override: str | None,
     ai_model_override: str | None,
     username: str,
-    is_admin: bool = True,
+    force_server: bool | None = None,
 ) -> None:
     """Background task: process a single admin chat message with AI."""
+    from rootcoz.ai_client import chat_session_source
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
         build_admin_custom_tools,
@@ -12766,20 +13378,26 @@ async def _process_admin_chat_message(
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         _admin_settings = get_settings()
         user_token = ai_username.set(username)
-        force_token = force_server_credentials.set(
-            _admin_settings.force_server_credentials
-        )
+        force_token = force_server_credentials.set(False)
+        source_token = None
         try:
-            ai_provider, ai_model = _resolve_chat_ai_config(
-                override_provider=ai_provider_override,
-                override_model=ai_model_override,
-                settings_provider=_admin_settings.ai_provider,
-                settings_model=_admin_settings.ai_model,
-                is_admin=is_admin,
+            ai_provider, ai_model = ai_provider_override, ai_model_override
+            if not ai_provider or not ai_model:
+                raise ValueError("Chat selection missing")
+            session_id, selected_force = await _check_chat_session_choice(
+                ADMIN_CHAT_JOB_ID, username, ai_provider, ai_model, force_server
+            )
+            force_server_credentials.set(selected_force)
+            source_token = chat_session_source.set(
+                "server" if selected_force else "user"
             )
 
-            credential_generation = await storage.get_user_ai_credential_generation(
-                username, ai_provider
+            credential_generation = (
+                None
+                if selected_force
+                else await storage.get_user_ai_credential_generation(
+                    username, ai_provider
+                )
             )
             msg_count = await storage.count_chat_messages(
                 ADMIN_CHAT_JOB_ID, username=username
@@ -12793,7 +13411,7 @@ async def _process_admin_chat_message(
                 if m.get("status") != "pending" and m.get("content")
             ]
 
-            last_session_id = None
+            last_session_id = session_id
             for msg in reversed(all_history):
                 if (
                     msg.get("role") == "assistant"
@@ -12816,6 +13434,18 @@ async def _process_admin_chat_message(
 
             server_url = _build_internal_server_url()
             auth_header = await _create_ai_auth_header(username, is_admin=True)
+            if not await _ai_admin_role_current(username):
+                await _cleanup_ai_session(auth_header)
+                logger.info(
+                    "Admin chat: access revoked before AI call for user %s", username
+                )
+                await _fail_chat_assistant_placeholder(
+                    assistant_msg_id,
+                    ADMIN_CHAT_JOB_ID,
+                    username,
+                    "Admin access required",
+                )
+                return
 
             custom_tools = build_admin_custom_tools(
                 server_url=server_url,
@@ -12873,6 +13503,37 @@ async def _process_admin_chat_message(
                 notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
                 return
 
+            if not await _ai_admin_role_current(username):
+                if new_session_id and new_session_id != last_session_id:
+                    await _discard_unsaved_ai_session(
+                        new_session_id, username, ai_provider
+                    )
+                logger.info(
+                    "Admin chat: access revoked during AI call for user %s", username
+                )
+                await _fail_chat_assistant_placeholder(
+                    assistant_msg_id,
+                    ADMIN_CHAT_JOB_ID,
+                    username,
+                    "Admin access required",
+                )
+                return
+
+            if selected_force and not await storage.can_user_use_server_providers(
+                username
+            ):
+                logger.info(
+                    "Admin chat: server grant revoked before completion for user=%s",
+                    username,
+                )
+                await _fail_chat_assistant_placeholder(
+                    assistant_msg_id,
+                    ADMIN_CHAT_JOB_ID,
+                    username,
+                    "Server provider access requires an administrator grant",
+                )
+                return
+
             # Check if message was aborted while AI was processing
             current_status = await storage.get_chat_message_status(assistant_msg_id)
             if current_status == "failed":
@@ -12893,6 +13554,7 @@ async def _process_admin_chat_message(
                 ai_model=ai_model,
                 session_id=new_session_id or "",
                 credential_generation=credential_generation,
+                server_source=selected_force,
             )
             if not saved:
                 await _discard_unsaved_chat_response(
@@ -12929,6 +13591,8 @@ async def _process_admin_chat_message(
                     assistant_msg_id,
                 )
         finally:
+            if source_token is not None:
+                chat_session_source.reset(source_token)
             force_server_credentials.reset(force_token)
             ai_username.reset(user_token)
             _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
@@ -13064,6 +13728,7 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     username = request.state.username
 
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
+        await _require_chat_clear_version(ADMIN_CHAT_JOB_ID, username, request)
         count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)

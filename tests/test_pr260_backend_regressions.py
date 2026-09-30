@@ -228,7 +228,7 @@ async def test_short_credential_rejected_at_api(monkeypatch):
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     with pytest.raises(HTTPException, match="8-1024"):
         await main.set_user_ai_credential(
-            "openai", main.AiCredentialInput(api_key="a"), request
+            "openai", main.AiCredentialInput(api_key="a", model="gpt-test"), request
         )
     save.assert_not_awaited()
 

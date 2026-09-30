@@ -80,8 +80,10 @@ const requestWithJsonBody = <T>(
   method: 'POST' | 'PUT' | 'DELETE',
   path: string,
   body?: unknown,
+  options?: RequestInit,
 ) =>
   request<T>(path, {
+    ...options,
     method,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
@@ -95,8 +97,8 @@ export const api = {
   put: <T>(path: string, body?: unknown) =>
     requestWithJsonBody<T>('PUT', path, body),
 
-  delete: <T>(path: string, body?: unknown) =>
-    requestWithJsonBody<T>('DELETE', path, body),
+  delete: <T>(path: string, body?: unknown, options?: RequestInit) =>
+    requestWithJsonBody<T>('DELETE', path, body, options),
 }
 
 

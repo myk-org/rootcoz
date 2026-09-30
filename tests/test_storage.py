@@ -1,5 +1,6 @@
 """Tests for SQLite storage."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1051,6 +1052,74 @@ class TestProgressPhaseHelpers:
             assert isinstance(log, list)
             assert len(log) == 1
             assert log[0]["phase"] == "waiting_for_jenkins"
+
+    async def test_clone_progress_tracks_parallel_repos_and_refreshes(
+        self, setup_test_db: Path
+    ) -> None:
+        """Clone changes serialize current names without losing the stage history."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("clone-job", "", "running", {"job_name": "test"})
+            await storage.update_clone_progress("clone-job", "tests", True)
+            await asyncio.gather(
+                storage.update_clone_progress("clone-job", "one", True),
+                storage.update_clone_progress("clone-job", "two", True),
+            )
+            result = (await storage.get_result("clone-job"))["result"]
+            assert result["progress_phase"] == "cloning"
+            assert set(result["cloning_repos"]) == {"tests", "one", "two"}
+            assert set(result["progress_log"][-1]["repos"]) == set(
+                result["cloning_repos"]
+            )
+            await storage.update_clone_progress("clone-job", "one", False)
+            refreshed = (await storage.get_result("clone-job"))["result"]
+            assert set(refreshed["cloning_repos"]) == {"tests", "two"}
+            assert refreshed["progress_log"][-1]["repos"] == refreshed["cloning_repos"]
+
+    async def test_terminal_update_preserves_clone_history(
+        self, setup_test_db: Path
+    ) -> None:
+        """A fresh result payload cannot erase persisted progress on failure."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("clone-fail", "", "running", {"job_name": "test"})
+            await storage.update_clone_progress("clone-fail", "tests", True)
+            await storage.update_clone_progress("clone-fail", "tests", False)
+            await storage.update_status(
+                "clone-fail", "failed", {"error": "clone failed"}
+            )
+            result = (await storage.get_result("clone-fail"))["result"]
+            assert result["progress_log"][0]["repos"] == ["tests"]
+            assert result["cloning_repos"] == []
+            assert result["progress_phase"] == "failed"
+
+    async def test_cancelled_clone_clears_current_names_and_keeps_log(
+        self, setup_test_db: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "clone-abort", "", "running", {"job_name": "test"}
+            )
+            await storage.update_clone_progress("clone-abort", "slow", True)
+            await storage.update_status(
+                "clone-abort", "aborted", {"error": "cancelled"}
+            )
+            await storage.update_clone_progress("clone-abort", "slow", False)
+            result = (await storage.get_result("clone-abort"))["result"]
+            assert result["cloning_repos"] == []
+            assert result["progress_phase"] == "aborted"
+            assert result["progress_log"][0]["repos"] == ["slow"]
+
+    async def test_clone_progress_done_does_not_restore_clone_phase(
+        self, setup_test_db: Path
+    ) -> None:
+        """Late clone cleanup after cancellation cannot overwrite the terminal stage."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("clone-done", "", "running", {"job_name": "test"})
+            await storage.update_clone_progress("clone-done", "tests", True)
+            await storage.update_progress_phase("clone-done", "analyzing")
+            await storage.update_clone_progress("clone-done", "tests", False)
+            result = (await storage.get_result("clone-done"))["result"]
+            assert result["progress_phase"] == "analyzing"
+            assert result["cloning_repos"] == []
 
     async def test_update_progress_phase_preserves_existing_progress_log(
         self, setup_test_db: Path

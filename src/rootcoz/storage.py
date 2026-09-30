@@ -1060,11 +1060,29 @@ async def init_db() -> None:
                 duration_ms INTEGER,
                 prompt_chars INTEGER NOT NULL DEFAULT 0,
                 response_chars INTEGER NOT NULL DEFAULT 0,
-                credential_source TEXT NOT NULL DEFAULT 'unknown'
+                credential_source TEXT NOT NULL DEFAULT 'unknown',
+                error_signature TEXT NOT NULL DEFAULT '',
+                child_job_name TEXT NOT NULL DEFAULT '',
+                child_build_number INTEGER NOT NULL DEFAULT 0
             )
         """)
         await _migrate_add_column(
             db, "ai_token_usage", "credential_source", "TEXT NOT NULL DEFAULT 'unknown'"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "error_signature", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "child_job_name", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "child_build_number", "INTEGER NOT NULL DEFAULT 0"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "failure_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "usage_attempt", "TEXT NOT NULL DEFAULT ''"
         )
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ai_session_sources (
@@ -1177,6 +1195,9 @@ async def init_db() -> None:
         # Migration: add status to chat_messages (pending/completed/failed)
         await _migrate_add_column(
             db, "chat_messages", "status", "TEXT NOT NULL DEFAULT 'completed'"
+        )
+        await _migrate_add_column(
+            db, "chat_messages", "session_revoked", "INTEGER NOT NULL DEFAULT 0"
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user_status "
@@ -1825,6 +1846,24 @@ async def _sync_result_token_usage(
     """Keep analysis writes from replacing newer per-call usage."""
     if summary := await _token_usage_snapshot(db, job_id):
         result["token_usage"] = summary
+    await _attach_failure_usage(db, job_id, result)
+
+
+async def _attach_failure_usage(
+    db: aiosqlite.Connection, job_id: str, result: dict[str, Any]
+) -> None:
+    from rootcoz.token_tracking import attach_failure_usage
+
+    rows = await (
+        await db.execute(
+            "SELECT * FROM ai_token_usage WHERE job_id = ? "
+            "AND ((call_type = 'primary' AND error_signature != '') "
+            "OR (call_type = 'reanalysis' AND usage_attempt != '')) "
+            "ORDER BY created_at, rowid",
+            (job_id,),
+        )
+    ).fetchall()
+    attach_failure_usage(result, [dict(row) for row in rows])
 
 
 async def save_result(
@@ -1907,6 +1946,70 @@ async def update_status(
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
+            cursor = await db.execute(
+                "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+            )
+            row = await cursor.fetchone()
+            previous = (
+                parse_result_json(row[0], job_id=job_id) if row and row[0] else None
+            )
+            if previous:
+                for key in ("progress_phase", "progress_log", "cloning_repos"):
+                    if key in previous:
+                        result[key] = previous[key]
+            if status in ("failed", "aborted", "completed"):
+                active_repos = result.get("cloning_repos") or []
+                if active_repos:
+                    log = result.setdefault("progress_log", [])
+                    state = "failed" if status == "failed" else "cancelled"
+                    active_operations: dict[str, dict[str, Any]] = {}
+                    legacy_starts: dict[str, dict[str, Any]] = {}
+                    for entry in log:
+                        repo = entry.get("repo")
+                        if repo not in active_repos:
+                            continue
+                        identity = entry.get("operation_id")
+                        active = active_operations if identity else legacy_starts
+                        key = identity or repo
+                        if entry.get("state") == "cloning":
+                            active[key] = entry
+                        else:
+                            active.pop(key, None)
+                    starts = list(active_operations.values()) + list(
+                        legacy_starts.values()
+                    )
+                    starts.extend(
+                        {"repo": repo}
+                        for repo in active_repos
+                        if repo not in legacy_starts
+                        and not any(
+                            entry["repo"] == repo
+                            for entry in active_operations.values()
+                        )
+                    )
+                    for started in starts:
+                        transition: dict[str, Any] = {
+                            "phase": "cloning",
+                            "repo": started["repo"],
+                            "state": state,
+                            "repos": [],
+                            "timestamp": time.time(),
+                        }
+                        transition.update(
+                            (key, started[key])
+                            for key in ("operation_id", "url", "ref")
+                            if key in started
+                        )
+                        log.append(transition)
+                    logger.info(
+                        "Ended %d active clone operations for job_id=%s status=%s",
+                        len(starts),
+                        job_id,
+                        status,
+                    )
+                result["cloning_repos"] = []
+                if status != "completed":
+                    result["progress_phase"] = status
             await _sync_result_token_usage(db, job_id, result)
         result_json = json.dumps(result) if result is not None else None
         set_parts, params = _build_status_update_clause(status, result_json, result)
@@ -2014,6 +2117,104 @@ def _make_progress_phase_patcher(phase: str) -> Callable[[dict[str, Any]], None]
     return _patcher
 
 
+async def update_clone_progress(
+    job_id: str,
+    repo_name: str,
+    started: bool,
+    *,
+    state: str = "cloned",
+    reanalysis: bool = False,
+    url: str = "",
+    ref: str = "",
+    operation_id: str = "",
+) -> None:
+    """Persist one named clone transition and the active repository list."""
+    from rootcoz.url_utils import sanitize_clone_url
+
+    safe_url = sanitize_clone_url(url)
+
+    def patch(data: dict[str, Any]) -> None:
+        names = set(data.get("cloning_repos") or [])
+        log = data.setdefault("progress_log", [])
+        # Re-analysis operations have their own persisted identity; the UI still
+        # receives one active name and one Cloning stage per repository.
+        # ponytail: scan the log on each transition; persist a separate active
+        # index if clone logs grow large enough to affect progress writes.
+        active_operations: dict[str, str] = {}
+        if operation_id:
+            for entry in log:
+                identity = entry.get("operation_id")
+                if identity:
+                    if entry.get("state") == "cloning":
+                        active_operations[identity] = entry["repo"]
+                    else:
+                        active_operations.pop(identity, None)
+        if started:
+            if operation_id and operation_id in active_operations:
+                return
+            if not operation_id and repo_name in names:
+                return
+            names.add(repo_name)
+            transition = "cloning"
+            if data.get("progress_phase") not in ("failed", "aborted", "completed"):
+                data["progress_phase"] = "cloning"
+        else:
+            if operation_id:
+                if active_operations.get(operation_id) != repo_name:
+                    return
+                active_operations.pop(operation_id)
+                if repo_name not in active_operations.values():
+                    names.discard(repo_name)
+            else:
+                if repo_name not in names:
+                    return
+                names.remove(repo_name)
+            transition = state
+        data["cloning_repos"] = sorted(names)
+        metadata = (
+            {"url": safe_url, "ref": ref}
+            if started
+            else next(
+                (
+                    entry
+                    for entry in reversed(log)
+                    if entry.get("repo") == repo_name
+                    and entry.get("state") == "cloning"
+                    and (not operation_id or entry.get("operation_id") == operation_id)
+                ),
+                {},
+            )
+        )
+        log.append(
+            {
+                "phase": "cloning",
+                "repo": repo_name,
+                "state": transition,
+                **({"operation_id": operation_id} if operation_id else {}),
+                "repos": sorted(names),
+                "timestamp": time.time(),
+                **{key: metadata[key] for key in ("url", "ref") if metadata.get(key)},
+            }
+        )
+        if (
+            not started
+            and not names
+            and reanalysis
+            and data.get("progress_phase") == "cloning"
+        ):
+            data["progress_phase"] = "completed"
+
+    await patch_result_json(
+        job_id,
+        patch,
+        skip_terminal=True,
+        allow_completed=reanalysis,
+        active_reanalysis_failure_id=operation_id.partition(":")[0]
+        if reanalysis
+        else "",
+    )
+
+
 async def update_progress_phase(job_id: str, phase: str) -> None:
     """Update the ``progress_phase`` field in the stored result JSON.
 
@@ -2030,6 +2231,10 @@ async def update_progress_phase(job_id: str, phase: str) -> None:
 async def patch_result_json(
     job_id: str,
     patch_fn: Callable[[dict[str, Any]], None],
+    *,
+    skip_terminal: bool = False,
+    allow_completed: bool = False,
+    active_reanalysis_failure_id: str = "",
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
@@ -2044,21 +2249,49 @@ async def patch_result_json(
     columns — missing keys leave existing column values unchanged.
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
+    ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
+    permits completed jobs when a reanalysis updates clone progress. Identified
+    re-analysis updates require a running failure regardless of parent status.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             cursor = await db.execute(
-                "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+                "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
             )
             row = await cursor.fetchone()
-            if not row or not row[0]:
+            if (
+                not row
+                or not row[0]
+                or (
+                    skip_terminal
+                    and (
+                        (
+                            row[1] in ("failed", "aborted")
+                            and not active_reanalysis_failure_id
+                        )
+                        or (row[1] == "completed" and not allow_completed)
+                    )
+                )
+            ):
                 await db.execute("ROLLBACK")
                 return
             result_data = parse_result_json(row[0], job_id=job_id)
             if result_data is None:
                 await db.execute("ROLLBACK")
                 return
+            if active_reanalysis_failure_id:
+                failure = _find_failure_by_uuid_in_failures(
+                    result_data.get("failures", []), active_reanalysis_failure_id
+                )
+                if failure is None:
+                    failure, _, _ = _find_failure_by_uuid_in_children(
+                        result_data.get("child_job_analyses", []),
+                        active_reanalysis_failure_id,
+                    )
+                if not failure or failure.get("reanalysis_status") != "running":
+                    await db.execute("ROLLBACK")
+                    return
             patch_fn(result_data)
             set_parts = ["result_json = ?"]
             params: list[Any] = [json.dumps(result_data)]
@@ -2223,6 +2456,7 @@ async def get_result(
                 await _backfill_failure_uuids(job_id, parsed)
                 if summary := await _token_usage_snapshot(db, job_id):
                     parsed["token_usage"] = summary
+                await _attach_failure_usage(db, job_id, parsed)
             if parsed and strip_sensitive:
                 parsed = strip_sensitive_from_response(parsed)
             row_data = dict(row)
@@ -5537,15 +5771,26 @@ async def update_user_ai_credential(
         # atomically with the credential so later turns start fresh.
         sessions = await (
             await db.execute(
-                "SELECT DISTINCT session_id FROM chat_messages "
-                "WHERE username = ? AND ai_provider = ? AND session_id != ''",
+                "SELECT DISTINCT chat_messages.session_id FROM chat_messages "
+                "LEFT JOIN ai_session_sources ON ai_session_sources.session_id = chat_messages.session_id "
+                "WHERE chat_messages.username = ? AND chat_messages.ai_provider = ? "
+                "AND chat_messages.session_id != '' AND ("
+                "(ai_session_sources.username = chat_messages.username "
+                "AND ai_session_sources.provider = chat_messages.ai_provider "
+                "AND ai_session_sources.credential_source = 'user') "
+                "OR ai_session_sources.session_id IS NULL)",
                 (username, provider),
             )
         ).fetchall()
-        await db.execute(
-            "UPDATE chat_messages SET session_id = '' "
-            "WHERE username = ? AND ai_provider = ? AND session_id != ''",
-            (username, provider),
+        await db.executemany(
+            "INSERT OR IGNORE INTO ai_session_sources "
+            "(session_id, username, provider, credential_source) VALUES (?, ?, ?, 'revoked')",
+            [(row[0], username, provider) for row in sessions],
+        )
+        await db.executemany(
+            "UPDATE chat_messages SET session_id = '', session_revoked = 1 "
+            "WHERE username = ? AND ai_provider = ? AND session_id = ?",
+            [(username, provider, row[0]) for row in sessions],
         )
         # Keep tombstones if sidecar deletion fails: an old keyed session must
         # never become an unowned (legacy) session that can be resumed.
@@ -6179,6 +6424,11 @@ async def record_token_usage(
     prompt_chars: int = 0,
     response_chars: int = 0,
     credential_source: str = "unknown",
+    error_signature: str = "",
+    child_job_name: str = "",
+    child_build_number: int = 0,
+    failure_id: str = "",
+    usage_attempt: str = "",
 ) -> str:
     """Record a single AI call's token usage. Returns the record ID."""
     record_id = str(uuid.uuid4())
@@ -6188,8 +6438,9 @@ async def record_token_usage(
             "INSERT INTO ai_token_usage "
             "(id, job_id, ai_provider, ai_model, call_type, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
-            "prompt_chars, response_chars, credential_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "prompt_chars, response_chars, credential_source, error_signature, "
+            "child_job_name, child_build_number, failure_id, usage_attempt) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -6206,6 +6457,11 @@ async def record_token_usage(
                 prompt_chars,
                 response_chars,
                 credential_source,
+                error_signature if call_type in ("primary", "reanalysis") else "",
+                child_job_name if call_type in ("primary", "reanalysis") else "",
+                child_build_number if call_type in ("primary", "reanalysis") else 0,
+                failure_id if call_type == "reanalysis" else "",
+                usage_attempt if call_type == "reanalysis" else "",
             ),
         )
         await db.commit()
@@ -6234,7 +6490,12 @@ async def _get_job_token_usage_totals(
         "SUM(cache_write_tokens) AS total_cache_write_tokens, "
         "SUM(total_tokens) AS total_tokens, "
         "CASE WHEN COUNT(cost_usd) = COUNT(*) THEN SUM(cost_usd) END AS total_cost_usd, "
-        "COALESCE(SUM(duration_ms), 0) AS total_duration_ms "
+        "COALESCE(SUM(duration_ms), 0) AS total_duration_ms, "
+        "CASE WHEN SUM(credential_source = 'user') > 0 "
+        "AND SUM(credential_source = 'server') > 0 THEN 'mixed' "
+        "WHEN SUM(credential_source = 'user') = COUNT(*) THEN 'user' "
+        "WHEN SUM(credential_source = 'server') = COUNT(*) THEN 'server' "
+        "ELSE 'unknown' END AS credential_source "
         "FROM ai_token_usage WHERE job_id = ?",
         (job_id,),
     )
@@ -6851,6 +7112,21 @@ async def get_chat_messages(
         return [dict(row) for row in rows]
 
 
+async def get_latest_chat_session(job_id: str, username: str) -> dict[str, Any] | None:
+    """Return the latest Start, or None when its credential was revoked."""
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT ai_provider, ai_model, session_id FROM chat_messages "
+                "WHERE job_id = ? AND username = ? AND role = 'assistant' "
+                "AND (session_id != '' OR session_revoked = 1) "
+                "ORDER BY id DESC LIMIT 1",
+                (job_id, username),
+            )
+        ).fetchone()
+    return dict(row) if row and row["session_id"] else None
+
+
 async def count_chat_messages(job_id: str, username: str = "") -> int:
     """Count total chat messages for a job."""
     async with _connect_db() as db:
@@ -6919,6 +7195,25 @@ async def delete_chat_messages(job_id: str, username: str = "") -> int:
                 "DELETE FROM chat_messages WHERE job_id = ?",
                 (job_id,),
             )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def delete_chat_welcome_messages(job_id: str, username: str) -> int:
+    """Delete a user's stored chat welcomes for a job. Returns count deleted.
+
+    A welcome is per-session chrome, not conversation: init writes it as an
+    assistant row with no AI fields, because no AI call produced it. Whenever a
+    session dies (credential revoked, grant withdrawn, key rotated) the next
+    Start writes a fresh welcome, and the dead session's copy would otherwise
+    sit in history forever. Only rows that no AI call ever filled are touched.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM chat_messages WHERE job_id = ? AND username = ? "
+            "AND role = 'assistant' AND COALESCE(ai_provider, '') = ''",
+            (job_id, username),
+        )
         await db.commit()
         return cursor.rowcount
 
@@ -7032,25 +7327,35 @@ async def complete_chat_message_if_generation(
     ai_model: str,
     session_id: str,
     credential_generation: int | None,
+    server_source: bool = False,
 ) -> bool:
-    """Complete a pending reply only while its user's credentials are current."""
+    """Complete a pending reply only while its credentials, grant and admin role are current."""
     async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE chat_messages SET content = ?, status = 'completed', "
             "ai_provider = ?, ai_model = ?, session_id = ? "
             "WHERE id = ? AND status = 'pending' AND "
-            "(? IS NULL OR EXISTS (SELECT 1 FROM users "
+            "(? = 1 OR ? IS NULL OR EXISTS (SELECT 1 FROM users "
             "WHERE username = chat_messages.username "
-            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?))",
+            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)) "
+            "AND (? = 0 OR chat_messages.username = 'admin' OR EXISTS "
+            "(SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND (role = 'admin' OR can_use_server_providers = 1))) "
+            "AND (chat_messages.job_id != '__admin_chat__' "
+            "OR chat_messages.username = 'admin' OR EXISTS "
+            "(SELECT 1 FROM users WHERE username = chat_messages.username "
+            "AND role = 'admin'))",
             (
                 content,
                 ai_provider,
                 ai_model,
                 session_id,
                 msg_id,
+                int(server_source),
                 credential_generation,
                 ai_provider,
                 credential_generation,
+                int(server_source),
             ),
         )
         await db.commit()

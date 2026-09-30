@@ -7,7 +7,10 @@ from pi_sidecar_client import AIResult, AITokenUsage
 
 from rootcoz.token_tracking import (
     build_token_usage_summary,
+    failure_group_usage,
+    reanalysis_usage_scope,
     record_ai_usage,
+    summarize_token_usage,
 )
 
 
@@ -53,6 +56,11 @@ class TestRecordAiUsage:
                 prompt_chars=500,
                 response_chars=len("analysis output"),
                 credential_source="unknown",
+                error_signature="",
+                child_job_name="",
+                child_build_number=0,
+                failure_id="",
+                usage_attempt="",
             )
 
     @pytest.mark.asyncio
@@ -124,6 +132,29 @@ class TestRecordAiUsage:
             assert call_kwargs["call_type"] == "peer_review"
 
     @pytest.mark.asyncio
+    async def test_reanalysis_scope_marks_primary_only_and_resets(self) -> None:
+        result = AIResult(success=True, text="ok", usage=AITokenUsage(input_tokens=3))
+        with patch(
+            "rootcoz.token_tracking.storage.record_token_usage", new_callable=AsyncMock
+        ) as mock_record:
+            with (
+                reanalysis_usage_scope("failure-uuid"),
+                failure_group_usage("job-1", "signature"),
+            ):
+                await record_ai_usage("job-1", result, "primary")
+                await record_ai_usage("job-1", result, "peer")
+            with failure_group_usage("job-1", "signature"):
+                await record_ai_usage("job-1", result, "primary")
+        first, second, third = (call.kwargs for call in mock_record.call_args_list)
+        assert first["call_type"] == "reanalysis"
+        assert first["failure_id"] == "failure-uuid"
+        assert first["usage_attempt"]
+        assert second["call_type"] == "peer"
+        assert second["error_signature"] == ""
+        assert third["call_type"] == "primary"
+        assert third["error_signature"] == "signature"
+
+    @pytest.mark.asyncio
     async def test_records_correct_response_chars(self) -> None:
         """response_chars is derived from len(result.text)."""
         long_text = "x" * 12345
@@ -140,6 +171,37 @@ class TestRecordAiUsage:
             assert mock_record.call_args.kwargs["response_chars"] == 12345
 
 
+@pytest.mark.parametrize(
+    ("sources", "expected"),
+    [
+        (["user"], "user"),
+        (["server"], "server"),
+        (["user", "server", None], "mixed"),
+        (["user", "unknown"], "unknown"),
+        (["server", None], "unknown"),
+        ([], "unknown"),
+    ],
+)
+def test_per_failure_credential_source(sources, expected) -> None:
+    records = [
+        {
+            "ai_provider": "gemini",
+            "ai_model": "test",
+            "call_type": "primary",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": None,
+            "duration_ms": None,
+            "credential_source": source,
+        }
+        for source in sources
+    ]
+    assert summarize_token_usage(records).credential_source == expected
+
+
 class TestBuildTokenUsageSummary:
     """Tests for build_token_usage_summary."""
 
@@ -154,6 +216,7 @@ class TestBuildTokenUsageSummary:
             "total_tokens": 1000,
             "total_cost_usd": None,
             "total_duration_ms": 12,
+            "credential_source": "server",
         }
         record = {
             "ai_provider": "gemini",

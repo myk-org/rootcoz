@@ -36,6 +36,17 @@ describe('api', () => {
     expect(result).toBeUndefined()
   })
 
+  it('delete forwards If-Match without a JSON body', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ deleted: 1 }), { status: 200 }),
+    )
+    await api.delete('/api/chat/job', undefined, { headers: { 'If-Match': 'opaque-version' } })
+    const [, options] = fetchSpy.mock.calls[0]
+    expect(options?.method).toBe('DELETE')
+    expect(options?.body).toBeUndefined()
+    expect(options?.headers).toEqual({ 'Content-Type': 'application/json', 'If-Match': 'opaque-version' })
+  })
+
   it('post sends JSON body', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ id: 1 }), {

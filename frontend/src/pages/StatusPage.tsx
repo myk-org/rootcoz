@@ -8,7 +8,7 @@ import type { ResultResponse } from '@/types'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { AlertTriangle, Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Clock, ExternalLink, Loader2, RotateCw, XCircle } from 'lucide-react'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -20,6 +20,12 @@ import { useAuth } from '@/lib/auth'
 
 const phaseLabels: Record<string, string> = {
   waiting_for_jenkins: 'Waiting for Jenkins build to complete...',
+  waiting_for_build: 'Waiting for build to complete...',
+  fetching: 'Fetching test results...',
+  routing: 'Routing failure groups...',
+  agent_routing: 'Routing failure groups to agents...',
+  cross_failure: 'Finding cross-failure patterns...',
+  cloning: 'Cloning repositories...',
   analyzing: 'Analyzing test failures with AI...',
   analyzing_child_jobs: 'Analyzing child job failures...',
   analyzing_failures: 'Analyzing test failures...',
@@ -27,9 +33,13 @@ const phaseLabels: Record<string, string> = {
   saving: 'Saving results...',
 }
 
-function getPhaseLabel(phase: string | undefined): string | undefined {
+function getPhaseLabel(phase: string | undefined, repos?: string[]): string | undefined {
+  if (phase === 'cloning' && repos?.length) return `Cloning repositories: ${repos.join(', ')}...`
   if (!phase) return undefined
   if (phaseLabels[phase]) return phaseLabels[phase]
+
+  const analysisGroup = phase.match(/^analyzing_failures \(group (\d+\/\d+)\)$/)
+  if (analysisGroup) return `Analyzing test failures \u2014 group ${analysisGroup[1]}...`
 
   // Handle peer_review_round_N or peer_review_round_N (group X/Y)
   const peerMatch = phase.match(/^peer_review_round_(\d+)(?:\s*\(group (.+)\))?$/)
@@ -79,10 +89,27 @@ const terminalErrorTitles: Record<string, string> = {
   aborted: 'Analysis aborted',
 }
 
+function safeRepoDisplay(raw?: string): string | null {
+  if (!raw) return null
+  try {
+    const url = new URL(raw)
+    if (!url.hostname || !['http:', 'https:', 'git:'].includes(url.protocol)) return null
+    url.username = ''
+    url.password = ''
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
 interface StepLogEntry {
   phase: string
   label: string
   timestamp: string
+  failed?: boolean
+  repos?: Array<{ name: string; state: string; url?: string; ref?: string }>
 }
 
 export function StatusPage() {
@@ -94,6 +121,7 @@ export function StatusPage() {
   const [reAnalyzeOpen, setReAnalyzeOpen] = useState(false)
   const [isAborting, setIsAborting] = useState(false)
   const [abortConfirmOpen, setAbortConfirmOpen] = useState(false)
+  const [clonesExpanded, setClonesExpanded] = useState(true)
   const prevLogLenRef = useRef(0)
   const logEndRef = useRef<HTMLDivElement>(null)
   const logContainerRef = useRef<HTMLDivElement>(null)
@@ -110,6 +138,7 @@ export function StatusPage() {
     setError('')
     setTerminalErrorKind(null)
     setReAnalyzeOpen(false)
+    setClonesExpanded(true)
     prevLogLenRef.current = 0
     async function fetchStatus() {
       if (inFlight || cancelled) {
@@ -207,15 +236,42 @@ export function StatusPage() {
 
   // Derive stepLog from server-persisted progress_log (survives F5 refresh)
   const rawProgressLog = data?.result?.progress_log
-  const progressLog = Array.isArray(rawProgressLog) ? rawProgressLog : []
-  const stepLog: StepLogEntry[] = useMemo(
-    () => progressLog.map(entry => ({
-      phase: entry.phase,
-      label: getPhaseLabel(entry.phase) ?? entry.phase,
-      timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(),
-    })),
-    [progressLog],
-  )
+  const stepLog: StepLogEntry[] = useMemo(() => {
+    const progressLog = Array.isArray(rawProgressLog) ? rawProgressLog : []
+    const steps: StepLogEntry[] = []
+    const clones = new Map<string, { name: string; state: string; url?: string; ref?: string }>()
+    const updateClone = (name: string, state: string, url?: string, ref?: string) => {
+      const previous = clones.get(name)
+      clones.set(name, { name, state, url: url ?? previous?.url, ref: ref ?? previous?.ref })
+    }
+    for (const entry of progressLog) {
+      if (entry.phase === 'cloning') {
+        if (!steps.some(step => step.phase === 'cloning')) {
+          steps.push({ phase: 'cloning', label: 'Cloning', timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(), repos: [] })
+        }
+        if (entry.state === 'failed') steps.find(step => step.phase === 'cloning')!.failed = true
+        if (entry.repo) updateClone(entry.repo, entry.state ?? 'cloning', entry.url, entry.ref)
+        // Older jobs contain active-name snapshots rather than per-repo transitions.
+        if (entry.repos) {
+          for (const [name, clone] of clones) {
+            if (!entry.repos.includes(name) && clone.state === 'cloning') updateClone(name, 'cloned')
+          }
+          for (const name of entry.repos) updateClone(name, 'cloning')
+        }
+      } else {
+        steps.push({ phase: entry.phase, label: getPhaseLabel(entry.phase) ?? entry.phase, timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(), failed: entry.state === 'failed' || entry.phase === 'failed' })
+      }
+    }
+    for (const name of data?.result?.cloning_repos ?? []) {
+      if (!clones.has(name)) updateClone(name, 'cloning')
+    }
+    const cloneStep = steps.find(step => step.phase === 'cloning')
+    if (cloneStep) {
+      cloneStep.repos = [...clones.values()]
+      cloneStep.failed ||= cloneStep.repos.some(repo => repo.state === 'failed')
+    }
+    return steps
+  }, [rawProgressLog, data?.result?.cloning_repos])
 
   useEffect(() => {
     if (stepLog.length > prevLogLenRef.current) {
@@ -244,9 +300,10 @@ export function StatusPage() {
   const peers = params?.peer_ai_configs
   const hasPeers = !!peers?.length
   const testsRepoUrl = (params?.tests_repo_url ?? '').trim()
-  const testsRepoHref = sanitizeHttpHref(testsRepoUrl)
+  const safeTestsRepoDisplay = safeRepoDisplay(testsRepoUrl)
+  const testsRepoHref = sanitizeHttpHref(safeTestsRepoDisplay)
   const testsRepoRef = (params?.tests_repo_ref ?? '').trim()
-  const testsRepoDisplay = testsRepoHref ?? testsRepoUrl
+  const testsRepoDisplay = safeTestsRepoDisplay ?? (testsRepoUrl ? 'Invalid repository URL' : '')
   const testsRepoLabel = testsRepoDisplay
     ? (testsRepoRef ? `${testsRepoDisplay}:${testsRepoRef}` : testsRepoDisplay)
     : '—'
@@ -328,9 +385,9 @@ export function StatusPage() {
           }}
         />
 
-        <div className="relative z-10 w-full max-w-xl px-4">
-        <Card className="animate-slide-up border-border-muted">
-          <CardContent className="flex flex-col items-center gap-6 p-8">
+        <div data-testid="status-card" className="relative z-10 w-full min-w-0 max-w-[80rem] px-4 sm:w-fit sm:max-w-[90vw]">
+        <Card className="w-full animate-slide-up border-border-muted">
+          <CardContent className="flex flex-col items-center gap-6 p-4 sm:p-8">
             {/* Pulsing / spinning indicator */}
             <div className="relative flex h-24 w-24 items-center justify-center">
               {/* Outer ring */}
@@ -427,7 +484,7 @@ export function StatusPage() {
                     {msg.title}
                   </h2>
                   <p className="mt-1 text-sm text-text-tertiary">
-                    {getPhaseLabel(progressPhase) ?? progressPhase ?? msg.subtitle}
+                    {getPhaseLabel(progressPhase, data?.result?.cloning_repos) ?? progressPhase ?? msg.subtitle}
                   </p>
                 </>
               )}
@@ -465,10 +522,14 @@ export function StatusPage() {
               {mainAi && (
                 <Row label="MAIN AI" value={mainAi} mono />
               )}
-              {data?.result?.token_usage && (
-                <Row label="USAGE / COST" value={
+              {(data?.result?.token_usage || (data?.graft_estimated_tokens_saved ?? 0) > 0) && (
+                <Row label={data?.result?.token_usage ? 'USAGE / COST' : 'GRAFT SAVINGS'} value={
                   <TooltipProvider>
-                    <TokenUsageBadge usage={data.result.token_usage} />
+                    {data?.result?.token_usage ? (
+                      <TokenUsageBadge usage={data.result.token_usage} graftEstimatedTokensSaved={data.graft_estimated_tokens_saved} />
+                    ) : (
+                      <TokenUsageBadge graftEstimatedTokensSaved={data?.graft_estimated_tokens_saved ?? 0} />
+                    )}
                   </TooltipProvider>
                 } />
               )}
@@ -565,24 +626,53 @@ export function StatusPage() {
                     Progress
                   </span>
                 </div>
-                <div ref={logContainerRef} className="max-h-64 overflow-y-auto px-3 py-2 space-y-1">
+                <div ref={logContainerRef} role="list" aria-label="Progress" tabIndex={0} className="max-h-[min(60vh,36rem)] overflow-y-auto px-3 py-2 space-y-1">
                   {stepLog.map((step, i) => {
                     const isLatest = i === stepLog.length - 1
+                    const failed = step.failed || (isLatest && (displayStatus === 'failed' || displayStatus === 'timeout'))
                     return (
-                      <div key={i} className={`flex items-start gap-2 text-xs ${isLatest ? 'text-signal-blue' : 'text-text-tertiary'}`}>
+                      <div role="listitem" key={i} className={`min-w-0 flex flex-wrap items-start gap-2 text-xs ${failed ? 'text-signal-red' : isLatest ? 'text-signal-blue' : 'text-text-tertiary'}`}>
                         <span className="shrink-0 font-mono text-[10px] text-text-tertiary/60">
                           {step.timestamp}
                         </span>
-                        {isLatest && isActive ? (
-                          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-signal-blue mt-0.5" />
-                        ) : isLatest && (displayStatus === 'failed' || displayStatus === 'timeout') ? (
+                        {failed ? (
                           <span className="shrink-0 text-signal-red mt-0.5">!</span>
+                        ) : isLatest && isActive ? (
+                          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-signal-blue mt-0.5" />
                         ) : (
                           <span className="shrink-0 text-signal-green mt-0.5">{'\u2713'}</span>
                         )}
-                        <span className={isLatest ? 'font-medium' : ''}>
-                          {step.label}
-                        </span>
+                        <div className="min-w-0 flex-1">
+                          {step.repos?.length ? (
+                            <button type="button" aria-expanded={clonesExpanded} aria-controls="clone-repos" onClick={() => setClonesExpanded(expanded => !expanded)} className={`inline-flex items-center gap-1 rounded-sm text-left hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent ${isLatest ? 'font-medium' : ''}`}>
+                              <ChevronDown aria-hidden="true" className={`h-3 w-3 transition-transform ${clonesExpanded ? '' : '-rotate-90'}`} />
+                              {step.label}
+                            </button>
+                          ) : (
+                            <span className={isLatest ? 'font-medium' : ''}>{step.label}</span>
+                          )}
+                          {step.repos && step.repos.length > 0 && (
+                            <ul id="clone-repos" hidden={!clonesExpanded} className="mt-1 space-y-1 border-l border-border-muted pl-3">
+                              {step.repos.map(repo => {
+                                const config = params?.additional_repos?.find(item => item.name === repo.name)
+                                  ?? (safeTestsRepoDisplay && new URL(safeTestsRepoDisplay).pathname.split('/').pop()?.replace(/\.git$/, '') === repo.name
+                                    ? { url: params?.tests_repo_url, ref: params?.tests_repo_ref } : undefined)
+                                  ?? (repo.name === 'tests' ? { url: params?.tests_repo_url, ref: params?.tests_repo_ref } : undefined)
+                                const display = safeRepoDisplay(repo.url ?? config?.url)
+                                const href = sanitizeHttpHref(display)
+                                const ref = (repo.ref ?? config?.ref)?.trim() || 'default'
+                                return (
+                                  <li key={repo.name} className={`min-w-0 break-words ${repo.state === 'failed' ? 'text-signal-red' : 'text-text-secondary'}`}>
+                                    <span className={`font-medium ${repo.state === 'failed' ? 'text-signal-red' : 'text-text-primary'}`}>{repo.name}</span>
+                                    {' · '}{href && isSafeHref(href) ? <a href={href} target="_blank" rel="noopener noreferrer" className="break-all text-text-link hover:underline">{href}</a> : <span className="break-all text-text-tertiary">{display ?? 'URL unavailable'}</span>}
+                                    {' · '}<span className="break-all">{ref}</span>
+                                    <span className={`ml-2 ${repo.state === 'failed' ? 'text-signal-red' : 'text-text-tertiary'}`}>{repo.state}</span>
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                          )}
+                        </div>
                       </div>
                     )
                   })}
