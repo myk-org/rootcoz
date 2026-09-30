@@ -174,7 +174,7 @@ describe('AiCredentials with a configured but unusable key', () => {
   it('warns that a saved key returned no usable models', async () => {
     const user = userEvent.setup()
     catalogMocks.providerStatus = {
-      'openai/custom': { has_api_key: true, model_count: 0 },
+      'openai/custom': { has_api_key: true, model_count: 0, modelListingSupported: true },
     }
     get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
 
@@ -188,9 +188,22 @@ describe('AiCredentials with a configured but unusable key', () => {
     expect((await screen.findAllByRole('option', /openai\/custom.*configured/)).length).toBeGreaterThan(0)
   })
 
+  it('stays quiet for a manual-only key that cannot list models', async () => {
+    catalogMocks.providerStatus = {
+      'openai/custom': { has_api_key: true, model_count: 0, modelListingSupported: false },
+    }
+    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
+
+    render(<AiCredentials />)
+
+    // Manual entry still works for this key, so it must not be called broken.
+    expect(await screen.findByText('openai/custom')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('stays quiet when the configured key did return models', async () => {
     catalogMocks.providerStatus = {
-      'openai/custom': { has_api_key: true, model_count: 2 },
+      'openai/custom': { has_api_key: true, model_count: 2, modelListingSupported: true },
     }
     get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
 

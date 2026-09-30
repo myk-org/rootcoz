@@ -460,3 +460,70 @@ async def test_status_reports_models_the_key_actually_yielded(monkeypatch):
         assert status["model_count"] == 1
     finally:
         ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_status_counts_distinct_model_ids(monkeypatch):
+    """A discovery response repeating an ID must not inflate model_count."""
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "secret"})
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(
+            return_value={
+                "modelListingSupported": True,
+                "models": [
+                    {"provider": "openai", "id": "dup", "name": "Dup"},
+                    {"provider": "openai", "id": "dup", "name": "Dup again"},
+                    {"provider": "openai", "id": "other", "name": "Other"},
+                ],
+            }
+        ),
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert sorted(entry["id"] for entry in scoped["openai"]) == ["dup", "other"]
+        assert ai_client.model_listing_status.get()["openai"]["model_count"] == 2
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_manual_only_key_reports_zero_without_listing_support(monkeypatch):
+    """No listing + no suggestions means manual entry, not a dead key."""
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(return_value={"mystery": "secret"}),
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["mystery"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(return_value={"modelListingSupported": False, "models": []}),
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        # Preserved as an empty bucket so the provider stays selectable.
+        assert scoped["mystery"] == []
+        status = ai_client.model_listing_status.get()["mystery"]
+        assert status["modelListingSupported"] is False
+        assert status["model_count"] == 0
+        # Manual entry is still accepted, so the key is usable.
+        assert await ai_client.resolve_catalog_pair("mystery", "typed-by-hand") == (
+            "mystery",
+            "typed-by-hand",
+        )
+    finally:
+        ai_client.ai_username.reset(token)

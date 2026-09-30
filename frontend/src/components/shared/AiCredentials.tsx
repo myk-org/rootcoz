@@ -40,11 +40,14 @@ export function AiCredentials() {
   const provider = editing ?? listed.find((item) => item.provider === selected)?.provider
   // Keys the sidecar accepted but that yielded nothing selectable. Surfaced per
   // provider, without needing a selection, so the row is never a dead end.
+  // Only a provider that *does* advertise listing qualifies: a manual-only key
+  // also reports zero, yet the user can still enter a model ID by hand.
   const starvedKeys = listed
     .filter(
       (item) =>
         item.configured &&
         catalogStatus[item.provider]?.has_api_key === true &&
+        catalogStatus[item.provider]?.modelListingSupported === true &&
         catalogStatus[item.provider]?.model_count === 0,
     )
     .map((item) => item.provider)

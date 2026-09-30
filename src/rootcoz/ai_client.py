@@ -388,7 +388,9 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             )
             if not listing:
                 pairs.setdefault((provider, ""), {})  # Preserve manual-only provider.
-            usable = 0
+            # Distinct accepted IDs: the catalog keys on (provider, id), so a
+            # discovery response repeating an ID must not inflate the count.
+            usable: set[tuple[str, str]] = set()
             for entry in entries:
                 pair = (provider, entry["id"])
                 limits = entry.get("capabilities") or {}
@@ -422,10 +424,10 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                         "can_use_server_providers": allowed,
                         "verified": listing,
                     }
-                usable += 1
+                usable.add(pair)
             # Report what the key actually yielded, so a key that stored fine but
             # surfaced no usable model is visible instead of silently looking ready.
-            status[provider]["model_count"] = usable
+            status[provider]["model_count"] = len(usable)
     result: dict[str, list[dict[str, Any]]] = {}
     for (provider, model), entry in pairs.items():
         bucket = result.setdefault(provider, [])
