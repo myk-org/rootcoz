@@ -13,8 +13,10 @@ RUN npm ci
 # Copy frontend source
 COPY frontend/ .
 
-# Build the frontend (vite build only — type checking runs in tox/CI)
-RUN npx vite build
+# Build the frontend. `npm run build` is `tsc -b && vite build`: the type check is
+# part of this stage on purpose. Plain `vite build` strips types without checking
+# them, which is how six type errors once reached a branch uncaught.
+RUN npm run build
 
 # Sidecar build stage
 FROM registry.access.redhat.com/ubi9/nodejs-22-minimal AS sidecar-builder

@@ -92,16 +92,31 @@ async def test_scoped_discovery_and_call_fail_closed(monkeypatch):
                 "can_use_server_providers": False,
                 "verified": True,
             },
+            {
+                "provider": "openai",
+                "id": "user-only",
+                "name": "User only",
+                "source": "api",
+                "credential_sources": ["user"],
+                "can_use_server_providers": False,
+                "verified": True,
+            },
         ]
         assert "xai" not in models
         assert secret not in str(models)
         with pytest.raises(ValueError, match="Unknown Pi-sidecar provider/model pair"):
-            await ai_client.resolve_catalog_pair("openai", "user-only")
+            await ai_client.resolve_catalog_pair("openai", "not-listed-anywhere")
+        # A key-listed model without token limits is still usable; the sidecar
+        # reports no capabilities for key-scoped discovery.
+        assert await ai_client.resolve_catalog_pair("openai", "user-only") == (
+            "openai",
+            "user-only",
+        )
         with pytest.raises(ValueError):
             await ai_client.resolve_catalog_pair("openai", "claude")
         ai_client.force_server_credentials.set(True)
         with pytest.raises(ValueError):
-            await ai_client.resolve_catalog_pair("openai", "user-only")
+            await ai_client.resolve_catalog_pair("openai", "not-listed-anywhere")
         assert await ai_client.session_key("openai") is None
     finally:
         ai_client.force_server_credentials.set(False)
@@ -305,6 +320,185 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
         assert await ai_client.resolve_catalog_pair("openai", "manual") == (
             "openai",
             "manual",
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+def _mock_key_discovery(monkeypatch, provider, discovery, catalog=None):
+    """Point the user-key path at a single provider with one discovery response.
+
+    Keeps every key-scoped test on the same mock wiring, so a change to how
+    discovery is stubbed is made once.
+    """
+    monkeypatch.setattr(
+        ai_client, "_get_model_catalog", AsyncMock(return_value=catalog or [])
+    )
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(return_value={provider: "secret"}),
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=[provider])
+    )
+    monkeypatch.setattr(
+        ai_client, "models_for_api_key", AsyncMock(return_value=discovery)
+    )
+
+
+@pytest.mark.asyncio
+async def test_key_listed_models_without_capabilities_stay_usable(monkeypatch):
+    """Regression: pi-sidecar reports no capabilities for key-scoped discovery.
+
+    Treating absent limits as unusable dropped every user-key model, so a stored
+    key produced zero selectable models and the provider vanished from the picker
+    (observed on prod for openai in v4.5.0).
+    """
+    # The provider is absent from the server catalog, as it is on prod.
+    _mock_key_discovery(
+        monkeypatch,
+        "openai",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
+                {
+                    "provider": "openai",
+                    "id": "gpt-5.6-luna",
+                    "name": "gpt-5.6-luna",
+                },
+            ],
+        },
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [entry["id"] for entry in scoped["openai"]] == [
+            "gpt-4o-mini",
+            "gpt-5.6-luna",
+        ]
+        assert all(
+            entry["credential_sources"] == ["user"] for entry in scoped["openai"]
+        )
+        assert await ai_client.resolve_catalog_pair("openai", "gpt-5.6-luna") == (
+            "openai",
+            "gpt-5.6-luna",
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_declared_but_unusable_limits_are_still_rejected(monkeypatch):
+    """Absence is fine; a declared-but-broken limit is not."""
+    _mock_key_discovery(
+        monkeypatch,
+        "google",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {
+                    "provider": "google",
+                    "id": "unlisted",
+                    "name": "No limits declared",
+                },
+                {
+                    "provider": "google",
+                    "id": "absurd",
+                    "name": "Beyond safe integer",
+                    "capabilities": {
+                        "inputTokenLimit": 2**53,
+                        "outputTokenLimit": 100,
+                    },
+                },
+            ],
+        },
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [entry["id"] for entry in scoped["google"]] == ["unlisted"]
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_status_reports_models_the_key_actually_yielded(monkeypatch):
+    """A key that stored but surfaced nothing must not look ready."""
+    _mock_key_discovery(
+        monkeypatch,
+        "openai",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
+                {
+                    "provider": "openai",
+                    "id": "broken",
+                    "name": "Broken",
+                    "capabilities": {
+                        "inputTokenLimit": 2**53,
+                        "outputTokenLimit": 1,
+                    },
+                },
+            ],
+        },
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [entry["id"] for entry in scoped["openai"]] == ["gpt-4o-mini"]
+        status = ai_client.model_listing_status.get()["openai"]
+        assert status["has_api_key"] is True
+        # One model survived the filter, so one is reported, not the two returned.
+        assert status["model_count"] == 1
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_status_counts_distinct_model_ids(monkeypatch):
+    """A discovery response repeating an ID must not inflate model_count."""
+    _mock_key_discovery(
+        monkeypatch,
+        "openai",
+        {
+            "modelListingSupported": True,
+            "models": [
+                {"provider": "openai", "id": "dup", "name": "Dup"},
+                {"provider": "openai", "id": "dup", "name": "Dup again"},
+                {"provider": "openai", "id": "other", "name": "Other"},
+            ],
+        },
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert sorted(entry["id"] for entry in scoped["openai"]) == ["dup", "other"]
+        assert ai_client.model_listing_status.get()["openai"]["model_count"] == 2
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_manual_only_key_reports_zero_without_listing_support(monkeypatch):
+    """No listing + no suggestions means manual entry, not a dead key."""
+    _mock_key_discovery(
+        monkeypatch, "mystery", {"modelListingSupported": False, "models": []}
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        # Preserved as an empty bucket so the provider stays selectable.
+        assert scoped["mystery"] == []
+        status = ai_client.model_listing_status.get()["mystery"]
+        assert status["modelListingSupported"] is False
+        assert status["model_count"] == 0
+        # Manual entry is still accepted, so the key is usable.
+        assert await ai_client.resolve_catalog_pair("mystery", "typed-by-hand") == (
+            "mystery",
+            "typed-by-hand",
         )
     finally:
         ai_client.ai_username.reset(token)

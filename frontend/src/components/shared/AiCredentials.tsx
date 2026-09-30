@@ -13,7 +13,8 @@ export function AiCredentials() {
   const [selected, setSelected] = useState('')
   const [key, setKey] = useState('')
   const [model, setModel] = useState('')
-  const { providers: catalog } = useProviderCatalog()
+  const { providers: catalog, providerStatus: rawStatus } = useProviderCatalog()
+  const catalogStatus = rawStatus ?? {}
   const keyRef = useRef('')
   const [editing, setEditing] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -33,8 +34,23 @@ export function AiCredentials() {
     setKey('')
   }
 
-  const available = providers?.filter((item) => !item.configured) ?? []
-  const provider = editing ?? available.find((item) => item.provider === selected)?.provider
+  const listed = providers ?? []
+  // Configured providers stay listed: hiding them made a saved key look lost.
+  // Picking one is a replace, which is what the form already submits.
+  const provider = editing ?? listed.find((item) => item.provider === selected)?.provider
+  // Keys the sidecar accepted but that yielded nothing selectable. Surfaced per
+  // provider, without needing a selection, so the row is never a dead end.
+  // Only a provider that *does* advertise listing qualifies: a manual-only key
+  // also reports zero, yet the user can still enter a model ID by hand.
+  const starvedKeys = listed
+    .filter(
+      (item) =>
+        item.configured &&
+        catalogStatus[item.provider]?.has_api_key === true &&
+        catalogStatus[item.provider]?.modelListingSupported === true &&
+        catalogStatus[item.provider]?.model_count === 0,
+    )
+    .map((item) => item.provider)
 
   async function save(event: FormEvent) {
     event.preventDefault()
@@ -97,11 +113,17 @@ export function AiCredentials() {
         </div>
         {error && <p role="alert" className="text-xs text-signal-red">{error}</p>}
         {notice && <p role="status" className="text-xs text-signal-green">{notice}</p>}
+        {starvedKeys.map((id) => (
+          <p key={id} role="alert" className="text-xs text-signal-amber">
+            Your {id} key is saved, but it returned no usable models. Remove the key and
+            add it again to re-check.
+          </p>
+        ))}
         {providers?.length === 0 && <p className="text-sm text-text-tertiary">No API-key providers available.</p>}
         {providers && <>
-          {providers.some((item) => item.configured) && (
+          {listed.some((item) => item.configured) && (
             <ul aria-label="Configured AI providers" className="divide-y divide-border-muted border-t border-border-muted">
-              {providers.filter((item) => item.configured).map(({ provider: id }) => (
+              {listed.filter((item) => item.configured).map(({ provider: id }) => (
                 <li key={id} className="flex flex-wrap items-center gap-2 py-3">
                   <span className="mr-auto font-mono text-sm text-text-primary break-all">{id}</span>
                   <span className="text-xs text-text-tertiary">Configured</span>
@@ -111,7 +133,7 @@ export function AiCredentials() {
               ))}
             </ul>
           )}
-          {(available.length > 0 || editing) && (
+          {(listed.length > 0 || editing) && (
             <form onSubmit={save} className="space-y-3 border-t border-border-muted pt-4">
               {editing ? (
                 <div className="flex items-center justify-between gap-2">
@@ -121,7 +143,7 @@ export function AiCredentials() {
               ) : (
                 <div className="space-y-1.5">
                   <span className="block text-xs text-text-tertiary">AI provider</span>
-                  <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); setError(''); setSelected(value) }} options={available.map((item) => ({ id: item.provider, name: item.provider }))} placeholder="Find a provider" ariaLabel="AI provider" disabled={busy !== null} />
+                  <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); setError(''); setSelected(value) }} options={listed.map((item) => ({ id: item.provider, name: item.configured ? 'configured' : item.provider }))} placeholder="Find a provider" ariaLabel="AI provider" disabled={busy !== null} />
                 </div>
               )}
               <div className="space-y-1.5">

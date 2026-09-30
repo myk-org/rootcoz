@@ -40,7 +40,7 @@ _selected_credential_source: ContextVar[str] = ContextVar(
     "selected_credential_source", default=""
 )
 chat_session_source: ContextVar[str] = ContextVar("chat_session_source", default="")
-model_listing_status: ContextVar[dict[str, dict[str, bool]] | None] = ContextVar(
+model_listing_status: ContextVar[dict[str, dict[str, bool | int]] | None] = ContextVar(
     "model_listing_status", default=None
 )
 _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = ContextVar(
@@ -335,7 +335,7 @@ async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
 async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     """Return models usable by the active user or server, with source per pair."""
     catalog = await _get_model_catalog()
-    status: dict[str, dict[str, bool]] = {}
+    status: dict[str, dict[str, bool | int]] = {}
     model_listing_status.set(status)
     from rootcoz.storage import can_user_use_server_providers
 
@@ -388,14 +388,28 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             )
             if not listing:
                 pairs.setdefault((provider, ""), {})  # Preserve manual-only provider.
+            # Distinct accepted IDs: the catalog keys on (provider, id), so a
+            # discovery response repeating an ID must not inflate the count.
+            usable: set[tuple[str, str]] = set()
             for entry in entries:
                 pair = (provider, entry["id"])
                 limits = entry.get("capabilities") or {}
-                constructible = pair in pairs or all(
-                    type(limits.get(field)) is int and 0 < limits[field] <= 2**53 - 1
+                declared = [
+                    limits.get(field)
                     for field in ("inputTokenLimit", "outputTokenLimit")
+                ]
+                present = [value for value in declared if value is not None]
+                # pi-sidecar reports no capabilities for key-scoped discovery, so
+                # absence must stay usable. A limit that is declared but partial,
+                # non-integer, or beyond the safe range still breaks token math.
+                unusable = bool(present) and (
+                    len(present) != 2
+                    or any(
+                        type(value) is not int or not 0 < value <= 2**53 - 1
+                        for value in present
+                    )
                 )
-                if listing and not constructible:
+                if listing and not (pair in pairs or not unusable):
                     continue
                 if pair in pairs:
                     pairs[pair]["credential_sources"].insert(0, "user")
@@ -410,6 +424,10 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                         "can_use_server_providers": allowed,
                         "verified": listing,
                     }
+                usable.add(pair)
+            # Report what the key actually yielded, so a key that stored fine but
+            # surfaced no usable model is visible instead of silently looking ready.
+            status[provider]["model_count"] = len(usable)
     result: dict[str, list[dict[str, Any]]] = {}
     for (provider, model), entry in pairs.items():
         bucket = result.setdefault(provider, [])

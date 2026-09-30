@@ -3,16 +3,22 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { api } from '@/lib/api'
 import { AiCredentials } from './AiCredentials'
+import type { ProviderStatus } from '@/types'
 
 Element.prototype.scrollIntoView = vi.fn()
 
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), put: vi.fn(), delete: vi.fn() } }))
+const catalogMocks = vi.hoisted(() => ({
+  // Reuse the real status shape so a new field cannot drift out of the mock.
+  providerStatus: {} as Record<string, ProviderStatus>,
+}))
+
 vi.mock('@/lib/useProviderOptions', () => ({
   resetProviderCatalogCache: vi.fn(),
   useProviderCatalog: () => ({ providers: {
     'openai/custom': [{ id: 'catalog-model', name: 'Catalog model' }],
     other: [],
-  } }),
+  }, providerStatus: catalogMocks.providerStatus }),
 }))
 
 const get = vi.mocked(api.get)
@@ -21,6 +27,7 @@ const remove = vi.mocked(api.delete)
 
 beforeEach(() => {
   vi.resetAllMocks()
+  catalogMocks.providerStatus = {}
   get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: false }, { provider: 'other', configured: false }] })
   put.mockResolvedValue({ outcome: 'accepted', ok: true })
   remove.mockResolvedValue(undefined)
@@ -44,7 +51,9 @@ describe('AiCredentials', () => {
     expect(screen.getByLabelText('API key')).toHaveValue('')
 
     await user.click(picker)
-    expect(screen.queryByRole('option', { name: 'openai/custom' })).not.toBeInTheDocument()
+    // A configured provider stays listed, marked as configured: hiding it made a
+    // saved key look like it had been lost.
+    expect((await screen.findAllByRole('option', { name: /openai\/custom.*configured/ })).length).toBeGreaterThan(0)
     await user.click(await screen.findByRole('option', { name: 'other' }))
     await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
     await user.type(screen.getByLabelText('API key'), 'second-secret')
@@ -160,5 +169,49 @@ describe('AiCredentials', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load AI credentials')
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  })
+})
+
+describe('AiCredentials with a configured but unusable key', () => {
+  it('warns that a saved key returned no usable models', async () => {
+    const user = userEvent.setup()
+    catalogMocks.providerStatus = {
+      'openai/custom': { has_api_key: true, model_count: 0, modelListingSupported: true },
+    }
+    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
+
+    render(<AiCredentials />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Your openai/custom key is saved, but it returned no usable models.',
+    )
+    // The key must still be reachable, not silently hidden.
+    await user.click(await screen.findByRole('combobox', { name: 'AI provider' }))
+    expect((await screen.findAllByRole('option', { name: /openai\/custom.*configured/ })).length).toBeGreaterThan(0)
+  })
+
+  it('stays quiet for a manual-only key that cannot list models', async () => {
+    catalogMocks.providerStatus = {
+      'openai/custom': { has_api_key: true, model_count: 0, modelListingSupported: false },
+    }
+    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
+
+    render(<AiCredentials />)
+
+    // Manual entry still works for this key, so it must not be called broken.
+    expect(await screen.findByText('openai/custom')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('stays quiet when the configured key did return models', async () => {
+    catalogMocks.providerStatus = {
+      'openai/custom': { has_api_key: true, model_count: 2, modelListingSupported: true },
+    }
+    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
+
+    render(<AiCredentials />)
+
+    expect(await screen.findByText('openai/custom')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
