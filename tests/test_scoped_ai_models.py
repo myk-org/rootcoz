@@ -417,3 +417,46 @@ async def test_declared_but_unusable_limits_are_still_rejected(monkeypatch):
         assert [entry["id"] for entry in scoped["google"]] == ["unlisted"]
     finally:
         ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_status_reports_models_the_key_actually_yielded(monkeypatch):
+    """A key that stored but surfaced nothing must not look ready."""
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "secret"})
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(
+            return_value={
+                "modelListingSupported": True,
+                "models": [
+                    {"provider": "openai", "id": "gpt-4o-mini", "name": "gpt-4o-mini"},
+                    {
+                        "provider": "openai",
+                        "id": "broken",
+                        "name": "Broken",
+                        "capabilities": {
+                            "inputTokenLimit": 2**53,
+                            "outputTokenLimit": 1,
+                        },
+                    },
+                ],
+            }
+        ),
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [entry["id"] for entry in scoped["openai"]] == ["gpt-4o-mini"]
+        status = ai_client.model_listing_status.get()["openai"]
+        assert status["has_api_key"] is True
+        # One model survived the filter, so one is reported, not the two returned.
+        assert status["model_count"] == 1
+    finally:
+        ai_client.ai_username.reset(token)

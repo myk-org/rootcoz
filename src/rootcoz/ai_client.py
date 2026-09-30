@@ -40,7 +40,7 @@ _selected_credential_source: ContextVar[str] = ContextVar(
     "selected_credential_source", default=""
 )
 chat_session_source: ContextVar[str] = ContextVar("chat_session_source", default="")
-model_listing_status: ContextVar[dict[str, dict[str, bool]] | None] = ContextVar(
+model_listing_status: ContextVar[dict[str, dict[str, bool | int]] | None] = ContextVar(
     "model_listing_status", default=None
 )
 _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = ContextVar(
@@ -335,7 +335,7 @@ async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
 async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     """Return models usable by the active user or server, with source per pair."""
     catalog = await _get_model_catalog()
-    status: dict[str, dict[str, bool]] = {}
+    status: dict[str, dict[str, bool | int]] = {}
     model_listing_status.set(status)
     from rootcoz.storage import can_user_use_server_providers
 
@@ -388,6 +388,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             )
             if not listing:
                 pairs.setdefault((provider, ""), {})  # Preserve manual-only provider.
+            usable = 0
             for entry in entries:
                 pair = (provider, entry["id"])
                 limits = entry.get("capabilities") or {}
@@ -421,6 +422,10 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                         "can_use_server_providers": allowed,
                         "verified": listing,
                     }
+                usable += 1
+            # Report what the key actually yielded, so a key that stored fine but
+            # surfaced no usable model is visible instead of silently looking ready.
+            status[provider]["model_count"] = usable
     result: dict[str, list[dict[str, Any]]] = {}
     for (provider, model), entry in pairs.items():
         bucket = result.setdefault(provider, [])
