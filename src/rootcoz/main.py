@@ -12167,6 +12167,12 @@ async def _init_chat_under_barrier(
             github_available=bool(github_token and github_repo),
         )
         if session_id:
+            # The previous session is gone, so its welcome is stale chrome.
+            # A dead session's welcome would otherwise accumulate in history on
+            # every credential or grant change. No session_id here: the init
+            # placeholder above is the session marker, and a welcome carrying one
+            # would take over as the latest Start.
+            await storage.delete_chat_welcome_messages(job_id, username)
             await storage.add_chat_message(
                 job_id=job_id,
                 role="assistant",

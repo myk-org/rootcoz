@@ -343,3 +343,66 @@ async def test_start_rejects_server_without_grant_even_when_job_forced(
         )
     assert exc.value.status_code == 422
     assert await storage.count_chat_messages("job", username="bob") == 0
+
+
+@pytest.mark.asyncio
+async def test_new_session_replaces_stale_welcome_but_keeps_replies(
+    monkeypatch, tmp_path
+):
+    """A dead session's welcome is chrome and must not stack up in history."""
+    from rootcoz.engine import chat
+    from rootcoz.sources import chat_workspace
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "openai", "user-key")
+    job_id = "job"
+    await storage.save_result(job_id, "", "completed", {"result": {}})
+    from rootcoz.config import Settings
+
+    monkeypatch.setattr(main, "get_settings", lambda: Settings(ai_call_timeout=30))
+    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        main, "_resolve_chat_credentials", AsyncMock(return_value=("", "", "", "", ""))
+    )
+    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+
+    async def validate(p, m):
+        ai_client._selected_credential_source.set("user")
+        return p, m
+
+    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+
+    sessions = iter(["sid-1", "sid-2"])
+
+    async def create(**kwargs):
+        sid = next(sessions)
+        await storage.save_ai_session_source(sid, "alice", "openai", "user")
+        return sid
+
+    monkeypatch.setattr(chat, "init_chat_session", create)
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+    )
+    body = ChatInitRequest(
+        ai_provider="openai", ai_model="chosen", force_server_credentials=False
+    )
+    await main.init_chat(job_id, request, body)
+
+    # A real exchange that must survive the next session.
+    await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="openai", ai_model="chosen"
+    )
+
+    # The first session dies: its user credential is no longer available.
+    await storage.update_user_ai_credential("alice", "openai", None)
+    await main.init_chat(job_id, request, body)
+
+    messages = await storage.get_chat_messages(job_id, username="alice")
+    assert sum(1 for m in messages if (m["content"] or "").startswith("👋")) == 1
+    assert any((m["content"] or "") == "hello" for m in messages)

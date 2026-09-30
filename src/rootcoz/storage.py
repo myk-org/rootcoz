@@ -7199,6 +7199,25 @@ async def delete_chat_messages(job_id: str, username: str = "") -> int:
         return cursor.rowcount
 
 
+async def delete_chat_welcome_messages(job_id: str, username: str) -> int:
+    """Delete a user's stored chat welcomes for a job. Returns count deleted.
+
+    A welcome is per-session chrome, not conversation: init writes it as an
+    assistant row with no AI fields, because no AI call produced it. Whenever a
+    session dies (credential revoked, grant withdrawn, key rotated) the next
+    Start writes a fresh welcome, and the dead session's copy would otherwise
+    sit in history forever. Only rows that no AI call ever filled are touched.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM chat_messages WHERE job_id = ? AND username = ? "
+            "AND role = 'assistant' AND COALESCE(ai_provider, '') = ''",
+            (job_id, username),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
 async def get_pending_chat_messages(
     job_id: str, username: str = ""
 ) -> list[dict[str, Any]]:

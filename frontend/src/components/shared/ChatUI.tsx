@@ -6,6 +6,7 @@ import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared
 import { Toggle } from '@/components/shared/Toggle'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog, useCursorAuthStatus } from '@/lib/useProviderOptions'
+import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useAuth } from '@/lib/auth'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { normalizeProvider } from '@/lib/aiProviders'
@@ -566,7 +567,9 @@ export function ChatUI({
         )}
 
         {!canUseServerProviders && !sessionStarted && (
-          <p className="px-6 pt-2 text-xs text-text-tertiary">Server credentials are restricted. Ask an admin for access, or use your own AI key.</p>
+          <div className="px-6 pt-2">
+            <CredentialAccessNotice />
+          </div>
         )}
         {!sessionStarted && !loadingHistory && (
           <p className="px-6 pt-2 text-xs text-text-tertiary" role="status">{needsServerToggle && canUseServerProviders

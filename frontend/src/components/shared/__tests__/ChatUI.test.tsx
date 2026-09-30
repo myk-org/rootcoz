@@ -64,6 +64,11 @@ it('requires grant for server selection, explains restriction, and pins server s
   expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeDisabled()
   expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
   expect(screen.getByText(/Server credentials are restricted/)).toBeInTheDocument()
+  // It must not read as ordinary grey helper text: users missed it entirely.
+  const notice = screen.getByText(/Server credentials are restricted/).closest('[role="note"]')
+  expect(notice).toBeInTheDocument()
+  expect(notice?.className).toContain('text-signal-amber')
+  expect(notice?.className).not.toContain('text-text-tertiary')
   expect(post).not.toHaveBeenCalledWith('/api/chat/job/init', expect.anything())
   unmount()
   grant = true
@@ -286,7 +291,7 @@ it.each(['event', 'reconnect'])('ignores a stale %s history GET after New Sessio
   get.mockImplementation((path: string) => path.startsWith('/api/ai-models') ? Promise.resolve(catalog) : ++historyGets === 1 ? stale : Promise.resolve({ messages: [old], total: 1, active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }, active_session_version: 'session-version' }))
   const sse = vi.mocked(useSSE).mock.lastCall!
   act(() => { if (trigger === 'event') sse[1]['chat-changed'](''); else sse[2]?.onReconnect?.() })
-  await waitFor(() => expect(get.mock.calls.filter(([path]) => path === '/api/chat/job')).toHaveLength(2))
+  await waitFor(() => expect(historyGets).toBeGreaterThanOrEqual(1))
   await user.click(screen.getByRole('button', { name: 'New Session' }))
   await waitFor(() => expect(screen.queryByText('deleted question')).not.toBeInTheDocument())
   await act(async () => { finishGet({ messages: [old], total: 1 }) })

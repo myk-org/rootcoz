@@ -5,10 +5,12 @@ import { Sidebar } from './Sidebar'
 import { useAuth } from '@/lib/auth'
 import { api } from '@/lib/api'
 import { useSSE } from '@/lib/SSEProvider'
+import { useHasMoreBelow } from './useHasMoreBelow'
 
 export function Layout() {
   const { username, isAdmin } = useAuth()
   const location = useLocation()
+  const { ref: mainRef, hasMore } = useHasMoreBelow<HTMLElement>()
   const [unreadCount, setUnreadCount] = useState(0)
   const [activeCount, setActiveCount] = useState(0)
   const [pendingCount, setPendingCount] = useState(0)
@@ -59,11 +61,19 @@ export function Layout() {
           mobileOpen={mobileOpen}
           onMobileClose={() => setMobileOpen(false)}
         />
-        <main className="flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
-          <div className="mx-auto max-w-[1400px]">
-            <Outlet />
-          </div>
-        </main>
+        <div className="relative flex-1">
+          <main ref={mainRef} className="h-full overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
+            <div className="mx-auto max-w-[1400px]">
+              <Outlet />
+            </div>
+          </main>
+          {hasMore && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-surface-page to-transparent"
+            />
+          )}
+        </div>
       </div>
     </div>
   )
