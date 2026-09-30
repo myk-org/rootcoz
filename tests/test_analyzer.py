@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+import logging
 import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -302,7 +303,9 @@ class TestRunSingleAiAnalysis:
                 server_url="",
                 job_id="",
             )
-        mock_cli.assert_awaited_once()
+        # A timeout is a recoverable failure, so the call is retried once before
+        # the group fails. Only auth/session faults skip the retry.
+        assert mock_cli.await_count == 2
 
     @pytest.mark.asyncio
     async def test_empty_response_retries_once_then_succeeds(
@@ -3092,3 +3095,221 @@ async def test_run_orchestrated_analysis_cross_failure_patterns(
     assert len(analyses) == 2
     assert len(patterns) == 1
     assert patterns[0].pattern == "Shared NFS outage"
+
+
+class TestRecoverableFailureRetry:
+    """A truncated provider stream must not discard a completed analysis.
+
+    Production case: an openai/gpt-5.6-luna call streamed 7395 characters over
+    85s, then the Responses stream ended without a terminal event. The sidecar
+    returned the text alongside the error, and the call was reported as a
+    failure, so the group showed "Analysis failed" despite the work completing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_truncated_stream_failure_is_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A transport failure retries once and uses the successful second attempt."""
+        complete = json.dumps(
+            {
+                "classification": "CODE ISSUE",
+                "affected_tests": ["test_foo"],
+                "details": "completed on the retry",
+            }
+        )
+        results = [
+            AIResult(
+                success=False,
+                text="AI call failed",
+                error="AI call failed",
+            ),
+            AIResult(success=True, text=complete),
+        ]
+        mock_cli = AsyncMock(side_effect=results)
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="err", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="openai",
+            ai_model="gpt-5.6-luna",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job-1",
+        )
+        assert mock_cli.await_count == 2
+        assert parsed.classification == "CODE ISSUE"
+        assert parsed.details == "completed on the retry"
+
+    @pytest.mark.asyncio
+    async def test_auth_failure_does_not_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An auth fault will not fix itself, so it must fail fast."""
+        mock_cli = AsyncMock(
+            return_value=AIResult(
+                success=False,
+                text="authentication required",
+                error="authentication required",
+            )
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="err", stack_trace="st"
+        )
+        with pytest.raises(RuntimeError):
+            await run_single_ai_analysis(
+                failures=[failure],
+                console_context="",
+                repo_path=None,
+                ai_provider="openai",
+                ai_model="gpt-5.6-luna",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="job-1",
+            )
+        assert mock_cli.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_log_does_not_leak_provider_error(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A provider error can echo a credential; it must never reach the logs."""
+        # Assembled at runtime: a key-shaped literal in source would need a
+        # whole-file gitleaks exemption, which would stop scanning every other
+        # secret in this file. The value is still a realistic credential shape.
+        secret = f"sk-live-{'0a1b2c3d' * 2}"
+        complete = json.dumps(
+            {
+                "classification": "CODE ISSUE",
+                "affected_tests": ["test_foo"],
+                "details": "recovered",
+            }
+        )
+        mock_cli = AsyncMock(
+            side_effect=[
+                AIResult(
+                    success=False,
+                    text="",
+                    error=f"upstream rejected key {secret}",
+                ),
+                AIResult(success=True, text=complete),
+            ]
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="err", stack_trace="st"
+        )
+        # simple_logger sets propagate=False, so caplog.at_level alone captures
+        # nothing and the assertion below would pass vacuously. Attach the handler
+        # to the engine logger directly, as test_debug_request_logging does.
+        from rootcoz.engine.core import logger as core_logger
+
+        original_level = core_logger.level
+        core_logger.setLevel(logging.WARNING)
+        core_logger.addHandler(caplog.handler)
+        try:
+            await run_single_ai_analysis(
+                failures=[failure],
+                console_context="",
+                repo_path=None,
+                ai_provider="openai",
+                ai_model="gpt-5.6-luna",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="job-1",
+            )
+        finally:
+            core_logger.removeHandler(caplog.handler)
+            core_logger.setLevel(original_level)
+
+        assert mock_cli.await_count == 2
+        # Guard against a vacuous pass: the retry must actually have been logged.
+        assert any(
+            "retrying recoverable failure" in record.message
+            for record in caplog.records
+        )
+        assert secret not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_invalid_api_key_marker_does_not_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The credential path emits invalid_api_key; that key is not recoverable."""
+        mock_cli = AsyncMock(
+            return_value=AIResult(success=False, text="", error="invalid_api_key")
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="err", stack_trace="st"
+        )
+        with pytest.raises(RuntimeError):
+            await run_single_ai_analysis(
+                failures=[failure],
+                console_context="",
+                repo_path=None,
+                ai_provider="openai",
+                ai_model="gpt-5.6-luna",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="job-1",
+            )
+        assert mock_cli.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_analysis_text_does_not_block_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Model-authored text quoting an auth phrase must not suppress a retry."""
+        complete = json.dumps(
+            {
+                "classification": "CODE ISSUE",
+                "affected_tests": ["test_foo"],
+                "details": "recovered despite the quoted phrase",
+            }
+        )
+        mock_cli = AsyncMock(
+            side_effect=[
+                AIResult(
+                    success=False,
+                    text='{"details": "the VM said session not found and then"}',
+                    error="OpenAI Responses stream ended before a terminal response event",
+                ),
+                AIResult(success=True, text=complete),
+            ]
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="err", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=None,
+            ai_provider="openai",
+            ai_model="gpt-5.6-luna",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job-1",
+        )
+        assert mock_cli.await_count == 2
+        assert parsed.classification == "CODE ISSUE"
