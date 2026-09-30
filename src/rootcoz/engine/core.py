@@ -1547,6 +1547,18 @@ def _is_empty_ai_text(result: AIResult) -> bool:
     return bool(result.success) and not (result.text or "").strip()
 
 
+# Auth and session faults do not resolve themselves; a second attempt only
+# repeats the failure. A redacted user-key failure arrives as "AI call failed",
+# which is deliberately absent here so a recoverable failure stays retryable.
+_NON_RETRYABLE_AI_ERRORS = (
+    "session not found",
+    "authentication required",
+    "not authenticated",
+    "not logged in",
+    "invalid api key",
+)
+
+
 async def _call_ai_with_retry(
     prompt: str,
     *,
@@ -1645,7 +1657,23 @@ async def _call_ai_with_retry(
         )
 
         if not result.success:
-            break
+            # A provider stream can end without a terminal event after the model
+            # has already emitted a full analysis, discarding it as a failure.
+            # That is transport-level, and a second attempt usually completes.
+            detail = f"{result.error or ''} {result.text or ''}".lower()
+            recoverable = not any(
+                marker in detail for marker in _NON_RETRYABLE_AI_ERRORS
+            )
+            if not recoverable or attempt >= max_attempts:
+                break
+            logger.warning(
+                "AI call failed (attempt=%d/%d); retrying recoverable failure: %s",
+                attempt,
+                max_attempts,
+                (result.error or "unknown error")[:200],
+            )
+            continue
+
         if not _is_empty_ai_text(result):
             break
 
