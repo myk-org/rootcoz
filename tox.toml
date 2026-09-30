@@ -27,8 +27,8 @@ commands = [
     "--no-fund",
   ],
   [
-    "npx",
-    "vite",
+    "npm",
+    "run",
     "build",
   ],
   [
@@ -36,7 +36,7 @@ commands = [
     "test",
   ],
 ]
-description = "Run frontend build and tests"
+description = "Run frontend type check, build and tests"
 skip_install = true
 allowlist_externals = ["npm", "npx"]
 change_dir = "frontend"
