@@ -343,7 +343,7 @@
 </tr>
 <tr>
 <td><code>rootcoz auth logout</code></td>
-<td>Clear the admin session.</td>
+<td>Clear the browser session cookie. See the note below — this does not remove a configured API key.</td>
 </tr>
 <tr>
 <td><code>rootcoz auth ai-keys list</code></td>
@@ -360,6 +360,9 @@
 </tbody>
 </table></div>
 <p>Roles reported by <code>auth whoami</code> are <code>viewer</code>, <code>reviewer</code>, <code>operator</code>, and <code>admin</code>.</p>
+<blockquote>
+<p><strong>Note:</strong> <code>auth logout</code> posts to <code>POST /api/auth/logout</code>, which deletes the <code>rootcoz_session</code> and <code>jji_session</code> browser cookies. The CLI never holds those cookies, and it stores no session of its own — <code>auth login</code> only validates the key and prints your role. So <code>logout</code> is effectively a no-op for CLI use: it leaves the <code>api_key</code> in <code>~/.config/rootcoz/config.toml</code> untouched, and every later command keeps authenticating with it. To end CLI access, remove the key from the config file (or unset <code>ROOTCOZ_API_KEY</code>), or run <code>rootcoz auth rotate-key</code> to issue a replacement — the old key stops working immediately, but you must then update the config file or environment with the new key, which is shown once.</p>
+</blockquote>
 <ol>
 <li><strong>Manage the local config file.</strong> These read <code>~/.config/rootcoz/config.toml</code> (or <code>$XDG_CONFIG_HOME/rootcoz/config.toml</code>) and do not need a running server, except <code>config defaults</code>.</li>
 </ol>

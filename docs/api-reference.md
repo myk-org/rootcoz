@@ -175,7 +175,7 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/create-github-issue` | viewer | `test_name`, `title`, `body`; returns `201` |
 | POST | `/results/{job_id}/create-jira-bug` | viewer | Adds `jira_issue_type`; returns `201` |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
-| GET | `/results/{job_id}/tracked-in` | viewer | Current tracker links |
+| GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
 | GET | `/api/exporters` | viewer | Available exporter plugins and enabled state |
 | POST | `/results/{job_id}/push/{plugin_name}` | operator | Generic push; `child_job_name` and `child_build_number` optional |

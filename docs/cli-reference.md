@@ -49,12 +49,14 @@ That single command resolves the server, authenticates, and returns machine-read
 | `rootcoz auth login --username NAME --api-key KEY` | Validate credentials and print the resolved role. Does not persist anything. |
 | `rootcoz auth whoami` | Current username, role, admin flag, and report access. |
 | `rootcoz auth rotate-key` | Issue a new API key for yourself, shown once. |
-| `rootcoz auth logout` | Clear the admin session. |
+| `rootcoz auth logout` | Clear the browser session cookie. See the note below — this does not remove a configured API key. |
 | `rootcoz auth ai-keys list` | Show which providers already have a key for your account. |
 | `rootcoz auth ai-keys set PROVIDER --model MODEL [--stdin]` | Store a provider key, verified against `MODEL`. |
 | `rootcoz auth ai-keys delete PROVIDER` | Remove your stored key for one provider. |
 
 Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin`.
+
+> **Note:** `auth logout` posts to `POST /api/auth/logout`, which deletes the `rootcoz_session` and `jji_session` browser cookies. The CLI never holds those cookies, and it stores no session of its own — `auth login` only validates the key and prints your role. So `logout` is effectively a no-op for CLI use: it leaves the `api_key` in `~/.config/rootcoz/config.toml` untouched, and every later command keeps authenticating with it. To end CLI access, remove the key from the config file (or unset `ROOTCOZ_API_KEY`), or run `rootcoz auth rotate-key` to issue a replacement — the old key stops working immediately, but you must then update the config file or environment with the new key, which is shown once.
 
 4. **Manage the local config file.** These read `~/.config/rootcoz/config.toml` (or `$XDG_CONFIG_HOME/rootcoz/config.toml`) and do not need a running server, except `config defaults`.
 

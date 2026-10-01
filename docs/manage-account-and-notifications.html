@@ -351,8 +351,9 @@
 </tr>
 </tbody>
 </table></div>
-<p>Tokens you type are validated against the provider before they are saved, and a failed validation leaves the stored value unchanged. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically. Saving an empty value for a field clears it; saving nothing at all leaves your stored tokens alone.</p>
+<p>Tokens you type are validated against the provider before they are saved, and a failed validation leaves the stored value unchanged. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.</p>
 <blockquote>
+<p><strong>Warning:</strong> Stored tokens cannot be cleared from this page or from the API. <code>PUT /api/user/tokens</code> treats an empty field as "keep what is already stored" and merges it back over your existing values, and a request with all three fields empty is dropped without saving. Clearing every field in the UI is skipped outright for the same reason. A stored GitHub or Jira credential therefore stays on the server until it is overwritten by a different value, and there is no <code>DELETE</code> route for it. If you need the credential gone, register a fresh account or ask an administrator to delete the account with <code>DELETE /api/admin/users/{username}</code>; the tokens are columns on the <code>users</code> row, so removing the row removes them.</p>
 <p><strong>Tip:</strong> Without a tracker token you can still preview generated issue content, but you cannot submit it. See <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for details.</p>
 </blockquote>
 <ol>

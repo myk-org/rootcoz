@@ -227,7 +227,7 @@
 </ul>
 <h2 id="quick-example">Quick Example</h2>
 <div class="highlight"><pre><span></span><code>AI_PROVIDER=claude
-AI_MODEL=claude-sonnet-4
+AI_MODEL=&lt;a model id from GET /api/ai-models&gt;
 ANTHROPIC_API_KEY=your-anthropic-api-key
 DEFAULT_USER_ROLE=operator
 REQUIRE_APPROVAL=false
@@ -236,6 +236,16 @@ SECURE_COOKIES=false
 
 <p>Those six lines are enough to run the local Docker stack at <code>http://localhost:8000</code> and submit your first analysis.</p>
 <p>Only <code>AI_PROVIDER</code> and <code>AI_MODEL</code> are hard-required. <code>docker-compose.yaml</code> fails fast without them, and the Helm chart requires <code>ai.provider</code> and <code>ai.model</code>. <code>ADMIN_KEY</code> is optional: the chart auto-generates it on first install. Everything else has a working default.</p>
+<blockquote>
+<p><strong>Note:</strong> Fill <code>AI_MODEL</code> in from your own deployment. There is no built-in default model list — the catalogue is discovered from the Pi-sidecar at runtime, so a model id copied from elsewhere may not resolve. Run <code>rootcoz ai-models</code> (or <code>GET /api/ai-models</code>) against a running server and pick an id that is actually listed.</p>
+</blockquote>
+<p><code>AI_PROVIDER</code> and <code>AI_MODEL</code> are resolved as a pair at submit time, and the resolution is strict:</p>
+<ul>
+<li>An <strong>exact</strong> <code>provider/model</code> pair that appears in the sidecar catalogue is used as-is.</li>
+<li>The friendly names <code>claude</code>, <code>gemini</code>, and <code>cursor</code> are <strong>not</strong> provider IDs. Each maps to exactly one sidecar provider (<code>claude</code> to <code>google-vertex-claude</code>, <code>gemini</code> to <code>google</code>, <code>cursor</code> to any <code>*-cursor</code> provider), and that mapping is applied only when the requested model id appears under <strong>exactly one</strong> catalogue provider <em>and</em> that provider is the mapped one.</li>
+<li>Anything else is rejected with <code>Unknown Pi-sidecar provider/model pair</code>, including an id that appears under two providers.</li>
+</ul>
+<p>The practical consequence is that <code>ANTHROPIC_API_KEY</code> alone does not authenticate <code>AI_PROVIDER=claude</code>: that key authenticates the <code>anthropic</code> provider, while the <code>claude</code> alias maps to <code>google-vertex-claude</code>, so a literal model id such as <code>claude-sonnet-4</code> is rejected unless your sidecar happens to expose it solely under <code>google-vertex-claude</code>. Check <code>rootcoz ai-models</code> before choosing an id, or set <code>AI_PROVIDER</code> to the exact provider ID that endpoint lists alongside the model.</p>
 <h2 id="step-by-step">Step-by-Step</h2>
 <ol>
 <li><strong>Understand the two configuration layers.</strong></li>
@@ -1003,6 +1013,8 @@ SECURE_COOKIES=false
 </tbody>
 </table></div>
 <p>Only one of <code>ANTHROPIC_API_KEY</code> or the Vertex trio is needed for <code>claude</code>. Gemini can also authenticate via <code>gemini auth login</code>, which needs no variable at all.</p>
+<p>RootCoz does not read the Vertex trio itself — <code>config.py</code> documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting <code>ai.vertex.enabled</code> writes <code>CLAUDE_CODE_USE_VERTEX=1</code>, <code>CLOUD_ML_REGION</code>, and <code>ANTHROPIC_VERTEX_PROJECT_ID</code>, and separately mounts <code>ai.vertex.serviceAccountKey</code> and points <code>GOOGLE_APPLICATION_CREDENTIALS</code> at the mounted <code>application_default_credentials.json</code>. Install fails outright if <code>ai.vertex.enabled</code> is set without <code>ai.vertex.projectId</code> or <code>ai.vertex.serviceAccountKey</code>, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.</p>
+<p>Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and the Anthropic Vertex tooling, not here. For the authoritative credential requirements, follow the Anthropic Claude Code on Vertex AI documentation rather than treating the trio as self-sufficient. This matters for <code>AI_PROVIDER=claude</code> in particular, because that alias resolves to the <code>google-vertex-claude</code> provider — so Vertex is the path on which <code>claude</code> is expected to resolve at all.</p>
 <blockquote>
 <p><strong>Warning:</strong> <code>ROOTCOZ_ENCRYPTION_KEY</code> is the one variable worth getting right before you have real data. Rotating it invalidates every encrypted stored token <em>and</em> every stored API key hash, so all keys must be re-issued afterwards. Existing sessions use plain SHA-256 hashing and survive. If you do not set it, RootCoz generates a file under <code>$XDG_DATA_HOME/rootcoz/.encryption_key</code> and warns you in the health endpoint.</p>
 </blockquote>
@@ -1030,7 +1042,7 @@ SECURE_COOKIES=false
 </tr>
 <tr>
 <td><code>ai.vertex.enabled</code>, <code>ai.vertex.projectId</code>, <code>ai.vertex.region</code>, <code>ai.vertex.serviceAccountKey</code></td>
-<td><code>CLAUDE_CODE_USE_VERTEX</code>, <code>ANTHROPIC_VERTEX_PROJECT_ID</code>, <code>CLOUD_ML_REGION</code>, and a mounted GCP key</td>
+<td><code>CLAUDE_CODE_USE_VERTEX</code>, <code>ANTHROPIC_VERTEX_PROJECT_ID</code>, <code>CLOUD_ML_REGION</code>, plus <code>GOOGLE_APPLICATION_CREDENTIALS</code> pointing at the mounted GCP key</td>
 </tr>
 <tr>
 <td><code>ai.cursor.apiKey</code>, <code>ai.cursor.authJson</code></td>
@@ -1050,7 +1062,7 @@ SECURE_COOKIES=false
 </tr>
 <tr>
 <td><code>env.secureCookies</code>, <code>env.publicBaseUrl</code></td>
-<td><code>SECURE_COOKIES</code>, <code>PUBLIC_BASE_URL</code>; both auto-derived from Route or TLS Ingress when left empty</td>
+<td><code>SECURE_COOKIES</code>, <code>PUBLIC_BASE_URL</code>; both auto-derived when left empty, as described below</td>
 </tr>
 <tr>
 <td><code>env.metadataRulesFile</code></td>
@@ -1067,6 +1079,45 @@ SECURE_COOKIES=false
 </tbody>
 </table></div>
 <p><code>admin.key</code> and <code>encryptionKey</code> are auto-generated on first install when empty. Database-configurable fields deliberately have no chart values — the chart comment says so explicitly, and you set those from Server Settings after the first login.</p>
+<p>When <code>env.secureCookies</code> and <code>env.publicBaseUrl</code> are left empty, the chart derives them in <code>_helpers.tpl</code>, and the two do not follow the same rule:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Configuration</th>
+<th><code>SECURE_COOKIES</code></th>
+<th><code>PUBLIC_BASE_URL</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>route.enabled</code> with <code>route.host</code> set</td>
+<td><code>true</code></td>
+<td><code>https://&lt;route.host&gt;</code></td>
+</tr>
+<tr>
+<td><code>route.enabled</code> with <code>route.host</code> empty (the chart default on OpenShift)</td>
+<td><code>true</code></td>
+<td>unset (empty)</td>
+</tr>
+<tr>
+<td>Ingress with <code>ingress.host</code> set and <code>ingress.tls.enabled</code></td>
+<td><code>true</code></td>
+<td><code>https://&lt;ingress.host&gt;</code></td>
+</tr>
+<tr>
+<td>Ingress with <code>ingress.host</code> set but <strong>no</strong> TLS</td>
+<td><code>false</code></td>
+<td><code>http://&lt;ingress.host&gt;</code></td>
+</tr>
+<tr>
+<td>Neither Route nor Ingress enabled</td>
+<td><code>false</code></td>
+<td>unset (empty)</td>
+</tr>
+</tbody>
+</table></div>
+<p>The Ingress requires <code>ingress.host</code> — <code>helm install</code> fails without it — so the "Ingress enabled with no host" case cannot occur.</p>
+<p>So a plain-HTTP Ingress still gets a derived base URL — as an <code>http://</code> origin — while <code>SECURE_COOKIES</code> stays <code>false</code>, because that value only flips to <code>true</code> for a Route or a TLS Ingress. Session cookies are consequently issued without the <code>Secure</code> attribute on a non-TLS Ingress. Set <code>env.secureCookies</code> and <code>env.publicBaseUrl</code> explicitly if you terminate TLS upstream of the Ingress or need the cookies hardened anyway.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
 <p>Change settings after login without touching a restart. Open Server Settings, edit the field, and save. The value is validated against the same Pydantic constraints as the environment variable, encrypted if sensitive, and applied to the running process immediately. Setting a field to an empty string deletes the override.</p>
 <p>Sensitive values are returned masked as <code>••••••••</code>. <code>GET /api/admin/settings?reveal_key=ADMIN_KEY</code> unmasks one key, and <code>reveal_key=__all__</code> unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See <a href="api-reference.html">API Endpoint Reference</a>.</p>

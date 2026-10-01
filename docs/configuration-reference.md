@@ -11,7 +11,7 @@ RootCoz reads its configuration from environment variables at startup and lets a
 
 ```dotenv
 AI_PROVIDER=claude
-AI_MODEL=claude-sonnet-4
+AI_MODEL=<a model id from GET /api/ai-models>
 ANTHROPIC_API_KEY=your-anthropic-api-key
 DEFAULT_USER_ROLE=operator
 REQUIRE_APPROVAL=false
@@ -21,6 +21,16 @@ SECURE_COOKIES=false
 Those six lines are enough to run the local Docker stack at `http://localhost:8000` and submit your first analysis.
 
 Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails fast without them, and the Helm chart requires `ai.provider` and `ai.model`. `ADMIN_KEY` is optional: the chart auto-generates it on first install. Everything else has a working default.
+
+> **Note:** Fill `AI_MODEL` in from your own deployment. There is no built-in default model list — the catalogue is discovered from the Pi-sidecar at runtime, so a model id copied from elsewhere may not resolve. Run `rootcoz ai-models` (or `GET /api/ai-models`) against a running server and pick an id that is actually listed.
+
+`AI_PROVIDER` and `AI_MODEL` are resolved as a pair at submit time, and the resolution is strict:
+
+- An **exact** `provider/model` pair that appears in the sidecar catalogue is used as-is.
+- The friendly names `claude`, `gemini`, and `cursor` are **not** provider IDs. Each maps to exactly one sidecar provider (`claude` to `google-vertex-claude`, `gemini` to `google`, `cursor` to any `*-cursor` provider), and that mapping is applied only when the requested model id appears under **exactly one** catalogue provider *and* that provider is the mapped one.
+- Anything else is rejected with `Unknown Pi-sidecar provider/model pair`, including an id that appears under two providers.
+
+The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticate `AI_PROVIDER=claude`: that key authenticates the `anthropic` provider, while the `claude` alias maps to `google-vertex-claude`, so a literal model id such as `claude-sonnet-4` is rejected unless your sidecar happens to expose it solely under `google-vertex-claude`. Check `rootcoz ai-models` before choosing an id, or set `AI_PROVIDER` to the exact provider ID that endpoint lists alongside the model.
 
 ## Step-by-Step
 
@@ -201,6 +211,10 @@ These are read straight from the process environment and have no `Settings` fiel
 
 Only one of `ANTHROPIC_API_KEY` or the Vertex trio is needed for `claude`. Gemini can also authenticate via `gemini auth login`, which needs no variable at all.
 
+RootCoz does not read the Vertex trio itself — `config.py` documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting `ai.vertex.enabled` writes `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`, and separately mounts `ai.vertex.serviceAccountKey` and points `GOOGLE_APPLICATION_CREDENTIALS` at the mounted `application_default_credentials.json`. Install fails outright if `ai.vertex.enabled` is set without `ai.vertex.projectId` or `ai.vertex.serviceAccountKey`, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.
+
+Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and the Anthropic Vertex tooling, not here. For the authoritative credential requirements, follow the Anthropic Claude Code on Vertex AI documentation rather than treating the trio as self-sufficient. This matters for `AI_PROVIDER=claude` in particular, because that alias resolves to the `google-vertex-claude` provider — so Vertex is the path on which `claude` is expected to resolve at all.
+
 > **Warning:** `ROOTCOZ_ENCRYPTION_KEY` is the one variable worth getting right before you have real data. Rotating it invalidates every encrypted stored token *and* every stored API key hash, so all keys must be re-issued afterwards. Existing sessions use plain SHA-256 hashing and survive. If you do not set it, RootCoz generates a file under `$XDG_DATA_HOME/rootcoz/.encryption_key` and warns you in the health endpoint.
 
 ### Helm chart coverage
@@ -212,17 +226,31 @@ The Helm chart exists for the bootstrap-only variables, since those cannot be se
 | `ai.provider`, `ai.model` | `AI_PROVIDER`, `AI_MODEL` |
 | `ai.geminiApiKey` | `GEMINI_API_KEY` |
 | `ai.anthropicApiKey` | `ANTHROPIC_API_KEY` |
-| `ai.vertex.enabled`, `ai.vertex.projectId`, `ai.vertex.region`, `ai.vertex.serviceAccountKey` | `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, and a mounted GCP key |
+| `ai.vertex.enabled`, `ai.vertex.projectId`, `ai.vertex.region`, `ai.vertex.serviceAccountKey` | `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, plus `GOOGLE_APPLICATION_CREDENTIALS` pointing at the mounted GCP key |
 | `ai.cursor.apiKey`, `ai.cursor.authJson` | `CURSOR_API_KEY` and the mounted Cursor `auth.json` |
 | `admin.key` | `ADMIN_KEY` |
 | `encryptionKey` | `ROOTCOZ_ENCRYPTION_KEY` |
 | `env.xdgDataHome`, `env.xdgConfigHome` | `XDG_DATA_HOME`, `XDG_CONFIG_HOME` |
-| `env.secureCookies`, `env.publicBaseUrl` | `SECURE_COOKIES`, `PUBLIC_BASE_URL`; both auto-derived from Route or TLS Ingress when left empty |
+| `env.secureCookies`, `env.publicBaseUrl` | `SECURE_COOKIES`, `PUBLIC_BASE_URL`; both auto-derived when left empty, as described below |
 | `env.metadataRulesFile` | `METADATA_RULES_FILE` |
 | `tuning.logLevel` | `LOG_LEVEL` |
 | `route.*`, `ingress.*` | Routing for the deployment, including the derived `PUBLIC_BASE_URL` origin |
 
 `admin.key` and `encryptionKey` are auto-generated on first install when empty. Database-configurable fields deliberately have no chart values — the chart comment says so explicitly, and you set those from Server Settings after the first login.
+
+When `env.secureCookies` and `env.publicBaseUrl` are left empty, the chart derives them in `_helpers.tpl`, and the two do not follow the same rule:
+
+| Configuration | `SECURE_COOKIES` | `PUBLIC_BASE_URL` |
+| --- | --- | --- |
+| `route.enabled` with `route.host` set | `true` | `https://<route.host>` |
+| `route.enabled` with `route.host` empty (the chart default on OpenShift) | `true` | unset (empty) |
+| Ingress with `ingress.host` set and `ingress.tls.enabled` | `true` | `https://<ingress.host>` |
+| Ingress with `ingress.host` set but **no** TLS | `false` | `http://<ingress.host>` |
+| Neither Route nor Ingress enabled | `false` | unset (empty) |
+
+The Ingress requires `ingress.host` — `helm install` fails without it — so the "Ingress enabled with no host" case cannot occur.
+
+So a plain-HTTP Ingress still gets a derived base URL — as an `http://` origin — while `SECURE_COOKIES` stays `false`, because that value only flips to `true` for a Route or a TLS Ingress. Session cookies are consequently issued without the `Secure` attribute on a non-TLS Ingress. Set `env.secureCookies` and `env.publicBaseUrl` explicitly if you terminate TLS upstream of the Ingress or need the cookies hardened anyway.
 
 ## Advanced Usage
 

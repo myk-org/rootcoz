@@ -67,7 +67,9 @@ The registration key is the only credential that signs you in; the tracker token
    | `Jira Email` | Your Atlassian account email, required for Jira Cloud API-token auth. |
    | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. |
 
-   Tokens you type are validated against the provider before they are saved, and a failed validation leaves the stored value unchanged. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically. Saving an empty value for a field clears it; saving nothing at all leaves your stored tokens alone.
+   Tokens you type are validated against the provider before they are saved, and a failed validation leaves the stored value unchanged. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
+
+   > **Warning:** Stored tokens cannot be cleared from this page or from the API. `PUT /api/user/tokens` treats an empty field as "keep what is already stored" and merges it back over your existing values, and a request with all three fields empty is dropped without saving. Clearing every field in the UI is skipped outright for the same reason. A stored GitHub or Jira credential therefore stays on the server until it is overwritten by a different value, and there is no `DELETE` route for it. If you need the credential gone, register a fresh account or ask an administrator to delete the account with `DELETE /api/admin/users/{username}`; the tokens are columns on the `users` row, so removing the row removes them.
 
    > **Tip:** Without a tracker token you can still preview generated issue content, but you cannot submit it. See [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for details.
 
