@@ -161,6 +161,8 @@ Every new environment variable added to `Settings` in `config.py` **MUST** also 
 
 `docs/` is a [pi-docsite](https://pypi.org/project/pi-docsite) site, served from the `main` branch by GitHub Pages.
 
+**This replaces the previous docsfy rule.** Under docsfy the `.md` files were themselves generated output, so editing them by hand was wrong. Under pi-docsite the Markdown is the source: it is a markdown-source generator, not a code-comment extractor. The generated half of `docs/` is still strictly off limits, and that is the half the rule below protects — but hand-authoring `docs/*.md` is now correct and necessary, not a violation. A generation-from-code approach is what produced 11 of the 16 pages as `*Documentation generation failed.*` placeholders.
+
 **Authored sources** (edit these):
 
 - `docs/*.md` — one page each, exactly one H1 that becomes its sidebar title
