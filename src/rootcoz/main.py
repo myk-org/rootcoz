@@ -6124,6 +6124,7 @@ async def set_reviewed(
 ) -> dict[str, Any]:
     """Toggle the reviewed state for a test failure."""
     _check_allow_list(request)
+    _require_reviewer(request)
     logger.debug(
         f"PUT /results/{job_id}/reviewed: test_name={body.test_name}, reviewed={body.reviewed}"
     )

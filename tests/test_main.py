@@ -1693,6 +1693,34 @@ class TestReviewedEndpoint:
         assert data["reviews"]["test_foo"]["username"] == reviewer_name
 
     @pytest.mark.asyncio
+    async def test_set_reviewed_viewer_forbidden(self, test_client):
+        from rootcoz import storage
+
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_foo",
+                    "error": "err",
+                    "analysis": {"classification": "CODE ISSUE"},
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-rev-viewer", "http://jenkins", "completed", result_data
+        )
+        _, viewer_key = await storage.create_user("test-viewer", role="viewer")
+        response = test_client.put(
+            "/results/job-rev-viewer/reviewed",
+            json={"test_name": "test_foo", "reviewed": True},
+            headers={"Authorization": f"Bearer {viewer_key}"},
+        )
+        assert response.status_code == 403
+        data = test_client.get("/results/job-rev-viewer/comments").json()
+        assert not data["reviews"].get("test_foo", {}).get("reviewed", False)
+
+    @pytest.mark.asyncio
     async def test_set_reviewed_nonexistent_job(self, test_client):
         response = test_client.put(
             "/results/nonexistent/reviewed",
