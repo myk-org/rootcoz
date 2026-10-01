@@ -6123,6 +6123,7 @@ async def set_reviewed(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Toggle the reviewed state for a test failure."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(
         f"PUT /results/{job_id}/reviewed: test_name={body.test_name}, reviewed={body.reviewed}"
@@ -6157,6 +6158,7 @@ async def enrich_comments(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Fetch live statuses for GitHub PRs and Jira tickets found in comments."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/enrich-comments")
 
@@ -6493,6 +6495,7 @@ async def preview_github_issue(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Generate preview content for a GitHub issue from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(
         f"POST /results/{job_id}/preview-github-issue: test_name={body.test_name}"
@@ -6573,6 +6576,7 @@ async def preview_jira_bug(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Generate preview content for a Jira bug from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/preview-jira-bug: test_name={body.test_name}")
     if not _jira_issue_creation_enabled(settings):
@@ -6908,6 +6912,7 @@ async def create_github_issue_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a GitHub issue from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(
         f"POST /results/{job_id}/create-github-issue: test_name={body.test_name}"
@@ -7001,6 +7006,7 @@ async def create_jira_bug_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a Jira bug from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
 
@@ -7898,6 +7904,7 @@ async def update_tags(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
+    _require_reviewer(request)
     _check_allow_list(request)
     body = await _read_json_object(request)
     raw_tags = body.get("tags")
@@ -8398,7 +8405,7 @@ async def stream_comments(job_id: str, request: Request) -> StreamingResponse:
 @app.get("/api/admin/token-usage/stream", operation_id="streamTokenUsage")
 async def stream_token_usage(request: Request) -> StreamingResponse:
     """SSE stream that notifies when token usage data changes."""
-    _check_allow_list(request)
+    _require_admin(request)
     return _make_sse_stream(request, _token_usage_listeners, "usage-changed")
 
 
@@ -10148,6 +10155,7 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     Only fields present in the JSON body are updated. Omitted fields are left unchanged.
     Pass empty string to clear a field.
     """
+    _require_reviewer(request)
     username = request.state.username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")

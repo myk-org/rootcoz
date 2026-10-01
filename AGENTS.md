@@ -140,7 +140,7 @@ src/rootcoz/
   - `/api/dashboard/stream` — dashboard job list changes
   - `/api/results/{job_id}/stream` — per-job status changes
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
-  - `/api/admin/token-usage/stream` — token usage data changes
+  - `/api/admin/token-usage/stream` — token usage data changes (admin only)
   - `/api/chat/{job_id}/stream` — per-job chat message changes
   - `/api/admin/logs/stream` — real-time server log tailing (admin only)
 - **Reports API**: Analytics endpoints for aggregated metrics (requires admin **or** `can_view_reports`):

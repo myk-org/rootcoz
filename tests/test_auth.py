@@ -1167,6 +1167,28 @@ def _create_user_with_role(client, username, role, admin_cookies=None):
     return api_key, dict(login_resp.cookies)
 
 
+# (method, path, json body) for every route guarded by _require_reviewer
+# that previously had only an allow-list check (issue #289).
+_REVIEWER_GUARDED_ROUTES = [
+    ("POST", "/results/job-v/preview-github-issue", {"test_name": "t1"}),
+    ("POST", "/results/job-v/preview-jira-bug", {"test_name": "t1"}),
+    (
+        "POST",
+        "/results/job-v/create-github-issue",
+        {"test_name": "t1", "title": "t", "body": "b"},
+    ),
+    (
+        "POST",
+        "/results/job-v/create-jira-bug",
+        {"test_name": "t1", "title": "t", "body": "b"},
+    ),
+    ("POST", "/results/job-v/enrich-comments", None),
+    ("PUT", "/results/job-v/reviewed", {"test_name": "t1", "reviewed": True}),
+    ("PUT", "/results/job-v/tags", {"tags": ["smoke"]}),
+    ("PUT", "/api/user/tokens", {"github_token": "ghp_test"}),
+]
+
+
 class TestRBACRoles:
     """Tests for the three-role (reviewer/operator/admin) RBAC system."""
 
@@ -1491,6 +1513,26 @@ class TestRBACRoles:
         """Viewers cannot delete jobs."""
         _, viewer_cookies = _create_user_with_role(client, "viewer_nodelete", "viewer")
         resp = client.delete("/results/fake-id", cookies=viewer_cookies)
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize(("method", "path", "body"), _REVIEWER_GUARDED_ROUTES)
+    def test_viewer_cannot_reviewer_routes(self, client, method, path, body):
+        """Viewers are rejected before any handler work on reviewer-only routes."""
+        _, viewer_cookies = _create_user_with_role(client, "viewer_guarded", "viewer")
+        resp = client.request(method, path, json=body, cookies=viewer_cookies)
+        assert resp.status_code == 403
+        assert "reviewer" in resp.json()["detail"].lower()
+
+    def test_viewer_cannot_token_usage_stream(self, client):
+        """The token-usage SSE stream is admin-only."""
+        _, viewer_cookies = _create_user_with_role(client, "viewer_usage", "viewer")
+        resp = client.get("/api/admin/token-usage/stream", cookies=viewer_cookies)
+        assert resp.status_code == 403
+
+    def test_reviewer_cannot_token_usage_stream(self, client):
+        """Reviewers are not admins — they cannot open the token-usage stream."""
+        _, rev_cookies = _create_user_with_role(client, "rev_usage", "reviewer")
+        resp = client.get("/api/admin/token-usage/stream", cookies=rev_cookies)
         assert resp.status_code == 403
 
     def test_existing_users_unaffected_by_viewer_addition(self, client):
