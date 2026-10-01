@@ -11,7 +11,7 @@ import { BulkUpdateBar } from '../BulkUpdateBar'
 import { groupFailures, scopedGroups } from '@/lib/grouping'
 import { reviewKey } from '@/lib/reviewKey'
 import { reconcileSelection, selectedScopes, type SelectedGroup } from '../failureUpdates'
-import type { AnalysisResult, FailureAnalysis } from '@/types'
+import type { AnalysisResult, FailureAnalysis, GroupedFailure } from '@/types'
 
 // The real grouping behaviour, with `scopedGroups` wrapped in a spy so the
 // reconciliation pass can be counted instead of timed.
@@ -280,6 +280,160 @@ const RECONCILE_TRANSITIONS: ReconcileTransition[] = [
     ],
   },
 ]
+
+// -- Property test: reconciliation over GENERATED selections ---------------
+//
+// The 10 rows above are a regression net, not a proof: a hand-listed set always
+// has one more transition nobody thought of, and that is exactly how both the
+// bridging fold and the cross-scope merge shipped with every row green. So the
+// invariants are also asserted over generated cases — random selections, random
+// refreshes, several scopes, failures with and without ids — where the shape of
+// the transition is nobody's job to enumerate.
+
+/** Deterministic PRNG: a failing case is reproducible from its seed. */
+function seeded(seed: number) {
+  let s = seed >>> 0
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0
+    let t = Math.imul(s ^ (s >>> 15), 1 | s)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+type Scope = { childJobName: string; childBuildNumber: number }
+
+/** Top level plus up to two child jobs — distinct name AND build, so a scope
+ *  never aliases another and the fold has to keep them apart itself. */
+function genScopes(rand: () => number): Scope[] {
+  const scopes: Scope[] = [{ childJobName: '', childBuildNumber: 0 }]
+  for (const [name, build] of [['job-a', 7], ['job-b', 9]] as const) {
+    if (rand() < 0.6) scopes.push({ childJobName: name, childBuildNumber: build })
+  }
+  return scopes
+}
+
+/** A failure with `id: ''` is a legacy row: `groupFailures` falls back to the
+ *  signature-derived group id, and `scopedGroups` gives EVERY scope the same
+ *  `group-` prefix — so such a group id repeats across scopes. That is the input
+ *  finding 2 lives on, so the generator must produce it. */
+function genFailure(rand: () => number, testName: string, signature: string): FailureAnalysis {
+  const f = failure(testName, signature)
+  return rand() < 0.5 ? { ...f, id: '' } : f
+}
+
+function genReport(scopes: Scope[], lists: FailureAnalysis[][]): AnalysisResult {
+  return {
+    ...resultPayload([]).result,
+    failures: lists[0] ?? [],
+    child_job_analyses: scopes.slice(1).map((s, i) => ({
+      id: `child-${s.childJobName}`, job_name: s.childJobName, build_number: s.childBuildNumber,
+      jenkins_url: null, summary: null, note: null, failed_children: [], failures: lists[i + 1] ?? [],
+    })),
+  }
+}
+
+const NAMES = ['test-0', 'test-1', 'test-2', 'test-3', 'test-4']
+const SIGS = ['sig-0', 'sig-1', 'sig-2']
+
+const pick = <T,>(rand: () => number, xs: T[]): T => xs[Math.floor(rand() * xs.length)]
+
+/** `count` distinct test names. A real report has no test name twice in one
+ *  scope — only across scopes — so the generator keeps it that way and lets the
+ *  SAME name recur in several scopes, which is what makes two scopes collide. */
+function distinctNames(rand: () => number, count: number): string[] {
+  return [...NAMES].sort(() => rand() - 0.5).slice(0, count)
+}
+
+interface Generated {
+  scopes: Scope[]
+  before: AnalysisResult
+  selection: SelectedGroup[]
+  live: AnalysisResult
+}
+
+/** One generated transition: a random selection over `before`, then a random
+ *  refresh that merges signatures, splits them, adds, removes, and rewrites ids
+ *  (so a refreshed group id may be signature-derived instead of UUID-derived). */
+function generate(seed: number): Generated {
+  const rand = seeded(seed)
+  const scopes = genScopes(rand)
+  const before = genReport(scopes, scopes.map(() => {
+    const names = distinctNames(rand, 1 + Math.floor(rand() * 4))
+    return names.map((n) => genFailure(rand, n, pick(rand, SIGS)))
+  }))
+
+  // A selection: most live groups picked, some retry-narrowed to a subset.
+  const selection: SelectedGroup[] = []
+  for (const s of scopes) {
+    for (const grp of scopedGroups(before, s.childJobName, s.childBuildNumber)) {
+      if (rand() < 0.35) continue
+      const narrowed = rand() < 0.2
+      selection.push({
+        id: grp.id,
+        testNames: narrowed ? [pick(rand, grp.tests).test_name] : grp.tests.map((t) => t.test_name),
+        narrowed: narrowed || undefined,
+        childJobName: s.childJobName || undefined,
+        childBuildNumber: s.childBuildNumber || undefined,
+      })
+    }
+  }
+
+  // The refresh: re-signature (merge/split), drop, add, rewrite ids.
+  const lists = scopes.map((_s, i) => {
+    const failures = (i === 0 ? before.failures : (before.child_job_analyses[i - 1]?.failures ?? []))
+      .filter(() => rand() > 0.15)
+      .map((f) => ({ ...f, ...(rand() < 0.35 ? { error_signature: pick(rand, SIGS) } : {}), ...(rand() < 0.35 ? { id: '' } : {}) }))
+    const free = NAMES.filter((n) => !failures.some((f) => f.test_name === n))
+    return rand() < 0.5 && free.length
+      ? [...failures, genFailure(rand, pick(rand, free), pick(rand, SIGS))]
+      : failures
+  })
+  return { scopes, before, selection, live: genReport(scopes, lists) }
+}
+
+/** The three invariants, asserted after EVERY generated pass. */
+function expectInvariants({ scopes, live }: Generated, state: Record<string, SelectedGroup>, label: string) {
+  const groups = Object.values(state)
+  if (groups.length === 0) return
+  const msg = (m: string) => `${label}: ${m}`
+
+  // P1 — a live group is claimed by at most one entry, within a scope.
+  const claims = groups.flatMap((g) =>
+    scopedGroups(live, g.childJobName, g.childBuildNumber)
+      .filter((x) => x.tests.some((t) => g.testNames.includes(t.test_name)))
+      .map((x) => `${g.childJobName ?? ''}#${g.childBuildNumber ?? 0}:${x.id}`))
+  expect(new Set(claims).size, msg('P1 a live group is claimed twice')).toBe(claims.length)
+
+  // P2 — the bulk count is the number of distinct tests actually sent.
+  const sent = selectedScopes(groups)
+  expect(new Set(sent.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber))).size,
+    msg('P2 a test is sent twice')).toBe(sent.length)
+  expect(sent.length, msg('P2 the count is not the number of tests sent')).toBe(groups.flatMap((g) => g.testNames).length)
+
+  // P3 — an entry carries the scope of the live group(s) it claims. Every scope it
+  // sends to must be a live scope holding that test, and a test that lives in
+  // exactly one scope of the report pins that scope: an entry tagged with the
+  // wrong child job sends its tests to the wrong job. This is what pins the
+  // same-signature-across-scopes merge, where `scopedGroups` hands both scopes the
+  // SAME group id and a bare-id fold keeps the last contributor's scope.
+  const liveNames = scopes.map((s) => [s, new Set(groupNamesOf(scopedGroups(live, s.childJobName, s.childBuildNumber)))] as const)
+  for (const g of groups) {
+    const mine = new Set(groupNamesOf(scopedGroups(live, g.childJobName, g.childBuildNumber)))
+    for (const n of g.testNames) {
+      expect(mine.has(n), msg(`P3 ${n} is not in the scope the entry claims`)).toBe(true)
+      const owners = liveNames.filter(([, names]) => names.has(n))
+      if (owners.length === 1) {
+        expect({ childJobName: g.childJobName ?? '', childBuildNumber: g.childBuildNumber ?? 0 },
+          msg(`P3 ${n} lives in one scope but the entry claims another`)).toEqual(owners[0][0])
+      }
+    }
+  }
+}
+
+function groupNamesOf(groups: GroupedFailure[]): string[] {
+  return groups.flatMap((x) => x.tests.map((t) => t.test_name))
+}
 
 describe('bulk failure selection', () => {
   it('bulk-marks individual selections as reviewed and clears the selection', async () => {
@@ -607,6 +761,18 @@ describe('bulk failure selection', () => {
 
     // Membership source and the `narrowed` flag, which keepSelectionAfterRun reads.
     expect(groups.map((g) => ({ tests: g.testNames, narrowed: !!g.narrowed }))).toEqual(expected)
+  })
+
+  it('holds the reconciliation invariants over 400 generated refreshes', () => {
+    // Every generated case, twice: the first pass folds a random selection
+    // against a random refresh, the second re-reconciles the folded state (the
+    // fold must be idempotent — a second pass is another refresh).
+    for (let seed = 1; seed <= 400; seed++) {
+      const c = generate(seed)
+      const state = reconcileSelection(c.live, Object.fromEntries(c.selection.map((g) => [g.id, g])))
+      expectInvariants(c, state, `seed ${seed} pass 1`)
+      expectInvariants(c, reconcileSelection(c.live, state), `seed ${seed} pass 2`)
+    }
   })
 
   it('sends one override request per group when a refresh splits the selected signature', async () => {

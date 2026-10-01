@@ -56,6 +56,15 @@ function scopeBody({ childJobName, childBuildNumber }: Omit<FailureScope, 'testN
   return { child_job_name: childJobName ?? '', child_build_number: childBuildNumber ?? 0 }
 }
 
+/** Identity of a live group AS SEEN FROM ONE SCOPE. The group id alone is not an
+ *  identity: `groupFailures` builds every scope's groups with the same id prefix,
+ *  so a legacy failure without a UUID yields the same `group-<signature>` id in the
+ *  top-level report and in a child job. Anything that decides "these two refer to
+ *  the same group" must compare this, never the bare id. */
+function scopeKey({ childJobName, childBuildNumber }: Pick<SelectedGroup, 'childJobName' | 'childBuildNumber'>, liveId: string) {
+  return `${childJobName ?? ''}#${childBuildNumber ?? 0}:${liveId}`
+}
+
 /* -- Per-failure endpoints (shared by the single-row controls and bulk bar) -- */
 
 export function putReviewed(jobId: string, scope: FailureScope, reviewed: boolean) {
@@ -154,12 +163,23 @@ export function selectedScopes(groups: SelectedGroup[]): FailureScope[] {
  *
  *  DE-DUPLICATION applies to EVERY entry, narrowed or not — narrowing exempts an
  *  entry from RE-WIDENING, never from folding. Entries are keyed by the live group
- *  (scope included, since the same signature can exist in several child jobs) they
- *  resolve to, and entries that resolve to the SAME live group become ONE entry
- *  holding the union of their names. Without this, two groups a refresh merged
- *  would stay two entries over one live group: the bulk bar counts each test
- *  twice, sends a duplicate request, and a failed duplicate leaves an
+ *  they resolve to, and entries that resolve to the SAME live group become ONE
+ *  entry holding the union of their names. Without this, two groups a refresh
+ *  merged would stay two entries over one live group: the bulk bar counts each
+ *  test twice, sends a duplicate request, and a failed duplicate leaves an
  *  already-updated test selected for retry.
+ *
+ *  The bucket key is SCOPE-QUALIFIED (see `scopeKey`) and the fold is taken to its
+ *  CLOSURE (see the union below): both are load-bearing, not tidiness.
+ *  - scope-qualified: `scopedGroups` builds every scope's groups with the same
+ *    `group-` id prefix, so a legacy failure without a UUID gets a signature-
+ *    derived id that is IDENTICAL in the top-level report and in a child job.
+ *    Folding on the bare id merges those two and keeps the last contributor's
+ *    `childJobName`/`childBuildNumber` — the entry then sends its tests to the
+ *    wrong child job.
+ *  - closed: a bridging entry (it resolves to two live groups that were separate
+ *    when the user selected them) grows its bucket past a bucket folded earlier,
+ *    so a first-match fold leaves two entries claiming one live group.
  *
  *  ponytail: keeps the original group ids, so a regrouped signature can leave an id
  *  with no card (at worst one duplicated write if the user re-selects everything).
@@ -179,29 +199,43 @@ export function reconcileSelection(
     const testNames = g.narrowed
       ? g.testNames.filter((n) => alive.has(n))
       : groupNames(siblings)
-    return { id, g, testNames, liveIds: siblings.map((x) => x.id) }
+    return { id, g, testNames, liveKeys: siblings.map((x) => scopeKey(g, x.id)) }
   }).filter((r) => r.testNames.length > 0)
 
-  // Fold: one entry per live group. A merge (two selected groups that now share
-  // a signature) or a split touching an already-selected group lands here too —
-  // the entry survives under the first contributor's id, `narrowed` if ANY
-  // contributor was narrowed, holding the union of the contributors' names.
-  const folded: { id: string; group: SelectedGroup; liveIds: string[] }[] = []
-  for (const r of resolved) {
-    const hit = folded.find((f) => f.liveIds.some((l) => r.liveIds.includes(l)))
-    if (!hit) {
-      folded.push({ id: r.id, group: { ...r.g, testNames: r.testNames }, liveIds: r.liveIds })
-      continue
+  // Fold: ONE entry per CONNECTED set of live groups — a merge (two selected groups
+  // that now share a signature), a split touching an already-selected group, or a
+  // bridging entry that reaches two buckets at once. Connected components of the
+  // "shares a live group" relation, so the result is closed: no two surviving
+  // entries claim the same live group, however the chain got there. The entry
+  // survives under the first contributor's id, `narrowed` if ANY contributor was
+  // narrowed, holding the union of the contributors' names.
+  //
+  // Every contributor to a component shares a scope-qualified key with it, so a
+  // component never spans two scopes: the emitted scope is every contributor's.
+  const parent = resolved.map((_, i) => i)
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])))
+  const owners = new Map<string, number>()
+  resolved.forEach((r, i) => {
+    for (const key of r.liveKeys) {
+      const owner = owners.get(key)
+      if (owner === undefined) owners.set(key, i)
+      else parent[find(owner)] = find(i)
     }
-    hit.group = {
-      ...r.g,
-      id: hit.id,
-      testNames: [...new Set([...hit.group.testNames, ...r.testNames])],
-      narrowed: hit.group.narrowed || r.g.narrowed,
+  })
+
+  // One entry per component, keyed by its root and inserted in first-appearance
+  // order, so the emitted order is the order the user selected in.
+  const buckets = new Map<number, SelectedGroup>()
+  for (let i = 0; i < resolved.length; i++) {
+    const root = find(i)
+    const existing = buckets.get(root)
+    if (!existing) buckets.set(root, { ...resolved[i].g, testNames: resolved[i].testNames })
+    else {
+      existing.testNames = [...new Set([...existing.testNames, ...resolved[i].testNames])]
+      existing.narrowed = existing.narrowed || resolved[i].g.narrowed
     }
-    hit.liveIds = [...new Set([...hit.liveIds, ...r.liveIds])]
   }
-  return Object.fromEntries(folded.map((f) => [f.id, f.group]))
+  return Object.fromEntries([...buckets].map(([root, group]) => [resolved[root].id, group]))
 }
 
 /** Widen each group back to its full error-signature group(s): the backend applies an
