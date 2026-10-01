@@ -1722,7 +1722,7 @@ The registration key is the only credential that signs you in; the tracker token
 
    | Field | What it is used for |
    | --- | --- |
-   | `GitHub Token` | Personal access token with `repo` scope. Used to create GitHub issues and to enrich comments with PR status. |
+   | `GitHub Token` | Personal access token with `repo` scope. Used to create GitHub issues. It is **not** what enriches comment badges: `enrich_comments` reads the server's `GITHUB_TOKEN` from Server Settings, so status badges resolve against the server-wide credential, not yours. |
    | `Jira Email` | Your Atlassian account email, required for Jira Cloud API-token auth. |
    | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. |
 
@@ -2054,7 +2054,7 @@ Everything the web UI does goes through the same HTTP API the CLI and the AI cha
       http://localhost:8000/results/JOB_ID
 ```
 
-That single authenticated GET returns the stored analysis for one job, including failures, classifications, patterns, comments, and child jobs.
+That single authenticated GET returns the stored analysis for one job, including failures, classifications, patterns, classification overrides, tracker links, capabilities, and child jobs. It does **not** include the comment thread — call `GET /results/{job_id}/comments` separately for that.
 
 ## Step-by-Step
 
@@ -3082,7 +3082,7 @@ This clones the tests repository plus both extra repositories into the analysis 
    | Peer list | `peer_ai_configs`, stored as `provider:model,provider:model` | empty (no peers) |
    | Debate rounds | `peer_analysis_max_rounds`, between 1 and 10 | 3 |
 
-   Providers are `claude`, `gemini`, and `cursor`. Peer models cost real tokens and real wall-clock time, so start with one peer and a small round limit.
+   `claude`, `gemini`, and `cursor` are convenience aliases, not the only accepted values — as with `AI_PROVIDER`, any exact provider ID that pi-sidecar reports is accepted, and the chart's restricted `ai.provider` enum does not apply here. Peer models cost real tokens and real wall-clock time, so start with one peer and a small round limit.
 
    > **Tip:** Peer models need credentials. Either they use your own stored key or the server's, depending on the `Use server credentials` permission you were granted.
 

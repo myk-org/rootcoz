@@ -339,7 +339,7 @@
 <tbody>
 <tr>
 <td><code>GitHub Token</code></td>
-<td>Personal access token with <code>repo</code> scope. Used to create GitHub issues and to enrich comments with PR status.</td>
+<td>Personal access token with <code>repo</code> scope. Used to create GitHub issues. It is <strong>not</strong> what enriches comment badges: <code>enrich_comments</code> reads the server's <code>GITHUB_TOKEN</code> from Server Settings, so status badges resolve against the server-wide credential, not yours.</td>
 </tr>
 <tr>
 <td><code>Jira Email</code></td>

@@ -73,7 +73,7 @@ This clones the tests repository plus both extra repositories into the analysis 
    | Peer list | `peer_ai_configs`, stored as `provider:model,provider:model` | empty (no peers) |
    | Debate rounds | `peer_analysis_max_rounds`, between 1 and 10 | 3 |
 
-   Providers are `claude`, `gemini`, and `cursor`. Peer models cost real tokens and real wall-clock time, so start with one peer and a small round limit.
+   `claude`, `gemini`, and `cursor` are convenience aliases, not the only accepted values — as with `AI_PROVIDER`, any exact provider ID that pi-sidecar reports is accepted, and the chart's restricted `ai.provider` enum does not apply here. Peer models cost real tokens and real wall-clock time, so start with one peer and a small round limit.
 
    > **Tip:** Peer models need credentials. Either they use your own stored key or the server's, depending on the `Use server credentials` permission you were granted.
 

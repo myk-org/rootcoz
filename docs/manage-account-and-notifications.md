@@ -63,7 +63,7 @@ The registration key is the only credential that signs you in; the tracker token
 
    | Field | What it is used for |
    | --- | --- |
-   | `GitHub Token` | Personal access token with `repo` scope. Used to create GitHub issues and to enrich comments with PR status. |
+   | `GitHub Token` | Personal access token with `repo` scope. Used to create GitHub issues. It is **not** what enriches comment badges: `enrich_comments` reads the server's `GITHUB_TOKEN` from Server Settings, so status badges resolve against the server-wide credential, not yours. |
    | `Jira Email` | Your Atlassian account email, required for Jira Cloud API-token auth. |
    | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. |
 

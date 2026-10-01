@@ -14,7 +14,7 @@ curl -H "Authorization: Bearer $ROOTCOZ_API_KEY" \
   http://localhost:8000/results/JOB_ID
 ```
 
-That single authenticated GET returns the stored analysis for one job, including failures, classifications, patterns, comments, and child jobs.
+That single authenticated GET returns the stored analysis for one job, including failures, classifications, patterns, classification overrides, tracker links, capabilities, and child jobs. It does **not** include the comment thread — call `GET /results/{job_id}/comments` separately for that.
 
 ## Step-by-Step
 

@@ -366,7 +366,7 @@
 </tr>
 </tbody>
 </table></div>
-<p>Providers are <code>claude</code>, <code>gemini</code>, and <code>cursor</code>. Peer models cost real tokens and real wall-clock time, so start with one peer and a small round limit.</p>
+<p><code>claude</code>, <code>gemini</code>, and <code>cursor</code> are convenience aliases, not the only accepted values — as with <code>AI_PROVIDER</code>, any exact provider ID that pi-sidecar reports is accepted, and the chart's restricted <code>ai.provider</code> enum does not apply here. Peer models cost real tokens and real wall-clock time, so start with one peer and a small round limit.</p>
 <blockquote>
 <p><strong>Tip:</strong> Peer models need credentials. Either they use your own stored key or the server's, depending on the <code>Use server credentials</code> permission you were granted.</p>
 </blockquote>

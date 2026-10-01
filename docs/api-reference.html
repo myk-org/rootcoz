@@ -230,7 +230,7 @@
 <span class="w">  </span>http://localhost:8000/results/JOB_ID
 </code></pre></div>
 
-<p>That single authenticated GET returns the stored analysis for one job, including failures, classifications, patterns, comments, and child jobs.</p>
+<p>That single authenticated GET returns the stored analysis for one job, including failures, classifications, patterns, classification overrides, tracker links, capabilities, and child jobs. It does <strong>not</strong> include the comment thread — call <code>GET /results/{job_id}/comments</code> separately for that.</p>
 <h2 id="step-by-step">Step-by-Step</h2>
 <ol>
 <li><strong>Authenticate.</strong></li>
