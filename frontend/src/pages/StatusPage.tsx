@@ -14,7 +14,7 @@ import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
-import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
+import { OriginJobBanner } from '@/components/shared/ReanalysisBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { useAuth } from '@/lib/auth'
 
