@@ -5366,6 +5366,31 @@ class TestReAnalyzeEndpoint:
         assert "request_params" in response.json()["detail"]
 
     @pytest.mark.asyncio
+    async def test_re_analyze_missing_jenkins_data_is_actionable(
+        self, test_client
+    ) -> None:
+        """Missing stored Jenkins coords explain the cause and the way out."""
+        from rootcoz import storage
+
+        await storage.save_result(
+            "job-no-jenkins-coords",
+            "http://jenkins/job/test/1/",
+            "completed",
+            {
+                "summary": "done",
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {"analysis_type": "jenkins", "ai_provider": "claude"}
+                ),
+            },
+        )
+        response = test_client.post("/re-analyze/job-no-jenkins-coords", json={})
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "no stored Jenkins job name and build number" in detail
+        assert "Submit the job again from Jenkins" in detail
+
+    @pytest.mark.asyncio
     async def test_re_analyze_success(self, test_client) -> None:
         """Re-analyze returns 202 with new job_id when original has request_params."""
         from rootcoz import storage

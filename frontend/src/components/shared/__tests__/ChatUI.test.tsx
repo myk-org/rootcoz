@@ -226,7 +226,11 @@ it('invalidates a stale selection when credential source changes', async () => {
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
   await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled())
-  expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('gpt (unavailable)')
+  // Raw value so the field stays editable; unavailability is enforced by the
+  // disabled Start Chat button (asserted above), not by decorating the input.
+  const staleModel = screen.getByRole('combobox', { name: 'AI Model' })
+  expect(staleModel).toHaveValue('gpt')
+  expect(staleModel).not.toHaveAttribute('readonly')
   expect(post).not.toHaveBeenCalledWith('/api/chat/job/init', expect.anything())
 })
 
