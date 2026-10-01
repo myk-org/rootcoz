@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from rootcoz import storage
 from rootcoz.config import Settings, get_settings
 from rootcoz.storage import generate_api_key, hash_api_key
+from tests.conftest import host_env
 
 
 def _create_user_sync(temp_db_path, username: str) -> dict:
@@ -70,18 +71,14 @@ _ALLOW_LIST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
 def _make_client(temp_db_path, allowed_users: str = "", admin_key: str = ""):
     """Create a test client with allow list configured."""
     effective_admin_key = admin_key or _ALLOW_LIST_ADMIN_KEY
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in {"ALLOWED_USERS", "ADMIN_KEY", "ROOTCOZ_ENCRYPTION_KEY"}
-    }
-    env["SECURE_COOKIES"] = "false"
-    env["DB_PATH"] = str(temp_db_path)
-    env["ADMIN_KEY"] = effective_admin_key
-    env["ROOTCOZ_ENCRYPTION_KEY"] = "test-key-for-hmac"  # pragma: allowlist secret
-    env["REQUIRE_APPROVAL"] = "false"
-    if allowed_users:
-        env["ALLOWED_USERS"] = allowed_users
+    env = host_env(
+        SECURE_COOKIES="false",
+        DB_PATH=str(temp_db_path),
+        ADMIN_KEY=effective_admin_key,
+        ROOTCOZ_ENCRYPTION_KEY="test-key-for-hmac",  # pragma: allowlist secret
+        REQUIRE_APPROVAL="false",
+        **({"ALLOWED_USERS": allowed_users} if allowed_users else {}),
+    )
     with patch.dict(os.environ, env, clear=True):
         get_settings.cache_clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
