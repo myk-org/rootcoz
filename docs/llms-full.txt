@@ -2117,7 +2117,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
-| PUT | `/api/user/tokens` | viewer | Save Jira and GitHub tracker tokens |
+| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens |
 | POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving |
 | POST | `/api/jira-projects` | viewer | List Jira projects visible to the supplied credentials |
 | POST | `/api/jira-security-levels` | viewer | List Jira security levels for a project |
