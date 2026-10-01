@@ -97,7 +97,7 @@ This prints just the three fields a status check needs, instead of the full resu
 
   See [CLI Command Reference](cli-reference.html) and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html).
 
-- **Poll the API directly.** `GET /results/{job_id}` returns the status, the result payload, and the full metadata you need to script your own checks. The same `fields` query parameter is available there. A browser hitting that URL is redirected to the status page only while the job is in progress (`pending`, `running`, or `waiting`). Once the job reaches a terminal state — including `failed` and `aborted` — the browser stays at `/results/{job_id}` and the report application renders there.
+- **Poll the API directly.** `GET /results/{job_id}` returns the status, the result payload, and the full metadata you need to script your own checks. The same `fields` query parameter is available there. A browser hitting that URL is redirected to the status page whenever the job is `waiting`, `pending`, `running`, **or `failed`** — `ReportPage.load()` sends a `failed` job to `/status/{id}` rather than rendering a report, because there is no analysis to show. The dashboard routes `failed` and `aborted` rows to the status page too, though they differ there: an `aborted` job can still have a result and can render the report if you navigate to it directly. An `aborted` job is the one terminal state where the report renders.
 
 - **Watch a running job for nothing else.** To answer "did anything change on this job right now", subscribe to the `results:{job_id}` stream and listen for `status-changed`. The browser app uses this, but it is the same mechanism an external tool can use.
 

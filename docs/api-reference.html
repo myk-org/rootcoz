@@ -666,7 +666,7 @@
 <td>PUT</td>
 <td><code>/results/{job_id}/tags</code></td>
 <td>reviewer</td>
-<td>name and tag fields.</td>
+<td>JSON body <code>{"tags": ["a", "b"]}</code> — a list of strings. A non-list value is rejected with <code>400 tags must be a list of strings</code></td>
 </tr>
 <tr>
 <td>DELETE</td>
@@ -856,7 +856,7 @@
 <td>GET</td>
 <td><code>/history/failures</code></td>
 <td>viewer</td>
-<td><code>search</code>, <code>job_name</code>, <code>classification</code>, <code>date_from</code>, <code>date_to</code>, <code>limit</code>, <code>offset</code></td>
+<td><code>search</code>, <code>job_name</code>, <code>classification</code>, <code>from</code>, <code>to</code>, <code>limit</code>, <code>offset</code>. The date bounds are named <code>from</code> and <code>to</code> on the wire, not <code>date_from</code>/<code>date_to</code></td>
 </tr>
 <tr>
 <td>GET</td>
@@ -886,7 +886,7 @@
 <td>POST</td>
 <td><code>/history/classify</code></td>
 <td>reviewer</td>
-<td><code>test_name</code>, <code>classification</code>, <code>reason</code>, <code>job_id</code>, <code>source</code>; returns <code>201</code></td>
+<td><strong>JSON body</strong> (not query string): <code>test_name</code>, <code>classification</code>, <code>reason</code>, <code>job_id</code>, <code>source</code>; returns <code>201</code></td>
 </tr>
 </tbody>
 </table></div>

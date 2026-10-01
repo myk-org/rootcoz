@@ -144,7 +144,7 @@ The shared body accepts the server defaults as per-request overrides:
 | PUT | `/results/{job_id}/reviewed` | reviewer | `test_name`, `reviewed`. |
 | PUT | `/results/{job_id}/override-classification` | reviewer | `test_name`, `classification` |
 | PUT | `/results/{job_id}/override-pattern` | reviewer | `test_name`, `pattern` |
-| PUT | `/results/{job_id}/tags` | reviewer | name and tag fields. |
+| PUT | `/results/{job_id}/tags` | reviewer | JSON body `{"tags": ["a", "b"]}` — a list of strings. A non-list value is rejected with `400 tags must be a list of strings` |
 | DELETE | `/results/{job_id}` | operator | none; deletes your own job, admins delete any |
 | DELETE | `/api/results/bulk` | operator | `job_ids` |
 
@@ -189,12 +189,12 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 
 | Method | Path | Min role | Query parameters |
 | --- | --- | --- | --- |
-| GET | `/history/failures` | viewer | `search`, `job_name`, `classification`, `date_from`, `date_to`, `limit`, `offset` |
+| GET | `/history/failures` | viewer | `search`, `job_name`, `classification`, `from`, `to`, `limit`, `offset`. The date bounds are named `from` and `to` on the wire, not `date_from`/`date_to` |
 | GET | `/history/test/{test_name}` | viewer | `limit`, `job_name`, `exclude_job_id` |
 | GET | `/history/search` | viewer | `signature`, `exclude_job_id` |
 | GET | `/history/stats/{job_name}` | viewer | `exclude_job_id` |
 | GET | `/history/classifications` | viewer | `test_name`, `classification`, `job_name`, `parent_job_name`, `job_id` |
-| POST | `/history/classify` | reviewer | `test_name`, `classification`, `reason`, `job_id`, `source`; returns `201` |
+| POST | `/history/classify` | reviewer | **JSON body** (not query string): `test_name`, `classification`, `reason`, `job_id`, `source`; returns `201` |
 
 Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` identity. The backend blocks AI callers from overriding classifications a human has already set.
 
