@@ -87,6 +87,13 @@ describe('FailureCard primary usage', () => {
     expect(screen.getByText(/Unavailable/)).toBeTruthy()
     expect(screen.queryByText(/\$0.00/)).toBeNull()
   })
+
+  it('no longer renders the bare provider/model inputs on the card', () => {
+    showCard(1)
+    expect(screen.queryByPlaceholderText('provider')).toBeNull()
+    expect(screen.queryByPlaceholderText('model')).toBeNull()
+    expect(screen.queryByText(/AI for issue generation/i)).toBeNull()
+  })
 })
 
 describe('FailureCard review controls', () => {

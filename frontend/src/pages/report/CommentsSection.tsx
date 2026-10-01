@@ -11,6 +11,8 @@ import { LinkedText } from '@/components/shared/LinkedText'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { MentionTextarea } from './MentionTextarea'
 import { useReviewSuggestion } from './useReviewSuggestion'
+import { useAiSelection } from './useAiSelection'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Trash2, MessageSquare } from 'lucide-react'
 import type { Comment } from '@/types'
@@ -83,6 +85,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
   const { comments, enrichments } = useReportState()
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
+  const { aiProvider, aiModel, setAiPair } = useAiSelection()
   const { role } = useAuth()
   const isViewer = role === 'viewer'
   const [text, setText] = useState('')
@@ -265,6 +268,16 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
             <Button size="sm" onClick={handleSubmit} disabled={!text.trim() || submitting} className="shrink-0">
               Post
             </Button>
+          </div>
+          {/* Where the review suggestion is triggered, so pick the AI that reads it. */}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-text-tertiary">AI for comment intent</span>
+            <div className="w-[160px]">
+              <AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} label="AI Provider for comment intent" />
+            </div>
+            <div className="w-[240px]">
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model)} forceServer={false} label="AI Model for comment intent" />
+            </div>
           </div>
           {submitError && (
             <span role="alert" className="text-signal-red text-xs">
