@@ -1289,7 +1289,7 @@ def analyze(
     source: str = typer.Option(
         "jenkins",
         "--source",
-        help="Analysis source: jenkins, file, or prow.",
+        help="Analysis source: jenkins, file, prow, or raw.",
     ),
     job_name: str = typer.Option(
         "",
@@ -1402,6 +1402,11 @@ def analyze(
         None, "--max-wait", help="Maximum minutes to wait for completion."
     ),
     max_concurrent: _MaxConcurrentOpt = 0,
+    failures: str = typer.Option(
+        "",
+        "--failures",
+        help='JSON list of failed test entries (for type=raw). Format: \'[{"test_name": "...", "error": "..."}]\'',
+    ),
     passed_tests: str = typer.Option(
         "",
         "--passed-tests",
@@ -1416,11 +1421,13 @@ def analyze(
     label: list[str] = _ANALYZE_LABEL_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Submit an analysis job (Jenkins, JUnit XML file, or Prow CI)."""
+    """Submit an analysis job (Jenkins, JUnit XML file, Prow CI, or raw failures)."""
     _set_json(json_output)
 
-    if source not in ("jenkins", "file", "prow"):
-        typer.echo("Error: --source must be 'jenkins', 'file', or 'prow'.", err=True)
+    if source not in ("jenkins", "file", "prow", "raw"):
+        typer.echo(
+            "Error: --source must be 'jenkins', 'file', 'prow', or 'raw'.", err=True
+        )
         raise typer.Exit(1)
 
     if source in ("jenkins", "prow"):
@@ -1548,19 +1555,21 @@ def analyze(
     if tags:
         extras["tags"] = tags
 
-    # Passed/skipped tests (type=raw only — API validates and rejects for other types)
-    if passed_tests:
-        try:
-            extras["passed_tests"] = json_mod.loads(passed_tests)
-        except json_mod.JSONDecodeError:
-            typer.echo("Error: --passed-tests must be valid JSON.", err=True)
-            raise typer.Exit(1)
-    if skipped_tests:
-        try:
-            extras["skipped_tests"] = json_mod.loads(skipped_tests)
-        except json_mod.JSONDecodeError:
-            typer.echo("Error: --skipped-tests must be valid JSON.", err=True)
-            raise typer.Exit(1)
+    # Raw test lists (type=raw only — API validates and rejects for other types)
+    for raw_field, raw_json in (
+        ("failures", failures),
+        ("passed_tests", passed_tests),
+        ("skipped_tests", skipped_tests),
+    ):
+        if raw_json:
+            try:
+                extras[raw_field] = json_mod.loads(raw_json)
+            except json_mod.JSONDecodeError:
+                typer.echo(
+                    f"Error: --{raw_field.replace('_', '-')} must be valid JSON.",
+                    err=True,
+                )
+                raise typer.Exit(1)
 
     if label:
         extras["labels"] = label
@@ -1568,7 +1577,7 @@ def analyze(
         extras["labels"] = _split_csv(cfg.labels)
 
     # Strip Jenkins-specific fields for non-Jenkins sources
-    if source in ("file", "prow"):
+    if source in ("file", "prow", "raw"):
         for key in (
             "jenkins_url",
             "jenkins_user",
@@ -1579,10 +1588,9 @@ def analyze(
             "wait_for_completion",
             "poll_interval_minutes",
             "max_wait_minutes",
+            "get_job_artifacts",
         ):
             extras.pop(key, None)
-    if source == "file":
-        extras.pop("get_job_artifacts", None)
     # Strip Prow-specific fields for non-Prow sources
     if source != "prow":
         for key in ("prow_url", "gcs_bucket", "gcs_prefix"):
@@ -1595,6 +1603,18 @@ def analyze(
         if source == "jenkins":
             post = client.submit if ingest_only else client.analyze
             data = post(job_name, jenkins_build_number, name=name, **extras)
+        elif source == "raw":
+            if not any(
+                extras.get(k) for k in ("failures", "passed_tests", "skipped_tests")
+            ):
+                typer.echo(
+                    "Error: --source raw requires at least one of --failures, "
+                    "--passed-tests, or --skipped-tests.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            post = client.submit if ingest_only else client.analyze
+            data = post(name=name, type="raw", **extras)
         elif source == "prow":
             extras["prow_job_name"] = job_name
             extras["build_id"] = build_number

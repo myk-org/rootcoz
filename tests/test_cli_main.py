@@ -3165,6 +3165,121 @@ class TestAnalyzeSourceFlag:
             ["analyze", "--source", "jenkins", "--job-name", "my-job"],
         )
         assert result.exit_code == 1
+
+    def test_analyze_source_raw_works(self, mock_client):
+        """Regression for #298: raw is selectable and carries failure entries."""
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "raw",
+                "--failures",
+                '[{"test_name": "t.Foo", "error": "boom"}]',
+            ],
+        )
+        assert result.exit_code == 0
+        assert "j1" in result.output
+        kwargs = mock_client.analyze.call_args.kwargs
+        assert kwargs["type"] == "raw"
+        assert kwargs["failures"] == [{"test_name": "t.Foo", "error": "boom"}]
+
+    def test_analyze_source_raw_accepts_passed_and_skipped_tests(self, mock_client):
+        """Regression for #298: --passed-tests/--skipped-tests are reachable on raw."""
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "raw",
+                "--failures",
+                '[{"test_name": "t.Foo", "error": "boom"}]',
+                "--passed-tests",
+                '[{"test_name": "t.Bar", "duration": 0.1, "status": "passed"}]',
+                "--skipped-tests",
+                '[{"test_name": "t.Baz", "duration": 0.0, "status": "skipped"}]',
+            ],
+        )
+        assert result.exit_code == 0
+        kwargs = mock_client.analyze.call_args.kwargs
+        assert kwargs["passed_tests"][0]["test_name"] == "t.Bar"
+        assert kwargs["skipped_tests"][0]["test_name"] == "t.Baz"
+
+    def test_analyze_source_raw_without_any_test_list_errors(self, mock_client):
+        result = runner.invoke(app, ["analyze", "--source", "raw"])
+        assert result.exit_code == 1
+        assert "--failures" in result.output
+        mock_client.analyze.assert_not_called()
+
+    def test_analyze_source_raw_with_passed_tests_only_works(self, mock_client):
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "raw",
+                "--passed-tests",
+                '[{"test_name": "t.Bar", "status": "passed"}]',
+            ],
+        )
+        assert result.exit_code == 0
+        assert mock_client.analyze.call_args.kwargs["type"] == "raw"
+
+    def test_analyze_source_raw_bad_json_errors(self, mock_client):
+        result = runner.invoke(
+            app, ["analyze", "--source", "raw", "--failures", "not-json"]
+        )
+        assert result.exit_code == 1
+        assert "--failures must be valid JSON" in result.output
+
+    def test_analyze_source_raw_strips_jenkins_and_prow_fields(self, mock_client):
+        """raw must not carry source-specific fields the model rejects."""
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "raw",
+                "--failures",
+                '[{"test_name": "t.Foo", "error": "boom"}]',
+                "--jenkins-url",
+                "https://jenkins.example",
+                "--prow-url",
+                "https://prow.example",
+                "--gcs-bucket",
+                "some-bucket",
+            ],
+        )
+        assert result.exit_code == 0
+        kwargs = mock_client.analyze.call_args.kwargs
+        assert "jenkins_url" not in kwargs
+        assert "prow_url" not in kwargs
+        assert "gcs_bucket" not in kwargs
+
+    def test_submit_source_raw_works(self, mock_client):
+        """submit shares the analyze command; raw must work there too."""
+        mock_client.submit.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "submit",
+                "--source",
+                "raw",
+                "--failures",
+                '[{"test_name": "t.Foo", "error": "boom"}]',
+            ],
+        )
+        assert result.exit_code == 0
+        kwargs = mock_client.submit.call_args.kwargs
+        assert kwargs["type"] == "raw"
+
+    def test_analyze_source_mentions_raw_in_help(self):
+        result = runner.invoke(app, ["analyze", "--help"])
+        assert "raw" in result.output
         assert "--build-number" in result.output
 
     def test_analyze_source_file_missing_file_errors(self, mock_client):
