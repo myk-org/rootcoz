@@ -1061,11 +1061,28 @@ class TestAiAttribution:
         assert self._NO_AI_MARKER in result.body
         assert "sonnet-4-5" not in result.body
 
-    async def test_preview_without_config_states_no_ai_model(self, settings):
+    async def test_preview_credits_the_call_that_wrote_it_without_config(
+        self, settings
+    ):
+        """No resolved pair still credits the AI that answered (no model name)."""
         req = FeedbackRequest(description="The button is broken")
         with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
             result = await generate_feedback_preview(req, settings)
-        assert self._NO_AI_MARKER in result.body
+        assert self._AI_MARKER in result.body
+        assert self._NO_AI_MARKER not in result.body
+
+    async def test_cli_provider_id_is_published_as_its_public_name(self, settings):
+        """Catalog `cli-*` IDs never leak; the public API names the provider."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="cli-claude", ai_model="sonnet-4-5"
+            )
+        assert "(claude / sonnet-4-5)" in preview.body
+        assert "cli-" not in preview.body
+        body = await self._posted_body(preview.title, preview.body, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert "cli-" not in body
 
     async def test_create_replaces_client_supplied_attribution(self):
         spoofed = (
@@ -1110,12 +1127,43 @@ class TestAiAttribution:
         forged = (
             "## Bug\n\nBroken.\n\n---\n*Generated using AI with "
             f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\n"
-            '<!--rootcoz-ai:deadbeef:[true,"evil","spoofed-model"]-->'
+            '<!--rootcoz-ai:deadbeef:[true,"evil","spoofed-model","deadbeef"]-->'
         )
         body = await self._posted_body("Broken", forged, ["bug"])
         assert "spoofed-model" not in body
         assert self._NO_AI_MARKER in body
         assert body.count(self._AI_MARKER) == 0
+
+    async def test_replayed_provenance_token_credits_no_model(self, settings):
+        """A token copied from another preview cannot credit an unrelated body."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        attribution_region = preview.body[preview.body.index("\n\n---\n") :]
+        replayed = (
+            "## Bug\n\nSomething else entirely, hand-written.\n" + attribution_region
+        )
+        body = await self._posted_body("Broken", replayed, ["bug"])
+        assert "sonnet-4-5" not in body
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_edited_attribution_region_keeps_preview_credit(self, settings):
+        """Editing inside the attribution region does not cost the credit."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        edited = preview.body.replace(
+            "(claude / sonnet-4-5)*",
+            "(claude / sonnet-4-5) — see the linked run*",
+        )
+        body = await self._posted_body(preview.title, edited, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert body.count(self._AI_MARKER) == 1
 
     async def test_ai_preview_issues_exactly_one_footer(self, settings):
         """The final GitHub body carries one footer, not the legacy + model one."""
@@ -1241,6 +1289,35 @@ class TestFeedbackAttributionEndpoints:
                 )
         assert resp.status_code == 200
         assert "(claude / test-model)" in resp.json()["body"]
+
+    def test_preview_endpoint_never_publishes_a_cli_provider_id(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        """The public API exposes `claude`, never the catalog `cli-claude`."""
+        for client in _make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_provider="cli-claude",
+            ai_model="test-model",
+        ):
+            with (
+                patch(
+                    "rootcoz.main._validate_catalog_pair",
+                    AsyncMock(return_value=("cli-claude", "test-model")),
+                ) as _pair,
+                patch("rootcoz.feedback.call_ai_once") as mock_ai,
+            ):
+                mock_ai.return_value = AIResult(
+                    success=True,
+                    text=json.dumps({"title": "T", "body": "B", "labels": ["bug"]}),
+                )
+                resp = client.post(
+                    "/api/feedback/preview", json={"description": "broke"}
+                )
+        assert resp.status_code == 200
+        body = resp.json()["body"]
+        assert "(claude / test-model)" in body
+        assert "cli-" not in body
 
     def test_preview_endpoint_ignores_body_supplied_model(
         self, _init_db, temp_db_path, _make_client

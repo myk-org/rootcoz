@@ -376,7 +376,9 @@ async def create_feedback_from_preview(
     title = scrub_sensitive_data(title)
     # Re-apply the attribution the preview was granted: the body round-trips
     # through the browser and may carry a stale, hand-edited or spoofed footer.
-    # Read provenance before scrubbing so the signed token is still intact.
+    # Read provenance before scrubbing so the signed token is still intact, and
+    # hand the same verified provenance to the creator — attribution is decided
+    # by this one signal, never by the body text.
     resolved = provenance or read_provenance(body) or AiProvenance(ai_used=False)
     body = apply_ai_attribution(scrub_sensitive_data(body), resolved)
     labels = [lbl for lbl in labels if lbl in _ALLOWED_LABELS]
@@ -387,6 +389,7 @@ async def create_feedback_from_preview(
         repo_url=_FEEDBACK_REPO_URL,
         github_token=github_token,
         labels=labels,
+        attribution=resolved,
     )
 
     return FeedbackResponse(

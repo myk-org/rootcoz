@@ -106,6 +106,31 @@ _LEGACY_PROVIDER_ALIASES: dict[str, str] = {
     "gemini-cli": "cli-gemini",
 }
 
+# Friendly provider names and the exact catalog providers each may resolve to.
+# One table serves route validation (:func:`resolve_catalog_pair`) and the
+# reverse mapping a public surface needs: the API only ever exposes
+# ``claude``/``gemini``/``cursor``, never a ``cli-*`` catalog ID.
+_LEGACY_PROVIDER_TARGETS: dict[str, tuple[str, ...]] = {
+    "gemini": ("google", "cli-gemini"),
+    "claude": ("google-vertex-claude", "cli-claude"),
+    "cursor": ("acpx-cursor", "cli-cursor"),
+}
+_PUBLIC_PROVIDER_NAMES: dict[str, str] = {
+    provider_id: name
+    for name, provider_ids in _LEGACY_PROVIDER_TARGETS.items()
+    for provider_id in provider_ids
+}
+
+
+def public_provider_name(provider: str) -> str:
+    """Return the public name of a catalog provider ID (identity if unknown).
+
+    ``cli-claude`` -> ``claude``; ``acpx-cursor`` -> ``cursor``.  Anything the
+    table does not know is already public and passes through unchanged.
+    """
+    return _PUBLIC_PROVIDER_NAMES.get(normalize_provider(provider), provider)
+
+
 # Last successful sidecar catalog.  AI calls share this with the catalog API so
 # a transient refresh failure never rejects a pair already known to be valid.
 _model_catalog_cache: list[dict[str, Any]] | None = None
@@ -498,14 +523,9 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
 
     # Legacy friendly IDs have one explicit destination each.  Mapping only when
     # precisely one catalog provider has this model prevents google/Vertex guesses.
-    targets = {
-        "gemini": lambda p: p == "google",
-        "claude": lambda p: p == "google-vertex-claude",
-        "cursor": lambda p: p.endswith("-cursor"),
-    }
-    target = targets.get(provider)
+    targets = _LEGACY_PROVIDER_TARGETS.get(provider)
     providers_for_model = {p for p, m in pairs if p and m == model}
-    matches = [p for p in providers_for_model if target and target(p)]
+    matches = [p for p in providers_for_model if targets and p in targets]
     if len(providers_for_model) == 1 and len(matches) == 1:
         await require_server_provider_grant()
         _selected_credential_source.set("server")
@@ -1172,5 +1192,6 @@ __all__ = [
     "list_models",
     "normalize_provider",
     "probe_cursor_auth",
+    "public_provider_name",
     "resolve_catalog_pair",
 ]

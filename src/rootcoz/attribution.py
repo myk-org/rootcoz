@@ -10,6 +10,23 @@ inside it as an HMAC-signed token (server secret = the Fernet key secret).
 The create step re-verifies the signature, so a client can neither change the
 credited model nor forge one, and any attribution line it adds anywhere in the
 body is stripped before the single server-owned footer is appended.
+
+**Who decides the attribution.**  Only the caller does, and only through an
+explicit ``AiProvenance``: :func:`read_provenance` returns a token's provenance
+when the token verifies, and :func:`apply_ai_attribution` / the shared issue
+creator apply exactly one footer from it.  Body text never decides anything —
+pattern-matching it is exactly how a client-supplied line used to suppress the
+server's footer and get published as its own claim.
+
+**Why the token is bound to the content.**  The signed payload carries a digest
+of the body *excluding* the attribution region, so the token describes the issue
+it was minted for.  A user may edit the attribution region itself (that is the
+only region the footer and token occupy) and the credit survives; any other
+body — a pasted token from someone else's AI preview or from an already
+published issue, attached to unrelated text — fails the digest check and is
+credited to no model.  The price is deliberate: edits *outside* the attribution
+region change the content and therefore lose the model credit, because nothing
+the server can verify still says who wrote them.
 """
 
 import hashlib
@@ -18,6 +35,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from rootcoz.ai_client import public_provider_name
 from rootcoz.encryption import get_hmac_secret
 
 # Attribution footer for issues submitted as raw feedback (no model wrote them).
@@ -57,10 +75,15 @@ class AiProvenance:
 
 
 def _pair(provenance: AiProvenance) -> tuple[str, str]:
-    """Return the creditable (provider, model) pair — empty when AI was unused."""
+    """Return the creditable (provider, model) pair — empty when AI was unused.
+
+    The provider is the catalog's internal ID; the public API only ever exposes
+    ``claude``/``gemini``/``cursor``, so it is mapped through ai_client's one
+    provider table before it reaches a footer or a signed payload.
+    """
     if not provenance.ai_used:
         return "", ""
-    return provenance.provider.strip(), provenance.model.strip()
+    return public_provider_name(provenance.provider.strip()), provenance.model.strip()
 
 
 def _sign(payload: str) -> str:
@@ -70,22 +93,37 @@ def _sign(payload: str) -> str:
     ).hexdigest()
 
 
-def _encode(provenance: AiProvenance) -> str:
-    """Render *provenance* as a signed, body-invisible token."""
+def _strip_attribution(body: str) -> str:
+    """Return *body* without any attribution footer or provenance token."""
+    return _PROVENANCE_RE.sub("", ATTRIBUTION_RE.sub("", body)).rstrip()
+
+
+def _content_digest(body: str) -> str:
+    """Digest the content a token describes: *body* minus its attribution."""
+    return hashlib.sha256(_strip_attribution(body).encode()).hexdigest()
+
+
+def _encode(body: str, provenance: AiProvenance) -> str:
+    """Render *provenance* as a token signed over the body it credits."""
     ai_used, provider, model = (
         provenance.ai_used,
         *_pair(provenance),
     )
-    payload = json.dumps([ai_used, provider, model], separators=(",", ":"))
+    # The digest is inside the signed payload: the signature covers the content
+    # binding, so a token cannot be re-pointed at another body.
+    payload = json.dumps(
+        [ai_used, provider, model, _content_digest(body)], separators=(",", ":")
+    )
     return f"{_PROVENANCE_PREFIX}{_sign(payload)}:{payload}-->"
 
 
 def read_provenance(body: str) -> AiProvenance | None:
     """Return the server-signed provenance carried by *body*, or ``None``.
 
-    Unsigned or tampered tokens are ignored: the caller must fall back to a
-    safe (no-AI) attribution rather than trust client-supplied text.
+    Unsigned, tampered or content-mismatched tokens are ignored: the caller
+    must fall back to a safe (no-AI) attribution rather than trust client text.
     """
+    digest = _content_digest(body)
     for match in _PROVENANCE_RE.finditer(body):
         token = match.group(0)[len(_PROVENANCE_PREFIX) : -len("-->")]
         signature, _, payload = token.partition(":")
@@ -95,26 +133,33 @@ def read_provenance(body: str) -> AiProvenance | None:
             parts = json.loads(payload)
         except json.JSONDecodeError:
             continue
-        if not isinstance(parts, list) or len(parts) != 3:
+        if not isinstance(parts, list) or len(parts) != 4:
             continue
-        ai_used, provider, model = parts
+        ai_used, provider, model, token_digest = parts
+        if not hmac.compare_digest(str(token_digest), digest):
+            continue
         return AiProvenance(bool(ai_used), str(provider), str(model))
     return None
 
 
 def build_ai_attribution(provenance: AiProvenance) -> str:
-    """Return the footer for *provenance* (the AI pair, or the no-AI footer)."""
+    """Return the footer for *provenance*: the AI pair, plain AI, or no AI."""
+    if not provenance.ai_used:
+        return NO_AI_ATTRIBUTION
     provider, model = _pair(provenance)
     if provider and model:
         return f"\n\n---\n*{AI_ATTRIBUTION_PREFIX} ({provider} / {model})*"
-    return NO_AI_ATTRIBUTION
+    return f"\n\n---\n*{AI_ATTRIBUTION_PREFIX}*"
 
 
 def apply_ai_attribution(body: str, provenance: AiProvenance) -> str:
     """Strip every attribution line from *body* and append exactly one footer.
 
-    The result carries one visible footer plus a signed provenance token, so
-    the create step re-verifies the model instead of re-resolving it.
+    The result carries one visible footer plus a signed provenance token bound
+    to this exact content, so the create step re-verifies the model instead of
+    re-resolving it — and cannot credit a different body.
     """
-    stripped = _PROVENANCE_RE.sub("", ATTRIBUTION_RE.sub("", body)).rstrip()
-    return stripped + build_ai_attribution(provenance) + "\n" + _encode(provenance)
+    stripped = _strip_attribution(body)
+    return (
+        stripped + build_ai_attribution(provenance) + "\n" + _encode(body, provenance)
+    )
