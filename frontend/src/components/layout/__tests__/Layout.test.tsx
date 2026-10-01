@@ -1,22 +1,29 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { Layout } from '../Layout'
 
+// Mock useAuth to control role/admin state
+const mockAuth = {
+  username: 'testuser',
+  isAdmin: false,
+  isOperator: false,
+  canViewReports: false,
+  role: 'reviewer',
+  loading: false,
+  authenticated: true,
+  login: vi.fn(),
+  logout: vi.fn(),
+  refreshAuth: vi.fn(),
+}
+
 vi.mock('@/lib/auth', () => ({
-  useAuth: () => ({
-    username: 'testuser',
-    isAdmin: false,
-    isOperator: false,
-    canViewReports: false,
-    role: 'reviewer',
-    loading: false,
-    authenticated: true,
-    login: vi.fn(),
-    logout: vi.fn(),
-    refreshAuth: vi.fn(),
-  }),
+  useAuth: () => mockAuth,
 }))
+
+import { useSSE } from '@/lib/SSEProvider'
+
+const mockUseSSE = useSSE as unknown as ReturnType<typeof vi.fn>
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -36,6 +43,7 @@ vi.mock('@/lib/SSEProvider', () => ({
 
 beforeEach(() => {
   localStorage.clear()
+  mockUseSSE.mockClear()
 })
 
 function renderLayout(pathname = '/') {
@@ -86,5 +94,20 @@ describe('Layout', () => {
   it('renders mobile menu toggle in header', () => {
     renderLayout()
     expect(screen.getByTestId('mobile-menu-toggle')).toBeDefined()
+  })
+
+  it('updates the pending badge from the navbar pending-count SSE event', () => {
+    // #227: the badge is driven by SSE, not a one-shot fetch on mount
+    mockAuth.isAdmin = true
+    renderLayout()
+    expect(screen.queryByText('3')).toBeNull()
+
+    const events = mockUseSSE.mock.calls.at(-1)![1]
+    act(() => events['pending-count']('3'))
+    expect(screen.getByText('3')).toBeDefined()
+
+    act(() => events['pending-count']('0'))
+    expect(screen.queryByText('3')).toBeNull()
+    mockAuth.isAdmin = false
   })
 })

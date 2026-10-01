@@ -481,6 +481,7 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
 # --- SSE broadcast for navbar badges ---
 _active_count_listeners: set[asyncio.Event] = set()
 _mention_listeners: dict[str, set[asyncio.Event]] = {}
+_pending_count_listeners: set[asyncio.Event] = set()
 
 
 async def _periodic_session_cleanup() -> None:
@@ -499,6 +500,12 @@ async def _periodic_session_cleanup() -> None:
 def notify_active_count_changed() -> None:
     """Signal all SSE listeners that the active analysis count has changed."""
     for event in _active_count_listeners:
+        event.set()
+
+
+def notify_pending_count_changed() -> None:
+    """Signal all navbar SSE listeners that the pending user count has changed."""
+    for event in _pending_count_listeners:
         event.set()
 
 
@@ -8251,19 +8258,24 @@ async def get_active_analysis_count() -> dict[str, Any]:
 
 @app.get("/api/navbar/stream", operation_id="streamNavbarCounts")
 async def stream_navbar_counts(request: Request) -> StreamingResponse:
-    """SSE stream that pushes active analysis count and unread mention count."""
+    """SSE stream that pushes active analysis count, unread mention count and
+    (admins only) the pending user approval count."""
     username = request.state.username
+    is_admin = getattr(request.state, "is_admin", False)
     _check_allow_list(request)
 
     async def event_generator() -> AsyncIterator[str]:
         # Per-connection events
         active_event = asyncio.Event()
         mention_event = asyncio.Event() if username else None
+        pending_event = asyncio.Event() if is_admin else None
 
         # Register
         _active_count_listeners.add(active_event)
         if username and mention_event is not None:
             _mention_listeners.setdefault(username, set()).add(mention_event)
+        if pending_event is not None:
+            _pending_count_listeners.add(pending_event)
 
         try:
             # Send both counts immediately on connect
@@ -8285,12 +8297,24 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     last_unread = 0
                     yield "event: unread-count\ndata: 0\n\n"
 
+            last_pending = -1
+            if pending_event is not None:
+                try:
+                    pending_count = len(await storage.list_pending_users())
+                    last_pending = pending_count
+                    yield f"event: pending-count\ndata: {pending_count}\n\n"
+                except aiosqlite.Error, OSError, TypeError, ValueError:
+                    last_pending = 0
+                    yield "event: pending-count\ndata: 0\n\n"
+
             active_wait_tasks: list[asyncio.Task[Any]] = []
             while True:
                 # Wait for either event or timeout
                 active_wait_tasks = [asyncio.create_task(active_event.wait())]
                 if mention_event is not None:
                     active_wait_tasks.append(asyncio.create_task(mention_event.wait()))
+                if pending_event is not None:
+                    active_wait_tasks.append(asyncio.create_task(pending_event.wait()))
 
                 try:
                     done, pending = await asyncio.wait(
@@ -8338,6 +8362,18 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                         logger.debug(
                             "Failed to fetch unread count for SSE", exc_info=True
                         )
+
+                if pending_event is not None and pending_event.is_set():
+                    pending_event.clear()
+                    try:
+                        pending_count = len(await storage.list_pending_users())
+                        if pending_count != last_pending:
+                            yield f"event: pending-count\ndata: {pending_count}\n\n"
+                            last_pending = pending_count
+                    except Exception:
+                        logger.debug(
+                            "Failed to fetch pending count for SSE", exc_info=True
+                        )
         finally:
             # Cancel any pending wait tasks on disconnect
             for task in active_wait_tasks:
@@ -8350,6 +8386,8 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     listeners.discard(mention_event)
                     if not listeners:
                         _mention_listeners.pop(username, None)
+            if pending_event is not None:
+                _pending_count_listeners.discard(pending_event)
 
     return StreamingResponse(
         event_generator(),
@@ -10622,6 +10660,7 @@ async def approve_user(
             detail=f"User '{username}' is not pending (current status: {status})",
         )
     effective_grant = await storage.can_user_use_server_providers(username)
+    notify_pending_count_changed()
     logger.info(
         "[AUDIT] Admin '%s' approved user '%s' (can_use_server_providers=%s)",
         request.state.username,
@@ -10649,6 +10688,7 @@ async def reject_user(username: str, request: Request) -> dict[str, Any]:
             detail=f"User '{username}' is not pending (current status: {status})",
         )
     await storage.set_user_status(username, "rejected")
+    notify_pending_count_changed()
     logger.info(f"[AUDIT] Admin '{request.state.username}' rejected user '{username}'")
     return {
         "username": username,
