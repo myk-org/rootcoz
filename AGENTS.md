@@ -137,11 +137,12 @@ src/rootcoz/
   - **`can_use_server_providers`** (DB flag, default false, orthogonal to role): when true, the user may send analyses and chat using the server's stored AI credentials instead of their own. Same reload-per-request and admin-implies-`True` semantics as `can_view_reports`. Managed via `PUT /api/admin/users/{username}/can-use-server-providers`, admin user create (`can_use_server_providers` in body), CLI `admin users create --can-use-server-providers` / `admin users set-can-use-server-providers`, and the admin UI (`Server providers` column). Gating the "Use server credentials" toggle.
   - **`can_view_reports`** (DB flag, default false, orthogonal to role): when true, the user may call `/api/reports/*`. Non-admins reload the flag from the users table on each request (so grants/revokes apply without session invalidation); admins have effective access (`True`) without depending on the stored column. Managed via `PUT /api/admin/users/{username}/can-view-reports`, admin user create (`can_view_reports` in body), CLI `admin users create --can-view-reports` / `admin users set-can-view-reports`, and the admin UI. Exposed on `request.state.can_view_reports`, `GET /api/auth/me`, and `POST /api/auth/login`.
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
-  - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)
+  - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions, pending approvals for admins)
+  - `/api/stream?topics=navbar` — multiplexed stream (`SSEProvider`); emits `navbar:active-count`, `navbar:unread-count` and, for admins, `navbar:pending-count`
   - `/api/dashboard/stream` — dashboard job list changes
   - `/api/results/{job_id}/stream` — per-job status changes
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
-  - `/api/admin/token-usage/stream` — token usage data changes
+  - `/api/admin/token-usage/stream` — token usage data changes (admin only)
   - `/api/chat/{job_id}/stream` — per-job chat message changes
   - `/api/admin/logs/stream` — real-time server log tailing (admin only)
 - **Reports API**: Analytics endpoints for aggregated metrics (requires admin **or** `can_view_reports`):

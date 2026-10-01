@@ -27,6 +27,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "base_url",
         "result_url",
         "reanalyzed_from_job_id",
+        "reanalyzed_to_job_ids",
         "origin_job_name",
         "result",
         # Nested under result

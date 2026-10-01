@@ -813,6 +813,11 @@ def results_show(
                         f"({link.get('tracked_in_type', '')}) "
                         f"by {link.get('tracked_in_by', '')}"
                     )
+        reanalyzed_to = data.get("reanalyzed_to_job_ids") or []
+        if reanalyzed_to:
+            typer.echo(
+                f"\nRe-analyzed into: {', '.join(str(j) for j in reanalyzed_to)}"
+            )
 
 
 @results_app.command("fields")
