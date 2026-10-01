@@ -792,6 +792,26 @@ def normalize_for_signature(text: str) -> str:
     return text
 
 
+def compute_signature(error_message: str, stack_trace: str) -> str:
+    """Hash an error message and stack trace into a failure signature.
+
+    Single source of truth for the signature formula: analysis and the
+    signature backfill (``rootcoz.signature_backfill``) both call this so the
+    two can never drift apart.
+
+    Args:
+        error_message: Error message text.
+        stack_trace: Stack trace text.
+
+    Returns:
+        SHA-256 hash string representing the failure signature.
+    """
+    normalized_error = normalize_for_signature(error_message)
+    normalized_trace = normalize_for_signature(stack_trace)
+    signature_text = f"{normalized_error}|{normalized_trace}"
+    return hashlib.sha256(signature_text.encode()).hexdigest()
+
+
 def get_failure_signature(failure: FailedTest) -> str:
     """Create a signature for grouping identical failures.
 
@@ -806,10 +826,7 @@ def get_failure_signature(failure: FailedTest) -> str:
     Returns:
         SHA-256 hash string representing the failure signature.
     """
-    normalized_error = normalize_for_signature(failure.error_message)
-    normalized_trace = normalize_for_signature(failure.stack_trace)
-    signature_text = f"{normalized_error}|{normalized_trace}"
-    return hashlib.sha256(signature_text.encode()).hexdigest()
+    return compute_signature(failure.error_message, failure.stack_trace)
 
 
 def extract_json_dict(raw_text: str) -> dict[str, Any] | None:

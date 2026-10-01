@@ -205,6 +205,7 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
+from rootcoz.signature_backfill import backfill_signatures
 from rootcoz.sources import (
     CI_SOURCE_REGISTRY,
     CISource,
@@ -9380,6 +9381,25 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
     """
     _require_admin(request)
     return strip_sensitive_from_response({"components": await get_component_versions()})
+
+
+@app.post("/api/admin/backfill-signatures", operation_id="adminBackfillSignatures")
+async def admin_backfill_signatures(
+    request: Request, dry_run: bool = True
+) -> dict[str, Any]:
+    """Recompute stored failure signatures with the current normalization rules.
+
+    Admin only. Signatures are stored rather than derived at read time, so
+    changing ``normalize_for_signature`` changes the hash new analyses produce
+    while stored rows keep their old hashes -- auto-review and history matching
+    then stop matching across the boundary. Run this **after** deploying the
+    code whose rules you are adopting.
+
+    ``ai_token_usage.error_signature`` is intentionally left untouched: it is
+    analytics grouping only and does not affect correctness.
+    """
+    _require_admin(request)
+    return await backfill_signatures(dry_run=dry_run)
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")

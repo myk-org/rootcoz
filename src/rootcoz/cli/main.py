@@ -636,6 +636,56 @@ def component_versions_cmd(json_output: bool = _JSON_OPTION) -> None:
         typer.echo(f"  {name}: {version if version else 'not installed'}")
 
 
+@admin_app.command("backfill-signatures")
+def backfill_signatures_cmd(
+    apply: bool = typer.Option(
+        False, "--apply", help="Write changes (default is a dry run)."
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Recompute stored failure signatures with the current normalization rules.
+
+    Admin only. Signatures are stored, not derived at read time, so deploying
+    new normalization rules changes the hash new analyses produce while stored
+    rows keep their old hashes -- auto-review and history matching then stop
+    matching across the boundary.
+
+    Run this AFTER deploying the code whose rules you are adopting.
+    """
+    _set_json(json_output)
+    dry_run = not apply
+    if (
+        apply
+        and not yes
+        and not typer.confirm(
+            "This rewrites stored failure signatures for every job. Continue?",
+            default=False,
+        )
+    ):
+        typer.echo("Aborted.")
+        raise typer.Exit(code=1)
+    try:
+        data = _get_client().admin_backfill_signatures(dry_run=dry_run)
+    except RootCozError as exc:
+        _handle_error(exc)
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+        return
+    verb = "would change" if dry_run else "changed"
+    typer.echo(
+        f"{'Dry run' if dry_run else 'Applied'}: {data['jobs_changed']}/{data['jobs_scanned']} jobs, "
+        f"{data['failures_changed']}/{data['failures_scanned']} failures {verb}."
+    )
+    if not dry_run:
+        typer.echo(
+            f"Updated {data['history_rows_changed']} failure_history rows, "
+            f"{data['comment_rows_changed']} comment rows."
+        )
+    if dry_run:
+        typer.echo("Re-run with --apply to write these changes.")
+
+
 @app.command()
 def version(
     json_output: bool = _JSON_OPTION,

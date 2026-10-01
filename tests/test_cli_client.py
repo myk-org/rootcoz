@@ -1784,6 +1784,24 @@ class TestRootCozClientAdminUsers:
         result = client.admin_component_versions()
         assert result["components"]["pi"] == "1.0.0"
 
+    def test_admin_backfill_signatures_dry_run(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/admin/backfill-signatures"
+            assert request.url.params["dry_run"] == "true"
+            return httpx.Response(200, json={"failures_changed": 3})
+
+        client = _make_client(handler)
+        assert client.admin_backfill_signatures(dry_run=True)["failures_changed"] == 3
+
+    def test_admin_backfill_signatures_apply(self):
+        def handler(request):
+            assert request.url.params["dry_run"] == "false"
+            return httpx.Response(200, json={"failures_changed": 3})
+
+        client = _make_client(handler)
+        assert client.admin_backfill_signatures(dry_run=False)["failures_changed"] == 3
+
     def test_admin_create_user(self):
         def handler(request):
             assert request.method == "POST"
