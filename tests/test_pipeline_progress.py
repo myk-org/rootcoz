@@ -438,3 +438,108 @@ async def test_pipeline_jira_and_saving_stages(
         )
         assert history.await_count == int(not all_failed)
         assert review.await_count == int(not all_failed)
+
+
+@pytest.mark.asyncio
+async def test_fully_failed_analysis_still_persists_test_entries_and_counts(
+    temp_db_path: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression for #306.
+
+    When every failure group fails analysis the pipeline returns early. Before
+    this fix that early return marked the job failed WITHOUT persisting test
+    outcomes or caching their counts, so the job showed zero tests even though
+    the CI source had reported them.
+    """
+    from rootcoz.main import _process_ci_source_analysis
+
+    failures = [FailedTest(test_name="boom.Test", error_message="kaboom")]
+    source_result = CISourceResult(
+        failures=failures,
+        passed_tests=[
+            BaseTestEntry(test_name="ok.Test", duration=0.5, status="passed")
+        ],
+        skipped_tests=[
+            BaseTestEntry(test_name="skip.Test", duration=0.0, status="skipped")
+        ],
+    )
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch(
+            "rootcoz.main.run_orchestrated_analysis",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("orchestrator failed"),
+        ),
+        patch(
+            "rootcoz.main.analyze_failure_group",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("group failed"),
+        ),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._enrich_result_with_jira", new_callable=AsyncMock),
+        patch("rootcoz.main.populate_failure_history", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible",
+            new_callable=AsyncMock,
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=([], []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result("all-failed", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="all-failed",
+            body=UnifiedAnalyzeRequest(type="raw", failures=failures),
+            merged=Settings(),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("all-failed")
+        entries = (await storage.get_test_entries("all-failed", limit=100))["entries"]
+
+    # 1. still marked failed
+    assert row["status"] == "failed"
+    assert "All failure group(s) failed during analysis" in row["result"]["error"]
+
+    # 2. test outcomes actually persisted
+    statuses = {e["test_name"]: e["status"] for e in entries}
+    assert statuses == {
+        "boom.Test": "failed",
+        "ok.Test": "passed",
+        "skip.Test": "skipped",
+    }
+
+    # 3. aggregate counts cached on the stored result
+    result = row["result"]
+    assert result["passed_count"] == 1
+    assert result["skipped_count"] == 1
+    assert result["failed_count"] == 1
