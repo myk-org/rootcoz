@@ -1506,7 +1506,7 @@ async def test_preview_binds_user_for_content_and_resets(
         jira_pat=None,
     )
     body = main.PreviewIssueRequest(test_name="failure")
-    request = SimpleNamespace(state=SimpleNamespace(username="alice"))
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="reviewer"))
     token = ai_client.ai_username.set("prior")
     try:
         result = await getattr(main, endpoint)("job", body, request, settings=settings)

@@ -20,6 +20,7 @@ from collections.abc import (
     Callable,
     Coroutine,
     Iterable,
+    Mapping,
     Sequence,
 )
 from contextlib import asynccontextmanager
@@ -481,6 +482,13 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
 # --- SSE broadcast for navbar badges ---
 _active_count_listeners: set[asyncio.Event] = set()
 _mention_listeners: dict[str, set[asyncio.Event]] = {}
+_pending_count_listeners: set[asyncio.Event] = set()
+# Seconds an SSE stream waits before emitting a keepalive.
+_SSE_KEEPALIVE_SECONDS = 30
+# Seconds before a failed pending-count lookup is role-checked again.  The
+# navbar streams wait for whichever comes first: this retry or the keepalive,
+# so unrelated events cannot postpone the retry.
+_PENDING_RETRY_SECONDS = 10
 
 
 async def _periodic_session_cleanup() -> None:
@@ -500,6 +508,83 @@ def notify_active_count_changed() -> None:
     """Signal all SSE listeners that the active analysis count has changed."""
     for event in _active_count_listeners:
         event.set()
+
+
+def notify_pending_count_changed() -> None:
+    """Signal all navbar SSE listeners that the pending user count has changed."""
+    for event in _pending_count_listeners:
+        event.set()
+
+
+async def _pending_user_count() -> int | None:
+    """Pending approval count for navbar SSE; ``None`` when storage cannot answer."""
+    try:
+        return len(await storage.list_pending_users())
+    except aiosqlite.Error, OSError, TypeError, ValueError:
+        logger.debug("Failed to fetch pending user count for navbar SSE", exc_info=True)
+        return None
+
+
+class _PendingFeed:
+    """Per-connection pending-count state for a navbar SSE stream.
+
+    Owns the admin re-check, the recount, the dedup bookkeeping and the retry
+    deadline so the navbar and multiplexed streams share one implementation.
+    """
+
+    def __init__(self, event: asyncio.Event | None, username: str, name: str):
+        self.event = event
+        self.username = username
+        self.name = name
+        # ``None`` = no count delivered to this stream yet.
+        self.last: int | None = None
+        # ``None`` = nothing to retry; otherwise the monotonic retry deadline.
+        self.retry_at: float | None = None
+
+    async def step(self) -> str | None:
+        """Re-verify the admin role and recount; return the chunk to emit."""
+        if self.event is None:
+            return None
+        try:
+            still_admin = await _ai_admin_role_current(self.username)
+        except aiosqlite.Error, OSError, TypeError, ValueError:
+            # Unverifiable is not revoked: send nothing, but stay registered and
+            # retry, so a transient database error does not freeze the badge.
+            logger.debug("Failed to re-check admin role for navbar SSE", exc_info=True)
+            self._defer()
+            return None
+        if not still_admin:
+            # Confirmed revocation: unregister for good and clear the badge.
+            _pending_count_listeners.discard(self.event)
+            self.event = None
+            self.last = None
+            self.retry_at = None
+            return f"event: {self.name}\ndata: 0\n\n"
+        count = await _pending_user_count()
+        if count is None:
+            # Storage failure: keep the last good count on the badge and retry
+            # instead of waiting for the next pending-user mutation.
+            self._defer()
+            return None
+        self.retry_at = None
+        if count != self.last:
+            self.last = count
+            return f"event: {self.name}\ndata: {count}\n\n"
+        return None
+
+    def _defer(self) -> None:
+        """Schedule a role-checked retry; nothing is sent to the stream."""
+        self.retry_at = _time.monotonic() + _PENDING_RETRY_SECONDS
+
+    def retry_due(self) -> bool:
+        """True when a scheduled retry has come due."""
+        return self.retry_at is not None and _time.monotonic() >= self.retry_at
+
+    def wait_timeout(self) -> float:
+        """Seconds to wait: the earliest of the keepalive and the retry."""
+        if self.retry_at is None:
+            return _SSE_KEEPALIVE_SECONDS
+        return min(_SSE_KEEPALIVE_SECONDS, max(0.0, self.retry_at - _time.monotonic()))
 
 
 def notify_mentions_changed(username: str) -> None:
@@ -605,7 +690,7 @@ def _make_sse_stream(
                     wait_task = asyncio.create_task(my_event.wait())
                     done, pending = await asyncio.wait(
                         [wait_task],
-                        timeout=30,
+                        timeout=_SSE_KEEPALIVE_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -882,14 +967,18 @@ def _attach_result_links(
 
 
 async def _attach_origin_job_info(result: dict[str, Any]) -> None:
-    """Attach origin job reference when the result is a re-analysis.
+    """Attach re-analysis links (both directions) to the top-level response.
 
-    If ``request_params.reanalyzed_from_job_id`` exists, adds
-    ``reanalyzed_from_job_id`` and ``origin_job_name`` to the top-level
-    response.  Prefers the denormalized ``reanalyzed_from_job_name``
-    stored at creation time; falls back to a DB lookup for legacy data.
+    ``reanalyzed_to_job_ids`` lists the re-analyses of this job (forward
+    links, appended in enqueue order); ``reanalyzed_from_job_id`` and
+    ``origin_job_name`` describe this job's origin.  Prefers the
+    denormalized ``reanalyzed_from_job_name`` stored at creation time;
+    falls back to a DB lookup for legacy data.
     """
     params = (result.get("result") or {}).get("request_params", {})
+    forward_links = params.get("reanalyzed_to_job_ids") or []
+    if isinstance(forward_links, list) and forward_links:
+        result["reanalyzed_to_job_ids"] = forward_links
     origin_id = params.get("reanalyzed_from_job_id", "")
     if not origin_id:
         return
@@ -3173,6 +3262,86 @@ def _stamp_reanalysis_metadata(
             request_params["reanalyzed_from_job_name"] = reanalyzed_from_job_name
 
 
+def _append_reanalysis_forward_link(
+    result_data: dict[str, Any], new_job_id: str
+) -> None:
+    """Record *new_job_id* in the original job's ``reanalyzed_to_job_ids``."""
+    params = result_data.get("request_params")
+    if not new_job_id or not isinstance(params, dict):
+        return
+    links = params.get("reanalyzed_to_job_ids") or []
+    if not isinstance(links, list):
+        links = []
+    if new_job_id not in links:
+        links.append(new_job_id)
+    params["reanalyzed_to_job_ids"] = links
+
+
+def _remove_reanalysis_forward_link(result_data: dict[str, Any], job_id: str) -> None:
+    """Drop *job_id* from the original job's ``reanalyzed_to_job_ids``."""
+    params = result_data.get("request_params")
+    if not isinstance(params, dict):
+        return
+    links = params.get("reanalyzed_to_job_ids")
+    if isinstance(links, list) and job_id in links:
+        params["reanalyzed_to_job_ids"] = [j for j in links if j != job_id]
+
+
+def _make_unlinker(job_id: str) -> Callable[[dict[str, Any]], None]:
+    """Return a ``patch_result_json`` callback unlinking *job_id*.
+
+    A factory rather than an inline lambda: the value is bound instead of the
+    loop variable (ruff B023) and the callback type is inferable by mypy.
+    """
+
+    def _unlink(data: dict[str, Any]) -> None:
+        _remove_reanalysis_forward_link(data, job_id)
+
+    return _unlink
+
+
+async def _reanalysis_origins(job_ids: Iterable[str]) -> dict[str, str]:
+    """Map each re-analysis job id to the origin job it points back to.
+
+    Read before the rows are deleted.  A failed lookup is logged, never
+    raised — the deletion itself must still succeed.
+    """
+    origins: dict[str, str] = {}
+    for job_id in job_ids:
+        origin_id = ""
+        try:
+            stored = await storage.get_result(job_id)
+            params = ((stored or {}).get("result") or {}).get("request_params") or {}
+            origin_id = str(params.get("reanalyzed_from_job_id") or "")
+        except Exception:
+            logger.warning(
+                f"Failed to look up the origin of deleted job {job_id}",
+                exc_info=True,
+            )
+        if origin_id:
+            origins[job_id] = origin_id
+    return origins
+
+
+async def _unlink_reanalysis_origins(origins: Mapping[str, str]) -> None:
+    """Remove the deleted job ids in *origins* from their origins' links.
+
+    Called *after* the rows are deleted so a link committed while the deletion
+    was in flight is unlinked too, and a link created afterwards is skipped by
+    the job-existence check on the enqueue patch.  A failed patch is logged,
+    never raised — the deletion itself must still succeed.
+    """
+    for job_id, origin_id in origins.items():
+        try:
+            await patch_result_json(origin_id, _make_unlinker(job_id))
+            notify_job_status_changed(origin_id)
+        except Exception:
+            logger.warning(
+                f"Failed to remove deleted re-analysis {job_id} from origin {origin_id}",
+                exc_info=True,
+            )
+
+
 def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     """Return *tags* with *username* included (lowercased, deduplicated)."""
     result = list(tags) if tags else []
@@ -3421,6 +3590,13 @@ async def _enqueue_ci_source_analysis(
                 continue
             merged_result[key] = value
         initial_result = merged_result
+        # request_params was rebuilt above, so carry the recorded re-analysis
+        # links of the job analyzed in place over to the new params.
+        prior_links = (prior.get("request_params") or {}).get("reanalyzed_to_job_ids")
+        if isinstance(prior_links, list) and prior_links:
+            initial_result["request_params"]["reanalyzed_to_job_ids"] = list(
+                prior_links
+            )
     await save_result(job_id, initial_build_url, initial_status, initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -3446,6 +3622,26 @@ async def _enqueue_ci_source_analysis(
         )
     )
     _register_job_task(job_id, task)
+
+    if reanalyzed_from_job_id:
+        # Point the original job at this re-analysis (accumulating list) and
+        # wake its open report.  The patch is conditional on this job still
+        # existing, so a concurrent deletion can never be left with a dead link.
+        # The job is already running, so a failed patch is logged rather than
+        # raised — it must not orphan the new job.
+        try:
+            await patch_result_json(
+                reanalyzed_from_job_id,
+                lambda data: _append_reanalysis_forward_link(data, job_id),
+                require_job_id=job_id,
+            )
+            notify_job_status_changed(reanalyzed_from_job_id)
+        except Exception:
+            logger.warning(
+                f"Failed to record re-analysis {job_id} on origin "
+                f"{reanalyzed_from_job_id}",
+                exc_info=True,
+            )
 
     response: dict[str, Any] = {
         "status": "queued",
@@ -6123,6 +6319,7 @@ async def set_reviewed(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Toggle the reviewed state for a test failure."""
+    _require_reviewer(request)
     _check_allow_list(request)
     _require_reviewer(request)
     logger.debug(
@@ -6157,7 +6354,12 @@ async def enrich_comments(
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
-    """Fetch live statuses for GitHub PRs and Jira tickets found in comments."""
+    """Fetch live statuses for GitHub PRs and Jira tickets found in comments.
+
+    Read-only: no storage writes, no external mutations. Any authenticated user
+    may call it, since the statuses are rendered beside the comment links a
+    viewer can already read.
+    """
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/enrich-comments")
 
@@ -6494,6 +6696,7 @@ async def preview_github_issue(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Generate preview content for a GitHub issue from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(
         f"POST /results/{job_id}/preview-github-issue: test_name={body.test_name}"
@@ -6574,6 +6777,7 @@ async def preview_jira_bug(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Generate preview content for a Jira bug from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/preview-jira-bug: test_name={body.test_name}")
     if not _jira_issue_creation_enabled(settings):
@@ -6909,6 +7113,7 @@ async def create_github_issue_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a GitHub issue from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(
         f"POST /results/{job_id}/create-github-issue: test_name={body.test_name}"
@@ -7002,6 +7207,7 @@ async def create_jira_bug_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a Jira bug from a failure analysis."""
+    _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
 
@@ -7899,6 +8105,7 @@ async def update_tags(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
+    _require_reviewer(request)
     _check_allow_list(request)
     body = await _read_json_object(request)
     raw_tags = body.get("tags")
@@ -8098,7 +8305,13 @@ async def bulk_delete_jobs_endpoint(
         job_ids = [jid for jid in job_ids if submitters.get(jid) == username]
         unauthorized_ids = [jid for jid in body.job_ids if jid not in job_ids]
 
+    origins = await _reanalysis_origins(job_ids)
     result = await storage.delete_jobs_bulk(job_ids)
+    # A job whose deletion failed keeps its row, so its origin keeps the link.
+    deleted_ids = set(result["deleted"])
+    await _unlink_reanalysis_origins(
+        {jid: origin_id for jid, origin_id in origins.items() if jid in deleted_ids}
+    )
     await _cleanup_revoked_ai_sessions()
     result["unauthorized"] = unauthorized_ids
 
@@ -8141,7 +8354,9 @@ async def delete_job_endpoint(
             detail="You can only delete jobs you submitted",
         )
 
+    origins = await _reanalysis_origins([job_id])
     await storage.delete_job(job_id)
+    await _unlink_reanalysis_origins(origins)
     await _cleanup_revoked_ai_sessions()
     await _cleanup_deleted_job_chat_workspaces(job_id)
 
@@ -8252,19 +8467,25 @@ async def get_active_analysis_count() -> dict[str, Any]:
 
 @app.get("/api/navbar/stream", operation_id="streamNavbarCounts")
 async def stream_navbar_counts(request: Request) -> StreamingResponse:
-    """SSE stream that pushes active analysis count and unread mention count."""
+    """SSE stream that pushes active analysis count, unread mention count and
+    (admins only) the pending user approval count."""
     username = request.state.username
+    is_admin = getattr(request.state, "is_admin", False)
     _check_allow_list(request)
 
     async def event_generator() -> AsyncIterator[str]:
         # Per-connection events
         active_event = asyncio.Event()
         mention_event = asyncio.Event() if username else None
+        pending_event = asyncio.Event() if is_admin else None
 
         # Register
         _active_count_listeners.add(active_event)
         if username and mention_event is not None:
             _mention_listeners.setdefault(username, set()).add(mention_event)
+        if pending_event is not None:
+            _pending_count_listeners.add(pending_event)
+        pending_feed = _PendingFeed(pending_event, username, "pending-count")
 
         try:
             # Send both counts immediately on connect
@@ -8286,17 +8507,22 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     last_unread = 0
                     yield "event: unread-count\ndata: 0\n\n"
 
+            if chunk := await pending_feed.step():
+                yield chunk
+
             active_wait_tasks: list[asyncio.Task[Any]] = []
             while True:
                 # Wait for either event or timeout
                 active_wait_tasks = [asyncio.create_task(active_event.wait())]
                 if mention_event is not None:
                     active_wait_tasks.append(asyncio.create_task(mention_event.wait()))
+                if pending_event is not None:
+                    active_wait_tasks.append(asyncio.create_task(pending_event.wait()))
 
                 try:
                     done, pending = await asyncio.wait(
                         active_wait_tasks,
-                        timeout=30,
+                        timeout=pending_feed.wait_timeout(),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -8308,7 +8534,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     active_wait_tasks = []
                     break
 
-                if not done:
+                if not done and not pending_feed.retry_due():
                     yield ": keepalive\n\n"
                     continue
 
@@ -8339,6 +8565,13 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                         logger.debug(
                             "Failed to fetch unread count for SSE", exc_info=True
                         )
+
+                if pending_event is not None and (
+                    pending_event.is_set() or pending_feed.retry_due()
+                ):
+                    pending_event.clear()
+                    if chunk := await pending_feed.step():
+                        yield chunk
         finally:
             # Cancel any pending wait tasks on disconnect
             for task in active_wait_tasks:
@@ -8351,6 +8584,8 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     listeners.discard(mention_event)
                     if not listeners:
                         _mention_listeners.pop(username, None)
+            if pending_event is not None:
+                _pending_count_listeners.discard(pending_event)
 
     return StreamingResponse(
         event_generator(),
@@ -8399,7 +8634,7 @@ async def stream_comments(job_id: str, request: Request) -> StreamingResponse:
 @app.get("/api/admin/token-usage/stream", operation_id="streamTokenUsage")
 async def stream_token_usage(request: Request) -> StreamingResponse:
     """SSE stream that notifies when token usage data changes."""
-    _check_allow_list(request)
+    _require_admin(request)
     return _make_sse_stream(request, _token_usage_listeners, "usage-changed")
 
 
@@ -8416,7 +8651,8 @@ async def stream_multiplexed(
 
     Supported topics:
 
-    - ``navbar`` — active analysis count + unread mention count
+    - ``navbar`` — active analysis count + unread mention count + pending
+      user approval count (pending count is admin only)
     - ``dashboard`` — job list changes
     - ``results:{job_id}`` — per-job status changes
     - ``comments:{job_id}`` — per-job comment changes
@@ -8518,6 +8754,7 @@ async def stream_multiplexed(
         # Navbar events (special handling)
         active_event: asyncio.Event | None = None
         mention_event: asyncio.Event | None = None
+        pending_event: asyncio.Event | None = None
         last_active = -1
         last_unread = -1
 
@@ -8527,6 +8764,10 @@ async def stream_multiplexed(
             if username:
                 mention_event = asyncio.Event()
                 _mention_listeners.setdefault(username, set()).add(mention_event)
+            if is_admin:
+                pending_event = asyncio.Event()
+                _pending_count_listeners.add(pending_event)
+        pending_feed = _PendingFeed(pending_event, username, "navbar:pending-count")
 
         wait_tasks: list[asyncio.Task[Any]] = []
 
@@ -8548,6 +8789,8 @@ async def stream_multiplexed(
                     except aiosqlite.Error, OSError, TypeError, ValueError:
                         last_unread = 0
                         yield "event: navbar:unread-count\ndata: 0\n\n"
+                if chunk := await pending_feed.step():
+                    yield chunk
 
             while True:
                 # Build wait list from all registered events
@@ -8559,13 +8802,15 @@ async def stream_multiplexed(
                     all_events.append(("navbar:active", active_event))
                 if mention_event is not None:
                     all_events.append(("navbar:mention", mention_event))
+                if pending_event is not None:
+                    all_events.append(("navbar:pending", pending_event))
 
                 wait_tasks = [asyncio.create_task(ev.wait()) for _, ev in all_events]
 
                 try:
                     done, pending = await asyncio.wait(
                         wait_tasks,
-                        timeout=30,
+                        timeout=pending_feed.wait_timeout(),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -8577,16 +8822,17 @@ async def stream_multiplexed(
                     wait_tasks = []
                     break
 
-                if not done:
+                if not done and not pending_feed.retry_due():
                     yield ": keepalive\n\n"
                     continue
 
                 if await request.is_disconnected():
                     break
 
-                # Emit events for all fired topics
+                # Emit events for all fired topics, plus a due pending retry
+                retry = pending_feed.retry_due()
                 for prefix, ev in all_events:
-                    if not ev.is_set():
+                    if not ev.is_set() and not (retry and prefix == "navbar:pending"):
                         continue
                     ev.clear()
 
@@ -8612,6 +8858,9 @@ async def stream_multiplexed(
                                 "Failed to fetch unread count for multiplexed SSE",
                                 exc_info=True,
                             )
+                    elif prefix == "navbar:pending":
+                        if chunk := await pending_feed.step():
+                            yield chunk
                     else:
                         # Simple notification topics — emit event with topic prefix
                         event_map = {
@@ -8656,6 +8905,8 @@ async def stream_multiplexed(
                     listeners.discard(mention_event)
                     if not listeners:
                         _mention_listeners.pop(username, None)
+            if pending_event is not None:
+                _pending_count_listeners.discard(pending_event)
 
     return StreamingResponse(
         event_generator(),
@@ -9842,6 +10093,9 @@ async def register_user(request: Request) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if user_status == "pending":
+        notify_pending_count_changed()
+
     # Create a session for the user with the default role
     default_role = settings.default_user_role
     session_token = await storage.create_session(
@@ -10149,6 +10403,7 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     Only fields present in the JSON body are updated. Omitted fields are left unchanged.
     Pass empty string to clear a field.
     """
+    _require_reviewer(request)
     username = request.state.username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
@@ -10490,6 +10745,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if not deleted:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
+    notify_pending_count_changed()
     await _cleanup_revoked_ai_sessions()
     logger.info(f"[AUDIT] Admin '{request.state.username}' deleted user '{username}'")
     return {"deleted": username}
@@ -10519,6 +10775,9 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
         detail = str(exc)
         status = 404 if "not found" in detail.lower() else 400
         raise HTTPException(status_code=status, detail=detail) from exc
+
+    # Promoting a pending user removes them from the pending list.
+    notify_pending_count_changed()
 
     logger.info(
         f"[AUDIT] Admin '{request.state.username}' changed role of '{username}' to '{new_role}'"
@@ -10623,6 +10882,7 @@ async def approve_user(
             detail=f"User '{username}' is not pending (current status: {status})",
         )
     effective_grant = await storage.can_user_use_server_providers(username)
+    notify_pending_count_changed()
     logger.info(
         "[AUDIT] Admin '%s' approved user '%s' (can_use_server_providers=%s)",
         request.state.username,
@@ -10650,6 +10910,7 @@ async def reject_user(username: str, request: Request) -> dict[str, Any]:
             detail=f"User '{username}' is not pending (current status: {status})",
         )
     await storage.set_user_status(username, "rejected")
+    notify_pending_count_changed()
     logger.info(f"[AUDIT] Admin '{request.state.username}' rejected user '{username}'")
     return {
         "username": username,

@@ -451,20 +451,16 @@ describe('bulk failure selection', () => {
     expect(screen.queryByRole('button', { name: 'Mark reviewed' })).not.toBeInTheDocument()
   })
 
-  it('makes every review control read-only for viewers', async () => {
+  it('hides every review control from viewers', async () => {
     role.current = 'viewer'
     const user = renderHarness()
 
-    // The state stays readable, but nothing may start a review edit (403).
-    for (const name of ['Review', 'Review 0/2']) {
-      expect(screen.getAllByRole('button', { name }).length).toBeGreaterThan(0)
-      for (const button of screen.getAllByRole('button', { name })) expect(button).toBeDisabled()
-    }
+    // Same read-only rule as the selection checkbox and the bulk bar above: no
+    // control is rendered at all, so nothing can start the 403-guarded review edit.
     await user.click(screen.getByRole('button', { name: /test-c1/ }))
-    expect(screen.getByRole('button', { name: 'Review All (0/2)' })).toBeDisabled()
-    for (const button of screen.getAllByRole('button', { name: 'Review' })) expect(button).toBeDisabled()
-
-    await user.click(screen.getByRole('button', { name: 'Review 0/2' }))
+    for (const name of ['Review', 'Review 0/2', 'Review All (0/2)']) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
+    }
     expect(put).not.toHaveBeenCalled()
   })
 

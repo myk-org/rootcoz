@@ -30,7 +30,7 @@ import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
-import { OriginJobBanner } from '@/components/shared/OriginJobBanner'
+import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
 import { reviewKey } from './report/ReportContext'
 import { useAuth } from '@/lib/auth'
@@ -164,7 +164,7 @@ function ReportContent() {
           return
         }
 
-        dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved, reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name } })
+        dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved, reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name, reanalyzedToJobIds: resultRes.reanalyzed_to_job_ids } })
 
         // Tracked-in data (keyed by reviewKey → {tracked_in_url, tracked_in_type})
         dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in ?? {} })
@@ -251,7 +251,7 @@ function ReportContent() {
       try {
         const resultRes = await api.get<ResultResponse>(`/results/${jobId}`)
         if (resultRes.result) {
-          dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved, reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name } })
+          dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved, reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name, reanalyzedToJobIds: resultRes.reanalyzed_to_job_ids } })
           dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in ?? {} })
         }
       } catch {
@@ -514,6 +514,11 @@ function ReportContent() {
       {/* ---- Origin job reference for re-analyses ---- */}
       {state.reanalyzedFromJobId && (
         <OriginJobBanner originJobId={state.reanalyzedFromJobId} originJobName={originJobLabel(state.originJobName, state.reanalyzedFromJobId)} />
+      )}
+
+      {/* ---- Forward link to this job's latest re-analysis ---- */}
+      {state.reanalyzedToJobId && (
+        <ReanalyzedForwardBanner reanalysisJobId={state.reanalyzedToJobId} />
       )}
 
       {/* ---- Metadata detail row ---- */}
