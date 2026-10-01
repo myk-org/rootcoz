@@ -1959,7 +1959,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
    | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
 
-   Everything else, including `enable_auto_review` and `auto_push_exporters`, applies to the running server as soon as you save.
+   Everything else applies to the running server as soon as you save. The exceptions are `enable_auto_review` and `auto_push_exporters`: both are server-only settings, so saving them through this page is rejected with `400 Server-only settings (env var only)` and they must be set in the deployment environment instead.
 
    > **Warning:** Saving an empty value is a reset, not a blank value. The database override is deleted and resolution falls back to the environment variable, then the default.
 

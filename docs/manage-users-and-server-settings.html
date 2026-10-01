@@ -616,7 +616,7 @@
 </tr>
 </tbody>
 </table></div>
-<p>Everything else, including <code>enable_auto_review</code> and <code>auto_push_exporters</code>, applies to the running server as soon as you save.</p>
+<p>Everything else applies to the running server as soon as you save. The exceptions are <code>enable_auto_review</code> and <code>auto_push_exporters</code>: both are server-only settings, so saving them through this page is rejected with <code>400 Server-only settings (env var only)</code> and they must be set in the deployment environment instead.</p>
 <blockquote>
 <p><strong>Warning:</strong> Saving an empty value is a reset, not a blank value. The database override is deleted and resolution falls back to the environment variable, then the default.</p>
 </blockquote>
