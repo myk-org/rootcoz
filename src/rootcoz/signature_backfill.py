@@ -28,6 +28,7 @@ from rootcoz.storage import (
     SignatureUpdate,
     claim_signature_migration,
     complete_signature_migration,
+    failure_error_text,
     get_signature_versions,
     iter_result_json_batches,
     mark_migration_applied,
@@ -67,6 +68,11 @@ class BackfillStats:
         self.unrecoverable_count = 0
         self.unrecoverable_failures: list[dict[str, Any]] = []
         self.migration_preempted = False
+        # Jobs the scan had to leave alone because their analysis was still
+        # running. Their signatures stay stale until that analysis saves -- or,
+        # if it fails and restores the job, until a later run reaches them -- so
+        # a run that leaves any behind has not finished the version.
+        self.deferred_jobs: list[str] = []
 
     def record_unrecoverable(self, record: dict[str, Any]) -> None:
         """Count one unrecoverable failure, keeping a bounded sample of them."""
@@ -90,6 +96,8 @@ class BackfillStats:
             "unrecoverable_failures_count": self.unrecoverable_count,
             "unrecoverable_failures": self.unrecoverable_failures,
             "migration_preempted": self.migration_preempted,
+            "jobs_deferred": len(self.deferred_jobs),
+            "deferred_jobs": self.deferred_jobs,
         }
 
 
@@ -174,7 +182,11 @@ def _rehash_stored_failures(
         job_id: Reported alongside unrecoverable records.
 
     Returns:
-        Number of failures whose signature changed.
+        Number of failures whose signature changed. The caller decides whether
+        that counts as a rewrite: in apply mode the pre-check result can still
+        be thrown away by the write (a job that went in flight, or that another
+        writer already fixed), so only the counts taken inside the committed
+        transaction are reported as changed.
     """
     changed = 0
     for failure, child_name, child_build in iter_stored_failures(result_data):
@@ -205,13 +217,11 @@ def _rehash_stored_failures(
                     test_name=failure.get("test_name", ""),
                     child_job_name=child_name,
                     child_build_number=child_build,
-                    error_message=inputs[0],
+                    error_message=failure_error_text(failure),
                     previous_signature=previous_signature,
                     new_signature=new_signature,
                 )
             )
-    if stats is not None:
-        stats.failures_changed += changed
     return changed
 
 
@@ -253,6 +263,11 @@ async def ensure_signatures_current() -> dict[str, Any] | None:
     would make a rollback to A skip the rehash B's rows need. The claim is
     re-checked before every batch so an older process stops writing once a newer
     deployment takes the migration over.
+
+    Jobs whose analysis was still running are deferred rather than counted as
+    done, and the version is left unapplied when any are -- otherwise a version
+    could be marked applied while stale rows it never touched sit behind a
+    running job, and no later startup would revisit them.
     """
     version = normalization_rules_version()
     if (await get_signature_versions())[0] == version:
@@ -272,6 +287,16 @@ async def ensure_signatures_current() -> dict[str, Any] | None:
             version,
         )
         return None
+    if stats["jobs_deferred"]:
+        # Leave the version unapplied so the next startup runs the backfill
+        # again and picks up the jobs that were in flight here.
+        logger.warning(
+            "Signature backfill for %s left %s job(s) to a running analysis; "
+            "not recording the version as applied, they are retried next start",
+            version,
+            stats["jobs_deferred"],
+        )
+        return stats
     await mark_migration_applied(MIGRATION_KEY_PREFIX + version)
     if not await complete_signature_migration(version):
         logger.warning(
@@ -337,7 +362,11 @@ async def backfill_signatures(
                 continue
 
             if dry_run:
-                if _rehash_stored_failures(result_data, stats=stats, job_id=job_id):
+                changed = _rehash_stored_failures(
+                    result_data, stats=stats, job_id=job_id
+                )
+                stats.failures_changed += changed
+                if changed:
                     stats.jobs_changed += 1
                 continue
 
@@ -364,6 +393,11 @@ async def backfill_signatures(
             )
             if outcome.written:
                 stats.jobs_changed += 1
+                # Counted from the committed transaction, not from the probe
+                # above: this is what the result blob actually had rewritten.
+                stats.failures_changed += len(updates)
+            elif outcome.in_flight:
+                stats.deferred_jobs.append(job_id)
             stats.history_rows_changed += outcome.history_rows
             stats.comment_rows_changed += outcome.comment_rows
         # Yield between batches so live requests interleave with the scan
@@ -374,11 +408,12 @@ async def backfill_signatures(
     result["dry_run"] = dry_run
     logger.info(
         "Signature backfill (dry_run=%s): %s jobs scanned, %s failures changed, "
-        "%s history rows, %s comment rows",
+        "%s history rows, %s comment rows, %s jobs deferred (analysis running)",
         dry_run,
         stats.jobs_scanned,
         stats.failures_changed,
         stats.history_rows_changed,
         stats.comment_rows_changed,
+        len(stats.deferred_jobs),
     )
     return result

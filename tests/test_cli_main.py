@@ -4174,6 +4174,7 @@ class TestAdminBackfillSignaturesCommand:
             "failures_changed": 7,
             "unrecoverable_failures_count": 0,
             "unrecoverable_failures": [],
+            "jobs_deferred": 0,
         }
         result = runner.invoke(app, ["admin", "backfill-signatures"])
         assert result.exit_code == 0
@@ -4181,6 +4182,7 @@ class TestAdminBackfillSignaturesCommand:
         assert "7/50" in result.output
         assert "Re-run with --apply" in result.output
         assert "kept their stored signature" not in result.output
+        assert "running analysis" not in result.output
 
     def test_reports_unrecoverable_failures(self, mock_client):
         mock_client.admin_backfill_signatures.return_value = {
@@ -4191,6 +4193,7 @@ class TestAdminBackfillSignaturesCommand:
             "failures_changed": 7,
             "unrecoverable_failures_count": 412,
             "unrecoverable_failures": [{"job_id": "j"}] * 100,
+            "jobs_deferred": 0,
         }
         result = runner.invoke(app, ["admin", "backfill-signatures"])
         assert result.exit_code == 0
@@ -4208,6 +4211,7 @@ class TestAdminBackfillSignaturesCommand:
             "comment_rows_changed": 3,
             "unrecoverable_failures_count": 0,
             "unrecoverable_failures": [],
+            "jobs_deferred": 2,
         }
         result = runner.invoke(
             app, ["admin", "backfill-signatures", "--apply", "--yes"]
@@ -4216,6 +4220,7 @@ class TestAdminBackfillSignaturesCommand:
         mock_client.admin_backfill_signatures.assert_called_once_with(dry_run=False)
         assert "7 failure_history rows" in result.output
         assert "3 comment rows" in result.output
+        assert "2 job(s) were left to a running analysis" in result.output
 
     def test_aborts_on_declined_confirmation(self, mock_client):
         result = runner.invoke(
