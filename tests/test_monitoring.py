@@ -22,6 +22,7 @@ from rootcoz.monitoring import (
     send_slack_alert,
     validate_startup_config,
 )
+from tests.conftest import host_env
 
 # ---------------------------------------------------------------------------
 # Rolling counter
@@ -212,9 +213,7 @@ class TestHealthChecks:
     @staticmethod
     def _env_without_ai():
         """Return a patch.dict that removes AI_PROVIDER and AI_MODEL."""
-        env = {
-            k: v for k, v in os.environ.items() if k not in ("AI_PROVIDER", "AI_MODEL")
-        }
+        env = host_env()
         return patch.dict(os.environ, env, clear=True)
 
     async def test_check_ai_provider_configured(self):
@@ -377,13 +376,11 @@ class TestStartupConfigValidation:
         from rootcoz.config import get_settings
 
         with patch.dict(os.environ, {}, clear=True):
-            env = {k: v for k, v in os.environ.items() if k != "AI_PROVIDER"}
-            with patch.dict(os.environ, env, clear=True):
+            get_settings.cache_clear()
+            try:
+                result = validate_startup_config()
+            finally:
                 get_settings.cache_clear()
-                try:
-                    result = validate_startup_config()
-                finally:
-                    get_settings.cache_clear()
         assert any("AI_PROVIDER" in w for w in result.warnings)
 
     def test_missing_encryption_key(self):
@@ -480,9 +477,7 @@ class TestSlackAlert:
 
     async def test_no_url_returns_false(self):
         with patch.dict(os.environ, {}, clear=True):
-            env = {k: v for k, v in os.environ.items() if k != "SLACK_WEBHOOK_URL"}
-            with patch.dict(os.environ, env, clear=True):
-                result = await send_slack_alert("test")
+            result = await send_slack_alert("test")
         assert result is False
 
     async def test_success(self):

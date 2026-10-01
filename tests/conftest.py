@@ -39,6 +39,38 @@ def _register_usage_recorder() -> None:
 
 CLI_TEST_BASE_URL = "http://localhost:8700"
 
+# The host variables the app-under-test may legitimately see. An allowlist, never
+# "real environment minus a denylist": a denylist leaks every credential the
+# developer happens to export (JIRA_PAT, GEMINI_API_KEY, TESTS_REPO_TOKEN, ...)
+# into TestClient(app), so the app then boots with real keys on a dev machine and
+# behaves differently there than in CI. The denylist also has to be extended every
+# time a credential is added to Settings, and nothing fails when someone forgets.
+#
+# HOME is deliberately absent: with DB_PATH unset, vapid/encryption fall back to
+# ~/.local/share/rootcoz and would read the developer's real key files. TMPDIR
+# covers the home-dir case there (the factories always set DB_PATH anyway).
+HOST_ENV_ALLOWLIST = (
+    "PATH",  # subprocess (git) lookups
+    "TMPDIR",  # tempfile / sqlite spill files
+    "TMP",  # ditto (Windows)
+    "TEMP",  # ditto (Windows)
+    "SYSTEMROOT",  # Windows temp dir resolution
+    "LANG",  # locale-dependent formatting
+    "LC_ALL",  # ditto
+    "TZ",  # timestamp rendering
+)
+
+
+def host_env(**overrides: str) -> dict[str, str]:
+    """Return the allowlisted host environment, with explicit overrides applied.
+
+    Use this (never a copy of ``os.environ``) when handing an environment to the
+    app under test via ``patch.dict(os.environ, ..., clear=True)``.
+    """
+    env = {k: os.environ[k] for k in HOST_ENV_ALLOWLIST if k in os.environ}
+    env.update(overrides)
+    return env
+
 
 def build_test_env(**overrides: str) -> dict[str, str]:
     """Return baseline Jenkins env with per-test overrides applied.
