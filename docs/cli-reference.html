@@ -613,7 +613,7 @@
 </table></div>
 <p>Sparse field paths include <code>result.summary</code>, <code>result.failed_count</code>, <code>result.failures.test_name</code>, <code>result.failures.classification</code>, and <code>result.failures.details</code>. Unknown paths are rejected with HTTP 400, so run <code>rootcoz results fields</code> first.</p>
 <blockquote>
-<p><strong>Note:</strong> Pass <code>--child-job</code> before <code>--child-build</code>; most commands reject a build number without a job name. <code>results set-tracked-in</code> is the exception — it does not enforce the pairing and silently drops <code>child_build_number</code> when <code>--child-job</code> is absent, so always pass both.</p>
+<p><strong>Note:</strong> Pass <code>--child-job</code> before <code>--child-build</code>. The CLI validates the pair and rejects a build number with no job name, because the client drops <code>child_build_number</code> when <code>--child-job</code> is absent — an unpaired <code>--child-build</code> would otherwise be applied unscoped and silently. <code>results set-tracked-in</code> is included in that validation.</p>
 </blockquote>
 <ol>
 <li><strong>Query failure history.</strong> <code>rootcoz history ...</code></li>

@@ -130,7 +130,7 @@ Related lifecycle commands:
 
 Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, and `result.failures.details`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
 
-> **Note:** Pass `--child-job` before `--child-build`; most commands reject a build number without a job name. `results set-tracked-in` is the exception — it does not enforce the pairing and silently drops `child_build_number` when `--child-job` is absent, so always pass both.
+> **Note:** Pass `--child-job` before `--child-build`. The CLI validates the pair and rejects a build number with no job name, because the client drops `child_build_number` when `--child-job` is absent — an unpaired `--child-build` would otherwise be applied unscoped and silently. `results set-tracked-in` is included in that validation.
 
 7. **Query failure history.** `rootcoz history ...`
 

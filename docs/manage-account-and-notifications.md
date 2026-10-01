@@ -136,7 +136,7 @@ The registration key is the only credential that signs you in; the tracker token
   You are signed in as the bootstrap `admin`. That key is managed through the `ADMIN_KEY` setting, not the UI.
 
 - Push notifications show `Push notifications are not configured on server.`  
-  Web Push is off. An admin must set both `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY` and restart the server. Setting only one of the pair is treated as unset.
+  Web Push is off. An admin must configure both `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`, either under `Web Push` in Server Settings or in the environment. Keys are resolved in the order Server Settings, then environment, then an auto-generated key file, so a key saved in Server Settings is the one used for signing. Setting only one of the pair is treated as unset.
 
 - Push notifications show `Notifications blocked.`  
   Your browser denied permission for this site. Re-enable notifications in the browser's site settings, then click `Enable` again.
