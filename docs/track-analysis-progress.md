@@ -73,7 +73,7 @@ This prints just the three fields a status check needs, instead of the full resu
 
 6. **Act on a stuck or unwanted job.**
 
-   `Abort` is available while the job is `waiting`, `pending`, or `running`. It is enabled only for the user who submitted the job and for admins; for anyone else the button is disabled with a tooltip explaining why.
+   `Abort` is available while the job is `waiting`, `pending`, or `running`. Two conditions apply, and the first is easy to miss: the caller must hold **at least the `reviewer` role**, and then it must be either the user who submitted the job or an admin. Being the submitter is not sufficient on its own — if your role is later downgraded from `operator` to `viewer` while your job is still active, the button stays enabled on the status page but the request returns 403. For anyone else the button is disabled with a tooltip explaining why.
 
    If the job finished and you want a fresh answer, use the header button on the report page: `Analyze` for a submitted job that has not been analyzed yet, `Re-Analyze` for an analyzed one. Both open the same dialog for changing AI settings, and both are disabled while the job is still active. Re-analysis is `operator` or `admin` only. See [Reviewing and Classifying Failures](review-and-classify-failures.html) for the review workflow that follows.
 

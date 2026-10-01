@@ -388,7 +388,7 @@
 <ol>
 <li><strong>Act on a stuck or unwanted job.</strong></li>
 </ol>
-<p><code>Abort</code> is available while the job is <code>waiting</code>, <code>pending</code>, or <code>running</code>. It is enabled only for the user who submitted the job and for admins; for anyone else the button is disabled with a tooltip explaining why.</p>
+<p><code>Abort</code> is available while the job is <code>waiting</code>, <code>pending</code>, or <code>running</code>. Two conditions apply, and the first is easy to miss: the caller must hold <strong>at least the <code>reviewer</code> role</strong>, and then it must be either the user who submitted the job or an admin. Being the submitter is not sufficient on its own — if your role is later downgraded from <code>operator</code> to <code>viewer</code> while your job is still active, the button stays enabled on the status page but the request returns 403. For anyone else the button is disabled with a tooltip explaining why.</p>
 <p>If the job finished and you want a fresh answer, use the header button on the report page: <code>Analyze</code> for a submitted job that has not been analyzed yet, <code>Re-Analyze</code> for an analyzed one. Both open the same dialog for changing AI settings, and both are disabled while the job is still active. Re-analysis is <code>operator</code> or <code>admin</code> only. See <a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a> for the review workflow that follows.</p>
 <ol>
 <li><strong>Understand what happens after a server restart.</strong></li>
