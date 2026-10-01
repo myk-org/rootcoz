@@ -8211,7 +8211,11 @@ async def bulk_delete_jobs_endpoint(
 
     origins = await _reanalysis_origins(job_ids)
     result = await storage.delete_jobs_bulk(job_ids)
-    await _unlink_reanalysis_origins(origins)
+    # A job whose deletion failed keeps its row, so its origin keeps the link.
+    deleted_ids = set(result["deleted"])
+    await _unlink_reanalysis_origins(
+        {jid: origin_id for jid, origin_id in origins.items() if jid in deleted_ids}
+    )
     await _cleanup_revoked_ai_sessions()
     result["unauthorized"] = unauthorized_ids
 

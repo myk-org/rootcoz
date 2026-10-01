@@ -5766,6 +5766,33 @@ class TestReAnalyzeEndpoint:
         assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == []
 
     @pytest.mark.asyncio
+    async def test_bulk_delete_keeps_link_for_failed_deletion(
+        self, test_client
+    ) -> None:
+        """A re-analysis whose bulk deletion failed keeps its origin's link."""
+        from rootcoz import storage as storage_module
+
+        await self._create_reanalysis_chain(["re-1", "re-2"])
+        real_delete_rows = storage_module._delete_job_rows
+
+        async def _delete_rows(db: aiosqlite.Connection, job_id: str) -> bool:
+            if job_id == "re-2":
+                raise RuntimeError("database is locked")
+            return await real_delete_rows(db, job_id)
+
+        with patch("rootcoz.storage._delete_job_rows", _delete_rows):
+            response = test_client.request(
+                "DELETE", "/api/results/bulk", json={"job_ids": ["re-1", "re-2"]}
+            )
+
+        assert response.status_code == 200
+        assert response.json()["deleted"] == ["re-1"]
+        # The retained row keeps its forward link on the origin.
+        assert test_client.get("/results/re-2").status_code == 200
+        origin = await storage_module.get_result("origin-delete")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == ["re-2"]
+
+    @pytest.mark.asyncio
     async def test_delete_keeps_forward_link_when_unlink_fails(
         self, test_client
     ) -> None:
