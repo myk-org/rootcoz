@@ -23,9 +23,20 @@ export function isCommentInScope(
   return commentChildJobName === ''
 }
 
+/** Resolve the signature a failure is keyed by.
+ *
+ *  `error_signature` is a frozen legacy anchor; `error_signature_v2` holds
+ *  the current-rules hash. Grouping must key on the resolved value
+ *  (`error_signature_v2 || error_signature`) because siblings inside one group
+ *  can carry DIFFERENT legacy `error_signature` values while sharing the
+ *  group's `error_signature_v2`. The legacy value is never overwritten. */
+export function resolvedSignature(failure: FailureAnalysis): string {
+  return failure.error_signature_v2 || failure.error_signature || ''
+}
+
 /** Compute grouping key — matches Python _grouping_key(). */
 export function groupingKey(failure: FailureAnalysis): string {
-  return failure.error_signature || `unique-${failure.test_name}`
+  return resolvedSignature(failure) || `unique-${failure.test_name}`
 }
 
 /** Group failures by error signature, preserving order.

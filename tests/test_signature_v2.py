@@ -13,10 +13,12 @@ history from before the rules changed.
 """
 
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 import pytest
+from pi_sidecar_client import AIResult
 
 from rootcoz import storage
 from rootcoz.engine.core import (
@@ -24,8 +26,15 @@ from rootcoz.engine.core import (
     compute_signature,
     get_failure_signature,
     get_legacy_signature,
+    run_single_ai_analysis,
 )
 from rootcoz.models import FailedTest
+from rootcoz.peer_analysis import _build_failure_summary
+from rootcoz.token_tracking import (
+    attach_failure_usage,
+    failure_group_usage,
+    record_ai_usage,
+)
 
 # A failure whose text the v2 rules normalize away and the frozen rules do not:
 # two runs of it differ only in per-request HTTP header noise.
@@ -81,14 +90,15 @@ async def _add_history_row(
     anchor: str,
     v2: str | None,
     username: str = "",
+    message: str = "boom",
 ) -> None:
     """Insert a failure_history row, dual-written or legacy-only."""
     async with aiosqlite.connect(db_path) as conn:
         await conn.execute(
             "INSERT INTO failure_history (job_id, job_name, build_number, test_name,"
             " error_message, error_signature, error_signature_v2, classification)"
-            " VALUES (?, 'my-job', 1, ?, 'boom', ?, ?, 'CODE ISSUE')",
-            (job_id, test_name, anchor, v2),
+            " VALUES (?, 'my-job', 1, ?, ?, ?, ?, 'CODE ISSUE')",
+            (job_id, test_name, message, anchor, v2),
         )
         if username:
             await conn.execute(
@@ -500,6 +510,196 @@ class TestAutoReviewAcrossTheRuleChange:
 
 
 # ---------------------------------------------------------------------------
+# An empty signature has no WHERE to interpolate
+# ---------------------------------------------------------------------------
+class TestEmptySignature:
+    """``signature_match`` returns ("", []) on empty input -- by contract.
+
+    Interpolated anyway, the fragment leaves ``WHERE`` with nothing after it.
+    """
+
+    def test_empty_input_yields_no_fragment(self) -> None:
+        assert storage.signature_match([]) == ("", [])
+        assert storage.signature_match(["", None]) == ("", [])
+
+    async def test_search_by_empty_signature_matches_nothing(self, db: Path) -> None:
+        failure = failure_a()
+        await _add_history_row(
+            db,
+            "job-old",
+            failure.test_name,
+            anchor=get_legacy_signature(failure),
+            v2=get_failure_signature(failure),
+        )
+        with patch.object(storage, "DB_PATH", db):
+            result = await storage.search_by_signature("")
+        assert result["total_occurrences"] == 0
+        assert result["unique_tests"] == 0
+        assert result["tests"] == []
+        assert result["comments"] == []
+
+    async def test_search_by_empty_signature_respects_exclude_job(
+        self, db: Path
+    ) -> None:
+        """The guard returns before any query, so the filter is moot -- not a crash."""
+        with patch.object(storage, "DB_PATH", db):
+            result = await storage.search_by_signature("", exclude_job_id="job-old")
+        assert result["total_occurrences"] == 0
+
+    async def test_no_other_call_site_interpolates_an_empty_fragment(
+        self, db: Path
+    ) -> None:
+        """The three call sites the guard does not live in, all covered.
+
+        Guards historical comments, related comments, and the override group --
+        the reviewers' other interpolation points.
+        """
+        failure = failure_a()
+        with patch.object(storage, "DB_PATH", db):
+            await storage.add_comment("job-old", failure.test_name, comment="note")
+            assert await storage.get_historical_comments(error_signatures=[""]) == []
+            assert await storage.get_historical_comments(
+                test_names=[failure.test_name], error_signatures=[""]
+            ) == [
+                c
+                for c in await storage.get_historical_comments(
+                    test_names=[failure.test_name]
+                )
+            ]
+            # A run whose rows carry no signature at all: the related-comments
+            # fragment is empty and the query must fall back to the test name.
+            await storage.populate_failure_history(
+                "job-group",
+                {
+                    "job_name": "my-job",
+                    "build_number": 2,
+                    "failures": [{"test_name": failure.test_name}],
+                },
+            )
+            history = await storage.get_test_history(failure.test_name)
+            assert [c["comment"] for c in history["comments"]] == ["note"]
+            # No signature on the row -> no group -> the single test stands alone.
+            group = await storage.override_classification(
+                job_id="job-group",
+                test_name=failure.test_name,
+                classification="PRODUCT BUG",
+                username="tester",
+            )
+            assert group == [failure.test_name]
+
+
+# ---------------------------------------------------------------------------
+# History written before the v2 rules, seen after the noise moved
+# ---------------------------------------------------------------------------
+class TestLegacyHistoryWhenTheAnchorMoved:
+    """A legacy row has no v2 hash, so the hash union alone misses it.
+
+    A run whose only difference is header/pointer noise gets a different frozen
+    anchor every time, so the anchor a legacy row is filed under is never the
+    one today's run produces. ``signatures_match`` normalizes both messages
+    under the v2 rules as a last branch; it must not widen that into a
+    message-only match.
+    """
+
+    @staticmethod
+    def _history_row(failure: FailedTest) -> dict[str, str]:
+        return legacy_row(failure) | {"error_message": failure.error_message}
+
+    @staticmethod
+    def _current_row(failure: FailedTest) -> dict[str, str]:
+        return dual_written_row(failure) | {"error": failure.error_message}
+
+    def test_legacy_row_matches_a_later_run_of_the_same_failure(self) -> None:
+        earlier, later = failure_a(), failure_b()
+        # The premise: the anchors share nothing, so the union finds no match.
+        assert get_legacy_signature(earlier) != get_legacy_signature(later)
+        assert not (
+            set(storage.signature_hashes(self._history_row(earlier)))
+            & set(storage.signature_hashes(self._current_row(later)))
+        )
+        assert storage.signatures_match(
+            self._history_row(earlier), self._current_row(later)
+        )
+
+    def test_a_similar_but_distinct_defect_does_not_match(self) -> None:
+        """The guard: same shape of message, different defect, no match."""
+        left = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+        )
+        right = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 5 rows in report, got 6",
+        )
+        assert not storage.signatures_match(
+            self._history_row(left), self._current_row(right)
+        )
+
+    def test_a_different_defect_entirely_does_not_match(self) -> None:
+        other = FailedTest(
+            test_name="test_gateway",
+            error_message="NullPointerException at Frame.java:12",
+        )
+        assert not storage.signatures_match(
+            self._history_row(failure_a()), self._current_row(other)
+        )
+
+    def test_a_row_with_no_message_is_never_matched_on_message(self) -> None:
+        """A trace-only failure stores no message; it must not match everything."""
+        trace_only = legacy_row(failure_a())
+        assert not storage.signatures_match(trace_only, {"error_message": ""})
+        assert not storage.signatures_match(trace_only, {"error": "anything"})
+
+    async def test_auto_review_chains_to_a_legacy_row(self, db: Path) -> None:
+        from rootcoz import main as main_mod
+
+        earlier, later = failure_a(), failure_b()
+        await _add_history_row(
+            db,
+            "job-old",
+            earlier.test_name,
+            anchor=get_legacy_signature(earlier),
+            v2=None,
+            username="human-reviewer",
+            message=earlier.error_message,
+        )
+        with patch.object(storage, "DB_PATH", db):
+            reviewed, total = await main_mod._match_and_auto_review_failures(
+                "job-new",
+                "my-job",
+                [self._current_row(later) | {"test_name": later.test_name}],
+            )
+        assert (reviewed, total) == (1, 1)
+
+    async def test_a_similar_defect_is_not_auto_reviewed_from_it(
+        self, db: Path
+    ) -> None:
+        from rootcoz import main as main_mod
+
+        earlier = failure_a()
+        other = FailedTest(
+            test_name=earlier.test_name,
+            error_message="HTTPError 502 Bad Gateway\nX-Request-Id: deadbeefcafe0001",
+        )
+        await _add_history_row(
+            db,
+            "job-old",
+            earlier.test_name,
+            anchor=get_legacy_signature(earlier),
+            v2=None,
+            username="human-reviewer",
+            message=earlier.error_message,
+        )
+        with patch.object(storage, "DB_PATH", db):
+            reviewed, total = await main_mod._match_and_auto_review_failures(
+                "job-new",
+                "my-job",
+                [self._current_row(other) | {"test_name": other.test_name}],
+            )
+        assert (reviewed, total) == (0, 1)
+
+
+# ---------------------------------------------------------------------------
 # Grouping / dedup uses the resolved value
 # ---------------------------------------------------------------------------
 class TestGroupingUsesResolvedValue:
@@ -569,3 +769,199 @@ class TestGroupingUsesResolvedValue:
         ]
         _copy_failure_ids(prior, current)
         assert current[0]["id"] == "old-id"
+
+
+# ---------------------------------------------------------------------------
+# The prompt must name every hash the group is filed under
+# ---------------------------------------------------------------------------
+def v2_group() -> list[FailedTest]:
+    """A v2 group: one shared v2 hash, one frozen anchor per member."""
+    return [failure_a(), failure_b()]
+
+
+def plain_failure() -> FailedTest:
+    """A failure the v2 rules do not separate from the frozen ones."""
+    return FailedTest(
+        test_name="test_plain", error_message="AssertionError: boom", stack_trace="42"
+    )
+
+
+async def _prompt_for(failures: list[FailedTest], tmp_path: Path) -> str:
+    """The prompt run_single_ai_analysis builds, with the AI call stubbed out."""
+    captured: dict[str, str] = {}
+
+    async def fake_call(prompt: str, **kwargs):
+        captured["prompt"] = prompt
+        return AIResult(
+            success=True,
+            text='{"classification": "CODE ISSUE", "affected_tests": ["t"],'
+            ' "details": "d"}',
+        )
+
+    with patch("rootcoz.engine.core.call_ai_once", fake_call):
+        await run_single_ai_analysis(
+            failures=failures,
+            console_context="",
+            repo_path=tmp_path,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="",
+        )
+    return captured["prompt"]
+
+
+class TestGroupHistorySearchCoversEveryMember:
+    """search_by_signature matches ONE hash, so the prompt must name them all."""
+
+    async def test_prompt_names_every_member_anchor_and_the_v2_hash(
+        self, tmp_path: Path
+    ) -> None:
+        group = v2_group()
+        assert get_legacy_signature(group[0]) != get_legacy_signature(group[1])
+        prompt = await _prompt_for(group, tmp_path)
+        for failure in group:
+            assert get_legacy_signature(failure) in prompt
+        assert get_failure_signature(group[0]) in prompt
+
+    async def test_the_failure_details_file_names_every_hash_too(
+        self, tmp_path: Path
+    ) -> None:
+        """The file the AI is told to read first carries the same set."""
+        group = v2_group()
+        await _prompt_for(group, tmp_path)
+        details = next(tmp_path.glob("failure-details-*.txt")).read_text()
+        for failure in group:
+            assert get_legacy_signature(failure) in details
+        assert get_failure_signature(group[0]) in details
+
+    async def test_anchor_leads_so_legacy_attribution_comes_first(
+        self, tmp_path: Path
+    ) -> None:
+        """The first hash listed is the representative's frozen anchor."""
+        group = v2_group()
+        prompt = await _prompt_for(group, tmp_path)
+        section = prompt[prompt.index("ERROR SIGNATURES:") :]
+        assert section.index(get_legacy_signature(group[0])) < section.index(
+            get_failure_signature(group[0])
+        )
+
+    async def test_a_group_with_one_hash_keeps_the_one_line_form(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing the v2 rules strip, so both rules hash the same text."""
+        failure = plain_failure()
+        assert get_failure_signature(failure) == get_legacy_signature(failure)
+        prompt = await _prompt_for([failure], tmp_path)
+        assert f"ERROR SIGNATURE: {get_legacy_signature(failure)}\n" in prompt
+        assert "ERROR SIGNATURES" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Per-failure token usage for a v2 group
+# ---------------------------------------------------------------------------
+def _usage_record(**overrides) -> dict:
+    record = {
+        "ai_provider": "claude",
+        "ai_model": "opus",
+        "call_type": "primary",
+        "credential_source": "user",
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "total_tokens": 15,
+        "cost_usd": 0.01,
+        "duration_ms": 100,
+        "error_signature": "",
+        "error_signature_v2": "",
+        "child_job_name": "",
+        "child_build_number": 0,
+    }
+    record.update(overrides)
+    return record
+
+
+class TestPerFailureUsageReachesEveryGroupMember:
+    def test_every_member_gets_the_summary_its_anchors_differ(self) -> None:
+        """The call is counted in the job total; each member must see it too."""
+        group = v2_group()
+        v2 = get_failure_signature(group[0])
+        result = {
+            "failures": [
+                dual_written_row(f) | {"test_name": f.test_name} for f in group
+            ]
+        }
+        attach_failure_usage(
+            result,
+            [
+                _usage_record(
+                    error_signature=get_legacy_signature(group[0]),
+                    error_signature_v2=v2,
+                )
+            ],
+        )
+        assert all(f["token_usage"]["total_calls"] == 1 for f in result["failures"])
+
+    def test_a_legacy_record_still_lands_on_its_anchor(self) -> None:
+        """No v2 on the row (written before the rules) or on the failure."""
+        failure = failure_a()
+        result = {"failures": [legacy_row(failure) | {"test_name": "test_gateway"}]}
+        attach_failure_usage(
+            result, [_usage_record(error_signature=get_legacy_signature(failure))]
+        )
+        assert result["failures"][0]["token_usage"]["total_calls"] == 1
+
+    async def test_the_recorded_row_carries_both_hashes(self) -> None:
+        """Anchor for legacy attribution, v2 so the members can find it."""
+        usage = SimpleNamespace(
+            provider="claude",
+            model="opus",
+            input_tokens=10,
+            output_tokens=5,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            cost_usd=0.01,
+            duration_ms=100,
+        )
+        with (
+            patch(
+                "rootcoz.token_tracking.storage.record_token_usage",
+                new_callable=AsyncMock,
+            ) as record,
+            failure_group_usage("job-1", "anchor-hash", "v2-hash"),
+        ):
+            await record_ai_usage(
+                "job-1",
+                SimpleNamespace(success=True, usage=usage, text="ok"),
+                "primary",
+            )
+        kwargs = record.call_args.kwargs
+        assert kwargs["error_signature"] == "anchor-hash"
+        assert kwargs["error_signature_v2"] == "v2-hash"
+
+
+# ---------------------------------------------------------------------------
+# Peer prompts search the same set
+# ---------------------------------------------------------------------------
+class TestPeerPromptSearchesTheSameSet:
+    def test_peer_summary_names_every_member_anchor(self, tmp_path: Path) -> None:
+        group = v2_group()
+        summary = _build_failure_summary(
+            group, get_failure_signature(group[0]), tmp_path
+        )
+        for failure in group:
+            assert get_legacy_signature(failure) in summary
+
+    def test_peer_summary_for_one_hash_keeps_the_one_line_form(
+        self, tmp_path: Path
+    ) -> None:
+        failure = plain_failure()
+        summary = _build_failure_summary(
+            [failure], get_failure_signature(failure), tmp_path
+        )
+        assert f"ERROR SIGNATURE: {get_failure_signature(failure)}\n" in summary
+        assert "ERROR SIGNATURES" not in summary

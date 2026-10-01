@@ -916,6 +916,32 @@ def get_legacy_signature(failure: FailedTest) -> str:
     return compute_legacy_signature(failure.error_message, failure.stack_trace)
 
 
+def build_signature_section(failures: list[FailedTest], group_signature: str) -> str:
+    """Prompt line(s) naming every hash the AI must search history for.
+
+    ``search_by_signature`` matches one hash at a time, and a v2 group's members
+    carry *different* frozen anchors -- that is exactly why they grouped. Naming
+    only the representative's anchor drops the rest of the group's history, so
+    the whole set goes in the prompt: each member's anchor (which reaches rows
+    stored before the v2 rules) plus the group's v2 hash.
+    """
+    hashes = list(
+        dict.fromkeys(
+            h
+            for failure in failures
+            for h in (get_legacy_signature(failure), group_signature)
+            if h
+        )
+    )
+    if len(hashes) <= 1:
+        return f"ERROR SIGNATURE: {hashes[0] if hashes else group_signature}\n"
+    return (
+        "ERROR SIGNATURES: this failure group has several hashes. You MUST call "
+        "search_error_signature once for EACH hash below and read the results "
+        "together:\n" + "".join(f"- {h}\n" for h in hashes)
+    )
+
+
 def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
     """Extract a JSON object from AI response text.
 
@@ -1569,11 +1595,13 @@ def write_failure_details_file(
     """Write error message, stack trace, and test names for the AI to read.
 
     Per AI Tool Access rules, failure data must not be embedded in the prompt.
+    The header names every hash the group is filed under, so an AI that reads
+    only this file still searches the whole group's history.
     """
     representative = failures[0]
     test_names = [f.test_name for f in failures]
     content = (
-        f"ERROR SIGNATURE: {error_signature}\n"
+        f"{build_signature_section(failures, error_signature)}"
         f"AFFECTED TESTS ({len(failures)} tests with same error):\n"
         + "\n".join(f"- {name}" for name in test_names)
         + f"\n\nERROR:\n{representative.error_message}\n"
@@ -1893,11 +1921,14 @@ async def run_single_ai_analysis(
     """
     representative = failures[0]
     error_signature = get_failure_signature(representative)
-    # The prompt carries the anchor hash, not the v2 group hash: every stored
-    # row -- including rows written before the v2 rules existed -- is filed
-    # under its anchor, so the mandatory search_error_signature call reaches the
-    # whole history instead of only post-deploy rows.
+    # The mandatory history search matches one hash at a time, so the prompt
+    # gets the WHOLE group's hash set: every member's anchor (the value every
+    # stored row carries, including rows written before the v2 rules existed)
+    # plus the v2 group hash. Naming only failures[0]'s anchor would drop the
+    # other members' history -- the v2 rules merged them precisely because their
+    # anchors differ.
     anchor_signature = get_legacy_signature(representative)
+    signature_section = build_signature_section(failures, error_signature)
 
     (
         agent_gate_section,
@@ -2001,7 +2032,7 @@ async def run_single_ai_analysis(
     prompt = f"""{agent_gate_section}{query_section}
 Analyze this test failure from a CI job.
 {other_groups_section}
-ERROR SIGNATURE: {anchor_signature}
+{signature_section}
 {failure_details_section}
 {console_file_section}
 {artifacts_section}
@@ -2031,10 +2062,10 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         job_id,
     )
     try:
-        # The anchor, not the v2 group hash: ai_token_usage rows are attributed
-        # back to failures by comparing this hash with the failure's
-        # error_signature, which is the anchor.
-        with failure_group_usage(job_id, anchor_signature):
+        # Both hashes: the anchor for legacy attribution and the v2 group hash
+        # so every member of a v2 group -- whose own anchors differ from it --
+        # resolves to the same usage summary (see attach_failure_usage).
+        with failure_group_usage(job_id, anchor_signature, error_signature):
             result = await _call_ai_with_retry(
                 prompt,
                 ai_provider=ai_provider,

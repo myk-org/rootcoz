@@ -26,6 +26,7 @@ from rootcoz.engine.core import (
     build_failure_details_instruction,
     build_other_groups_instruction,
     build_prompt_sections,
+    build_signature_section,
     get_legacy_signature,
     parse_json_response,
     run_single_ai_analysis,
@@ -435,6 +436,10 @@ def _build_failure_summary(
 
     Writes error/stack/test names to a workspace file and returns a MANDATORY
     read instruction. Peers must read the file — not receive data in the prompt.
+
+    ``error_signature`` is the v2 group hash, so peers get the whole group's
+    hash set instead: searching by the group hash alone misses every failure row
+    stored before the v2 rules, which carry only their own anchor.
     """
     try:
         filepath = write_failure_details_file(failures, error_signature, workspace_dir)
@@ -444,7 +449,7 @@ def _build_failure_summary(
             "Check filesystem permissions and available disk space."
         ) from exc
     return (
-        f"ERROR SIGNATURE: {error_signature}\n"
+        f"{build_signature_section(failures, error_signature)}"
         f"{build_failure_details_instruction(filepath)}"
     )
 

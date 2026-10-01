@@ -107,6 +107,34 @@ def signature_hashes(row: Any) -> list[str]:
     )
 
 
+def _row_message(row: Any) -> str:
+    """Return the error text a row stores, whichever column it keeps it in.
+
+    ``failure_history`` calls it ``error_message``; a FailureAnalysis dict calls
+    it ``error``.
+    """
+    return _signature_field(row, "error_message") or _signature_field(row, "error")
+
+
+def _message_signature(row: Any) -> str:
+    """Hash *row*'s error message alone under the current (v2) rules.
+
+    A row stored before the v2 rules has no ``error_signature_v2``, so no stored
+    hash can ever show that it is today's failure. The message is the only thing
+    left to normalize -- under the SAME rules the run's own grouping already
+    accepts as identity, never the raw text. The stack trace is not stored on
+    history rows, so both sides are hashed with an empty one and the comparison
+    is message against message, never message against hash.
+    """
+    message = _row_message(row)
+    if not message:
+        return ""
+    # Imported here: engine.core imports storage at module level.
+    from rootcoz.engine.core import compute_signature
+
+    return compute_signature(message, "")
+
+
 def signatures_match(left: Any, right: Any) -> bool:
     """Return whether two rows describe the same failure across rule versions.
 
@@ -115,8 +143,18 @@ def signatures_match(left: Any, right: Any) -> bool:
     new row stop matching its own history, so the comparison is over the union
     of both rows' hashes -- a legacy row and a new row for the SAME failure
     match on the anchor they share.
+
+    When the hashes share nothing, one last branch: both messages normalized
+    under the v2 rules. It exists for the case the union cannot cover -- a
+    legacy row plus a later run whose only difference is header/pointer noise,
+    so the frozen anchor moved and the legacy row has no v2 hash to meet it on.
+    ponytail: this branch ignores the stack trace (not stored on history rows);
+    drop it if a later column makes the stack comparable again.
     """
-    return bool(set(signature_hashes(left)) & set(signature_hashes(right)))
+    if set(signature_hashes(left)) & set(signature_hashes(right)):
+        return True
+    left_message = _message_signature(left)
+    return bool(left_message) and left_message == _message_signature(right)
 
 
 def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
@@ -3097,8 +3135,10 @@ async def find_matching_previous_analysis(
     Returns:
         Dict with previous failure_history row data if found, None otherwise.
         Includes keys: job_id, build_number, build_id, error_signature,
-        error_signature_v2, classification, pattern, analyzed_at. Compare the
-        pair with :func:`signatures_match`, never field by field.
+        error_signature_v2, error_message, classification, pattern, analyzed_at.
+        Compare the pair with :func:`signatures_match`, never field by field --
+        error_message is selected so that comparison can normalize the message of
+        a row stored before the v2 rules.
     """
     async with _connect_db() as db:
         # Find the most recent failure_history row for the same job+test
@@ -3112,7 +3152,7 @@ async def find_matching_previous_analysis(
         # the API model where child_build_number=0 means "not specified".
         cursor = await db.execute(
             "SELECT fh.job_id, fh.build_number, fh.build_id, fh.error_signature, "
-            "fh.error_signature_v2, "
+            "fh.error_signature_v2, fh.error_message, "
             "fh.classification, fh.pattern, fh.analyzed_at "
             "FROM failure_history fh "
             "WHERE fh.job_name = ? AND fh.test_name = ? AND fh.job_id != ? "
@@ -3808,7 +3848,20 @@ async def search_by_signature(
     logger.debug(
         f"search_by_signature: signature={signature}, exclude_job_id={exclude_job_id}"
     )
+    empty: dict[str, Any] = {
+        "signature": signature,
+        "total_occurrences": 0,
+        "unique_tests": 0,
+        "tests": [],
+        "last_classification": "",
+        "comments": [],
+    }
     sig_where, sig_params = signature_match([signature])
+    if not sig_where:
+        # No signature, no fragment -- by contract. Interpolating it anyway
+        # would leave "WHERE" with nothing and match every row.
+        logger.warning("search_by_signature called with an empty signature")
+        return empty
     async with _connect_db() as db:
         # Build optional exclude filter
         exclude_filter = ""
@@ -3825,14 +3878,7 @@ async def search_by_signature(
         total_occurrences = (await cursor.fetchone())[0]
 
         if total_occurrences == 0:
-            return {
-                "signature": signature,
-                "total_occurrences": 0,
-                "unique_tests": 0,
-                "tests": [],
-                "last_classification": "",
-                "comments": [],
-            }
+            return empty
 
         # Tests with this signature and their occurrence counts
         cursor = await db.execute(
@@ -6664,8 +6710,15 @@ async def record_token_usage(
     child_build_number: int = 0,
     failure_id: str = "",
     usage_attempt: str = "",
+    error_signature_v2: str = "",
 ) -> str:
-    """Record a single AI call's token usage. Returns the record ID."""
+    """Record a single AI call's token usage. Returns the record ID.
+
+    ``error_signature`` stays the frozen anchor for legacy attribution;
+    ``error_signature_v2`` carries the group's current-rules hash so every
+    member of a v2 group resolves to the same usage row (see
+    ``storage.resolve_signature``).
+    """
     record_id = str(uuid.uuid4())
     total_tokens = input_tokens + output_tokens
     async with _connect_db() as db:
@@ -6674,8 +6727,9 @@ async def record_token_usage(
             "(id, job_id, ai_provider, ai_model, call_type, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
             "prompt_chars, response_chars, credential_source, error_signature, "
-            "child_job_name, child_build_number, failure_id, usage_attempt) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "child_job_name, child_build_number, failure_id, usage_attempt, "
+            "error_signature_v2) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -6697,6 +6751,7 @@ async def record_token_usage(
                 child_build_number if call_type in ("primary", "reanalysis") else 0,
                 failure_id if call_type == "reanalysis" else "",
                 usage_attempt if call_type == "reanalysis" else "",
+                error_signature_v2 if call_type in ("primary", "reanalysis") else None,
             ),
         )
         await db.commit()

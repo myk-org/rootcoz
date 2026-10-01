@@ -20,8 +20,13 @@ from rootcoz.models import TokenUsageEntry, TokenUsageSummary
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
+# v2 when present, else the anchor: the one rule for a canonical signature
+# (see rootcoz.storage). Rows on both sides of the anchor/v2 pair resolve to
+# the same value, so every member of a v2 group finds the same summary.
+resolve_signature = storage.resolve_signature
+
 _on_usage_recorded: Callable[[str], None] | None = None
-_group_context: ContextVar[tuple[str, str] | None] = ContextVar(
+_group_context: ContextVar[tuple[str, str, str] | None] = ContextVar(
     "failure_group_usage", default=None
 )
 _child_context: ContextVar[tuple[str, int] | None] = ContextVar(
@@ -54,9 +59,18 @@ def child_usage_scope(job_name: str, build_number: int) -> Iterator[None]:
 
 
 @contextmanager
-def failure_group_usage(job_id: str, error_signature: str) -> Iterator[None]:
-    """Scope primary call attribution to this job and failure group."""
-    token = _group_context.set((job_id, error_signature))
+def failure_group_usage(
+    job_id: str, error_signature: str, error_signature_v2: str = ""
+) -> Iterator[None]:
+    """Scope primary call attribution to this job and failure group.
+
+    Both hashes of the group are kept: the frozen anchor (legacy attribution)
+    and the v2 group hash. A v2 group's members each carry a *different*
+    anchor, so resolving the summary by anchor alone would leave them without
+    one; ``attach_failure_usage`` resolves the row (v2 when present, else the
+    anchor) on both sides.
+    """
+    token = _group_context.set((job_id, error_signature, error_signature_v2))
     try:
         yield
     finally:
@@ -68,11 +82,13 @@ def attach_failure_usage(result: dict[str, Any], records: list[dict[str, Any]]) 
     grouped: dict[tuple[str, int, str], list[dict[str, Any]]] = defaultdict(list)
     attempts: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for record in records:
-        if record["call_type"] == "primary" and record.get("error_signature"):
+        if record["call_type"] == "primary" and (
+            signature := resolve_signature(record)
+        ):
             key = (
                 record.get("child_job_name") or "",
                 record.get("child_build_number") or 0,
-                record["error_signature"],
+                signature,
             )
             grouped[key].append(record)
         elif record["call_type"] == "reanalysis" and record.get("usage_attempt"):
@@ -88,9 +104,11 @@ def attach_failure_usage(result: dict[str, Any], records: list[dict[str, Any]]) 
         node: dict[str, Any], child_name: str = "", build_number: int = 0
     ) -> None:
         for failure in node.get("failures") or []:
-            if not isinstance(failure, dict) or not failure.get("error_signature"):
+            if not isinstance(failure, dict):
                 continue
-            signature = failure["error_signature"]
+            signature = resolve_signature(failure)
+            if not signature:
+                continue
             history = failure.get("previous_analyses") or []
             if failure.get("previous_analysis"):
                 history = [*history, failure["previous_analysis"]]
@@ -136,7 +154,7 @@ def attach_failure_usage(result: dict[str, Any], records: list[dict[str, Any]]) 
     ) -> None:
         for failure in node.get("failures") or []:
             if isinstance(failure, dict):
-                signature: str = failure.get("error_signature") or ""
+                signature: str = resolve_signature(failure)
                 scope = (child_name, build_number, signature)
                 attempt = failure.get("usage_attempt")
                 failure_id: str = failure.get("id") or ""
@@ -198,6 +216,7 @@ async def record_ai_usage(
             response_chars=len(result.text),
             credential_source=getattr(result, "credential_source", "unknown"),
             error_signature=group[1] if group and group[0] == job_id else "",
+            error_signature_v2=group[2] if group and group[0] == job_id else "",
             child_job_name=child[0] if child else "",
             child_build_number=child[1] if child else 0,
             failure_id=reanalysis[0] if reanalysis else "",
