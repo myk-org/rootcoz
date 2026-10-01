@@ -1,17 +1,34 @@
 # rootcoz
 
-> Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.
+> AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML
 
 ## Getting Started
 
-- [Quickstart](quickstart.md): Run RootCoz, sign in, and submit your first Jenkins, Prow, or JUnit XML analysis in just a few minutes.
+- [Quickstart](quickstart.md)
+- [Deploying RootCoz](deploy-rootcoz.md)
+- [Configuration Reference](configuration-reference.md)
 
-## User Guides
+## Analyzing Results
 
-- [Reviewing and Classifying Failures](review-and-classify-failures.md): Inspect grouped failures, compare AI reasoning, mark reviews complete, and override classifications or patterns when the default answer needs correction.
-- [Exploring History and Reports](explore-history-and-reports.md): Search recurring failures, drill into test history, and compare team-level trends across dates, labels, metadata, and review status.
-- [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analysis.md): Show administrators how to ask RootCoz questions across all jobs, choose or override the AI model, follow live replies in the web UI or CLI, abort or clear a session, and save or download HTML report artifacts from chat output.
+- [Submitting Analyses](submit-analyses.md)
+- [Tracking Analysis Progress](track-analysis-progress.md)
+- [Reviewing and Classifying Failures](review-and-classify-failures.md)
+- [Collaborating on Results](collaborate-on-results.md)
+- [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.md)
 
-## Recipes
+## Exploring Data
 
-- [Deploying RootCoz](deploy-rootcoz.md): Bring up RootCoz with Docker Compose for local use or Helm for Kubernetes and OpenShift when you need a shared deployment.
+- [Exploring History and Reports](explore-history-and-reports.md)
+- [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analysis.md)
+
+## Account and Administration
+
+- [Managing Your Account and Notifications](manage-account-and-notifications.md)
+- [Managing Users and Server Settings](manage-users-and-server-settings.md)
+
+## Reference
+
+- [API Endpoint Reference](api-reference.md)
+- [CLI Command Reference](cli-reference.md)
+- [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.md)
+- [Configuring Analysis Context](configure-analysis-context.md)

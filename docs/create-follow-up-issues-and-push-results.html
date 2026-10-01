@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Creating Follow-Up Issues and Pushing Results - rootcoz</title>
-    <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
-    <link rel="stylesheet" href="assets/style.css">
+    <meta name="description" content="AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML">
+    <link rel="stylesheet" href="assets/style.css?v=5a6efa51d2">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
     <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
     <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
@@ -14,7 +14,7 @@
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <a href="index.html" class="sidebar-logo">rootcoz</a>
-            <p class="sidebar-tagline">Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.</p>
+            <p class="sidebar-tagline">AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML</p>
         </div>
 
         <div class="sidebar-search">
@@ -23,147 +23,154 @@
         </div>
 
         <nav class="sidebar-nav">
-            
+
             <div class="nav-group">
                 <h3 class="nav-group-title">Getting Started</h3>
                 <ul class="nav-group-pages">
-                    
+
                     <li>
                         <a href="quickstart.html"
                            class="nav-link">
                             Quickstart
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">User Guides</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="submit-analyses.html"
-                           class="nav-link">
-                            Submitting Analyses
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="configure-analysis-context.html"
-                           class="nav-link">
-                            Configuring Analysis Context
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="track-analysis-progress.html"
-                           class="nav-link">
-                            Tracking Analysis Progress
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="review-and-classify-failures.html"
-                           class="nav-link">
-                            Reviewing and Classifying Failures
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="collaborate-on-results.html"
-                           class="nav-link">
-                            Collaborating on Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-account-and-notifications.html"
-                           class="nav-link">
-                            Managing Your Account and Notifications
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="create-follow-up-issues-and-push-results.html"
-                           class="nav-link active" aria-current="page">
-                            Creating Follow-Up Issues and Pushing Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="explore-history-and-reports.html"
-                           class="nav-link">
-                            Exploring History and Reports
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-users-and-server-settings.html"
-                           class="nav-link">
-                            Managing Users and Server Settings
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="use-server-chat-for-cross-job-analysis.html"
-                           class="nav-link">
-                            Use Server Chat for Cross-Job Analysis
-                        </a>
-                    </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Recipes</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="automate-common-tasks-with-the-cli.html"
-                           class="nav-link">
-                            Automating Common Tasks with the CLI
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="deploy-rootcoz.html"
                            class="nav-link">
                             Deploying RootCoz
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Reference</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="api-reference.html"
-                           class="nav-link">
-                            API Endpoint Reference
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="cli-reference.html"
-                           class="nav-link">
-                            CLI Command Reference
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="configuration-reference.html"
                            class="nav-link">
                             Configuration Reference
                         </a>
                     </li>
-                    
+
                 </ul>
             </div>
-            
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Analyzing Results</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="submit-analyses.html"
+                           class="nav-link">
+                            Submitting Analyses
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="track-analysis-progress.html"
+                           class="nav-link">
+                            Tracking Analysis Progress
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Reviewing and Classifying Failures
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="collaborate-on-results.html"
+                           class="nav-link">
+                            Collaborating on Results
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="create-follow-up-issues-and-push-results.html"
+                           class="nav-link active" aria-current="page">
+                            Creating Follow-Up Issues and Pushing Results
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Exploring Data</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="explore-history-and-reports.html"
+                           class="nav-link">
+                            Exploring History and Reports
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="use-server-chat-for-cross-job-analysis.html"
+                           class="nav-link">
+                            Use Server Chat for Cross-Job Analysis
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Account and Administration</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="manage-account-and-notifications.html"
+                           class="nav-link">
+                            Managing Your Account and Notifications
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="manage-users-and-server-settings.html"
+                           class="nav-link">
+                            Managing Users and Server Settings
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="api-reference.html"
+                           class="nav-link">
+                            API Endpoint Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="cli-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="automate-common-tasks-with-the-cli.html"
+                           class="nav-link">
+                            Automating Common Tasks with the CLI
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="configure-analysis-context.html"
+                           class="nav-link">
+                            Configuring Analysis Context
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
         </nav>
     </aside>
 
@@ -182,15 +189,15 @@
                 <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
                     <kbd>&#8984;K</kbd> Search
                 </button>
-                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
-                    ⚡ docs<span class="brand-accent">fy</span>
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener" class="docsite-badge" title="documentation">
+                    ⚡ pi<span class="brand-accent">-docsite</span>
                 </a>
-                
-                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
                     <span class="github-stars" id="github-stars" title="GitHub stars"></span>
                 </a>
-                
+
                 <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
                     <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                         <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
@@ -203,7 +210,7 @@
         </header>
 
         <main class="content">
-            
+
             <article class="article">
                 <div class="article-body">
                     <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
@@ -211,43 +218,202 @@
                          user-supplied input. XSS risk is minimal and accepted since
                          the AI generates the content, not end users. -->
                     <h1 id="creating-follow-up-issues-and-pushing-results">Creating Follow-Up Issues and Pushing Results</h1>
-<p><em>Documentation generation failed. Please re-run.</em></p>
+<p>Turn a reviewed failure into real follow-up work: file a GitHub issue or Jira ticket from the report, link a failure to a ticket that already exists, and push the finished classifications into Report Portal. Every action here starts from a result page, and the issue content is generated from the same AI analysis you already reviewed.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>A completed analysis result, ideally with its failures reviewed. See <a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a> for details.</li>
+<li>A <code>GitHub Token</code> or Jira credentials on your own profile. Issue creation always uses your token, never a stored server credential. See <a href="manage-account-and-notifications.html">Managing Your Account and Notifications</a> for details.</li>
+<li><code>reviewer</code> or above to link an existing issue with <code>Track</code>.</li>
+<li><code>operator</code> or <code>admin</code> to push results to an exporter. Push is rejected for reviewers.</li>
+<li>Report Portal enabled on the server (<code>ENABLE_REPORTPORTAL</code>, with <code>REPORTPORTAL_URL</code>, <code>REPORTPORTAL_API_TOKEN</code>, and <code>REPORTPORTAL_PROJECT</code>) if you want to push classifications. See <a href="configuration-reference.html">Configuration Reference</a> for details.</li>
+<li>For the CLI examples, an authenticated CLI profile. See <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> for details.</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>preview-issue<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">"tests.test_auth.test_login"</span><span class="w"> </span>--type<span class="w"> </span>github<span class="w"> </span>--include-links
+rootcoz<span class="w"> </span>create-issue<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">"tests.test_auth.test_login"</span><span class="w"> </span>--type<span class="w"> </span>github<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--title<span class="w"> </span><span class="s2">"Login fails after token refresh"</span><span class="w"> </span>--body<span class="w"> </span><span class="s2">"</span><span class="k">$(</span>cat<span class="w"> </span>issue-body.md<span class="k">)</span><span class="s2">"</span>
+rootcoz<span class="w"> </span>exporters
+rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"> </span>--plugin<span class="w"> </span>reportportal
+</code></pre></div>
+
+<p>This generates and reviews issue content, creates the issue, confirms which exporters are available, and pushes the reviewed classifications.</p>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li>Finish the review first.</li>
+</ol>
+<p>Issue content and pushed classifications are generated from the current analysis, so correct the labels before you file anything. The <code>Create</code> action on a failure card also offers <code>Mark as reviewed?</code> right after the issue is created.</p>
+<ol>
+<li>Generate a preview from the failure card.</li>
+</ol>
+<p>Expand a failure, then use <code>GitHub Issue</code> or <code>Jira Ticket</code> in the <code>Actions</code> row. RootCoz opens the issue prompt, which comes from the <code>issue_prompt</code> stored with the job or from <code>.rootcoz/ROOTCOZ_ISSUE_PROMPT.md</code> in the test repository. Edit it if you want to steer the title and body, then click <code>Continue</code>.</p>
+<p>RootCoz calls <code>POST /results/{job_id}/preview-github-issue</code> or <code>POST /results/{job_id}/preview-jira-bug</code>, which draft a title and body, and search for issues that look like duplicates of the same bug.</p>
+<p><code>Include links</code> adds clickable report and build URLs. <code>AI for issue generation</code> lets you pick a different provider or model for the draft. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.</p>
+<blockquote>
+<p><strong>Note:</strong> <code>Include links</code> only has an effect when the server has a public base URL configured, because relative links would resolve against the tracker instead of RootCoz. See <a href="configuration-reference.html">Configuration Reference</a> for details.</p>
+</blockquote>
+<ol>
+<li>Set the Jira specifics when you file a Jira ticket.</li>
+</ol>
+<p>In the preview step, pick or type the <code>Jira Project</code> (the server searches your projects as you type), choose an <code>Issue Type</code> from <code>Bug</code>, <code>Task</code>, <code>Story</code>, <code>Epic</code>, <code>Sub-task</code>, or <code>Custom...</code>, and optionally pick a <code>Security Level</code>. A project key must be available on the server or in the request, otherwise ticket creation fails.</p>
+<p>GitHub issues need a repository: RootCoz always uses the deployment's <code>TESTS_REPO_URL</code>. It deliberately ignores the job's additional repositories, so you cannot retarget issue creation at another repo — a job's <code>request_params</code> are never consulted for this. To file against a different repository, change <code>TESTS_REPO_URL</code> on the server (or the <code>GITHUB</code> category in Server Settings) first.</p>
+<ol>
+<li>Create the issue and let RootCoz record the link.</li>
+</ol>
+<p>Edit the <code>Title</code> and <code>Body</code> if the draft is not right, then click <code>Create GitHub Issue</code> or <code>Create Jira Ticket</code>. On success RootCoz automatically:</p>
+<ul>
+<li>adds a comment on the failure containing the new issue link, and</li>
+<li>adds a tracked-in link for that issue, shown as a <code>GitHub</code> or <code>Jira</code> badge under the failure, which you can remove later like any other tracked link.</li>
+</ul>
+<p>Creation uses your own credentials. A missing or expired token returns an error that points back to your profile settings.</p>
+<blockquote>
+<p><strong>Warning:</strong> GitHub and Jira issue creation can be disabled per server with <code>ENABLE_GITHUB_ISSUES</code> and <code>ENABLE_JIRA_ISSUES</code>. When disabled, the buttons are greyed out and the endpoints refuse the request.</p>
+</blockquote>
+<ol>
+<li>Link a failure to an issue that already exists.</li>
+</ol>
+<p>Use the <code>Track</code> button on the <code>Classify</code> row, paste the <code>Issue URL</code> into the <code>Track In</code> dialog, and click <code>Save</code>. RootCoz detects <code>GitHub</code> or <code>Jira</code> from the URL itself and shows the detected type before you save. You can link several issues to the same failure.</p>
+<p>Creators can remove their own links; admins can remove any link.</p>
+<ol>
+<li>Review what Jira search already found during analysis.</li>
+</ol>
+<p>When Jira is configured, analysis for a <code>PRODUCT BUG</code> already searched for related tickets before you opened the report:</p>
+<ol>
+<li>The AI generates search keywords as part of the failure analysis.</li>
+<li>Identical keyword sets are deduplicated into one Jira search, and the searches run in parallel.</li>
+<li>Each candidate is scored for relevance by the AI.</li>
+<li>Only relevant matches are attached to the result, under <code>Matching Jira Issues</code> in the <code>Bug Report</code> section, with their status.</li>
+</ol>
+<p>Jira problems never break an analysis. Search failures are logged and swallowed, so a result without matching tickets usually means the lookup failed or found nothing relevant — not that the analysis is wrong.</p>
+<ol>
+<li>Push reviewed classifications to Report Portal.</li>
+</ol>
+<p>Click <code>Push to Report Portal</code> in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any unmatched items and errors.</p>
+<p>You can also check what is available before pushing:</p>
+<p><code>bash
+   rootcoz exporters</code></p>
+<p>The list shows each exporter plugin with its display name and whether it is ready. Report Portal is reported as disabled when the integration is unconfigured, when every push-content toggle is off, or when <code>PUBLIC_BASE_URL</code> is missing while the rootcoz-URL toggle is on.</p>
+<p>Report Portal push content is controlled by three toggles:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Toggle</th>
+<th>Effect when enabled</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RP_PUSH_CLASSIFICATIONS</code></td>
+<td>Maps RootCoz classifications to Report Portal defect types</td>
+</tr>
+<tr>
+<td><code>RP_PUSH_ROOTCOZ_URL</code></td>
+<td>Adds the RootCoz report URL as a comment on the test item</td>
+</tr>
+<tr>
+<td><code>RP_PUSH_TRACKER_LINKS</code></td>
+<td>Adds linked GitHub and Jira issues as external system issues</td>
+</tr>
+</tbody>
+</table></div>
+<p>At least one of the three must be enabled or the push is refused.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<p>Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. <code>POST /results/{job_id}/push/{plugin_name}</code> takes the same optional <code>child_job_name</code> and <code>child_build_number</code> parameters and returns the exporter's own result fields plus <code>success</code> and <code>message</code>. The Report Portal-specific endpoint <code>POST /results/{job_id}/push-reportportal</code> remains available and is what the UI button uses.</p>
+<p>Let the pipeline push for you. When <code>AUTO_PUSH_EXPORTERS</code> is set to a comma-separated plugin list and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved <code>rootcoz-ai</code> identity. An empty <code>AUTO_PUSH_EXPORTERS</code> disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with <code>400 Server-only settings (env var only)</code>. Set <code>AUTO_PUSH_EXPORTERS</code> in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.</p>
+<p>Create issues from the terminal, including for nested child-job failures:</p>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>get-issue-prompt<span class="w"> </span>JOB_ID
+rootcoz<span class="w"> </span>preview-issue<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">"TEST_NAME"</span><span class="w"> </span>--type<span class="w"> </span>jira<span class="w"> </span>--jira-project-key<span class="w"> </span>PROJ
+rootcoz<span class="w"> </span>create-issue<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">"TEST_NAME"</span><span class="w"> </span>--type<span class="w"> </span>jira<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--title<span class="w"> </span><span class="s2">"Short summary"</span><span class="w"> </span>--body<span class="w"> </span><span class="s2">"What failed, and where it was reproduced."</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--jira-project-key<span class="w"> </span>PROJ<span class="w"> </span>--jira-issue-type<span class="w"> </span>Bug<span class="w"> </span>--jira-security-level<span class="w"> </span><span class="s2">"Internal"</span>
+rootcoz<span class="w"> </span>create-issue<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">"TEST_NAME"</span><span class="w"> </span>--type<span class="w"> </span>github<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--title<span class="w"> </span><span class="s2">"Short summary"</span><span class="w"> </span>--body<span class="w"> </span><span class="s2">"What failed, and where it was reproduced."</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--child-job<span class="w"> </span><span class="s2">"CHILD_JOB"</span><span class="w"> </span>--child-build<span class="w"> </span><span class="m">12345</span>
+rootcoz<span class="w"> </span>push-reportportal<span class="w"> </span>JOB_ID<span class="w"> </span>--child-job-name<span class="w"> </span><span class="s2">"CHILD_JOB"</span><span class="w"> </span>--child-build-number<span class="w"> </span><span class="m">12345</span>
+rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"> </span>--plugin<span class="w"> </span>reportportal<span class="w"> </span>--json
+</code></pre></div>
+
+<p>Tracker flags fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. See <a href="cli-reference.html">CLI Command Reference</a> for details.</p>
+<p>Send feedback about RootCoz itself through the <code>Feedback</code> button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server.</p>
+<p>For raw endpoints, see <a href="api-reference.html">API Endpoint Reference</a> for details.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>
+<p>The <code>GitHub Issue</code> or <code>Jira Ticket</code> button is greyed out.<br>
+  Issue creation is disabled for this server, or the job was analyzed without a repository or Jira project to target. Ask an administrator to check <code>ENABLE_GITHUB_ISSUES</code> and <code>ENABLE_JIRA_ISSUES</code>.</p>
+</li>
+<li>
+<p>Creation fails with <code>GitHub token is required</code> or <code>Jira token is required</code>.<br>
+  Issue creation uses only your own credentials. Add the token on your profile settings page and try again.</p>
+</li>
+<li>
+<p>The preview has no <code>Include links</code> effect.<br>
+  The server has no public base URL configured. Set <code>PUBLIC_BASE_URL</code> so report links can be absolute.</p>
+</li>
+<li>
+<p>No <code>Matching Jira Issues</code> appear on a product bug.<br>
+  The search may have found nothing, or the lookup failed. Failures are logged and ignored, so the analysis result is still valid.</p>
+</li>
+<li>
+<p><code>Exporters</code> shows Report Portal as disabled.<br>
+  Run <code>rootcoz exporters</code> and check the reason: the integration is off, all three <code>RP_PUSH_*</code> toggles are off, or <code>PUBLIC_BASE_URL</code> is missing while <code>RP_PUSH_ROOTCOZ_URL</code> is on.</p>
+</li>
+<li>
+<p>The push returns <code>Operator access required.</code><br>
+  Exporter pushes need <code>operator</code> or <code>admin</code>. Reviewers can create and link issues, but not push.</p>
+</li>
+<li>
+<p>The push reports unmatched items.<br>
+  RootCoz matched the launch but could not pair some failures with Report Portal test items. Check the reported item names against the launch, and confirm the job name and build number match the Report Portal launch.</p>
+</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a></li>
+<li><a href="collaborate-on-results.html">Collaborating on Results</a></li>
+<li><a href="manage-account-and-notifications.html">Managing Your Account and Notifications</a></li>
+<li><a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a></li>
+<li><a href="cli-reference.html">CLI Command Reference</a></li>
+</ul>
                 </div>
             </article>
             <nav class="page-nav">
-                
-                <a href="manage-account-and-notifications.html" class="page-nav-link page-nav-prev">
+
+                <a href="collaborate-on-results.html" class="page-nav-link page-nav-prev">
                     <span class="page-nav-label">Previous</span>
-                    <span class="page-nav-title">Managing Your Account and Notifications</span>
+                    <span class="page-nav-title">Collaborating on Results</span>
                 </a>
-                
-                
+
+
                 <a href="explore-history-and-reports.html" class="page-nav-link page-nav-next">
                     <span class="page-nav-label">Next</span>
                     <span class="page-nav-title">Exploring History and Reports</span>
                 </a>
-                
+
             </nav>
-            
+
             <aside class="toc-sidebar">
                 <div class="toc-container">
                     <h3>On this page</h3>
                     <div class="toc">
-<ul></ul>
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
 </div>
 
                 </div>
             </aside>
-            
+
 
         </main>
 
         <footer class="page-footer">
-            
-            <span class="footer-version">Generated from version 4.4.2</span>
-            <span class="footer-sep">&middot;</span>
-            
-            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+
+            Built from <code>docs/*.md</code> by <code>pi-docsite</code>
             <span class="footer-sep">&middot;</span>
             <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
         </footer>
@@ -255,13 +421,14 @@
 
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-    <script src="assets/theme.js"></script>
-    <script src="assets/search.js"></script>
-    <script src="assets/copy.js"></script>
-    <script src="assets/callouts.js"></script>
-    <script src="assets/scrollspy.js"></script>
-    <script src="assets/codelabels.js"></script>
-    <script src="assets/github.js"></script>
+    <script src="assets/theme.js?v=5a6efa51d2"></script>
+
+    <script src="assets/search.js?v=5a6efa51d2"></script>
+    <script src="assets/copy.js?v=5a6efa51d2"></script>
+    <script src="assets/callouts.js?v=5a6efa51d2"></script>
+    <script src="assets/scrollspy.js?v=5a6efa51d2"></script>
+    <script src="assets/codelabels.js?v=5a6efa51d2"></script>
+    <script src="assets/github.js?v=5a6efa51d2"></script>
     <script>
 (function() {
     var toggle = document.getElementById('sidebar-toggle');
@@ -307,5 +474,6 @@
     }
 })();
 </script>
+<!-- generated by pi-docsite -->
 </body>
 </html>

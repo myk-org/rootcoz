@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Deploying RootCoz - rootcoz</title>
-    <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
-    <link rel="stylesheet" href="assets/style.css">
+    <meta name="description" content="AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML">
+    <link rel="stylesheet" href="assets/style.css?v=5a6efa51d2">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
     <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
     <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
@@ -14,7 +14,7 @@
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <a href="index.html" class="sidebar-logo">rootcoz</a>
-            <p class="sidebar-tagline">Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.</p>
+            <p class="sidebar-tagline">AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML</p>
         </div>
 
         <div class="sidebar-search">
@@ -23,147 +23,154 @@
         </div>
 
         <nav class="sidebar-nav">
-            
+
             <div class="nav-group">
                 <h3 class="nav-group-title">Getting Started</h3>
                 <ul class="nav-group-pages">
-                    
+
                     <li>
                         <a href="quickstart.html"
                            class="nav-link">
                             Quickstart
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">User Guides</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="submit-analyses.html"
-                           class="nav-link">
-                            Submitting Analyses
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="configure-analysis-context.html"
-                           class="nav-link">
-                            Configuring Analysis Context
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="track-analysis-progress.html"
-                           class="nav-link">
-                            Tracking Analysis Progress
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="review-and-classify-failures.html"
-                           class="nav-link">
-                            Reviewing and Classifying Failures
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="collaborate-on-results.html"
-                           class="nav-link">
-                            Collaborating on Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-account-and-notifications.html"
-                           class="nav-link">
-                            Managing Your Account and Notifications
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="create-follow-up-issues-and-push-results.html"
-                           class="nav-link">
-                            Creating Follow-Up Issues and Pushing Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="explore-history-and-reports.html"
-                           class="nav-link">
-                            Exploring History and Reports
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-users-and-server-settings.html"
-                           class="nav-link">
-                            Managing Users and Server Settings
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="use-server-chat-for-cross-job-analysis.html"
-                           class="nav-link">
-                            Use Server Chat for Cross-Job Analysis
-                        </a>
-                    </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Recipes</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="automate-common-tasks-with-the-cli.html"
-                           class="nav-link">
-                            Automating Common Tasks with the CLI
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="deploy-rootcoz.html"
                            class="nav-link active" aria-current="page">
                             Deploying RootCoz
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Reference</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="api-reference.html"
-                           class="nav-link">
-                            API Endpoint Reference
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="cli-reference.html"
-                           class="nav-link">
-                            CLI Command Reference
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="configuration-reference.html"
                            class="nav-link">
                             Configuration Reference
                         </a>
                     </li>
-                    
+
                 </ul>
             </div>
-            
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Analyzing Results</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="submit-analyses.html"
+                           class="nav-link">
+                            Submitting Analyses
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="track-analysis-progress.html"
+                           class="nav-link">
+                            Tracking Analysis Progress
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Reviewing and Classifying Failures
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="collaborate-on-results.html"
+                           class="nav-link">
+                            Collaborating on Results
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="create-follow-up-issues-and-push-results.html"
+                           class="nav-link">
+                            Creating Follow-Up Issues and Pushing Results
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Exploring Data</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="explore-history-and-reports.html"
+                           class="nav-link">
+                            Exploring History and Reports
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="use-server-chat-for-cross-job-analysis.html"
+                           class="nav-link">
+                            Use Server Chat for Cross-Job Analysis
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Account and Administration</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="manage-account-and-notifications.html"
+                           class="nav-link">
+                            Managing Your Account and Notifications
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="manage-users-and-server-settings.html"
+                           class="nav-link">
+                            Managing Users and Server Settings
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="api-reference.html"
+                           class="nav-link">
+                            API Endpoint Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="cli-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="automate-common-tasks-with-the-cli.html"
+                           class="nav-link">
+                            Automating Common Tasks with the CLI
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="configure-analysis-context.html"
+                           class="nav-link">
+                            Configuring Analysis Context
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
         </nav>
     </aside>
 
@@ -182,15 +189,15 @@
                 <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
                     <kbd>&#8984;K</kbd> Search
                 </button>
-                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
-                    ⚡ docs<span class="brand-accent">fy</span>
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener" class="docsite-badge" title="documentation">
+                    ⚡ pi<span class="brand-accent">-docsite</span>
                 </a>
-                
-                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
                     <span class="github-stars" id="github-stars" title="GitHub stars"></span>
                 </a>
-                
+
                 <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
                     <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                         <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
@@ -203,7 +210,7 @@
         </header>
 
         <main class="content">
-            
+
             <article class="article">
                 <div class="article-body">
                     <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
@@ -215,197 +222,17 @@
 <p><strong>Note:</strong> The Helm chart bootstraps RootCoz itself. Configure Jenkins, Jira, GitHub, Report Portal, and other runtime settings in the UI after first login. See <a href="configuration-reference.html">Configuration Reference</a> and <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</p>
 <p><strong>Warning:</strong> The Helm chart is single-replica and expects one persistent volume. Enable either <code>route</code> or <code>ingress</code>, not both.</p>
 </blockquote>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>Docker with Docker Compose for the local recipe, or Helm 3 plus <code>kubectl</code> or <code>oc</code> for the cluster recipes</li>
+<li>A cluster with a <code>ReadWriteOnce</code> PersistentVolume provisioner for the SQLite data volume</li>
+<li>One AI provider credential: <code>GEMINI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code> (or a Vertex service account key). <code>CURSOR_API_KEY</code> alone is not enough — the bundled Compose file leaves <code>CURSOR_API_KEY</code>, <code>ACPX_AGENTS</code>, and <code>CLI_AGENTS</code> commented out, so a Cursor deployment needs those uncommented and <code>ACPX_AGENTS</code> (or <code>CLI_AGENTS</code>) set before Cursor models are discovered.</li>
+<li>An admin API key of at least 16 characters if you want to set <code>admin.key</code> yourself; otherwise the interactive setup script requires one and plain <code>helm install</code> auto-generates it</li>
+<li><code>openssl</code>, only for the self-signed certificate in the Ingress recipe</li>
+</ul>
 <h2 id="start-locally-with-docker-compose">Start locally with Docker Compose</h2>
-<p>Bring up a local RootCoz on <code>http://localhost:800</code> with persistent data in <code>./data</code>.</p>
-<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>.env<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
-<span class="s">JENKINS_URL=https://jenkins.example.com</span>
-<span class="s">JENKINS_USER=ci-reader</span>
-<span class="s">JENKINS_PASSWORD=jenkins-api-token</span>
-<span class="s">JENKINS_SSL_VERIFY=true</span>
-<span class="s">AI_PROVIDER=gemini</span>
-<span class="s">AI_MODEL=gemini-2.5-pro</span>
-<span class="s">GEMINI_API_KEY=replace-with-real-gemini-key</span>
-<span class="s">LOG_LEVEL=INFO</span>
-<span class="s">DEBUG=false</span>
-<span class="s">EOF</span>
-
-docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
-curl<span class="w"> </span>http://localhost:800/health
-</code></pre></div>
-
-<p>This uses the repo’s <code>docker-compose.yaml</code>, builds the local image, and keeps the SQLite database in <code>./data</code>. Use it for laptops, demos, and single-user environments where <code>localhost</code> access is enough.</p>
-<ul>
-<li>After changing <code>.env</code>, reload with <code>docker compose up -d --force-recreate rootcoz</code>.</li>
-<li>Continue with <a href="quickstart.html">Quickstart</a> once the health check returns <code>{"status":"ok"}</code>.</li>
-</ul>
-<h2 id="bootstrap-a-shared-cluster-interactively">Bootstrap a shared cluster interactively</h2>
-<p>Use the setup script to generate safe Helm values files outside the repo and install the chart in one pass.</p>
-<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-
-uv<span class="w"> </span>run<span class="w"> </span>python<span class="w"> </span>scripts/helm-setup.py<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--release<span class="w"> </span>rootcoz<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--namespace<span class="w"> </span>rootcoz<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--output-dir<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-</code></pre></div>
-
-<p>The script prompts for cluster type, hostname, AI provider, credentials, and the bootstrap admin key, then writes <code>values.generated.yaml</code> and <code>values.secrets.yaml</code> before running <code>helm upgrade --install</code>. Use this when you want the fastest first-time shared deployment without hand-editing values files.</p>
-<ul>
-<li>Add <code>--skip-helm</code> to write files only.</li>
-<li>Add <code>--dry-run</code> to pass <code>--dry-run</code> through to Helm.</li>
-</ul>
-<h2 id="install-on-openshift-with-a-route">Install on OpenShift with a Route</h2>
-<p>Publish RootCoz on OpenShift with a stable route and keep sensitive values outside the git checkout.</p>
-<div class="highlight"><pre><span></span><code><span class="nv">NAMESPACE</span><span class="o">=</span>rootcoz
-<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">&quot;</span>
-
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
-<span class="s">route:</span>
-<span class="s">  enabled: true</span>
-<span class="s">  host: rootcoz.apps.example.com</span>
-<span class="s">ingress:</span>
-<span class="s">  enabled: false</span>
-<span class="s">ai:</span>
-<span class="s">  provider: gemini</span>
-<span class="s">  model: gemini-2.5-pro</span>
-<span class="s">EOF</span>
-
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
-<span class="s">ai:</span>
-<span class="s">  geminiApiKey: &quot;replace-with-real-gemini-key&quot;</span>
-<span class="s">admin:</span>
-<span class="s">  key: &quot;rootcoz-admin-2026-demo-key-please-change&quot;</span>
-<span class="s">encryptionKey: &quot;7d7f4cef5a224778a3a1a5d8af4c12b62&quot;</span>
-<span class="s">EOF</span>
-
-helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
-
-oc<span class="w"> </span>get<span class="w"> </span>route<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span>
-</code></pre></div>
-
-<p>This uses the chart’s default OpenShift-friendly path: a Route on top of the <code>rootcoz</code> service, persistent storage, and a bootstrap admin key you control from day one. Use it when you want a shared internal deployment with the smallest amount of cluster-specific tuning.</p>
-<ul>
-<li>Omit <code>route.host</code> or set it to <code>""</code> if you want OpenShift to generate the hostname.</li>
-<li>After the route exists, sign in as <code>admin</code> and continue with <a href="quickstart.html">Quickstart</a>.</li>
-</ul>
-<h2 id="install-on-kubernetes-with-tls-ingress">Install on Kubernetes with TLS Ingress</h2>
-<p>Run RootCoz behind a standard Kubernetes Ingress and a TLS secret so browser sessions stay on HTTPS.</p>
-<div class="highlight"><pre><span></span><code><span class="nv">NAMESPACE</span><span class="o">=</span>rootcoz
-<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">&quot;</span><span class="w"> </span>/tmp/rootcoz-tls
-
-kubectl<span class="w"> </span>create<span class="w"> </span>namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-o<span class="w"> </span>yaml<span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>-
-
-openssl<span class="w"> </span>req<span class="w"> </span>-x509<span class="w"> </span>-nodes<span class="w"> </span>-newkey<span class="w"> </span>rsa:2048<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-keyout<span class="w"> </span>/tmp/rootcoz-tls/tls.key<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-out<span class="w"> </span>/tmp/rootcoz-tls/tls.crt<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-days<span class="w"> </span><span class="m">365</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-subj<span class="w"> </span><span class="s2">&quot;/CN=rootcoz.example.com&quot;</span>
-
-kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>tls<span class="w"> </span>rootcoz-tls<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--cert<span class="o">=</span>/tmp/rootcoz-tls/tls.crt<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--key<span class="o">=</span>/tmp/rootcoz-tls/tls.key<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-o<span class="w"> </span>yaml<span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>-
-
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
-<span class="s">route:</span>
-<span class="s">  enabled: false</span>
-<span class="s">ingress:</span>
-<span class="s">  enabled: true</span>
-<span class="s">  host: rootcoz.example.com</span>
-<span class="s">  className: nginx</span>
-<span class="s">  tls:</span>
-<span class="s">    enabled: true</span>
-<span class="s">    secretName: rootcoz-tls</span>
-<span class="s">ai:</span>
-<span class="s">  provider: gemini</span>
-<span class="s">  model: gemini-2.5-pro</span>
-<span class="s">EOF</span>
-
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
-<span class="s">ai:</span>
-<span class="s">  geminiApiKey: &quot;replace-with-real-gemini-key&quot;</span>
-<span class="s">admin:</span>
-<span class="s">  key: &quot;rootcoz-admin-2026-demo-key-please-change&quot;</span>
-<span class="s">encryptionKey: &quot;7d7f4cef5a224778a3a1a5d8af4c12b62&quot;</span>
-<span class="s">EOF</span>
-
-helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
-</code></pre></div>
-
-<p>This recipe is for vanilla Kubernetes clusters where you want shared browser access and secure cookies from the start. The self-signed certificate keeps the recipe copy-pasteable; swap it for your normal cluster TLS secret or cert-manager output before exposing the service broadly.</p>
-<ul>
-<li>Replace <code>className: nginx</code> with your actual ingress class if needed.</li>
-<li>For production certificates, keep the same <code>secretName</code> and remove the <code>openssl</code> step.</li>
-</ul>
-<h2 id="run-a-private-clusterip-only-release-and-port-forward-it">Run a private ClusterIP-only release and port-forward it</h2>
-<p>Use this when you want a shared in-cluster deployment without exposing RootCoz through a Route or Ingress yet.</p>
-<div class="highlight"><pre><span></span><code><span class="nv">NAMESPACE</span><span class="o">=</span>rootcoz
-<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">&quot;</span>
-
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
-<span class="s">route:</span>
-<span class="s">  enabled: false</span>
-<span class="s">ingress:</span>
-<span class="s">  enabled: false</span>
-<span class="s">ai:</span>
-<span class="s">  provider: gemini</span>
-<span class="s">  model: gemini-2.5-pro</span>
-<span class="s">EOF</span>
-
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
-<span class="s">ai:</span>
-<span class="s">  geminiApiKey: &quot;replace-with-real-gemini-key&quot;</span>
-<span class="s">admin:</span>
-<span class="s">  key: &quot;rootcoz-admin-2026-demo-key-please-change&quot;</span>
-<span class="s">encryptionKey: &quot;7d7f4cef5a224778a3a1a5d8af4c12b62&quot;</span>
-<span class="s">EOF</span>
-
-helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
-
-kubectl<span class="w"> </span>port-forward<span class="w"> </span>svc/rootcoz<span class="w"> </span><span class="m">800</span>:800<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span>
-</code></pre></div>
-
-<p>This keeps the service internal to the cluster and gives you temporary browser and API access on <code>http://localhost:800</code> through <code>kubectl port-forward</code>. Use it for admin-only testing, locked-down evaluation clusters, or the period before your ingress or route is approved.</p>
-<ul>
-<li>With no Route or TLS Ingress, the chart automatically falls back to non-secure cookies for this HTTP-only access pattern.</li>
-<li>When you are ready to publish it, switch to the Route or Ingress recipe instead of editing the Service directly.</li>
-</ul>
-<h2 id="upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</h2>
-<p>Apply new values, wait for the rollout, and run the chart’s built-in health test after any deployment change.</p>
-<div class="highlight"><pre><span></span><code><span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-
-helm<span class="w"> </span>upgrade<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
-
-kubectl<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/rootcoz<span class="w"> </span>-n<span class="w"> </span>rootcoz
-helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>rootcoz<span class="w"> </span>-n<span class="w"> </span>rootcoz
-</code></pre></div>
-
-<p>This is the shortest safe path for normal Helm updates once your release is already running. The <code>helm test</code> pod curls <code>/health</code>, so you get a quick verification that the app is listening after the rollout finishes.</p>
-<ul>
-<li>If you changed external secrets out of band, follow with <code>kubectl rollout restart deployment/rootcoz -n rootcoz</code>.</li>
-<li>For first-login and first-analysis steps after the rollout, see <a href="quickstart.html">Quickstart</a>.# Deploying RootCoz</li>
-</ul>
-<blockquote>
-<p><strong>Note:</strong> The Helm chart bootstraps RootCoz itself. Configure Jenkins, Jira, GitHub, Report Portal, and other runtime settings in the UI after first login. See <a href="configuration-reference.html">Configuration Reference</a> and <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a> for details.</p>
-<p><strong>Warning:</strong> The Helm chart is single-replica and expects one persistent volume. Enable either <code>route</code> or <code>ingress</code>, not both.</p>
-</blockquote>
-<h2 id="start-locally-with-docker-compose_1">Start locally with Docker Compose</h2>
 <p>Bring up a local RootCoz on <code>http://localhost:8000</code> with persistent data in <code>./data</code>.</p>
-<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>.env<span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+<div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>.env<span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
 <span class="s">JENKINS_URL=https://jenkins.example.com</span>
 <span class="s">JENKINS_USER=ci-reader</span>
 <span class="s">JENKINS_PASSWORD=jenkins-api-token</span>
@@ -424,16 +251,19 @@ curl<span class="w"> </span>http://localhost:8000/health
 <p>This uses the repo’s <code>docker-compose.yaml</code>, builds the local image, and keeps the SQLite database in <code>./data</code>. Use it for laptops, demos, and single-user environments where <code>localhost</code> access is enough.</p>
 <ul>
 <li>After changing <code>.env</code>, reload with <code>docker compose up -d --force-recreate rootcoz</code>.</li>
-<li>Continue with <a href="quickstart.html">Quickstart</a> once the health check returns <code>{"status":"ok"}</code>.</li>
+<li>Continue with <a href="quickstart.html">Quickstart</a> once the health check returns <code>{"status":"healthy"}</code>.</li>
 </ul>
-<h2 id="bootstrap-a-shared-cluster-interactively_1">Bootstrap a shared cluster interactively</h2>
+<blockquote>
+<p><strong>Note:</strong> This <code>.env</code> leaves the shipped defaults for access control in place: <code>REQUIRE_APPROVAL</code> is <code>true</code> and <code>DEFAULT_USER_ROLE</code> is <code>reviewer</code>. Add <code>REQUIRE_APPROVAL=false</code> and <code>DEFAULT_USER_ROLE=operator</code> if you want to register and submit without an admin in the loop.</p>
+</blockquote>
+<h2 id="bootstrap-a-shared-cluster-interactively">Bootstrap a shared cluster interactively</h2>
 <p>Use the setup script to generate safe Helm values files outside the repo and install the chart in one pass.</p>
-<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm"</span>
 
 uv<span class="w"> </span>run<span class="w"> </span>python<span class="w"> </span>scripts/helm-setup.py<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--release<span class="w"> </span>rootcoz<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--namespace<span class="w"> </span>rootcoz<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--output-dir<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
+<span class="w">  </span>--output-dir<span class="w"> </span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm"</span>
 </code></pre></div>
 
 <p>The script prompts for cluster type, hostname, AI provider, credentials, and the bootstrap admin key, then writes <code>values.generated.yaml</code> and <code>values.secrets.yaml</code> before running <code>helm upgrade --install</code>. Use this when you want the fastest first-time shared deployment without hand-editing values files.</p>
@@ -441,13 +271,13 @@ uv<span class="w"> </span>run<span class="w"> </span>python<span class="w"> </sp
 <li>Add <code>--skip-helm</code> to write files only.</li>
 <li>Add <code>--dry-run</code> to pass <code>--dry-run</code> through to Helm.</li>
 </ul>
-<h2 id="install-on-openshift-with-a-route_1">Install on OpenShift with a Route</h2>
+<h2 id="install-on-openshift-with-a-route">Install on OpenShift with a Route</h2>
 <p>Publish RootCoz on OpenShift with a stable route and keep sensitive values outside the git checkout.</p>
 <div class="highlight"><pre><span></span><code><span class="nv">NAMESPACE</span><span class="o">=</span>rootcoz
-<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">&quot;</span>
+<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">"</span>
 
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
 <span class="s">route:</span>
 <span class="s">  enabled: true</span>
 <span class="s">  host: rootcoz.apps.example.com</span>
@@ -458,20 +288,20 @@ cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</
 <span class="s">  model: gemini-2.5-pro</span>
 <span class="s">EOF</span>
 
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span><span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
 <span class="s">ai:</span>
-<span class="s">  geminiApiKey: &quot;replace-with-real-gemini-key&quot;</span>
+<span class="s">  geminiApiKey: "replace-with-real-gemini-key"</span>
 <span class="s">admin:</span>
-<span class="s">  key: &quot;rootcoz-admin-2026-demo-key-please-change&quot;</span>
-<span class="s">encryptionKey: &quot;7d7f4cef5a224778a3a1a5d8af4c12b62&quot;</span>
+<span class="s">  key: "rootcoz-admin-2026-demo-key-please-change"</span>
+<span class="s">encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"</span>
 <span class="s">EOF</span>
 
 helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
+<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">"</span><span class="nv">$NAMESPACE</span><span class="s2">"</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span>
 
-oc<span class="w"> </span>get<span class="w"> </span>route<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span>
+oc<span class="w"> </span>get<span class="w"> </span>route<span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$NAMESPACE</span><span class="s2">"</span>
 </code></pre></div>
 
 <p>This uses the chart’s default OpenShift-friendly path: a Route on top of the <code>rootcoz</code> service, persistent storage, and a bootstrap admin key you control from day one. Use it when you want a shared internal deployment with the smallest amount of cluster-specific tuning.</p>
@@ -479,27 +309,27 @@ oc<span class="w"> </span>get<span class="w"> </span>route<span class="w"> </spa
 <li>Omit <code>route.host</code> or set it to <code>""</code> if you want OpenShift to generate the hostname.</li>
 <li>After the route exists, sign in as <code>admin</code> and continue with <a href="quickstart.html">Quickstart</a>.</li>
 </ul>
-<h2 id="install-on-kubernetes-with-tls-ingress_1">Install on Kubernetes with TLS Ingress</h2>
+<h2 id="install-on-kubernetes-with-tls-ingress">Install on Kubernetes with TLS Ingress</h2>
 <p>Run RootCoz behind a standard Kubernetes Ingress and a TLS secret so browser sessions stay on HTTPS.</p>
 <div class="highlight"><pre><span></span><code><span class="nv">NAMESPACE</span><span class="o">=</span>rootcoz
-<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">&quot;</span><span class="w"> </span>/tmp/rootcoz-tls
+<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">"</span><span class="w"> </span>/tmp/rootcoz-tls
 
-kubectl<span class="w"> </span>create<span class="w"> </span>namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-o<span class="w"> </span>yaml<span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>-
+kubectl<span class="w"> </span>create<span class="w"> </span>namespace<span class="w"> </span><span class="s2">"</span><span class="nv">$NAMESPACE</span><span class="s2">"</span><span class="w"> </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-o<span class="w"> </span>yaml<span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>-
 
 openssl<span class="w"> </span>req<span class="w"> </span>-x509<span class="w"> </span>-nodes<span class="w"> </span>-newkey<span class="w"> </span>rsa:2048<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-keyout<span class="w"> </span>/tmp/rootcoz-tls/tls.key<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-out<span class="w"> </span>/tmp/rootcoz-tls/tls.crt<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-days<span class="w"> </span><span class="m">365</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-subj<span class="w"> </span><span class="s2">&quot;/CN=rootcoz.example.com&quot;</span>
+<span class="w">  </span>-subj<span class="w"> </span><span class="s2">"/CN=rootcoz.example.com"</span>
 
 kubectl<span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>tls<span class="w"> </span>rootcoz-tls<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--cert<span class="o">=</span>/tmp/rootcoz-tls/tls.crt<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--key<span class="o">=</span>/tmp/rootcoz-tls/tls.key<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$NAMESPACE</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-o<span class="w"> </span>yaml<span class="w"> </span><span class="p">|</span><span class="w"> </span>kubectl<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>-
 
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
 <span class="s">route:</span>
 <span class="s">  enabled: false</span>
 <span class="s">ingress:</span>
@@ -514,18 +344,18 @@ cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</
 <span class="s">  model: gemini-2.5-pro</span>
 <span class="s">EOF</span>
 
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span><span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
 <span class="s">ai:</span>
-<span class="s">  geminiApiKey: &quot;replace-with-real-gemini-key&quot;</span>
+<span class="s">  geminiApiKey: "replace-with-real-gemini-key"</span>
 <span class="s">admin:</span>
-<span class="s">  key: &quot;rootcoz-admin-2026-demo-key-please-change&quot;</span>
-<span class="s">encryptionKey: &quot;7d7f4cef5a224778a3a1a5d8af4c12b62&quot;</span>
+<span class="s">  key: "rootcoz-admin-2026-demo-key-please-change"</span>
+<span class="s">encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"</span>
 <span class="s">EOF</span>
 
 helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
+<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">"</span><span class="nv">$NAMESPACE</span><span class="s2">"</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span>
 </code></pre></div>
 
 <p>This recipe is for vanilla Kubernetes clusters where you want shared browser access and secure cookies from the start. The self-signed certificate keeps the recipe copy-pasteable; swap it for your normal cluster TLS secret or cert-manager output before exposing the service broadly.</p>
@@ -533,13 +363,13 @@ helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class=
 <li>Replace <code>className: nginx</code> with your actual ingress class if needed.</li>
 <li>For production certificates, keep the same <code>secretName</code> and remove the <code>openssl</code> step.</li>
 </ul>
-<h2 id="run-a-private-clusterip-only-release-and-port-forward-it_1">Run a private ClusterIP-only release and port-forward it</h2>
+<h2 id="run-a-private-clusterip-only-release-and-port-forward-it">Run a private ClusterIP-only release and port-forward it</h2>
 <p>Use this when you want a shared in-cluster deployment without exposing RootCoz through a Route or Ingress yet.</p>
 <div class="highlight"><pre><span></span><code><span class="nv">NAMESPACE</span><span class="o">=</span>rootcoz
-<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
-mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">&quot;</span>
+<span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">"</span>
 
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
 <span class="s">route:</span>
 <span class="s">  enabled: false</span>
 <span class="s">ingress:</span>
@@ -549,20 +379,20 @@ cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</
 <span class="s">  model: gemini-2.5-pro</span>
 <span class="s">EOF</span>
 
-cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span><span class="w"> </span><span class="s">&lt;&lt;&#39;EOF&#39;</span>
+cat<span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span><span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>
 <span class="s">ai:</span>
-<span class="s">  geminiApiKey: &quot;replace-with-real-gemini-key&quot;</span>
+<span class="s">  geminiApiKey: "replace-with-real-gemini-key"</span>
 <span class="s">admin:</span>
-<span class="s">  key: &quot;rootcoz-admin-2026-demo-key-please-change&quot;</span>
-<span class="s">encryptionKey: &quot;7d7f4cef5a224778a3a1a5d8af4c12b62&quot;</span>
+<span class="s">  key: "rootcoz-admin-2026-demo-key-please-change"</span>
+<span class="s">encryptionKey: "7d7f4cef5a224778a3a1a5d8af4c12b62"</span>
 <span class="s">EOF</span>
 
 helm<span class="w"> </span>upgrade<span class="w"> </span>--install<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
+<span class="w">  </span>--namespace<span class="w"> </span><span class="s2">"</span><span class="nv">$NAMESPACE</span><span class="s2">"</span><span class="w"> </span>--create-namespace<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span>
 
-kubectl<span class="w"> </span>port-forward<span class="w"> </span>svc/rootcoz<span class="w"> </span><span class="m">8000</span>:8000<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$NAMESPACE</span><span class="s2">&quot;</span>
+kubectl<span class="w"> </span>port-forward<span class="w"> </span>svc/rootcoz<span class="w"> </span><span class="m">8000</span>:8000<span class="w"> </span>-n<span class="w"> </span><span class="s2">"</span><span class="nv">$NAMESPACE</span><span class="s2">"</span>
 </code></pre></div>
 
 <p>This keeps the service internal to the cluster and gives you temporary browser and API access on <code>http://localhost:8000</code> through <code>kubectl port-forward</code>. Use it for admin-only testing, locked-down evaluation clusters, or the period before your ingress or route is approved.</p>
@@ -570,13 +400,13 @@ kubectl<span class="w"> </span>port-forward<span class="w"> </span>svc/rootcoz<s
 <li>With no Route or TLS Ingress, the chart automatically falls back to non-secure cookies for this HTTP-only access pattern.</li>
 <li>When you are ready to publish it, switch to the Route or Ingress recipe instead of editing the Service directly.</li>
 </ul>
-<h2 id="upgrade-and-smoke-test-a-helm-release_1">Upgrade and smoke-test a Helm release</h2>
+<h2 id="upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</h2>
 <p>Apply new values, wait for the rollout, and run the chart’s built-in health test after any deployment change.</p>
-<div class="highlight"><pre><span></span><code><span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">&quot;</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm&quot;</span>
+<div class="highlight"><pre><span></span><code><span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm"</span>
 
 helm<span class="w"> </span>upgrade<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml&quot;</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span>
 
 kubectl<span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/rootcoz<span class="w"> </span>-n<span class="w"> </span>rootcoz
 helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>rootcoz<span class="w"> </span>-n<span class="w"> </span>rootcoz
@@ -586,6 +416,41 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <ul>
 <li>If you changed external secrets out of band, follow with <code>kubectl rollout restart deployment/rootcoz -n rootcoz</code>.</li>
 <li>For first-login and first-analysis steps after the rollout, see <a href="quickstart.html">Quickstart</a>.</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>
+<p><code>route.enabled and ingress.enabled are mutually exclusive</code>
+  The chart refuses to render with both on. Set the one you are not using to <code>false</code>.</p>
+</li>
+<li>
+<p><code>ingress.host is required when ingress.enabled is true</code>
+  Kubernetes Ingress has no auto-generated hostname. Add <code>ingress.host</code> or switch to the OpenShift Route recipe.</p>
+</li>
+<li>
+<p><code>ai.provider and ai.model are required for install</code>
+  These two keys are enforced on first install only. Add them to <code>values.generated.yaml</code>.</p>
+</li>
+<li>
+<p><code>ai.geminiApiKey is required when ai.provider is gemini</code>
+  Add the matching credential key for your provider: <code>ai.geminiApiKey</code>, <code>ai.anthropicApiKey</code>, or <code>ai.cursor.apiKey</code>.</p>
+</li>
+<li>
+<p><code>ADMIN_KEY not found in existing secret and admin.key not set in values</code>
+  The credentials Secret was edited or deleted outside Helm. Restore the key by setting <code>admin.key</code> in values to match your original key, or reinstall from scratch.</p>
+</li>
+<li>
+<p><code>helm template</code> renders empty secrets
+  Expected. Auto-generated secrets use Helm <code>lookup</code>, which needs a live cluster. Run <code>helm install</code> or <code>helm upgrade</code> instead.</p>
+</li>
+<li>
+<p><code>kubectl port-forward</code> reports the pod is not ready
+  Wait for the rollout with <code>kubectl rollout status deployment/rootcoz -n rootcoz</code>, then run <code>helm test rootcoz -n rootcoz</code> to confirm <code>/health</code> responds.</p>
+</li>
+<li>
+<p>I cannot log in as <code>admin</code>.<br>
+  Retrieve the bootstrap key with <code>kubectl get secret rootcoz-secret -n rootcoz -o jsonpath='{.data.ADMIN_KEY}' | base64 -d; echo</code> and use it as the password for username <code>admin</code>.</p>
+</li>
 </ul>
 <h2 id="related-pages">Related Pages</h2>
 <ul>
@@ -598,53 +463,46 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
                 </div>
             </article>
             <nav class="page-nav">
-                
-                <a href="automate-common-tasks-with-the-cli.html" class="page-nav-link page-nav-prev">
+
+                <a href="quickstart.html" class="page-nav-link page-nav-prev">
                     <span class="page-nav-label">Previous</span>
-                    <span class="page-nav-title">Automating Common Tasks with the CLI</span>
+                    <span class="page-nav-title">Quickstart</span>
                 </a>
-                
-                
-                <a href="api-reference.html" class="page-nav-link page-nav-next">
+
+
+                <a href="configuration-reference.html" class="page-nav-link page-nav-next">
                     <span class="page-nav-label">Next</span>
-                    <span class="page-nav-title">API Endpoint Reference</span>
+                    <span class="page-nav-title">Configuration Reference</span>
                 </a>
-                
+
             </nav>
-            
+
             <aside class="toc-sidebar">
                 <div class="toc-container">
                     <h3>On this page</h3>
                     <div class="toc">
 <ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
 <li><a href="#start-locally-with-docker-compose">Start locally with Docker Compose</a></li>
 <li><a href="#bootstrap-a-shared-cluster-interactively">Bootstrap a shared cluster interactively</a></li>
 <li><a href="#install-on-openshift-with-a-route">Install on OpenShift with a Route</a></li>
 <li><a href="#install-on-kubernetes-with-tls-ingress">Install on Kubernetes with TLS Ingress</a></li>
 <li><a href="#run-a-private-clusterip-only-release-and-port-forward-it">Run a private ClusterIP-only release and port-forward it</a></li>
 <li><a href="#upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</a></li>
-<li><a href="#start-locally-with-docker-compose_1">Start locally with Docker Compose</a></li>
-<li><a href="#bootstrap-a-shared-cluster-interactively_1">Bootstrap a shared cluster interactively</a></li>
-<li><a href="#install-on-openshift-with-a-route_1">Install on OpenShift with a Route</a></li>
-<li><a href="#install-on-kubernetes-with-tls-ingress_1">Install on Kubernetes with TLS Ingress</a></li>
-<li><a href="#run-a-private-clusterip-only-release-and-port-forward-it_1">Run a private ClusterIP-only release and port-forward it</a></li>
-<li><a href="#upgrade-and-smoke-test-a-helm-release_1">Upgrade and smoke-test a Helm release</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#related-pages">Related Pages</a></li>
 </ul>
 </div>
 
                 </div>
             </aside>
-            
+
 
         </main>
 
         <footer class="page-footer">
-            
-            <span class="footer-version">Generated from version 4.4.2</span>
-            <span class="footer-sep">&middot;</span>
-            
-            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+
+            Built from <code>docs/*.md</code> by <code>pi-docsite</code>
             <span class="footer-sep">&middot;</span>
             <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
         </footer>
@@ -652,13 +510,14 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-    <script src="assets/theme.js"></script>
-    <script src="assets/search.js"></script>
-    <script src="assets/copy.js"></script>
-    <script src="assets/callouts.js"></script>
-    <script src="assets/scrollspy.js"></script>
-    <script src="assets/codelabels.js"></script>
-    <script src="assets/github.js"></script>
+    <script src="assets/theme.js?v=5a6efa51d2"></script>
+
+    <script src="assets/search.js?v=5a6efa51d2"></script>
+    <script src="assets/copy.js?v=5a6efa51d2"></script>
+    <script src="assets/callouts.js?v=5a6efa51d2"></script>
+    <script src="assets/scrollspy.js?v=5a6efa51d2"></script>
+    <script src="assets/codelabels.js?v=5a6efa51d2"></script>
+    <script src="assets/github.js?v=5a6efa51d2"></script>
     <script>
 (function() {
     var toggle = document.getElementById('sidebar-toggle');
@@ -704,5 +563,6 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
     }
 })();
 </script>
+<!-- generated by pi-docsite -->
 </body>
 </html>

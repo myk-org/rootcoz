@@ -33,12 +33,12 @@ Open `History`, use the search box to narrow the table by test name, then add a 
 Start with `Failure Rate`, `Total Runs`, `Failures`, and `Consecutive` to understand whether the test is stable, degrading, or repeatedly broken. Then read the classification badges, comments, `First seen`, and `Last seen`, and open any row in `Recent Runs` to jump back to a specific result.
 
 4. Move to `Reports` for broader trends.
-Choose `Total Failures` when you want summary counts, `Classification Overrides` when you want review changes, or `Issues Created` when you want follow-up visibility. Use the filters across the top to narrow by `Team`, `Tier`, `Version`, `Status`, `Review status`, date range, and label include/exclude chips.
+Choose `Total Failures` when you want summary counts, `Classification Overrides` when you want review changes, or `Issues Created` when you want follow-up visibility. Use the filters across the top — `All teams`, `All tiers`, `All versions`, `All statuses`, `Review:`, the date range picker, and the `Tags:` include/exclude chips — to narrow the slice.
 
 > **Note:** If you leave the status filter empty, report summaries start with completed jobs only.
 
 5. Read the report detail that matches your question.
-In `Total Failures`, expand `Job Details` to compare jobs in the current slice. In `Classification Overrides`, expand a `from -> to` group to see which tests changed and who changed them; in `Issues Created`, open the external issue link or the linked result to inspect the original analysis.
+In `Total Failures`, expand `Job Details` to compare jobs in the current slice. In `Classification Overrides`, expand a transition group such as `CODE ISSUE → PRODUCT BUG` to see which tests changed, on which axis (`Root Cause` or `Pattern`), and who changed them; in `Issues Created`, open the external issue link or the linked result to inspect the original analysis.
 
 When you find a specific result you want to confirm or correct, see [Reviewing and Classifying Failures](review-and-classify-failures.html) for details.
 
@@ -59,7 +59,7 @@ See [CLI Command Reference](cli-reference.html) for all flags, or see [API Endpo
 
 ## Troubleshooting
 - I do not see `Reports` in the sidebar.  
-  Ask an administrator to grant report access, then reload the page.
+  Reports access is a separate flag from your role. Ask an administrator to grant reports access, then reload the page. Admins always have it.
 
 - `History` is empty for a test I expect to find.  
   Remove the classification filter, widen the date range, or search with the full test name.
