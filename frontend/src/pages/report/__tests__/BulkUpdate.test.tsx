@@ -4,12 +4,13 @@ import { render, screen, waitFor, within, fireEvent } from '@testing-library/rea
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { ReportProvider, useReportDispatch } from '../ReportContext'
+import { ReportProvider, useReportDispatch, useReportState } from '../ReportContext'
 import { FailureCard } from '../FailureCard'
 import { GroupSelectAll } from '../GroupSelectAll'
 import { BulkUpdateBar } from '../BulkUpdateBar'
 import { groupFailures, scopedGroups } from '@/lib/grouping'
-import { reconcileSelection, type SelectedGroup } from '../failureUpdates'
+import { reviewKey } from '@/lib/reviewKey'
+import { reconcileSelection, selectedScopes, type SelectedGroup } from '../failureUpdates'
 import type { AnalysisResult, FailureAnalysis } from '@/types'
 
 // The real grouping behaviour, with `scopedGroups` wrapped in a spy so the
@@ -126,6 +127,159 @@ beforeEach(() => {
   put.mockResolvedValue({ reviewed_by: 'rev' })
   get.mockResolvedValue({ tracked_in: {} })
 })
+
+/** One row of the reconciliation table: a selection the user left against
+ *  `before`, the report it is reconciled against (`after`), and optionally a
+ *  further refresh (`second`). `expected` is the selection after reconciliation —
+ *  which entry survived, which names it holds and whether it stays narrowed. */
+interface ReconcileTransition {
+  name: string
+  selection: SelectedGroup[]
+  after: AnalysisResult
+  second?: AnalysisResult
+  expected: { tests: string[]; narrowed: boolean }[]
+}
+
+/** Report holding exactly these failures, no child jobs. */
+function report(...failures: FailureAnalysis[]): AnalysisResult {
+  return resultPayload(failures).result
+}
+
+/** A selection entry as a card toggle builds it: the id of the live group that
+ *  holds `idFrom`, holding `idFrom` (or the narrowed `testNames`). */
+function selected(before: AnalysisResult, idFrom: string[], over: Partial<SelectedGroup> = {}): SelectedGroup {
+  const g = scopedGroups(before).find((x) => x.tests.some((t) => idFrom.includes(t.test_name)))
+  if (!g) throw new Error(`no live group holds ${idFrom.join(',')}`)
+  return { id: g.id, testNames: idFrom, ...over }
+}
+
+/** Every way the live membership of a selection can change between two refreshes.
+ *  Table-driven on purpose: a hand-picked set is always one transition short —
+ *  the merged-signature case shipped while split, add, narrow and remove all
+ *  passed. Each row asserts two properties instead of one expected value:
+ *  exactly one entry per (scope, liveGroupId), and a bulk count equal to the
+ *  number of distinct tests sent. */
+const RECONCILE_TRANSITIONS: ReconcileTransition[] = [
+  {
+    // One selected signature spreads over two live groups: one entry holding the
+    // union, so the split half keeps its own override request later.
+    name: 'split: one selected group fans out over two live groups',
+    selection: [selected(report(failure('test-a', 'sig-x'), failure('test-b', 'sig-x')), ['test-a', 'test-b'])],
+    after: report(failure('test-a', 'sig-x'), failure('test-b', 'sig-y')),
+    expected: [{ tests: ['test-a', 'test-b'], narrowed: false }],
+  },
+  {
+    // Two separately selected groups now share a signature. One live group, so
+    // one entry: counting both would double every test.
+    name: 'merge: two selected groups become one live group',
+    selection: (() => {
+      const before = report(failure('test-a', 'sig-a'), failure('test-b', 'sig-b'))
+      return [selected(before, ['test-a']), selected(before, ['test-b'])]
+    })(),
+    after: report(failure('test-a', 'sig-a'), failure('test-b', 'sig-a')),
+    expected: [{ tests: ['test-a', 'test-b'], narrowed: false }],
+  },
+  {
+    // A joining test is picked up: an un-narrowed entry tracks live members.
+    name: 'add: a test joins the selected signature',
+    selection: (() => {
+      const before = report(failure('test-a', 'sig-a'), failure('test-b', 'sig-b'))
+      return [selected(before, ['test-a']), selected(before, ['test-b'])]
+    })(),
+    after: report(failure('test-a', 'sig-a'), failure('test-b', 'sig-b'), failure('test-c', 'sig-a')),
+    expected: [
+      { tests: ['test-a', 'test-c'], narrowed: false },
+      { tests: ['test-b'], narrowed: false },
+    ],
+  },
+  {
+    // A removed test drops out; the empty entry disappears with it.
+    name: 'remove: a selected test is gone from the report',
+    selection: (() => {
+      const before = report(failure('test-a', 'sig-a'), failure('test-b', 'sig-b'), failure('test-c', 'sig-b'))
+      return [selected(before, ['test-a']), selected(before, ['test-b', 'test-c'])]
+    })(),
+    after: report(failure('test-a', 'sig-a'), failure('test-c', 'sig-b')),
+    expected: [
+      { tests: ['test-a'], narrowed: false },
+      { tests: ['test-c'], narrowed: false },
+    ],
+  },
+  {
+    // A member of the selected group is replaced by a new test with the same
+    // signature: the entry tracks the live members, so the newcomer is picked up.
+    name: 'replace: a member of the selected signature is replaced',
+    selection: [selected(report(failure('test-a', 'sig-x'), failure('test-b', 'sig-x')), ['test-a', 'test-b'])],
+    after: report(failure('test-a', 'sig-x'), failure('test-z', 'sig-x')),
+    expected: [{ tests: ['test-a', 'test-z'], narrowed: false }],
+  },
+  {
+    // The retry leftover: one name of a two-test group, and it stays that way.
+    name: 'narrow: a partial-failure retry leaves one test of the group',
+    selection: [selected(report(failure('test-a', 'sig-a'), failure('test-b', 'sig-a')), ['test-a', 'test-b'], {
+      testNames: ['test-b'], narrowed: true,
+    })],
+    after: report(failure('test-a', 'sig-a'), failure('test-b', 'sig-a')),
+    expected: [{ tests: ['test-b'], narrowed: true }],
+  },
+  {
+    // The same narrow, then two more refreshes that move the selected test into
+    // another group and grow that group: still one name, still narrowed.
+    name: 're-widen-after-narrow: further refreshes never re-widen it',
+    selection: [selected(report(failure('test-a', 'sig-a'), failure('test-b', 'sig-b')), ['test-b'], { narrowed: true })],
+    after: report(failure('test-a', 'sig-a'), failure('test-b', 'sig-a')),
+    second: report(failure('test-a', 'sig-a'), failure('test-b', 'sig-a'), failure('test-c', 'sig-a'), failure('test-d', 'sig-b')),
+    expected: [{ tests: ['test-b'], narrowed: true }],
+  },
+  {
+    // The case the narrowed exemption let through: two groups narrowed by two
+    // separate retries, then merged. Exempt from re-widening, never from folding.
+    name: 'two-narrowed-entries-merge: two retry-narrowed groups share a signature',
+    selection: (() => {
+      const before = report(failure('test-a', 'sig-a'), failure('test-b', 'sig-b'))
+      return [
+        selected(before, ['test-a'], { testNames: ['test-a'], narrowed: true }),
+        selected(before, ['test-b'], { testNames: ['test-b'], narrowed: true }),
+      ]
+    })(),
+    after: report(failure('test-a', 'sig-a'), failure('test-b', 'sig-a')),
+    expected: [{ tests: ['test-a', 'test-b'], narrowed: true }],
+  },
+  {
+    // Mixed contributors: the un-narrowed entry tracks the live members, the
+    // narrowed one is not re-widened, and one entry results either way.
+    name: 'merge of a narrowed and an un-narrowed entry',
+    selection: (() => {
+      const before = report(failure('test-a', 'sig-a'), failure('test-b', 'sig-b'), failure('test-c', 'sig-b'))
+      return [
+        selected(before, ['test-a']),
+        selected(before, ['test-b', 'test-c'], { testNames: ['test-b'], narrowed: true }),
+      ]
+    })(),
+    after: report(failure('test-a', 'sig-a'), failure('test-b', 'sig-a'), failure('test-c', 'sig-b')),
+    expected: [{ tests: ['test-a', 'test-b'], narrowed: true }],
+  },
+  {
+    // Same signature, different child jobs: scope keeps them apart, so the
+    // buckets do too. Two entries, one per (scope, liveGroupId).
+    name: 'the same signature in two child jobs stays two entries',
+    selection: [
+      { id: 'top', testNames: ['test-a'] },
+      { id: 'child', testNames: ['test-b'], childJobName: 'child', childBuildNumber: 7 },
+    ],
+    after: {
+      ...report(failure('test-a', 'sig-a'), failure('test-c', 'sig-a')),
+      child_job_analyses: [{
+        id: 'child-1', job_name: 'child', build_number: 7, jenkins_url: null, summary: null,
+        note: null, failed_children: [], failures: [failure('test-b', 'sig-a')],
+      }],
+    },
+    expected: [
+      { tests: ['test-a', 'test-c'], narrowed: false },
+      { tests: ['test-b'], narrowed: false },
+    ],
+  },
+]
 
 describe('bulk failure selection', () => {
   it('bulk-marks individual selections as reviewed and clears the selection', async () => {
@@ -425,6 +579,36 @@ describe('bulk failure selection', () => {
     ])
   })
 
+  it.each(RECONCILE_TRANSITIONS)('$name', ({ selection, after, second, expected }) => {
+    // Reconcile once, and a second time when the row carries a further refresh —
+    // the fold must be idempotent.
+    let live: AnalysisResult = after
+    let state = reconcileSelection(live, Object.fromEntries(selection.map((g) => [g.id, g])))
+    if (second) {
+      live = second
+      state = reconcileSelection(live, state)
+    }
+    const groups = Object.values(state)
+
+    // PROPERTY 1: one entry per (scope, liveGroupId), whatever the mix of
+    // narrowed inputs. A merged signature claimed twice is the defect.
+    const claims = groups.flatMap((g) =>
+      scopedGroups(live, g.childJobName, g.childBuildNumber)
+        .filter((x) => x.tests.some((t) => g.testNames.includes(t.test_name)))
+        .map((x) => `${g.childJobName ?? ''}#${g.childBuildNumber ?? 0}:${x.id}`),
+    )
+    expect(claims.length).toBeGreaterThan(0)
+    expect([...new Set(claims)]).toHaveLength(claims.length)
+
+    // PROPERTY 2: the bulk count is the number of DISTINCT tests actually sent.
+    const sent = selectedScopes(groups)
+    expect(new Set(sent.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber))).size).toBe(sent.length)
+    expect(sent.length).toBe(groups.flatMap((g) => g.testNames).length)
+
+    // Membership source and the `narrowed` flag, which keepSelectionAfterRun reads.
+    expect(groups.map((g) => ({ tests: g.testNames, narrowed: !!g.narrowed }))).toEqual(expected)
+  })
+
   it('sends one override request per group when a refresh splits the selected signature', async () => {
     // The refreshed report gives test-c2 a signature of its own, splitting the
     // selected sig-c group across two live groups.
@@ -452,6 +636,48 @@ describe('bulk failure selection', () => {
     }
     // ...and both were covered, so neither half is left stranded in the selection.
     await waitFor(() => expect(screen.queryByText(/selected in/)).not.toBeInTheDocument())
+  })
+
+  it('collapses a card toggle that re-selects half of a split group into one override request', async () => {
+    // A split leaves the entry spanning both live groups under the ORIGINAL id, so
+    // ticking one of the two cards is a SECOND entry for a live group already in
+    // the selection — a toggle is never reconciled. `widenToSignatureGroups` is what
+    // turns that back into one request per live group.
+    const refreshed = [FAILURES[0], FAILURES[1], failure('test-c1', 'sig-c'), failure('test-c2', 'sig-c-split')]
+    function LiveCards() {
+      const { result } = useReportState()
+      return <>{groupFailures(result?.failures ?? []).map((g, i) => (
+        <FailureCard key={g.id} group={g} jobId="job-1" index={i} />
+      ))}</>
+    }
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ReportProvider>
+            <SeedResult />
+            <SseRefresh label="Split" failures={refreshed} />
+            <LiveCards />
+            <BulkUpdateBar />
+          </ReportProvider>
+        </TooltipProvider>
+      </MemoryRouter>,
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('checkbox', { name: 'Select test-c1' }))
+    expect(screen.getByText(/2 tests selected in 1 failure/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Split' }))
+    expect(screen.getByText(/2 tests selected in 1 failure/)).toBeInTheDocument()
+
+    fireEvent.click(behindDialog('Select test-c2', 'checkbox'))
+    // test-c2 is now counted twice: the split entry and the toggled half.
+    await waitFor(() => expect(screen.getByText(/3 tests selected in 2 failures/)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('combobox', { name: 'Bulk classification' }))
+    await user.click(await screen.findByRole('option', { name: 'PRODUCT BUG' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Apply' }))
+    // ...but the duplicate collapses: one request per live group, not per entry.
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
   })
 
   it('applies an override to the whole signature group after the selection was narrowed', async () => {

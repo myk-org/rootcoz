@@ -152,6 +152,15 @@ export function selectedScopes(groups: SelectedGroup[]): FailureScope[] {
  *    entry across several live groups it holds the union, so a name is dropped
  *    here only when it no longer exists in the report.
  *
+ *  DE-DUPLICATION applies to EVERY entry, narrowed or not — narrowing exempts an
+ *  entry from RE-WIDENING, never from folding. Entries are keyed by the live group
+ *  (scope included, since the same signature can exist in several child jobs) they
+ *  resolve to, and entries that resolve to the SAME live group become ONE entry
+ *  holding the union of their names. Without this, two groups a refresh merged
+ *  would stay two entries over one live group: the bulk bar counts each test
+ *  twice, sends a duplicate request, and a failed duplicate leaves an
+ *  already-updated test selected for retry.
+ *
  *  ponytail: keeps the original group ids, so a regrouped signature can leave an id
  *  with no card (at worst one duplicated write if the user re-selects everything).
  *  Re-derive the `child-<hash>` card prefix here if that ever matters.
@@ -161,17 +170,38 @@ export function reconcileSelection(
   selection: Record<string, SelectedGroup>,
 ): Record<string, SelectedGroup> {
   const scoped = scopedGroupPass(result)
-  const next: Record<string, SelectedGroup> = {}
-  for (const [id, g] of Object.entries(selection)) {
+  // Each entry reconciled on its own, with the live groups it resolves to.
+  const resolved = Object.entries(selection).map(([id, g]) => {
     const live = scoped(g.childJobName, g.childBuildNumber)
     const selected = new Set(g.testNames)
     const alive = new Set(groupNames(live))
+    const siblings = live.filter((x) => x.tests.some((t) => selected.has(t.test_name)))
     const testNames = g.narrowed
       ? g.testNames.filter((n) => alive.has(n))
-      : groupNames(live.filter((x) => x.tests.some((t) => selected.has(t.test_name))))
-    if (testNames.length > 0) next[id] = { ...g, testNames }
+      : groupNames(siblings)
+    return { id, g, testNames, liveIds: siblings.map((x) => x.id) }
+  }).filter((r) => r.testNames.length > 0)
+
+  // Fold: one entry per live group. A merge (two selected groups that now share
+  // a signature) or a split touching an already-selected group lands here too —
+  // the entry survives under the first contributor's id, `narrowed` if ANY
+  // contributor was narrowed, holding the union of the contributors' names.
+  const folded: { id: string; group: SelectedGroup; liveIds: string[] }[] = []
+  for (const r of resolved) {
+    const hit = folded.find((f) => f.liveIds.some((l) => r.liveIds.includes(l)))
+    if (!hit) {
+      folded.push({ id: r.id, group: { ...r.g, testNames: r.testNames }, liveIds: r.liveIds })
+      continue
+    }
+    hit.group = {
+      ...r.g,
+      id: hit.id,
+      testNames: [...new Set([...hit.group.testNames, ...r.testNames])],
+      narrowed: hit.group.narrowed || r.g.narrowed,
+    }
+    hit.liveIds = [...new Set([...hit.liveIds, ...r.liveIds])]
   }
-  return next
+  return Object.fromEntries(folded.map((f) => [f.id, f.group]))
 }
 
 /** Widen each group back to its full error-signature group(s): the backend applies an
