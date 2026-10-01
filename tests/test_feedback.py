@@ -13,6 +13,7 @@ from pi_sidecar_client import AIResult
 from rootcoz import storage
 from rootcoz.attribution import AiProvenance, read_provenance
 from rootcoz.config import get_settings
+from rootcoz.encryption import get_hmac_secret
 from rootcoz.feedback import (
     _build_fallback_feedback,
     _derive_fallback_labels,
@@ -33,6 +34,11 @@ from rootcoz.models import (
 from tests.conftest import host_env
 
 _TEST_GITHUB_TOKEN = "test-token-placeholder"
+
+# The HMAC secret the attribution tests run under.  A named constant so the
+# shared fixture and the assertion that the tests are really running under it
+# cannot drift apart (and so no test quietly falls back to a real key file).
+_TEST_HMAC_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
 
 _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
@@ -71,6 +77,30 @@ async def _posted_body(title: str, body: str, labels: list[str]) -> str:
             github_token=_TEST_GITHUB_TOKEN,
         )
     return client.post.call_args.kwargs["json"]["body"]
+
+
+# The settings every AI-attribution test runs under.  One definition, shared by
+# the classes below rather than copied into each: signing reads the key out of
+# the live environment on every call, so two copies could drift and leave one
+# class verifying under a different secret than the one it signed with.
+# yield, never return: a preview signs a provenance token and creation
+# re-verifies it, both in the test body, so the patched env (and the HMAC key in
+# it) must still be in effect while the test runs.  Returning from inside
+# patch.dict ends it before either call and lets _get_or_create_key_file() write
+# a real key file outside tmp when the ambient variable is unset.
+@pytest.fixture
+def settings():
+    env = {
+        "JENKINS_URL": "https://jenkins.example.com",
+        "JENKINS_USER": "user",
+        "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": _TEST_HMAC_KEY,
+    }
+    with patch.dict(os.environ, env, clear=True):
+        get_settings.cache_clear()
+        s = get_settings()
+        get_settings.cache_clear()
+        yield s
 
 
 # ---------------------------------------------------------------------------
@@ -1180,20 +1210,6 @@ class TestAiAttribution:
     _AI_MARKER = _GITHUB_FOOTER_MARKER
     _NO_AI_MARKER = "No AI model generated this issue"
 
-    @pytest.fixture
-    def settings(self):
-        env = {
-            "JENKINS_URL": "https://jenkins.example.com",
-            "JENKINS_USER": "user",
-            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
-            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
-        }
-        with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
-            s = get_settings()
-            get_settings.cache_clear()
-            return s
-
     @staticmethod
     def _ai_response() -> AIResult:
         return AIResult(
@@ -1515,25 +1531,6 @@ class TestAttributionShapedProsePreserved:
         "*See https://github.com/myk-org/rootcoz/docs for setup*"
     )
 
-    @pytest.fixture
-    def settings(self):
-        env = {
-            "JENKINS_URL": "https://jenkins.example.com",
-            "JENKINS_USER": "user",
-            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
-            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
-        }
-        # yield, never return: the preview signs a provenance token and
-        # creation re-verifies it, so the patched env (and the HMAC key in it)
-        # has to still be in effect while the test runs.  Returning from inside
-        # patch.dict ends it before either call and leaves signing and
-        # verification reading whatever the ambient environment holds.
-        with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
-            s = get_settings()
-            get_settings.cache_clear()
-            yield s
-
     async def _preview(self, settings, *, ai_generated: bool = True, body=None):
         """A real preview whose body is the given (footer-shaped) prose."""
         req = FeedbackRequest(description="Chart crashes")
@@ -1594,24 +1591,6 @@ class TestProvenanceBindsToThePreviewedContent:
 
     _EXPECTED = AiProvenance(ai_used=True, provider="claude", model="sonnet-4-5")
 
-    @pytest.fixture
-    def settings(self):
-        env = {
-            "JENKINS_URL": "https://jenkins.example.com",
-            "JENKINS_USER": "user",
-            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
-            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
-        }
-        # yield, never return: signing the token and verifying it both happen
-        # in the test body, so the patched key must still be in effect then.
-        # Ending the patch early also risks _get_or_create_key_file() writing a
-        # real key file outside tmp when the ambient variable is unset.
-        with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
-            s = get_settings()
-            get_settings.cache_clear()
-            yield s
-
     async def _preview(self, settings):
         response = AIResult(
             success=True,
@@ -1634,6 +1613,12 @@ class TestProvenanceBindsToThePreviewedContent:
         client's own line left visible as the (unsigned) text it is.
         """
         preview = await self._preview(settings)
+        # The credit is only reproducible because the shared fixture held the
+        # patched key for this whole test: signing and verification both read
+        # os.environ at call time, so a key that lapsed between them -- or an
+        # unpatched one falling back to a real $XDG_DATA_HOME key file -- reads
+        # a different secret and the token verifies as no-AI.
+        assert get_hmac_secret() == _TEST_HMAC_KEY
         assert read_provenance(preview.body) == self._EXPECTED
 
         tampered = preview.body + "\n---\n*Generated using AI by EvilBot*"
