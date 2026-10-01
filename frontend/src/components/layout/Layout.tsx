@@ -3,12 +3,11 @@ import { Outlet, useLocation } from 'react-router-dom'
 import { Header } from './Header'
 import { Sidebar } from './Sidebar'
 import { useAuth } from '@/lib/auth'
-import { api } from '@/lib/api'
 import { useSSE } from '@/lib/SSEProvider'
 import { useHasMoreBelow } from './useHasMoreBelow'
 
 export function Layout() {
-  const { username, isAdmin } = useAuth()
+  const { username } = useAuth()
   const location = useLocation()
   const { ref: mainRef, hasMore } = useHasMoreBelow<HTMLElement>()
   const [unreadCount, setUnreadCount] = useState(0)
@@ -31,17 +30,13 @@ export function Layout() {
       const count = parseInt(data, 10)
       if (!isNaN(count)) setUnreadCount(count)
     },
+    'pending-count': (data: string) => {
+      const count = parseInt(data, 10)
+      if (!isNaN(count)) setPendingCount(count)
+    },
   }), [])
 
   useSSE(username ? 'navbar' : null, navbarEvents)
-
-  // Fetch pending user count for admin badge
-  useEffect(() => {
-    if (!isAdmin) return
-    api.get<{ users: { username: string }[] }>('/api/admin/users/pending')
-      .then(res => setPendingCount(res.users?.length ?? 0))
-      .catch(() => setPendingCount(0))
-  }, [isAdmin])
 
   // Clear stale counts when user is logged out
   useEffect(() => {

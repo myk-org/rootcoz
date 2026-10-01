@@ -406,6 +406,8 @@ export interface ResultResponse {
   base_url: string | null
   result_url: string | null
   reanalyzed_from_job_id?: string
+  /** IDs of re-analyses of this job, in enqueue order. */
+  reanalyzed_to_job_ids?: string[]
   origin_job_name?: string
   /** Per-test tracked-in links (composite key → list of links). */
   tracked_in?: Record<string, TrackedInEntry[]>
