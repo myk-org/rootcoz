@@ -12006,10 +12006,43 @@ async def create_feedback(
             github_token=github_token,
         )
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
+        # 401 means the token is bad; 403 means it is valid but either lacks
+        # the repo scope or is rate limited. A classic PAT authenticates fine
+        # without `repo`, so identity checks cannot tell these apart. Reporting
+        # both as "invalid or expired" made a scope problem look like a lost
+        # key. Neither is a gateway failure: 502 stays reserved for an
+        # unreachable GitHub API.
+        #
+        # Rate limiting is classified up front, before any status branch, so a
+        # new rate-limit status cannot fall through to the generic 502. GitHub
+        # uses 403 for the primary limit and 429 for the secondary limit; 429
+        # is definitionally a rate limit, while 403 needs header/body evidence.
+        response = exc.response
+        if response.status_code == 429 or (
+            response.status_code == 403
+            and (
+                response.headers.get("x-ratelimit-remaining") == "0"
+                or "rate limit" in response.text.lower()
+            )
+        ):
+            # A new token cannot fix a spent quota, so never point at the token.
             raise HTTPException(
-                status_code=502,
-                detail="GitHub token is invalid or expired",
+                status_code=429,
+                detail="GitHub API rate limit reached. Try again later.",
+            ) from exc
+        if exc.response.status_code == 401:
+            raise HTTPException(
+                status_code=403,
+                detail="GitHub token is invalid or expired. "
+                "Generate a new token in Profile Settings.",
+            ) from exc
+        if exc.response.status_code == 403:
+            # Reaching here means no rate-limit signal, so it is a real scope
+            # failure and the token is the thing to fix.
+            raise HTTPException(
+                status_code=403,
+                detail="GitHub token is missing the 'repo' scope. "
+                "Regenerate it in Profile Settings with repo access.",
             ) from exc
         raise HTTPException(
             status_code=502,
