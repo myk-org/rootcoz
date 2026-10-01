@@ -3176,14 +3176,14 @@ class TestAnalyzeSourceFlag:
                 "--source",
                 "raw",
                 "--failures",
-                '[{"test_name": "t.Foo", "error": "boom"}]',
+                '[{"test_name": "t.Foo", "error_message": "boom"}]',
             ],
         )
         assert result.exit_code == 0
         assert "j1" in result.output
         kwargs = mock_client.analyze.call_args.kwargs
         assert kwargs["type"] == "raw"
-        assert kwargs["failures"] == [{"test_name": "t.Foo", "error": "boom"}]
+        assert kwargs["failures"] == [{"test_name": "t.Foo", "error_message": "boom"}]
 
     def test_analyze_source_raw_accepts_passed_and_skipped_tests(self, mock_client):
         """Regression for #298: --passed-tests/--skipped-tests are reachable on raw."""
@@ -3195,7 +3195,7 @@ class TestAnalyzeSourceFlag:
                 "--source",
                 "raw",
                 "--failures",
-                '[{"test_name": "t.Foo", "error": "boom"}]',
+                '[{"test_name": "t.Foo", "error_message": "boom"}]',
                 "--passed-tests",
                 '[{"test_name": "t.Bar", "duration": 0.1, "status": "passed"}]',
                 "--skipped-tests",
@@ -3245,7 +3245,7 @@ class TestAnalyzeSourceFlag:
                 "--source",
                 "raw",
                 "--failures",
-                '[{"test_name": "t.Foo", "error": "boom"}]',
+                '[{"test_name": "t.Foo", "error_message": "boom"}]',
                 "--jenkins-url",
                 "https://jenkins.example",
                 "--prow-url",
@@ -3270,12 +3270,47 @@ class TestAnalyzeSourceFlag:
                 "--source",
                 "raw",
                 "--failures",
-                '[{"test_name": "t.Foo", "error": "boom"}]',
+                '[{"test_name": "t.Foo", "error_message": "boom"}]',
             ],
         )
         assert result.exit_code == 0
         kwargs = mock_client.submit.call_args.kwargs
         assert kwargs["type"] == "raw"
+
+    def test_analyze_source_prow_keeps_get_job_artifacts(self, mock_client):
+        """Regression: Prow honours --get-job-artifacts; only file/raw strip it."""
+        mock_client.analyze.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--source",
+                "prow",
+                "--job-name",
+                "some-job",
+                "--build-number",
+                "42",
+                "--no-get-job-artifacts",
+            ],
+        )
+        assert result.exit_code == 0
+        assert mock_client.analyze.call_args.kwargs["get_job_artifacts"] is False
+
+    def test_analyze_source_file_strips_get_job_artifacts(self, mock_client, tmp_path):
+        xml_file = tmp_path / "results.xml"
+        xml_file.write_text("<testsuites/>")
+        mock_client.analyze_file.return_value = self._ANALYZE_RESPONSE
+        result = runner.invoke(
+            app,
+            ["analyze", "--source", "file", "--file", str(xml_file)],
+        )
+        assert result.exit_code == 0
+        assert "get_job_artifacts" not in mock_client.analyze_file.call_args.kwargs
+
+    def test_analyze_failures_help_uses_error_message(self):
+        """Regression: FailedTest's field is error_message, not error."""
+        result = runner.invoke(app, ["analyze", "--help"])
+        assert '"error_message"' in result.output
 
     def test_analyze_source_mentions_raw_in_help(self):
         result = runner.invoke(app, ["analyze", "--help"])

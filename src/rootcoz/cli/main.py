@@ -1405,7 +1405,7 @@ def analyze(
     failures: str = typer.Option(
         "",
         "--failures",
-        help='JSON list of failed test entries (for type=raw). Format: \'[{"test_name": "...", "error": "..."}]\'',
+        help='JSON list of failed test entries (for type=raw). Format: \'[{"test_name": "...", "error_message": "..."}]\'',
     ),
     passed_tests: str = typer.Option(
         "",
@@ -1588,9 +1588,11 @@ def analyze(
             "wait_for_completion",
             "poll_interval_minutes",
             "max_wait_minutes",
-            "get_job_artifacts",
         ):
             extras.pop(key, None)
+    # Prow honours --get-job-artifacts, so only file/raw drop it
+    if source in ("file", "raw"):
+        extras.pop("get_job_artifacts", None)
     # Strip Prow-specific fields for non-Prow sources
     if source != "prow":
         for key in ("prow_url", "gcs_bucket", "gcs_prefix"):
