@@ -11734,10 +11734,23 @@ async def create_feedback(
             github_token=github_token,
         )
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
+        # 401 means the token is bad; 403 means it is valid but lacks the repo
+        # scope. A classic PAT authenticates fine without `repo`, so identity
+        # checks cannot tell these apart — only GitHub's status can. Reporting
+        # both as "invalid or expired" made a scope problem look like a lost
+        # key. Neither is a gateway failure: 502 stays reserved for an
+        # unreachable GitHub API.
+        if exc.response.status_code == 401:
             raise HTTPException(
-                status_code=502,
-                detail="GitHub token is invalid or expired",
+                status_code=403,
+                detail="GitHub token is invalid or expired. "
+                "Generate a new token in Profile Settings.",
+            ) from exc
+        if exc.response.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail="GitHub token is missing the 'repo' scope. "
+                "Regenerate it in Profile Settings with repo access.",
             ) from exc
         raise HTTPException(
             status_code=502,

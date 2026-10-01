@@ -4,6 +4,7 @@ import json
 import os
 from unittest.mock import patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
@@ -974,3 +975,63 @@ class TestFeedbackEndpoint:
             resp = client.get("/api/capabilities")
             assert resp.status_code == 200
             assert resp.json()["feedback_enabled"] is False
+
+    # -- GitHub error mapping (issue #284) -------------------------------------
+    # A valid token missing the `repo` scope was reported as "invalid or
+    # expired" with a 502, which reads as a GitHub outage and sent one user
+    # looking for a lost key instead of a missing scope.
+
+    def _post_create(self, client):
+        return client.post(
+            "/api/feedback/create",
+            json={"title": "Test title", "body": "Test body", "labels": ["bug"]},
+        )
+
+    def _raise_status(self, status: int):
+        """Build a create_github_issue side effect raising HTTPStatusError."""
+        request = httpx.Request("POST", "https://api.github.com/repos/x/y/issues")
+        response = httpx.Response(status, request=request)
+        return httpx.HTTPStatusError(
+            f"GitHub returned {status}", request=request, response=response
+        )
+
+    def _create_with_github_failure(self, temp_db_path, exc):
+        for client in self._make_client(temp_db_path):
+            with (
+                patch.object(
+                    storage,
+                    "get_user_tokens",
+                    return_value={"github_token": _TEST_GITHUB_TOKEN},
+                ),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                mock_create.side_effect = exc
+                return self._post_create(client)
+
+    def test_create_invalid_token_returns_403_not_502(self, _init_db, temp_db_path):
+        resp = self._create_with_github_failure(temp_db_path, self._raise_status(401))
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert "invalid or expired" in detail
+        assert "repo" not in detail.lower().split("regenerate")[0]
+
+    def test_create_missing_repo_scope_names_the_scope(self, _init_db, temp_db_path):
+        """A valid token lacking `repo` must not be called invalid (issue #284)."""
+        resp = self._create_with_github_failure(temp_db_path, self._raise_status(403))
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert "repo" in detail
+        assert "scope" in detail.lower()
+        assert "invalid or expired" not in detail
+
+    def test_create_other_github_status_stays_502(self, _init_db, temp_db_path):
+        resp = self._create_with_github_failure(temp_db_path, self._raise_status(422))
+        assert resp.status_code == 502
+        assert "GitHub API error: 422" in resp.json()["detail"]
+
+    def test_create_unreachable_github_stays_502(self, _init_db, temp_db_path):
+        """502 remains reserved for a genuinely unreachable GitHub API."""
+        exc = httpx.RequestError("connection refused")
+        resp = self._create_with_github_failure(temp_db_path, exc)
+        assert resp.status_code == 502
+        assert "unreachable" in resp.json()["detail"]
