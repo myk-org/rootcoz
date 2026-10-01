@@ -244,6 +244,35 @@ class TestBackfillSignatures:
         assert stats["failures_changed"] == 1
         assert await _signatures(db, "job1") == ["stale-hash"]
 
+    async def test_dry_run_reports_exactly_what_apply_would_change(self, db):
+        """The preview counts a running analysis as deferred, not as a change."""
+        await _store_job(
+            db, "job-live", _result(failures=_stale(_failure("t", "running")))
+        )
+        await _store_job(
+            db, "job-done", _result(failures=_stale(_failure("t", "finished")))
+        )
+        await _set_status(db, "job-live", "running")
+
+        preview = await backfill_signatures(dry_run=True)
+        applied = await backfill_signatures(dry_run=False)
+
+        assert preview["jobs_scanned"] == 2
+        assert preview["deferred_jobs"] == ["job-live"]
+        assert preview["jobs_changed"] == 1
+        assert preview["failures_changed"] == 1
+        # Nothing was written by the preview, and everything it promised landed.
+        assert await _signatures(db, "job-live") == ["stale-hash"]
+        for key in (
+            "jobs_scanned",
+            "jobs_changed",
+            "failures_scanned",
+            "failures_changed",
+            "jobs_deferred",
+            "deferred_jobs",
+        ):
+            assert preview[key] == applied[key], key
+
     async def test_apply_recomputes_to_current_rules(self, db):
         await _store_job(
             db, "job1", _result(failures=_stale(_failure("t", MESSAGE_WITH_NOISE)))
@@ -400,13 +429,12 @@ class TestConcurrentUpdateSafety:
         )
 
     async def test_repeated_test_names_keep_their_own_signature(self, db):
-        """Two failures sharing a test name get their own history/comment hash."""
+        """Two failures sharing a test name get their own history hash."""
         await _store_job(
             db,
             "job1",
             _result(failures=_stale(_failure("t", "first"), _failure("t", "second"))),
         )
-        await db.add_comment("job1", "t", "about first", error_signature="stale-hash")
 
         await backfill_signatures(dry_run=False)
 
@@ -414,8 +442,6 @@ class TestConcurrentUpdateSafety:
         by_message = {row["error_message"]: row["error_signature"] for row in history}
         assert by_message["first"] == compute_signature("first", TRACE)
         assert by_message["second"] == compute_signature("second", TRACE)
-        comments = await db.get_comments_for_job("job1")
-        assert comments[0]["error_signature"] == compute_signature("first", TRACE)
 
     async def test_same_name_and_message_different_traces_keep_their_own_hash(self, db):
         """History rows are matched by the hash they carry, not by message."""
@@ -447,7 +473,6 @@ class TestConcurrentUpdateSafety:
             failure.error_signature = "shared-old-hash"
             failures.append(failure)
         await _store_job(db, "job1", _result(failures=failures))
-        await db.add_comment("job1", "t", "about a", error_signature="shared-old-hash")
 
         stats = await backfill_signatures(dry_run=False)
 
@@ -459,12 +484,53 @@ class TestConcurrentUpdateSafety:
         ]
         # Rows are seeded in stored-failure order, so each keeps its own hash.
         assert [row["error_signature"] for row in await _history(db, "job1")] == stored
-        # The comment row is ambiguous; it leaves with the first failure's hash,
-        # never with the dead one.
-        assert (await db.get_comments_for_job("job1"))[0]["error_signature"] == stored[
-            0
-        ]
         assert stats["history_rows_changed"] == 2
+
+    async def test_a_split_leaves_comments_alone_rather_than_misattributing(self, db):
+        """A comment whose failure split is kept off the wrong failure's hash."""
+        failures = []
+        for trace in ("at a.py:1", "at b.py:2"):
+            failure = _failure("t", "boom", trace)
+            # The old rules hashed both traces to this one value, so a comment
+            # row written against either of them stores the same hash.
+            failure.error_signature = "shared-old-hash"
+            failures.append(failure)
+        await _store_job(db, "job1", _result(failures=failures))
+        # Two comments, so dealing them out by id would put each on a different
+        # failure -- with no way to say which one that failure was.
+        await db.add_comment("job1", "t", "about a", error_signature="shared-old-hash")
+        await db.add_comment("job1", "t", "about b", error_signature="shared-old-hash")
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert {
+            row["error_signature"] for row in await db.get_comments_for_job("job1")
+        } == {"shared-old-hash"}
+        assert stats["comment_rows_changed"] == 0
+        assert stats["ambiguous_comment_rows"] == 2
+        assert stats["ambiguous_comments"] == [{"job_id": "job1", "comment_rows": 2}]
+
+    async def test_an_unambiguous_comment_is_still_rewritten(self, db):
+        """One failure per comment group: the rewrite still happens."""
+        failures = []
+        for trace, previous in (("at a.py:1", "old-a"), ("at b.py:2", "old-b")):
+            failure = _failure("t", "boom", trace)
+            failure.error_signature = previous
+            failures.append(failure)
+        await _store_job(db, "job1", _result(failures=failures))
+        await db.add_comment("job1", "t", "about a", error_signature="old-a")
+        await db.add_comment("job1", "t", "about b", error_signature="old-b")
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert {
+            row["error_signature"] for row in await db.get_comments_for_job("job1")
+        } == {
+            compute_signature("boom", "at a.py:1"),
+            compute_signature("boom", "at b.py:2"),
+        }
+        assert stats["comment_rows_changed"] == 2
+        assert stats["ambiguous_comments"] == []
 
     async def test_every_comment_of_one_failure_keeps_its_new_hash(self, db):
         """A failure can hold several comments; they are rewritten as a group."""

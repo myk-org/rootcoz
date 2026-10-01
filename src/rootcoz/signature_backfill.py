@@ -26,6 +26,7 @@ from rootcoz.engine.core import compute_signature, normalization_rules_version
 from rootcoz.storage import (
     RESULT_JSON_BATCH_SIZE,
     SignatureUpdate,
+    analysis_in_flight,
     claim_signature_migration,
     complete_signature_migration,
     failure_error_text,
@@ -50,6 +51,12 @@ MIGRATION_KEY_PREFIX = "failure-signatures-"
 #: failure in the database, which is neither bounded nor usable as a report.
 UNRECOVERABLE_SAMPLE_SIZE = 100
 
+#: Same treatment for the comment groups whose rows cannot be attributed to
+#: one of the failures they match (see
+#: :func:`rootcoz.storage._apply_denormalized_signatures`): counted exactly,
+#: sampled in the report, never reassigned.
+AMBIGUOUS_COMMENT_SAMPLE_SIZE = 100
+
 
 class BackfillStats:
     """Counts for one backfill run."""
@@ -67,6 +74,13 @@ class BackfillStats:
         # with the hash they already carry rather than rehashed from a guess.
         self.unrecoverable_count = 0
         self.unrecoverable_failures: list[dict[str, Any]] = []
+        # Comment rows that could not be attributed to the failure they were
+        # written about, because that failure's group split onto several new
+        # hashes and a comment row records nothing that would tell them apart.
+        # They keep their old hash, which costs them signature-based lookups
+        # but never files them under a failure nobody commented on.
+        self.ambiguous_comment_rows = 0
+        self.ambiguous_comments: list[dict[str, Any]] = []
         self.migration_preempted = False
         # Jobs the scan had to leave alone because their analysis was still
         # running. Their signatures stay stale until that analysis saves -- or,
@@ -82,6 +96,15 @@ class BackfillStats:
         else:
             logger.debug("Unrecoverable signature inputs (not sampled): %s", record)
 
+    def record_ambiguous_comments(self, job_id: str, rows: int) -> None:
+        """Count comment rows left on a stale hash, keeping a bounded sample."""
+        self.ambiguous_comment_rows += rows
+        record = {"job_id": job_id, "comment_rows": rows}
+        if len(self.ambiguous_comments) < AMBIGUOUS_COMMENT_SAMPLE_SIZE:
+            self.ambiguous_comments.append(record)
+        else:
+            logger.debug("Ambiguous comment rows (not sampled): %s", record)
+
     def as_dict(self) -> dict[str, Any]:
         """Return the stats as a JSON-serializable dict."""
         return {
@@ -95,6 +118,8 @@ class BackfillStats:
             "unparsable_jobs": self.unparsable_jobs,
             "unrecoverable_failures_count": self.unrecoverable_count,
             "unrecoverable_failures": self.unrecoverable_failures,
+            "ambiguous_comment_rows": self.ambiguous_comment_rows,
+            "ambiguous_comments": self.ambiguous_comments,
             "migration_preempted": self.migration_preempted,
             "jobs_deferred": len(self.deferred_jobs),
             "deferred_jobs": self.deferred_jobs,
@@ -333,7 +358,11 @@ async def backfill_signatures(
 
     Args:
         dry_run: When True (the default) nothing is written and the returned
-            counts describe what an apply would change.
+            counts describe what an apply would change -- including the jobs an
+            apply defers, which are reported as deferred and not as changed.
+            The ``*_rows`` counters are not previewed: how many
+            ``failure_history`` / ``comments`` rows a write touches (and which
+            comment rows stay ambiguous) is only known inside its transaction.
         guard: Awaited before each batch; when it returns False the run stops
             and ``migration_preempted`` is set. Used to hand the migration to a
             newer process version.
@@ -348,7 +377,7 @@ async def backfill_signatures(
         if guard is not None and not await guard():
             stats.migration_preempted = True
             break
-        for job_id, raw_json in batch:
+        for job_id, raw_json, status in batch:
             stats.jobs_scanned += 1
             try:
                 result_data = json.loads(raw_json)
@@ -361,20 +390,26 @@ async def backfill_signatures(
                 stats.unparsable_jobs.append(job_id)
                 continue
 
-            if dry_run:
-                changed = _rehash_stored_failures(
-                    result_data, stats=stats, job_id=job_id
-                )
-                stats.failures_changed += changed
-                if changed:
-                    stats.jobs_changed += 1
-                continue
-
             # Probe the scanned copy first: patch_result_json opens
             # BEGIN IMMEDIATE before it can tell that nothing changed, and most
             # rows are already current or unrecoverable. Only a job the probe
-            # finds stale is worth the write lock.
-            if not _rehash_stored_failures(result_data, stats=stats, job_id=job_id):
+            # finds stale is worth the write lock -- or, in a dry run, worth
+            # counting.
+            changed = _rehash_stored_failures(result_data, stats=stats, job_id=job_id)
+            if not changed:
+                continue
+
+            if dry_run:
+                # Same skip the apply below makes, and for the same reason (see
+                # patch_result_json's ``skip_in_flight``): a running analysis
+                # writes its own current-rule signatures when it saves. Counted
+                # as deferred, not as a rewrite, so the preview matches what the
+                # apply it stands in for would do.
+                if analysis_in_flight(status):
+                    stats.deferred_jobs.append(job_id)
+                else:
+                    stats.jobs_changed += 1
+                    stats.failures_changed += changed
                 continue
 
             updates: list[SignatureUpdate] = []
@@ -383,12 +418,6 @@ async def backfill_signatures(
                 _make_updater(updates),
                 denormalized=updates,
                 write_if_changed=True,
-                # A live analysis writes its failure history and then, in a
-                # separate operation, its result. A backfill landing between
-                # the two re-hashes the *previous* result and leaves the history
-                # the analysis just wrote pointing at a different hash. That
-                # analysis writes current-rule signatures itself when it saves,
-                # so its job is left alone.
                 skip_in_flight=True,
             )
             if outcome.written:
@@ -400,6 +429,8 @@ async def backfill_signatures(
                 stats.deferred_jobs.append(job_id)
             stats.history_rows_changed += outcome.history_rows
             stats.comment_rows_changed += outcome.comment_rows
+            if outcome.comment_rows_ambiguous:
+                stats.record_ambiguous_comments(job_id, outcome.comment_rows_ambiguous)
         # Yield between batches so live requests interleave with the scan
         # instead of queueing behind one long uninterrupted run.
         await asyncio.sleep(0)
@@ -408,12 +439,14 @@ async def backfill_signatures(
     result["dry_run"] = dry_run
     logger.info(
         "Signature backfill (dry_run=%s): %s jobs scanned, %s failures changed, "
-        "%s history rows, %s comment rows, %s jobs deferred (analysis running)",
+        "%s history rows, %s comment rows, %s comment rows left ambiguous, "
+        "%s jobs deferred (analysis running)",
         dry_run,
         stats.jobs_scanned,
         stats.failures_changed,
         stats.history_rows_changed,
         stats.comment_rows_changed,
+        stats.ambiguous_comment_rows,
         len(stats.deferred_jobs),
     )
     return result
