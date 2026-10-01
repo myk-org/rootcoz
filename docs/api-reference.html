@@ -398,13 +398,13 @@
 <td>GET</td>
 <td><code>/api/user/ai-credentials</code></td>
 <td>viewer</td>
-<td>Personal provider credentials, secrets masked</td>
+<td>Supported provider IDs with a <code>configured</code> flag each. Keys are never returned</td>
 </tr>
 <tr>
 <td>PUT</td>
 <td><code>/api/user/ai-credentials/{provider}</code></td>
 <td>reviewer</td>
-<td>Store a personal key. <code>{provider}</code> is an exact provider ID from <code>GET /api/user/ai-credentials</code> (for example <code>anthropic</code> or <code>google</code>), not the <code>claude</code>/<code>gemini</code>/<code>cursor</code> names used for analysis settings. Unknown IDs are rejected with 400</td>
+<td>Store a personal key. Body is <code>{api_key, model}</code> — <code>model</code> is required (<code>400</code> without it, since the key is verified against it) and the key is only persisted when the provider returns <code>accepted</code>. A <code>rejected</code> or <code>inconclusive</code> check is not an HTTP error: it returns <code>200</code> with <code>ok: false</code>, an <code>outcome</code>, and an explanatory <code>message</code>, leaving any existing credential unchanged, so clients must check <code>ok</code> rather than the status code. <code>{provider}</code> is an exact provider ID from <code>GET /api/user/ai-credentials</code> (for example <code>anthropic</code> or <code>google</code>), not the <code>claude</code>/<code>gemini</code>/<code>cursor</code> names used for analysis settings. Unknown IDs are rejected with 400</td>
 </tr>
 <tr>
 <td>DELETE</td>
