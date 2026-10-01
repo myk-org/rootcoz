@@ -1599,7 +1599,8 @@ async def test_feedback_preview_uses_requester_context_and_resets(monkeypatch):
     token = ai_client.ai_username.set("prior")
     try:
         await main.preview_feedback(
-            SimpleNamespace(state=SimpleNamespace(username="alice")), object()
+            SimpleNamespace(state=SimpleNamespace(username="alice")),
+            SimpleNamespace(ai_provider=None, ai_model=None),
         )
         assert ai_client.ai_username.get() == "prior"
     finally:

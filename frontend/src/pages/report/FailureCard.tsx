@@ -13,7 +13,6 @@ import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import { getTrackedIn, notifyReviewChanged, putReviewed, runBatched, scopeKey, scopedReviewState } from './failureUpdates'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
 import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -193,7 +192,7 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, aiModels, result, classifications, trackedIn, selection } = useReportState()
+    const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, result, classifications, trackedIn, selection } = useReportState()
   const dispatch = useReportDispatch()
   const { role, isOperator, isAdmin, username } = useAuth()
   const isViewer = role === 'viewer'
@@ -218,8 +217,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const [trackedLinkError, setTrackedLinkError] = useState<string | null>(null)
   const [reviewingAll, setReviewingAll] = useState(false)
   const [reviewAllError, setReviewAllError] = useState<string | null>(null)
-  const [selectedProvider, setSelectedProvider] = useState(result?.ai_provider ?? '')
-  const [selectedModel, setSelectedModel] = useState(result?.ai_model ?? '')
   const [includeLinks, setIncludeLinks] = useState(false)
   const [reAnalyzeOpen, setReAnalyzeOpen] = useState(false)
   const { copiedKey: copiedSection, copy: copyToClipboard } = useClipboard()
@@ -240,14 +237,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     [result?.request_params],
   )
 
-  const providers = Object.keys(aiModels)
-  const models = (aiModels[selectedProvider] ?? []).map((m) => m.id)
-
-  function handleProviderChange(provider: string) {
-    setSelectedProvider(provider)
-    setSelectedModel('')
-  }
-
   const scopedReviewKey = (testName: string) =>
     reviewKey(testName, scopedChildJobName, scopedChildBuildNumber)
 
@@ -255,7 +244,6 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const classification = classifications[repKey] ?? analysis.classification
   const pattern = analysis.pattern || ''
   const borderColor = classification === 'PRODUCT BUG' ? 'border-l-signal-orange' : 'border-l-signal-blue'
-  const showAiSelector = providers.length > 0 || models.length > 0
 
   // Comment count for ALL tests in the group
   const groupTestNames = group.tests.map((t) => t.test_name)
@@ -626,43 +614,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             {/* Peer debate trail */}
             {rep.peer_debate && <PeerDebateSection debate={rep.peer_debate} repoUrls={repoUrls} primaryUsage={usage} />}
 
-            {/* ACTIONS line: AI selector, Re-analyze, issue buttons, include links */}
+            {/* ACTIONS line: Re-analyze, issue buttons, include links */}
             <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border-muted">
               <span className="text-[10px] font-bold uppercase tracking-wider text-text-tertiary">Actions</span>
-              {showAiSelector && (
-                <>
-                  <span className="text-xs text-text-tertiary whitespace-nowrap">AI for issue generation:</span>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      list={`provider-options-${group.id}`}
-                      value={selectedProvider}
-                      onChange={(e) => handleProviderChange(e.target.value)}
-                      placeholder="provider"
-                      aria-label="AI provider"
-                      className="h-7 border bg-surface-card px-2 text-xs text-text-primary w-24"
-                    />
-                    <datalist id={`provider-options-${group.id}`}>
-                      {providers.map((p) => (
-                        <option key={p} value={p} />
-                      ))}
-                    </datalist>
-
-                    <Input
-                      list={`model-options-${group.id}`}
-                      value={selectedModel}
-                      onChange={(e) => setSelectedModel(e.target.value)}
-                      placeholder="model"
-                      aria-label="AI model"
-                      className="h-7 border bg-surface-card px-2 text-xs text-text-primary w-44"
-                    />
-                    <datalist id={`model-options-${group.id}`}>
-                      {models.map((m) => (
-                        <option key={m} value={m} />
-                      ))}
-                    </datalist>
-                  </div>
-                </>
-              )}
               {isOperator && result?.analysis_state !== 'submitted' && (
                 <Button variant="outline" size="sm" onClick={() => setReAnalyzeOpen(true)} disabled={rep.reanalysis_status === 'running'}>
                   <RotateCw className={`h-3.5 w-3.5 mr-1${rep.reanalysis_status === 'running' ? ' animate-spin' : ''}`} />
@@ -681,7 +635,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 label="Jira Ticket"
                 onClick={() => setBugTarget('jira')}
               />
-              {(showAiSelector || githubIssuesEnabled || jiraIssuesEnabled) && (
+              {(githubIssuesEnabled || jiraIssuesEnabled) && (
                 <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer">
                   <input
                     type="checkbox"
@@ -800,8 +754,8 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           target={bugTarget}
           childJobName={scopedChildJobName}
           childBuildNumber={scopedChildBuildNumber}
-          aiProvider={selectedProvider}
-          aiModel={selectedModel}
+          defaultAiProvider={result?.ai_provider ?? ''}
+          defaultAiModel={result?.ai_model ?? ''}
           defaultProjectKey={serverJiraProjectKey}
           availableRepos={
             repoUrls.length > 0

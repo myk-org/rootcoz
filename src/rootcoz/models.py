@@ -1369,6 +1369,14 @@ class FeedbackRequest(BaseModel):
     user_agent: str = Field(
         default="", max_length=500, description="Browser user agent string"
     )
+    ai_provider: str | None = Field(
+        default=None,
+        description="AI provider for preview generation (server default if unset)",
+    )
+    ai_model: str | None = Field(
+        default=None,
+        description="AI model for preview generation (server default if unset)",
+    )
 
 
 class FeedbackPreviewResponse(BaseModel):
@@ -1377,6 +1385,16 @@ class FeedbackPreviewResponse(BaseModel):
     title: str = Field(description="Generated issue title")
     body: str = Field(description="Generated issue body (markdown)")
     labels: list[str] = Field(default_factory=list, description="Issue labels")
+    ai_provider: str = Field(
+        default="", description="Server-resolved AI provider used for the preview"
+    )
+    ai_model: str = Field(
+        default="", description="Server-resolved AI model used for the preview"
+    )
+    ai_generated: bool = Field(
+        default=False,
+        description="False when the non-AI fallback template was used instead",
+    )
 
 
 class FeedbackCreateRequest(BaseModel):
