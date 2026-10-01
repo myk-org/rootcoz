@@ -222,7 +222,7 @@
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>A completed analysis result.</li>
-<li>A signed-in account to mark failures reviewed.</li>
+<li>A signed-in account with at least the <code>reviewer</code> role, since <code>PUT /results/{job_id}/reviewed</code> requires one and a <code>viewer</code> receives <code>403</code>.</li>
 <li><code>reviewer</code>, <code>operator</code>, or <code>admin</code> access to change a failure's classification or pattern.</li>
 <li><code>operator</code> or <code>admin</code> access if you plan to re-analyze a job or a single failure.</li>
 <li>If you want to use the CLI examples, a configured CLI profile.</li>

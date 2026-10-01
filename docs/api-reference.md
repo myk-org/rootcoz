@@ -172,10 +172,10 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | Method | Path | Min role | Notes |
 | --- | --- | --- | --- |
 | GET | `/results/{job_id}/issue-prompt` | viewer | Custom `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md` for the repo |
-| POST | `/results/{job_id}/preview-github-issue` | viewer | `test_name`, `include_links`, AI overrides; returns preview content |
-| POST | `/results/{job_id}/preview-jira-bug` | viewer | Same shape, Jira flavour |
-| POST | `/results/{job_id}/create-github-issue` | viewer | `test_name`, `title`, `body`; returns `201` |
-| POST | `/results/{job_id}/create-jira-bug` | viewer | Adds `jira_issue_type`; returns `201` |
+| POST | `/results/{job_id}/preview-github-issue` | reviewer | `test_name`, `include_links`, AI overrides; returns preview content |
+| POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
+| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201` |
+| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201` |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
@@ -183,7 +183,7 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/push/{plugin_name}` | operator | Generic push; `child_job_name` and `child_build_number` optional |
 | POST | `/results/{job_id}/push-reportportal` | operator | Backward-compatible Report Portal push |
 
-> **Note:** The issue preview and create endpoints are gated by the `ALLOWED_USERS` allow list rather than by a role check, so a `viewer` account can call them when the server runs with an empty allow list. They still require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
+> **Note:** All four issue preview and create endpoints call `_require_reviewer`, so a `viewer` receives `403` before the allow list is consulted. They additionally require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
 
 ### History and classification lookup
 

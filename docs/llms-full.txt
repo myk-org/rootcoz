@@ -989,7 +989,7 @@ Use the report page when you need to decide whether RootCoz got a failure right 
 
 ## Prerequisites
 - A completed analysis result.
-- A signed-in account to mark failures reviewed.
+- A signed-in account with at least the `reviewer` role, since `PUT /results/{job_id}/reviewed` requires one and a `viewer` receives `403`.
 - `reviewer`, `operator`, or `admin` access to change a failure's classification or pattern.
 - `operator` or `admin` access if you plan to re-analyze a job or a single failure.
 - If you want to use the CLI examples, a configured CLI profile.
@@ -1349,7 +1349,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
 Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
 
-Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server setting and can be changed without a restart.
+Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
 
 Create issues from the terminal, including for nested child-job failures:
 
@@ -2206,10 +2206,10 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | Method | Path | Min role | Notes |
 | --- | --- | --- | --- |
 | GET | `/results/{job_id}/issue-prompt` | viewer | Custom `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md` for the repo |
-| POST | `/results/{job_id}/preview-github-issue` | viewer | `test_name`, `include_links`, AI overrides; returns preview content |
-| POST | `/results/{job_id}/preview-jira-bug` | viewer | Same shape, Jira flavour |
-| POST | `/results/{job_id}/create-github-issue` | viewer | `test_name`, `title`, `body`; returns `201` |
-| POST | `/results/{job_id}/create-jira-bug` | viewer | Adds `jira_issue_type`; returns `201` |
+| POST | `/results/{job_id}/preview-github-issue` | reviewer | `test_name`, `include_links`, AI overrides; returns preview content |
+| POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
+| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201` |
+| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201` |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
@@ -2217,7 +2217,7 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/push/{plugin_name}` | operator | Generic push; `child_job_name` and `child_build_number` optional |
 | POST | `/results/{job_id}/push-reportportal` | operator | Backward-compatible Report Portal push |
 
-> **Note:** The issue preview and create endpoints are gated by the `ALLOWED_USERS` allow list rather than by a role check, so a `viewer` account can call them when the server runs with an empty allow list. They still require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
+> **Note:** All four issue preview and create endpoints call `_require_reviewer`, so a `viewer` receives `403` before the allow list is consulted. They additionally require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
 
 ### History and classification lookup
 
@@ -2945,6 +2945,22 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
            --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
        done
 
+`--limit` bounds one page and nothing advances past it, so a job with more than 200 failed tests leaves the remainder unreviewed and unpushed. Page with `--offset`, and stop when a page comes back empty:
+
+```bash
+    OFFSET=0
+    while :; do
+      PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed --limit 200 --offset "$OFFSET")
+      [ "$(jq 'length' <<<"$PAGE.entries")" -eq 0 ] && break
+      jq -r '.entries[].test_name' <<<"$PAGE" | while read -r TEST; do
+        rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
+        rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
+          --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
+      done
+      OFFSET=$((OFFSET + 200))
+    done
+```
+
    rootcoz --json push "$JOB_ID" --plugin reportportal | jq '{pushed, unmatched, errors}'
    ```
 
@@ -2955,7 +2971,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
 - Pass `--api-key` from a CI secret and `--server` from a variable to run the same script against dev, staging, and prod without editing it.
 - Use `rootcoz analyze --source file -f results.xml` to analyze artifacts downloaded after the fact, which is the easiest way to backfill historical CI runs.
 - `rootcoz results delete --all --confirm` deletes jobs in bulk. The `--confirm` requirement exists so an accidental flag cannot wipe the server. The command collects job IDs from a single unpaginated `/api/dashboard` request, so on a server with more than 500 jobs it only sees the first page and leaves the rest in place. For a full cleanup, delete the remainder by explicit `JOB_ID` values from `rootcoz --json results list`.
-- `rootcoz re-analyze JOB_ID` re-runs a finished analysis with its original settings, which is faster than resubmitting when you only changed the model on the server side.
+- `rootcoz re-analyze JOB_ID` re-runs a finished analysis by replaying the job's stored request parameters, which is faster than resubmitting when the inputs are unchanged. Note what that means for models: because the replay includes the `ai_model` resolved when the job first ran, a model you have since changed on the server is **not** picked up. Pass an explicit model override to re-analyze if you want the new one.
 - `rootcoz history search --signature HASH` finds every other test that failed with the same error signature, useful for deciding whether a new failure is really a new problem.
 - `rootcoz --json admin-chat send "Which jobs regressed this week?"` is the fastest way to get a cross-job answer in a pipeline log.
 

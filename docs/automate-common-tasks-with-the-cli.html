@@ -442,6 +442,20 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
          rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
            --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
        done</p>
+<p><code>--limit</code> bounds one page and nothing advances past it, so a job with more than 200 failed tests leaves the remainder unreviewed and unpushed. Page with <code>--offset</code>, and stop when a page comes back empty:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">OFFSET</span><span class="o">=</span><span class="m">0</span>
+<span class="k">while</span><span class="w"> </span>:<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">  </span><span class="nv">PAGE</span><span class="o">=</span><span class="k">$(</span>rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class="w"> </span>tests<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span>--status<span class="w"> </span>failed<span class="w"> </span>--limit<span class="w"> </span><span class="m">200</span><span class="w"> </span>--offset<span class="w"> </span><span class="s2">"</span><span class="nv">$OFFSET</span><span class="s2">"</span><span class="k">)</span>
+<span class="w">  </span><span class="o">[</span><span class="w"> </span><span class="s2">"</span><span class="k">$(</span>jq<span class="w"> </span><span class="s1">'length'</span><span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">"</span><span class="nv">$PAGE</span><span class="s2">.entries"</span><span class="k">)</span><span class="s2">"</span><span class="w"> </span>-eq<span class="w"> </span><span class="m">0</span><span class="w"> </span><span class="o">]</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="k">break</span>
+<span class="w">  </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">'.entries[].test_name'</span><span class="w"> </span><span class="o">&lt;&lt;&lt;</span><span class="s2">"</span><span class="nv">$PAGE</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="nb">read</span><span class="w"> </span>-r<span class="w"> </span>TEST<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">    </span>rootcoz<span class="w"> </span>results<span class="w"> </span>set-reviewed<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span>--test<span class="w"> </span><span class="s2">"</span><span class="nv">$TEST</span><span class="s2">"</span><span class="w"> </span>--reviewed
+<span class="w">    </span>rootcoz<span class="w"> </span>results<span class="w"> </span>set-tracked-in<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span>--test<span class="w"> </span><span class="s2">"</span><span class="nv">$TEST</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">      </span>--url<span class="w"> </span><span class="s2">"https://jira.example.com/browse/PLAT-</span><span class="nv">$BUILD_NUMBER</span><span class="s2">"</span>
+<span class="w">  </span><span class="k">done</span>
+<span class="w">  </span><span class="nv">OFFSET</span><span class="o">=</span><span class="k">$((</span><span class="nv">OFFSET</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="m">200</span><span class="k">))</span>
+<span class="k">done</span>
+</code></pre></div>
+
 <p>rootcoz --json push "$JOB_ID" --plugin reportportal | jq '{pushed, unmatched, errors}'
    ```</p>
 <p>The same shape works for a cron-driven report: swap step 2 for <code>reports totals</code> and drop the polling loop entirely.</p>
@@ -450,40 +464,26 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
 <li>Pass <code>--api-key</code> from a CI secret and <code>--server</code> from a variable to run the same script against dev, staging, and prod without editing it.</li>
 <li>Use <code>rootcoz analyze --source file -f results.xml</code> to analyze artifacts downloaded after the fact, which is the easiest way to backfill historical CI runs.</li>
 <li><code>rootcoz results delete --all --confirm</code> deletes jobs in bulk. The <code>--confirm</code> requirement exists so an accidental flag cannot wipe the server. The command collects job IDs from a single unpaginated <code>/api/dashboard</code> request, so on a server with more than 500 jobs it only sees the first page and leaves the rest in place. For a full cleanup, delete the remainder by explicit <code>JOB_ID</code> values from <code>rootcoz --json results list</code>.</li>
-<li><code>rootcoz re-analyze JOB_ID</code> re-runs a finished analysis with its original settings, which is faster than resubmitting when you only changed the model on the server side.</li>
+<li><code>rootcoz re-analyze JOB_ID</code> re-runs a finished analysis by replaying the job's stored request parameters, which is faster than resubmitting when the inputs are unchanged. Note what that means for models: because the replay includes the <code>ai_model</code> resolved when the job first ran, a model you have since changed on the server is <strong>not</strong> picked up. Pass an explicit model override to re-analyze if you want the new one.</li>
 <li><code>rootcoz history search --signature HASH</code> finds every other test that failed with the same error signature, useful for deciding whether a new failure is really a new problem.</li>
 <li><code>rootcoz --json admin-chat send "Which jobs regressed this week?"</code> is the fastest way to get a cross-job answer in a pipeline log.</li>
 </ul>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
-<li>
-<p>The script hangs on the first command.<br>
-  The CLI is waiting for a prompt. <code>auth ai-keys set</code> prompts unless you pass <code>--stdin</code>, <code>validate-token</code> always prompts for <code>--token</code>, and <code>admin users delete</code> prompts unless you pass <code>--force</code>.</p>
-</li>
-<li>
-<p><code>Error: No server specified.</code> on the first call.<br>
-<code>ROOTCOZ_SERVER</code> is not exported in the script's environment, and no config file exists. Set both variables, or add a <code>[default]</code> server to <code>~/.config/rootcoz/config.toml</code>.</p>
-</li>
-<li>
-<p><code>Error: 401</code> partway through a long script.<br>
-  The key expired or was rotated. Re-run <code>rootcoz auth whoami</code> to confirm, then issue a new one with <code>rootcoz auth rotate-key</code>.</p>
-</li>
-<li>
-<p>The poll loop never exits.<br>
-  A <code>--wait</code> submission stays in <code>waiting</code> until the CI build finishes. Add an iteration cap, and check <code>rootcoz status JOB_ID</code> manually to see which state it is stuck in.</p>
-</li>
-<li>
-<p><code>results tests</code> returns fewer entries than the dashboard failure count.<br>
-  The dashboard counts analysis failures, while <code>results tests</code> pages the CI test entries. Raise <code>--limit</code> to 200 and keep incrementing <code>--offset</code> until <code>has_more</code> is <code>false</code>.</p>
-</li>
-<li>
-<p><code>push</code> reports unmatched tests.<br>
-  The exporter could not line the test names up. Run <code>rootcoz exporters</code> to confirm the plugin is enabled, and add <code>--child-job-name</code> and <code>--child-build-number</code> for pipeline jobs.</p>
-</li>
-<li>
-<p>A <code>403</code> mentions <code>can_view_reports</code>.<br>
-  Your role is fine but the reports grant is missing. An admin can add it with <code>rootcoz admin users set-can-view-reports USERNAME true</code>.</p>
-</li>
+<li>The script hangs on the first command.<br>
+  The CLI is waiting for a prompt. <code>auth ai-keys set</code> prompts unless you pass <code>--stdin</code>, <code>validate-token</code> always prompts for <code>--token</code>, and <code>admin users delete</code> prompts unless you pass <code>--force</code>.</li>
+<li><code>Error: No server specified.</code> on the first call.<br>
+<code>ROOTCOZ_SERVER</code> is not exported in the script's environment, and no config file exists. Set both variables, or add a <code>[default]</code> server to <code>~/.config/rootcoz/config.toml</code>.</li>
+<li><code>Error: 401</code> partway through a long script.<br>
+  The key expired or was rotated. Re-run <code>rootcoz auth whoami</code> to confirm, then issue a new one with <code>rootcoz auth rotate-key</code>.</li>
+<li>The poll loop never exits.<br>
+  A <code>--wait</code> submission stays in <code>waiting</code> until the CI build finishes. Add an iteration cap, and check <code>rootcoz status JOB_ID</code> manually to see which state it is stuck in.</li>
+<li><code>results tests</code> returns fewer entries than the dashboard failure count.<br>
+  The dashboard counts analysis failures, while <code>results tests</code> pages the CI test entries. Raise <code>--limit</code> to 200 and keep incrementing <code>--offset</code> until <code>has_more</code> is <code>false</code>.</li>
+<li><code>push</code> reports unmatched tests.<br>
+  The exporter could not line the test names up. Run <code>rootcoz exporters</code> to confirm the plugin is enabled, and add <code>--child-job-name</code> and <code>--child-build-number</code> for pipeline jobs.</li>
+<li>A <code>403</code> mentions <code>can_view_reports</code>.<br>
+  Your role is fine but the reports grant is missing. An admin can add it with <code>rootcoz admin users set-can-view-reports USERNAME true</code>.</li>
 </ul>
 <h2 id="related-pages">Related Pages</h2>
 <ul>

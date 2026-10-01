@@ -4,7 +4,7 @@ Use the report page when you need to decide whether RootCoz got a failure right 
 
 ## Prerequisites
 - A completed analysis result.
-- A signed-in account to mark failures reviewed.
+- A signed-in account with at least the `reviewer` role, since `PUT /results/{job_id}/reviewed` requires one and a `viewer` receives `403`.
 - `reviewer`, `operator`, or `admin` access to change a failure's classification or pattern.
 - `operator` or `admin` access if you plan to re-analyze a job or a single failure.
 - If you want to use the CLI examples, a configured CLI profile.

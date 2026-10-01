@@ -779,25 +779,25 @@
 <tr>
 <td>POST</td>
 <td><code>/results/{job_id}/preview-github-issue</code></td>
-<td>viewer</td>
+<td>reviewer</td>
 <td><code>test_name</code>, <code>include_links</code>, AI overrides; returns preview content</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/results/{job_id}/preview-jira-bug</code></td>
-<td>viewer</td>
+<td>reviewer</td>
 <td>Same shape, Jira flavour</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/results/{job_id}/create-github-issue</code></td>
-<td>viewer</td>
+<td>reviewer</td>
 <td><code>test_name</code>, <code>title</code>, <code>body</code>; returns <code>201</code></td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/results/{job_id}/create-jira-bug</code></td>
-<td>viewer</td>
+<td>reviewer</td>
 <td>Adds <code>jira_issue_type</code>; returns <code>201</code></td>
 </tr>
 <tr>
@@ -839,7 +839,7 @@
 </tbody>
 </table></div>
 <blockquote>
-<p><strong>Note:</strong> The issue preview and create endpoints are gated by the <code>ALLOWED_USERS</code> allow list rather than by a role check, so a <code>viewer</code> account can call them when the server runs with an empty allow list. They still require valid tracker credentials and the matching <code>ENABLE_GITHUB_ISSUES</code> or <code>ENABLE_JIRA_ISSUES</code> toggle.</p>
+<p><strong>Note:</strong> All four issue preview and create endpoints call <code>_require_reviewer</code>, so a <code>viewer</code> receives <code>403</code> before the allow list is consulted. They additionally require valid tracker credentials and the matching <code>ENABLE_GITHUB_ISSUES</code> or <code>ENABLE_JIRA_ISSUES</code> toggle.</p>
 </blockquote>
 <h3 id="history-and-classification-lookup">History and classification lookup</h3>
 <div class="table-wrap"><table>

@@ -260,6 +260,22 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
            --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
        done
 
+`--limit` bounds one page and nothing advances past it, so a job with more than 200 failed tests leaves the remainder unreviewed and unpushed. Page with `--offset`, and stop when a page comes back empty:
+
+```bash
+OFFSET=0
+while :; do
+  PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed --limit 200 --offset "$OFFSET")
+  [ "$(jq 'length' <<<"$PAGE.entries")" -eq 0 ] && break
+  jq -r '.entries[].test_name' <<<"$PAGE" | while read -r TEST; do
+    rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
+    rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
+      --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
+  done
+  OFFSET=$((OFFSET + 200))
+done
+```
+
    rootcoz --json push "$JOB_ID" --plugin reportportal | jq '{pushed, unmatched, errors}'
    ```
 
@@ -270,7 +286,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
 - Pass `--api-key` from a CI secret and `--server` from a variable to run the same script against dev, staging, and prod without editing it.
 - Use `rootcoz analyze --source file -f results.xml` to analyze artifacts downloaded after the fact, which is the easiest way to backfill historical CI runs.
 - `rootcoz results delete --all --confirm` deletes jobs in bulk. The `--confirm` requirement exists so an accidental flag cannot wipe the server. The command collects job IDs from a single unpaginated `/api/dashboard` request, so on a server with more than 500 jobs it only sees the first page and leaves the rest in place. For a full cleanup, delete the remainder by explicit `JOB_ID` values from `rootcoz --json results list`.
-- `rootcoz re-analyze JOB_ID` re-runs a finished analysis with its original settings, which is faster than resubmitting when you only changed the model on the server side.
+- `rootcoz re-analyze JOB_ID` re-runs a finished analysis by replaying the job's stored request parameters, which is faster than resubmitting when the inputs are unchanged. Note what that means for models: because the replay includes the `ai_model` resolved when the job first ran, a model you have since changed on the server is **not** picked up. Pass an explicit model override to re-analyze if you want the new one.
 - `rootcoz history search --signature HASH` finds every other test that failed with the same error signature, useful for deciding whether a new failure is really a new problem.
 - `rootcoz --json admin-chat send "Which jobs regressed this week?"` is the fastest way to get a cross-job answer in a pipeline log.
 
