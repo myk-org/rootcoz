@@ -563,7 +563,25 @@ class FailureAnalysis(BaseModel):
         description="Stable UUID for referencing this failure",
     )
     test_name: str = Field(description="Name of the failed test")
-    error: str = Field(description="Error message or exception")
+    error: str = Field(
+        description=(
+            "Error message or exception, exactly as the failure carried it -- "
+            "it is a signature input. Use :attr:`display_error` for a "
+            "human-readable value; a trace-only failure stores an empty "
+            "message here, and putting the trace in its place would change the "
+            "signature the backfill recomputes."
+        )
+    )
+    stack_trace: str = Field(
+        default="",
+        description=(
+            "Stack trace text. Persisted alongside 'error' because both feed "
+            "error_signature: without it the signature cannot be recomputed "
+            "(see rootcoz.signature_backfill). 'error' alone is not enough -- "
+            "a signature built with an empty trace differs from one built with "
+            "the real trace."
+        ),
+    )
     analysis: AnalysisDetail = Field(description="Structured AI analysis output")
     error_signature: str = Field(
         default="",
@@ -577,6 +595,16 @@ class FailureAnalysis(BaseModel):
         default=None,
         description="Primary AI usage for this failure's signature; shared by group members",
     )
+
+    @property
+    def display_error(self) -> str:
+        """Return the text to show for this failure.
+
+        The trace stands in for the message when the source reported no message
+        at all (some CI formats carry only a trace). Never stored back into
+        :attr:`error`, which is a signature input.
+        """
+        return self.error or self.stack_trace
 
     @field_validator("analysis", mode="before")
     @classmethod

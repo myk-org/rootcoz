@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time as _time
 import uuid
@@ -206,6 +207,7 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
+from rootcoz.signature_backfill import backfill_signatures, ensure_signatures_current
 from rootcoz.sources import (
     CI_SOURCE_REGISTRY,
     CISource,
@@ -1468,6 +1470,32 @@ async def _safe_preload_cursor_models() -> None:
         logger.debug("Failed to preload sidecar models", exc_info=True)
 
 
+def _is_pytest() -> bool:
+    """Whether this process is a pytest run.
+
+    Used only to keep startup *maintenance* work out of unit tests; it never
+    gates production behaviour.
+    """
+    return "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None
+
+
+async def _backfill_signatures_if_stale() -> None:
+    """Startup task: re-hash stored failure signatures if the rules changed.
+
+    Thin ``None``-returning wrapper so the task matches the other startup
+    background tasks; ``ensure_signatures_current`` returns its stats for the
+    admin dry-run path. The backfill writes in bounded per-job transactions and
+    yields between batches, so live requests interleave instead of queueing
+    behind it.
+    """
+    try:
+        await ensure_signatures_current()
+    except Exception:
+        # A failed backfill must not take the server down; it is retried on the
+        # next start because the gate stays unapplied.
+        logger.warning("Failure signature backfill failed", exc_info=True)
+
+
 async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
     """Retroactively assign metadata to existing jobs missing metadata. Best-effort."""
     try:
@@ -1542,6 +1570,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             logger.info("[startup] ADMIN_WAIT_APPROVE_MSG configured")
         if settings.metadata_rules:
             task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+
+        # Re-hash stored failure signatures when the normalization rules change.
+        # Self-gating and self-maintaining (no admin step); runs post-deploy so
+        # it always uses the rules this process is applying.
+        #
+        # Skipped under pytest: a unit test that builds the real app would
+        # otherwise start this maintenance task for real, and because each test
+        # gets a fresh database the migration key is always absent, so it would
+        # run every time, take BEGIN IMMEDIATE write locks mid-test and make the
+        # suite order-dependent. Production still runs it on every start.
+        if not _is_pytest():
+            task = asyncio.create_task(_backfill_signatures_if_stale())
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
 
@@ -9623,6 +9665,29 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
     """
     _require_admin(request)
     return strip_sensitive_from_response({"components": await get_component_versions()})
+
+
+@app.post("/api/admin/backfill-signatures", operation_id="adminBackfillSignatures")
+async def admin_backfill_signatures(
+    request: Request, dry_run: bool = True
+) -> dict[str, Any]:
+    """Recompute stored failure signatures with the current normalization rules.
+
+    Admin only. Signatures are stored rather than derived at read time, so
+    changing ``normalize_for_signature`` changes the hash new analyses produce
+    while stored rows keep their old hashes -- auto-review and history matching
+    then stop matching across the boundary. Run this **after** deploying the
+    code whose rules you are adopting.
+
+    ``ai_token_usage.error_signature`` is intentionally left untouched: it is
+    analytics grouping only and does not affect correctness.
+
+    Safe to re-run: each job is re-hashed from its own current contents, in
+    bounded batches, so an interrupted apply resumes without a full scan having
+    to finish first.
+    """
+    _require_admin(request)
+    return await backfill_signatures(dry_run=dry_run)
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")

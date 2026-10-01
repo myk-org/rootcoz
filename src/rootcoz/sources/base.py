@@ -155,11 +155,18 @@ class CISourceResult:
         )
 
     def unanalyzed_failure_analyses(self) -> list[FailureAnalysis]:
-        """Build FailureAnalysis rows from fetch data with empty AI fields."""
+        """Build FailureAnalysis rows from fetch data with empty AI fields.
+
+        ``error`` holds the source's message verbatim because it, together with
+        the trace, is what the signature hashes. A trace-only failure therefore
+        stores an empty message; :attr:`FailureAnalysis.display_error` is what
+        shows the trace instead.
+        """
         return [
             FailureAnalysis(
                 test_name=failure.test_name,
-                error=failure.error_message or failure.stack_trace,
+                error=failure.error_message,
+                stack_trace=failure.stack_trace,
                 analysis=AnalysisDetail(),
                 error_signature=get_failure_signature(failure),
             )

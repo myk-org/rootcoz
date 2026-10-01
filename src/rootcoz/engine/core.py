@@ -695,9 +695,49 @@ def build_artifacts_section(artifacts_context: str) -> str:
     )
 
 
+def _canonical_header(match: re.Match[str]) -> str:
+    """Normalize an HTTP header line to a case-stable placeholder."""
+    return f"{match.group(1).lower()}: <HEADER>"
+
+
+# Allowlist of HTTP response headers whose *values* are per-request noise, so
+# header churn (ids, lengths, encodings, routing, trace propagation) never
+# splits a signature. Deliberately not a blanket ``x-*``: custom headers such as
+# ``X-Error-Code`` describe the failure itself, and discarding their values would
+# merge distinct failures into one signature.
+_HEADER_NAMES = (
+    r"date|content-length|content-encoding|content-range|transfer-encoding"
+    r"|connection|keep-alive|vary|etag|last-modified|age|expires|cache-control"
+    r"|retry-after|via|request-id|cf-ray|traceparent|tracestate"
+    r"|x-request-id|x-amzn-request-id|x-amzn-trace-id|x-correlation-id"
+    r"|x-trace-id|x-github-request-id|x-cache|x-served-by|x-timer"
+    r"|x-oauth-scopes|x-ratelimit-[a-z0-9-]+"
+    r"|x-b3-[a-z0-9-]+|x-envoy-[a-z0-9-]+|x-forwarded-[a-z0-9-]+"
+)
+
 # Pre-compiled patterns for signature normalization.
 # Strips run-specific data so the same underlying failure produces identical hashes.
-_NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+_NORMALIZE_PATTERNS: list[
+    tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]
+] = [
+    # HTTP response header lines: "Date: Sun, 31 May 2026 06:50:48 GMT",
+    # "Content-Length: 812", "X-Request-Id: 9c1f...". Must run before the date
+    # rules below, otherwise the date part is replaced and the time-of-day
+    # survives as new signature noise.
+    (
+        re.compile(rf"(?im)^[ \t]*({_HEADER_NAMES})[ \t]*:[^\r\n]*$"),
+        _canonical_header,
+    ),
+    # RFC 1123 date-time (surviving time-of-day of a partially normalized date):
+    # "Sun, 31 May 2026 06:50:48 GMT"
+    (
+        re.compile(
+            r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{1,2} "
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} "
+            r"\d{2}:\d{2}:\d{2}(?: \w+)?"
+        ),
+        "<DATE>",
+    ),
     # ISO timestamps: 2026-05-31T06:50:48.123Z, 2026-05-31T06:50:48+00:00
     (
         re.compile(
@@ -733,15 +773,19 @@ _NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?:build|run)[/\-]\d+", re.IGNORECASE), "<BUILD_REF>"),
     # Standalone date: 2026-05-31 (not already caught by timestamp patterns)
     (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), "<DATE>"),
+    # Runtime pointers: 0x7f3c8a1b2c40 (must run after UUID/pod-suffix rules).
+    (re.compile(r"\b0[xX][0-9a-fA-F]{6,}\b"), "<PTR>"),
+    # Bare long hex tokens: heap/object addresses, 7f3c8a1b2c40, commit SHAs.
+    (re.compile(r"\b[0-9a-fA-F]{12,}\b"), "<HEX>"),
 ]
 
 
 def normalize_for_signature(text: str) -> str:
     """Strip run-specific data from text before signature hashing.
 
-    Removes timestamps, dates, UUIDs, pod name suffixes, and build
-    numbers so that the same underlying failure produces the same
-    hash across different runs.
+    Removes timestamps, dates, HTTP response-header noise, UUIDs, pod name
+    suffixes, build numbers, and runtime pointer/hex tokens so that the same
+    underlying failure produces the same hash across different runs.
 
     Args:
         text: Error message or stack trace text.
@@ -754,13 +798,89 @@ def normalize_for_signature(text: str) -> str:
     return text
 
 
+def compute_signature(error_message: str, stack_trace: str) -> str:
+    """Hash an error message and stack trace into a failure signature.
+
+    Single source of truth for the signature formula: analysis and the
+    signature backfill (``rootcoz.signature_backfill``) both call this so the
+    two can never drift apart.
+
+    Args:
+        error_message: Error message text.
+        stack_trace: Stack trace text.
+
+    Returns:
+        SHA-256 hash string representing the failure signature.
+    """
+    normalized_error = normalize_for_signature(error_message)
+    normalized_trace = normalize_for_signature(stack_trace)
+    signature_text = f"{normalized_error}|{normalized_trace}"
+    return hashlib.sha256(signature_text.encode()).hexdigest()
+
+
+#: Bumped by hand when signature behavior changes in a way the fingerprint in
+#: :func:`normalization_rules_version` cannot observe on its own.
+SIGNATURE_ALGORITHM_VERSION = 1
+
+#: Fixed texts the normalization chain is probed with: one per pattern kind, so
+#: any rule change shows up in the probe output. The fingerprint is behaviour
+#: rather than bytecode because ``co_code`` differs between CPython versions and
+#: ``co_consts`` carries docstrings -- hashing either would re-trigger a full
+#: backfill on an interpreter upgrade or a docstring edit.
+_SIGNATURE_PROBE_TEXTS: tuple[str, ...] = (
+    (
+        "HTTPError 502\nDate: Sun, 31 May 2026 06:50:48 GMT\nContent-Length: 812\n"
+        "X-Request-Id: 9c1f2b7a-1111-2222-3333-444455556666"
+    ),
+    "GET /x\nX-Error-Code: quota-exceeded",
+    "AssertionError: expected 2026-05-31T06:50:48.123Z but got 2026-06-01 07:00:00",
+    (
+        "Timeout in pod virt-launcher-7f8b9c build/123 (#456) commit "
+        "7f3c8a1b2c40deadbeef at 0x7f3c8a1b2c40 (Jan 5 2026 03:04:05)"
+    ),
+)
+
+
+def normalization_rules_version() -> str:
+    """Return a stable fingerprint of everything that changes a signature.
+
+    Used as a migration key so the signature backfill runs automatically
+    whenever signature behaviour changes -- no version number for a human to
+    remember bumping. Covers the whole chain, not just the pattern table: every
+    pattern's text and flags, what each rule does to fixed probe texts (so a
+    replacement callable's body counts without hashing its bytecode),
+    ``normalize_for_signature`` itself, the ``compute_signature`` formula, and
+    the explicit :data:`SIGNATURE_ALGORITHM_VERSION` lever. The digest is
+    returned in full -- the migration key column is unrestricted text.
+    """
+    parts = [str(SIGNATURE_ALGORITHM_VERSION)]
+    for pattern, replacement in _NORMALIZE_PATTERNS:
+        parts.append(f"{pattern.pattern}\x1f{pattern.flags}")
+        parts.append(
+            "\x1f".join(
+                pattern.sub(replacement, text) for text in _SIGNATURE_PROBE_TEXTS
+            )
+        )
+    parts.append(
+        "\x1f".join(normalize_for_signature(text) for text in _SIGNATURE_PROBE_TEXTS)
+    )
+    probes = _SIGNATURE_PROBE_TEXTS
+    parts.append(
+        "\x1f".join(
+            compute_signature(text, trace)
+            for text, trace in zip(probes, probes[1:] + probes[:1], strict=True)
+        )
+    )
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
 def get_failure_signature(failure: FailedTest) -> str:
     """Create a signature for grouping identical failures.
 
     Uses the full error message and stack trace to identify failures that
     are essentially the same issue. Text is normalized to strip
-    run-specific data (timestamps, UUIDs, pod names, build numbers)
-    before hashing.
+    run-specific data (timestamps, UUIDs, pod names, build numbers, HTTP
+    header noise, pointer/hex tokens) before hashing.
 
     Args:
         failure: The test failure to create a signature for.
@@ -768,10 +888,7 @@ def get_failure_signature(failure: FailedTest) -> str:
     Returns:
         SHA-256 hash string representing the failure signature.
     """
-    normalized_error = normalize_for_signature(failure.error_message)
-    normalized_trace = normalize_for_signature(failure.stack_trace)
-    signature_text = f"{normalized_error}|{normalized_trace}"
-    return hashlib.sha256(signature_text.encode()).hexdigest()
+    return compute_signature(failure.error_message, failure.stack_trace)
 
 
 def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
@@ -2285,6 +2402,7 @@ def _expand_group_to_analyses(
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
+            stack_trace=f.stack_trace,
             analysis=analysis,
             error_signature=sig,
         )
@@ -2384,6 +2502,7 @@ def _failed_group_analyses(
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
+            stack_trace=f.stack_trace,
             error_signature=signature,
             analysis=AnalysisDetail(
                 details="Analysis failed; check server logs for details"

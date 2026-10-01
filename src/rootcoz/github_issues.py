@@ -213,7 +213,7 @@ async def enrich_with_tests_repo_matches(
                     bug_title=f"{representative_fix.file}: {representative_fix.change}",
                     bug_description=(
                         f"Test: {representative_failure.test_name}\n"
-                        f"Error: {representative_failure.error}\n"
+                        f"Error: {representative_failure.display_error}\n"
                         f"Analysis: {representative_failure.analysis.details}"
                     ),
                     candidates=candidates,

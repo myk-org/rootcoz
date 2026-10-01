@@ -134,6 +134,8 @@ export interface FailureAnalysis {
   id: string
   test_name: string
   error: string
+  /** Fallback display text when the source reported no message (backend `display_error`). */
+  stack_trace?: string
   analysis: AnalysisDetail
   error_signature: string
   token_usage?: TokenUsageSummary | null
