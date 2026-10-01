@@ -54,7 +54,7 @@ export function AnalysisModelSelect({ provider, value, onChange, forceServer, la
   const { canUseServerProviders } = useAuth()
   const unverified = allowsUnverified(providerStatus, provider, forceServer)
   return <>
-    <ModelCombobox value={value} onChange={onChange} options={visibleModels(providers, provider, forceServer, providerStatus, canUseServerProviders)} ariaLabel={label} strict={!unverified} forceServer={forceServer} canUseServer={canUseServerProviders} placeholder={unverified ? 'Enter model ID' : 'Default model'} />
+    <ModelCombobox value={value} onChange={onChange} options={visibleModels(providers, provider, forceServer, providerStatus, canUseServerProviders)} ariaLabel={label} forceServer={forceServer} canUseServer={canUseServerProviders} placeholder={unverified ? 'Enter model ID' : 'Default model'} />
     {unverified && <p className="mt-1 text-xs text-text-tertiary">Models are not verified for this key. Suggestions are unverified; enter a model ID at your own risk.</p>}
   </>
 }

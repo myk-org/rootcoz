@@ -23,7 +23,6 @@ interface ModelComboboxProps {
   className?: string
   ariaLabel?: string
   disabled?: boolean
-  strict?: boolean
   forceServer?: boolean
   canUseServer?: boolean
 }
@@ -42,7 +41,6 @@ export function ModelCombobox({
   className,
   ariaLabel,
   disabled = false,
-  strict = false,
   forceServer = false,
   canUseServer = true,
 }: ModelComboboxProps) {
@@ -55,12 +53,16 @@ export function ModelCombobox({
   const listboxId = useId()
   const hasDeniedServer = !canUseServer && options.some((model) => model.credential_sources?.includes('server'))
 
-  // Fuzzy filter: case-insensitive substring match on id or name
-  const filtered = options.filter((m) => {
-    if (strict || !value || options.some((m) => m.id === value)) return true
+  // Fuzzy filter: case-insensitive substring match on id or name. When the
+  // current value matches nothing (a stale stored model, or the user typing a
+  // new id), fall back to the full list — otherwise the dropdown is empty and
+  // the user can neither type nor pick anything.
+  const matches = options.filter((m) => {
+    if (!value || options.some((m) => m.id === value)) return true
     const q = value.toLowerCase()
     return m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q)
   })
+  const filtered = matches.length > 0 ? matches : options
 
   const showDropdown = !disabled && open && filtered.length > 0
 
@@ -255,13 +257,11 @@ export function ModelCombobox({
           type="text"
           className="flex h-9 w-full rounded-full border border-border-default bg-surface-elevated px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
           placeholder={placeholder}
-          value={strict && value && !options.some((m) => m.id === value) ? `${value} (unavailable)` : value}
-          readOnly={strict}
+          value={value}
           aria-label={ariaLabel}
           aria-describedby={hasDeniedServer ? `${listboxId}-server-help` : undefined}
           disabled={disabled}
           onChange={(e) => {
-            if (strict) return
             onChange(e.target.value)
             if (!open) setOpen(true)
           }}

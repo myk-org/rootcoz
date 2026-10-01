@@ -99,7 +99,7 @@ export function PeerConfigList({
               value={peer.ai_model}
               onChange={(val) => updatePeer(peer.id, { ai_model: val })}
               options={strict ? visibleModels(providers, peer.ai_provider, forceServer, providerStatus, canUseServerProviders) : peerModels[peer.id] ?? []}
-              strict={strict && !allowsUnverified(providerStatus, peer.ai_provider, forceServer)}
+
               forceServer={strict && forceServer}
               canUseServer={canUseServerProviders}
               ariaLabel={`Peer ${i + 1} model`}
