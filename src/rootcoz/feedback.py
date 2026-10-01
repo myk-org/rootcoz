@@ -13,6 +13,7 @@ from typing import Any
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import call_ai_once
+from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
 from rootcoz.bug_creation import create_github_issue
 from rootcoz.config import Settings
 from rootcoz.models import (
@@ -25,17 +26,9 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 
-# Attribution footer for feedback issues. The AI pair is always resolved
-# server-side (env var / settings DB) — never taken from the request body.
-_NO_AI_ATTRIBUTION = (
-    "\n\n---\n*No AI model generated this issue — submitted as raw feedback "
-    "via [rootcoz](https://github.com/myk-org/rootcoz)*"
-)
-# Matches a trailing rootcoz attribution footer (any generated variant) so it
-# can be replaced instead of duplicated when the body round-trips the client.
-_ATTRIBUTION_RE = re.compile(
-    r"\n*---\n\*(?:Generated using AI|No AI model generated)[^\n]*\*\s*$"
-)
+# Issue attribution is owned by rootcoz.attribution: the footer, its regex and
+# the signed preview-time provenance all live there so feedback creation and
+# the shared issue creator cannot disagree about who gets credit.
 
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
@@ -90,34 +83,6 @@ def scrub_sensitive_data(text: str) -> str:
     for pattern, replacement in _SENSITIVE_PATTERNS:
         result = pattern.sub(replacement, result)
     return result
-
-
-def build_ai_attribution(ai_provider: str, ai_model: str) -> str:
-    """Return the attribution footer naming the server-resolved AI pair.
-
-    States explicitly that no AI model generated the issue when the server
-    has no provider/model configured.
-    """
-    provider = ai_provider.strip()
-    model = ai_model.strip()
-    if not provider or not model:
-        return _NO_AI_ATTRIBUTION
-    return (
-        "\n\n---\n*Generated using AI with "
-        "[rootcoz](https://github.com/myk-org/rootcoz) "
-        f"({provider} / {model})*"
-    )
-
-
-def apply_ai_attribution(body: str, ai_provider: str, ai_model: str) -> str:
-    """Replace any existing rootcoz attribution with a server-resolved one.
-
-    ``ai_provider``/``ai_model`` must come from server-side resolution, so a
-    client editing the previewed body cannot inject a fake model name into the
-    created issue.
-    """
-    stripped = _ATTRIBUTION_RE.sub("", body).rstrip()
-    return stripped + build_ai_attribution(ai_provider, ai_model)
 
 
 async def format_feedback_with_ai(
@@ -346,17 +311,20 @@ async def generate_feedback_preview(
 
     Returns:
         FeedbackPreviewResponse with generated title, body, and labels.
-        The body carries a server-resolved AI attribution footer naming the
-        provider/model that wrote it, or stating that no AI model did.
+        The body carries a server-owned attribution footer naming the
+        provider/model that wrote it, or stating that no AI model did, plus
+        the signed provenance that :func:`create_feedback_from_preview`
+        re-verifies so the credit cannot drift with later settings changes.
     """
     title, body, labels, ai_generated = await format_feedback_with_ai(
         request, settings, ai_provider=ai_provider, ai_model=ai_model
     )
-    # Append AI attribution footer so the user sees who wrote the content.
-    if not ai_generated:
-        # Fallback template — say so instead of crediting a model.
-        ai_provider, ai_model = "", ""
-    body = apply_ai_attribution(body, ai_provider, ai_model)
+    # Fallback template content is credited to no model, whatever the server
+    # has configured — the footer follows what actually generated the body.
+    provenance = AiProvenance(
+        ai_used=ai_generated, provider=ai_provider, model=ai_model
+    )
+    body = apply_ai_attribution(body, provenance)
     return FeedbackPreviewResponse(title=title, body=body, labels=labels)
 
 
@@ -380,8 +348,7 @@ async def create_feedback_from_preview(
     labels: list[str],
     github_token: str,
     *,
-    ai_provider: str = "",
-    ai_model: str = "",
+    provenance: AiProvenance | None = None,
 ) -> FeedbackResponse:
     """Create a GitHub issue from a previously previewed feedback.
 
@@ -390,8 +357,9 @@ async def create_feedback_from_preview(
         body: Issue body (from preview).
         labels: Issue labels (from preview).
         github_token: User's GitHub token for authentication.
-        ai_provider: Server-resolved AI provider (never from the request).
-        ai_model: Server-resolved AI model (never from the request).
+        provenance: Server-side preview-time AI provenance.  When omitted it
+            is read from the signed token in *body* (the create endpoint's
+            only source — it never accepts a provider/model from the browser).
 
     Returns:
         FeedbackResponse with the created issue details.
@@ -406,9 +374,11 @@ async def create_feedback_from_preview(
         )
 
     title = scrub_sensitive_data(title)
-    # Re-apply the server-resolved attribution: the body round-trips through
-    # the browser and may carry a stale (or hand-edited) footer.
-    body = apply_ai_attribution(scrub_sensitive_data(body), ai_provider, ai_model)
+    # Re-apply the attribution the preview was granted: the body round-trips
+    # through the browser and may carry a stale, hand-edited or spoofed footer.
+    # Read provenance before scrubbing so the signed token is still intact.
+    resolved = provenance or read_provenance(body) or AiProvenance(ai_used=False)
+    body = apply_ai_attribution(scrub_sensitive_data(body), resolved)
     labels = [lbl for lbl in labels if lbl in _ALLOWED_LABELS]
 
     result = await create_github_issue(
@@ -454,6 +424,4 @@ async def create_feedback_issue(
         body=preview.body,
         labels=preview.labels,
         github_token=github_token,
-        ai_provider=settings.ai_provider,
-        ai_model=settings.ai_model,
     )

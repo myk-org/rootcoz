@@ -2,13 +2,15 @@
 
 import json
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
+from rootcoz.attribution import AiProvenance
 from rootcoz.config import get_settings
 from rootcoz.feedback import (
     _build_fallback_feedback,
@@ -996,6 +998,7 @@ class TestAiAttribution:
             "JENKINS_URL": "https://jenkins.example.com",
             "JENKINS_USER": "user",
             "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
         }
         with patch.dict(os.environ, env, clear=True):
             get_settings.cache_clear()
@@ -1011,6 +1014,31 @@ class TestAiAttribution:
                 {"title": "Broken", "body": "## Bug\n\nBroken.", "labels": ["bug"]}
             ),
         )
+
+    @staticmethod
+    async def _posted_body(title: str, body: str, labels: list[str]) -> str:
+        """Create the issue through the real creator and return what GitHub got."""
+        response = httpx.Response(
+            201,
+            json={
+                "number": 7,
+                "title": title,
+                "html_url": "https://github.com/myk-org/rootcoz/issues/7",
+            },
+            request=httpx.Request("POST", "https://api.github.com/repos/o/r/issues"),
+        )
+        client = AsyncMock()
+        client.post.return_value = response
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        with patch("rootcoz.bug_creation.httpx.AsyncClient", return_value=client):
+            await create_feedback_from_preview(
+                title=title,
+                body=body,
+                labels=labels,
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+        return client.post.call_args.kwargs["json"]["body"]
 
     async def test_preview_names_provider_and_model(self, settings):
         req = FeedbackRequest(description="The button is broken")
@@ -1055,13 +1083,75 @@ class TestAiAttribution:
                 body=spoofed,
                 labels=["bug"],
                 github_token=_TEST_GITHUB_TOKEN,
-                ai_provider="claude",
-                ai_model="sonnet-4-5",
+                provenance=AiProvenance(
+                    ai_used=True, provider="claude", model="sonnet-4-5"
+                ),
             )
         body = mock_create.call_args.kwargs["body"]
         assert "spoofed-model" not in body
         assert "(claude / sonnet-4-5)" in body
         assert body.count(self._AI_MARKER) == 1
+
+    async def test_mid_body_spoofed_footer_is_stripped(self):
+        """A fake footer anywhere in the body must not survive (issue #282)."""
+        spoofed = (
+            "## Bug\n\nBroken.\n\n---\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\n\nExtra detail."
+        )
+        body = await self._posted_body("Broken", spoofed, ["bug"])
+        assert "spoofed-model" not in body
+        assert "Extra detail." in body
+        # Exactly one footer remains: the server's (no verified provenance).
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_forged_provenance_token_is_ignored(self):
+        """A hand-written provenance token fails signature verification."""
+        forged = (
+            "## Bug\n\nBroken.\n\n---\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\n"
+            '<!--rootcoz-ai:deadbeef:[true,"evil","spoofed-model"]-->'
+        )
+        body = await self._posted_body("Broken", forged, ["bug"])
+        assert "spoofed-model" not in body
+        assert self._NO_AI_MARKER in body
+        assert body.count(self._AI_MARKER) == 0
+
+    async def test_ai_preview_issues_exactly_one_footer(self, settings):
+        """The final GitHub body carries one footer, not the legacy + model one."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        body = await self._posted_body(preview.title, preview.body, preview.labels)
+        assert body.count(self._AI_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in body
+
+    async def test_fallback_preview_issues_exactly_one_no_ai_footer(self, settings):
+        """Raw fallback content is published as raw, with one footer."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch(
+            "rootcoz.feedback.call_ai_once",
+            return_value=AIResult(success=False, text="sidecar down"),
+        ):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        body = await self._posted_body(preview.title, preview.body, preview.labels)
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert body.count(self._AI_MARKER) == 0
+        assert "sonnet-4-5" not in body
+
+    async def test_create_uses_preview_provenance_only(self, settings):
+        """Create credits the preview's model without any provider/model input."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        body = await self._posted_body(preview.title, preview.body, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
 
     async def test_create_without_ai_config_states_no_ai_model(self):
         with patch("rootcoz.feedback.create_github_issue") as mock_create:
@@ -1197,4 +1287,58 @@ class TestFeedbackAttributionEndpoints:
             assert resp.status_code == 201
         created_body = mock_create.call_args.kwargs["body"]
         assert "spoofed-model" not in created_body
+        # No server-verified provenance in the request → nothing is credited.
+        assert "No AI model generated this issue" in created_body
+
+    def test_create_endpoint_credits_preview_time_model(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        """Server Settings changing between preview and create is ignored (D)."""
+        from rootcoz.config import update_db_settings_cache
+
+        for client in _make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_provider="claude",
+            ai_model="test-model",
+        ):
+            with patch("rootcoz.feedback.call_ai_once") as mock_ai:
+                mock_ai.return_value = AIResult(
+                    success=True,
+                    text=json.dumps({"title": "T", "body": "B", "labels": ["bug"]}),
+                )
+                preview = client.post(
+                    "/api/feedback/preview", json={"description": "broke"}
+                )
+            assert preview.status_code == 200
+            # Admin switches the configured model before the user submits.
+            update_db_settings_cache({"ai_model": "other-model"})
+            with (
+                patch.object(
+                    storage,
+                    "get_user_tokens",
+                    return_value={"github_token": _TEST_GITHUB_TOKEN},
+                ),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                mock_create.return_value = {
+                    "url": "https://github.com/myk-org/rootcoz/issues/13",
+                    "number": 13,
+                    "title": "T",
+                }
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={
+                        "title": preview.json()["title"],
+                        "body": preview.json()["body"],
+                        "labels": ["bug"],
+                        "ai_provider": "evil",
+                        "ai_model": "evil-model",
+                    },
+                )
+            assert resp.status_code == 201
+        created_body = mock_create.call_args.kwargs["body"]
         assert "(claude / test-model)" in created_body
+        assert "other-model" not in created_body
+        assert "evil" not in created_body
+        assert created_body.count(_GITHUB_FOOTER_MARKER) == 1
