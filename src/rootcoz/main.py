@@ -205,7 +205,7 @@ from rootcoz.rootcoz_repo_settings import (
     resolve_tests_repo_url,
     tests_repo_available,
 )
-from rootcoz.signature_backfill import backfill_signatures
+from rootcoz.signature_backfill import backfill_signatures, ensure_signatures_current
 from rootcoz.sources import (
     CI_SOURCE_REGISTRY,
     CISource,
@@ -1377,6 +1377,21 @@ async def _safe_preload_cursor_models() -> None:
         logger.debug("Failed to preload sidecar models", exc_info=True)
 
 
+async def _backfill_signatures_if_stale() -> None:
+    """Startup task: re-hash stored failure signatures if the rules changed.
+
+    Thin ``None``-returning wrapper so the task matches the other startup
+    background tasks; ``ensure_signatures_current`` returns its stats for the
+    admin dry-run path.
+    """
+    try:
+        await ensure_signatures_current()
+    except Exception:
+        # A failed backfill must not take the server down; it is retried on the
+        # next start because the gate stays unapplied.
+        logger.warning("Failure signature backfill failed", exc_info=True)
+
+
 async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
     """Retroactively assign metadata to existing jobs missing metadata. Best-effort."""
     try:
@@ -1453,6 +1468,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
+
+        # Re-hash stored failure signatures when the normalization rules change.
+        # Self-gating and self-maintaining (no admin step); runs post-deploy so
+        # it always uses the rules this process is applying.
+        task = asyncio.create_task(_backfill_signatures_if_stale())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
         waiting_jobs, recovered_jobs = await storage.mark_stale_results_failed()
         for rj in recovered_jobs:
