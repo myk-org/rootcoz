@@ -882,14 +882,18 @@ def _attach_result_links(
 
 
 async def _attach_origin_job_info(result: dict[str, Any]) -> None:
-    """Attach origin job reference when the result is a re-analysis.
+    """Attach re-analysis links (both directions) to the top-level response.
 
-    If ``request_params.reanalyzed_from_job_id`` exists, adds
-    ``reanalyzed_from_job_id`` and ``origin_job_name`` to the top-level
-    response.  Prefers the denormalized ``reanalyzed_from_job_name``
-    stored at creation time; falls back to a DB lookup for legacy data.
+    ``reanalyzed_to_job_ids`` lists the re-analyses of this job (forward
+    links, appended in enqueue order); ``reanalyzed_from_job_id`` and
+    ``origin_job_name`` describe this job's origin.  Prefers the
+    denormalized ``reanalyzed_from_job_name`` stored at creation time;
+    falls back to a DB lookup for legacy data.
     """
     params = (result.get("result") or {}).get("request_params", {})
+    forward_links = params.get("reanalyzed_to_job_ids") or []
+    if isinstance(forward_links, list) and forward_links:
+        result["reanalyzed_to_job_ids"] = forward_links
     origin_id = params.get("reanalyzed_from_job_id", "")
     if not origin_id:
         return
@@ -3173,6 +3177,21 @@ def _stamp_reanalysis_metadata(
             request_params["reanalyzed_from_job_name"] = reanalyzed_from_job_name
 
 
+def _append_reanalysis_forward_link(
+    result_data: dict[str, Any], new_job_id: str
+) -> None:
+    """Record *new_job_id* in the original job's ``reanalyzed_to_job_ids``."""
+    params = result_data.get("request_params")
+    if not new_job_id or not isinstance(params, dict):
+        return
+    links = params.get("reanalyzed_to_job_ids") or []
+    if not isinstance(links, list):
+        links = []
+    if new_job_id not in links:
+        links.append(new_job_id)
+    params["reanalyzed_to_job_ids"] = links
+
+
 def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     """Return *tags* with *username* included (lowercased, deduplicated)."""
     result = list(tags) if tags else []
@@ -3422,6 +3441,12 @@ async def _enqueue_ci_source_analysis(
             merged_result[key] = value
         initial_result = merged_result
     await save_result(job_id, initial_build_url, initial_status, initial_result)
+    if reanalyzed_from_job_id:
+        # Point the original job at this re-analysis (accumulating list).
+        await patch_result_json(
+            reanalyzed_from_job_id,
+            lambda data: _append_reanalysis_forward_link(data, job_id),
+        )
     notify_active_count_changed()
     notify_dashboard_changed()
 

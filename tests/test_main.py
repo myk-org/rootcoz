@@ -5443,6 +5443,69 @@ class TestReAnalyzeEndpoint:
         assert params["reanalyzed_from_job_name"] == "My Job"
 
     @pytest.mark.asyncio
+    async def test_re_analyze_appends_forward_link_on_origin(self, test_client) -> None:
+        """Re-analyze records the new job id on the original job's forward link."""
+        await self._create_origin_job(
+            "job-origin-fwd",
+            "http://jenkins/job/my-job/42/",
+            {
+                "summary": "1 failure",
+                "job_name": "my-job",
+                "display_name": "My Job",
+                "build_number": 42,
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "job_name": "my-job",
+                        "build_number": 42,
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "jenkins_url": "https://jenkins.example.com",
+                    }
+                ),
+            },
+        )
+        with patch("rootcoz.main._process_ci_source_analysis"):
+            first = test_client.post("/re-analyze/job-origin-fwd", json={})
+            second = test_client.post("/re-analyze/job-origin-fwd", json={})
+        assert first.status_code == 202
+        assert second.status_code == 202
+        first_id = first.json()["job_id"]
+        second_id = second.json()["job_id"]
+        assert first_id != second_id
+
+        # Forward links accumulate across repeated re-analyses, in order.
+        origin = await storage.get_result("job-origin-fwd")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+            first_id,
+            second_id,
+        ]
+
+        # API exposes the forward link on the original job
+        data = test_client.get("/results/job-origin-fwd").json()
+        assert data["reanalyzed_to_job_ids"] == [first_id, second_id]
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_forward_link_exposed_via_fields(
+        self, test_client
+    ) -> None:
+        """reanalyzed_to_job_ids is selectable via the sparse fields allowlist."""
+        await storage.save_result(
+            "origin-fields",
+            "",
+            "completed",
+            {
+                "summary": "orig",
+                "request_params": {"reanalyzed_to_job_ids": ["re-1", "re-2"]},
+            },
+        )
+        response = test_client.get(
+            "/results/origin-fields?fields=reanalyzed_to_job_ids"
+        )
+        assert response.status_code == 200
+        assert response.json()["reanalyzed_to_job_ids"] == ["re-1", "re-2"]
+
+    @pytest.mark.asyncio
     async def test_re_analyze_file_stores_reanalyzed_metadata(
         self, test_client
     ) -> None:
