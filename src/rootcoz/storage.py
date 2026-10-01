@@ -1866,6 +1866,23 @@ async def _attach_failure_usage(
     attach_failure_usage(result, [dict(row) for row in rows])
 
 
+async def _row_exists(db: aiosqlite.Connection, job_id: str) -> bool:
+    """Return whether a ``results`` row exists for *job_id*."""
+    cursor = await db.execute("SELECT 1 FROM results WHERE job_id = ?", (job_id,))
+    return await cursor.fetchone() is not None
+
+
+async def _read_stored_result(
+    db: aiosqlite.Connection, job_id: str
+) -> dict[str, Any] | None:
+    """Return the result currently stored for *job_id* (``None`` if absent)."""
+    cursor = await db.execute(
+        "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+    )
+    row = await cursor.fetchone()
+    return parse_result_json(row[0], job_id=job_id) if row and row[0] else None
+
+
 async def save_result(
     job_id: str,
     build_url: str = "",
@@ -1890,6 +1907,11 @@ async def save_result(
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
+            # Merge the stored forward links inside this same transaction so a
+            # link appended after the caller read the job cannot be dropped.
+            previous = await _read_stored_result(db, job_id)
+            if previous:
+                _preserve_reanalysis_forward_links(previous, result)
             await _sync_result_token_usage(db, job_id, result)
             result_json = json.dumps(result)
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
@@ -1922,6 +1944,28 @@ async def save_result(
         await db.commit()
 
 
+def _preserve_reanalysis_forward_links(
+    previous: dict[str, Any], result: dict[str, Any]
+) -> None:
+    """Keep the stored ``reanalyzed_to_job_ids`` when writing an analysis result.
+
+    Forward links are appended (and removed on delete) with
+    ``patch_result_json`` while the origin job runs, so the ``request_params``
+    copy a finishing job read earlier must not replace the newer stored list —
+    that would resurrect a deleted link or drop a re-analysis enqueued
+    mid-flight.  The stored list is always the newer one, and both
+    ``save_result`` and ``update_status`` merge it inside their own write
+    transaction.
+    """
+    stored_params = previous.get("request_params")
+    params = result.get("request_params")
+    if not isinstance(stored_params, dict) or not isinstance(params, dict):
+        return
+    links = stored_params.get("reanalyzed_to_job_ids")
+    if isinstance(links, list):
+        params["reanalyzed_to_job_ids"] = list(links)
+
+
 async def update_status(
     job_id: str,
     status: str,
@@ -1946,17 +1990,12 @@ async def update_status(
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
-            cursor = await db.execute(
-                "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
-            )
-            row = await cursor.fetchone()
-            previous = (
-                parse_result_json(row[0], job_id=job_id) if row and row[0] else None
-            )
+            previous = await _read_stored_result(db, job_id)
             if previous:
                 for key in ("progress_phase", "progress_log", "cloning_repos"):
                     if key in previous:
                         result[key] = previous[key]
+                _preserve_reanalysis_forward_links(previous, result)
             if status in ("failed", "aborted", "completed"):
                 active_repos = result.get("cloning_repos") or []
                 if active_repos:
@@ -2235,6 +2274,7 @@ async def patch_result_json(
     skip_terminal: bool = False,
     allow_completed: bool = False,
     active_reanalysis_failure_id: str = "",
+    require_job_id: str = "",
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
@@ -2252,10 +2292,16 @@ async def patch_result_json(
     ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
     permits completed jobs when a reanalysis updates clone progress. Identified
     re-analysis updates require a running failure regardless of parent status.
+    ``require_job_id`` makes the patch conditional: when set and that job row no
+    longer exists, the patch is skipped, so a link can never be created for an
+    already-deleted result.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
+            if require_job_id and not await _row_exists(db, require_job_id):
+                await db.execute("ROLLBACK")
+                return
             cursor = await db.execute(
                 "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
             )

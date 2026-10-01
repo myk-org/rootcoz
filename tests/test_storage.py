@@ -2223,6 +2223,178 @@ async def test_delete_job_metadata_cleans_labels(setup_test_db):
             assert count == 0
 
 
+class TestReanalysisForwardLinkPreserved:
+    """update_status must not erase a forward link appended while the job ran."""
+
+    async def test_completion_write_keeps_newer_forward_links(
+        self, setup_test_db: Path
+    ) -> None:
+        """A finishing job's stale request_params cannot drop the stored links."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="origin-running",
+                status="running",
+                result={"request_params": {"ai_provider": "claude"}},
+            )
+
+            def _append(data: dict) -> None:
+                params = data["request_params"]
+                params["reanalyzed_to_job_ids"] = ["re-1", "re-2"]
+
+            await storage.patch_result_json("origin-running", _append)
+
+            # Completion write carries the params read *before* the append.
+            await storage.update_status(
+                "origin-running",
+                "completed",
+                {"summary": "done", "request_params": {"ai_provider": "claude"}},
+            )
+            stored = await storage.get_result("origin-running")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1",
+                "re-2",
+            ]
+
+    async def test_completion_write_keeps_link_removal(
+        self, setup_test_db: Path
+    ) -> None:
+        """A removed forward link is not resurrected by a stale completion write."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="origin-deleted",
+                status="running",
+                result={
+                    "request_params": {
+                        "reanalyzed_to_job_ids": ["re-1", "re-2"],
+                    }
+                },
+            )
+
+            def _drop(data: dict) -> None:
+                params = data["request_params"]
+                params["reanalyzed_to_job_ids"] = ["re-1"]
+
+            await storage.patch_result_json("origin-deleted", _drop)
+            await storage.update_status(
+                "origin-deleted",
+                "completed",
+                {
+                    "summary": "done",
+                    "request_params": {"reanalyzed_to_job_ids": ["re-1", "re-2"]},
+                },
+            )
+            stored = await storage.get_result("origin-deleted")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1"
+            ]
+
+    async def test_save_merge_keeps_newer_forward_links(
+        self, setup_test_db: Path
+    ) -> None:
+        """save_result merges the stored links inside its own transaction."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="origin-inplace",
+                status="running",
+                result={
+                    "request_params": {"reanalyzed_to_job_ids": ["re-1"]},
+                },
+            )
+            # The caller read the job, then a concurrent re-analysis appended.
+            stale = await storage.get_result("origin-inplace")
+            await storage.patch_result_json(
+                "origin-inplace",
+                lambda data: data["request_params"]["reanalyzed_to_job_ids"].append(
+                    "re-2"
+                ),
+            )
+
+            await storage.save_result(
+                job_id="origin-inplace",
+                status="running",
+                result=stale["result"],
+            )
+            stored = await storage.get_result("origin-inplace")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1",
+                "re-2",
+            ]
+
+    async def test_concurrent_save_and_append_keep_both_links(
+        self, setup_test_db: Path
+    ) -> None:
+        """Racing save_result and append writes converge on one full link list."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="origin-race",
+                status="running",
+                result={"request_params": {"reanalyzed_to_job_ids": ["re-1"]}},
+            )
+            stale = await storage.get_result("origin-race")
+
+            async def _append() -> None:
+                await asyncio.sleep(0)
+                await storage.patch_result_json(
+                    "origin-race",
+                    lambda data: data["request_params"]["reanalyzed_to_job_ids"].append(
+                        "re-2"
+                    ),
+                )
+
+            async def _save() -> None:
+                await asyncio.sleep(0)
+                await storage.save_result(
+                    job_id="origin-race",
+                    status="running",
+                    result=stale["result"],
+                )
+
+            await asyncio.gather(_save(), _append())
+            stored = await storage.get_result("origin-race")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1",
+                "re-2",
+            ]
+
+    async def test_patch_skipped_when_required_job_is_missing(
+        self, setup_test_db: Path
+    ) -> None:
+        """require_job_id makes a link patch conditional on the job existing."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="origin-guard",
+                status="running",
+                result={"request_params": {"reanalyzed_to_job_ids": []}},
+            )
+
+            def _append(data: dict) -> None:
+                data["request_params"]["reanalyzed_to_job_ids"].append("re-1")
+
+            # Job still exists -> the link is recorded.
+            await storage.save_result(
+                job_id="re-1",
+                status="running",
+                result={"request_params": {}},
+            )
+            await storage.patch_result_json(
+                "origin-guard", _append, require_job_id="re-1"
+            )
+            stored = await storage.get_result("origin-guard")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1"
+            ]
+
+            # Job already deleted -> no dead link is created.
+            await storage.delete_job("re-1")
+            await storage.patch_result_json(
+                "origin-guard", _append, require_job_id="re-1"
+            )
+            stored = await storage.get_result("origin-guard")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1"
+            ]
+
+
 class TestPatchResultJsonKeyPresence:
     """Regression: patch_result_json must not clobber denorm columns on partial patches."""
 

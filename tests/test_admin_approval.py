@@ -1,9 +1,11 @@
 """Tests for admin approval of new user registrations (issue #54)."""
 
 import asyncio
+import contextlib
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import aiosqlite
 import pytest
 from fastapi.testclient import TestClient
 
@@ -478,3 +480,449 @@ class TestConfigSetting:
                 assert settings.require_approval is False
             finally:
                 get_settings.cache_clear()
+
+
+class _StubRequest:
+    """Minimal Request stand-in for driving the navbar SSE generators."""
+
+    def __init__(self, username: str | None = None, is_admin: bool = False):
+        self.state = type("State", (), {"username": username, "is_admin": is_admin})()
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+def _maybe_fail(fail: dict[str, BaseException], key: str, value):
+    """AsyncMock side effect that raises while ``key`` is present in ``fail``."""
+
+    def _side_effect(*_args):
+        if key in fail:
+            raise fail[key]
+        return value() if callable(value) else value
+
+    return AsyncMock(side_effect=_side_effect)
+
+
+@contextlib.contextmanager
+def _navbar_storage(
+    pending: list[str],
+    role: str = "admin",
+    *,
+    fail: dict[str, BaseException] | None = None,
+):
+    """Patch the storage reads the navbar streams make; yield the main module.
+
+    ``pending`` is mutated by the test to simulate a count change.  ``role`` is
+    the live role of the streaming admin, so tests can revoke admin rights
+    while the stream is open.  ``fail`` maps a storage read (``"role"`` for the
+    admin re-check, ``"count"`` for the pending lookup) to the exception it
+    raises; tests mutate the dict to toggle the failure.
+    """
+    from rootcoz import main
+
+    fail = fail if fail is not None else {}
+    with (
+        patch.object(main.storage, "count_active_analyses", AsyncMock(return_value=0)),
+        patch.object(
+            main.storage, "get_unread_mention_count", AsyncMock(return_value=0)
+        ),
+        patch.object(
+            main.storage,
+            "list_pending_users",
+            _maybe_fail(fail, "count", lambda: [{"username": u} for u in pending]),
+        ),
+        patch.object(
+            main.storage,
+            "get_user_by_username",
+            _maybe_fail(fail, "role", {"username": "boss", "role": role}),
+        ),
+        patch.object(main, "_check_allow_list"),
+    ):
+        yield main
+
+
+async def _next_or_timeout(stream, timeout: float = 0.5):
+    """Return the next SSE chunk, or raise if the stream stayed quiet."""
+    return await asyncio.wait_for(stream.__anext__(), timeout=timeout)
+
+
+async def _wait_for_call(mock: AsyncMock, count: int, timeout: float = 1.0) -> None:
+    """Wait until ``mock`` has been awaited at least ``count`` times."""
+    async with asyncio.timeout(timeout):
+        while mock.await_count < count:
+            await asyncio.sleep(0.001)
+
+
+@contextlib.asynccontextmanager
+async def _background(*coros):
+    """Run coroutines as tasks and cancel every one of them on exit."""
+    tasks = tuple(asyncio.create_task(coro) for coro in coros)
+    try:
+        yield tasks
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _open_navbar_stream(
+    main, endpoint: str, *, username: str, is_admin: bool, topics: str = "navbar"
+):
+    """Open the navbar SSE stream on either endpoint and return its body."""
+    request = _StubRequest(username=username, is_admin=is_admin)
+    if endpoint == "multiplexed":
+        resp = await main.stream_multiplexed(request, topics=topics)
+    else:
+        resp = await main.stream_navbar_counts(request)
+    return resp.body_iterator
+
+
+async def _notify_every(listeners: set[asyncio.Event], interval: float) -> None:
+    """Fire a listener set on a fixed interval to keep an SSE stream busy."""
+    while True:
+        await asyncio.sleep(interval)
+        for event in list(listeners):
+            event.set()
+
+
+async def _drain_until(stream, sink: list[str], needle: str, timeout: float = 2.0):
+    """Consume SSE chunks into ``sink`` until one contains ``needle``."""
+    async with asyncio.timeout(timeout):
+        while True:
+            chunk = await stream.__anext__()
+            sink.append(chunk)
+            if needle in chunk:
+                return
+
+
+# SSE event name carrying the pending count, per endpoint.
+_PENDING_EVENT = {"multiplexed": "navbar:pending-count", "standalone": "pending-count"}
+
+
+class TestNavbarPendingCountStream:
+    """The navbar SSE streams carry pending-count for admins (issue #227)."""
+
+    @pytest.mark.asyncio
+    async def test_multiplexed_admin_gets_initial_and_updated_pending_count(self):
+        """Layout consumes /api/stream?topics=navbar — this is its pending-count path."""
+        pending = ["p1", "p2"]
+        with _navbar_storage(pending) as main:
+            resp = await main.stream_multiplexed(
+                _StubRequest(username="boss", is_admin=True), topics="navbar"
+            )
+            stream = resp.body_iterator
+            try:
+                initial = [await stream.__anext__() for _ in range(3)]
+                assert initial[0].startswith("event: navbar:active-count")
+                assert initial[1].startswith("event: navbar:unread-count")
+                assert initial[2] == "event: navbar:pending-count\ndata: 2\n\n"
+                assert main._pending_count_listeners  # registered on connect
+
+                # Same value re-broadcast is deduped, then a real change is sent
+                pending.remove("p2")
+                main.notify_pending_count_changed()
+                assert await _next_or_timeout(stream) == (
+                    "event: navbar:pending-count\ndata: 1\n\n"
+                )
+                pending.clear()
+                main.notify_pending_count_changed()
+                assert await _next_or_timeout(stream) == (
+                    "event: navbar:pending-count\ndata: 0\n\n"
+                )
+            finally:
+                await stream.aclose()
+            assert not main._pending_count_listeners  # deregistered on disconnect
+
+    @pytest.mark.asyncio
+    async def test_standalone_admin_gets_initial_and_updated_pending_count(self):
+        pending = ["p1", "p2"]
+        with _navbar_storage(pending) as main:
+            resp = await main.stream_navbar_counts(
+                _StubRequest(username="boss", is_admin=True)
+            )
+            stream = resp.body_iterator
+            try:
+                initial = [await stream.__anext__() for _ in range(3)]
+                assert initial[-1] == "event: pending-count\ndata: 2\n\n"
+                assert main._pending_count_listeners  # registered on connect
+
+                pending.clear()
+                main.notify_pending_count_changed()
+                assert await _next_or_timeout(stream) == (
+                    "event: pending-count\ndata: 0\n\n"
+                )
+            finally:
+                await stream.aclose()
+            assert not main._pending_count_listeners  # deregistered on disconnect
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["multiplexed", "standalone"])
+    async def test_non_admin_never_receives_pending_count(self, endpoint):
+        with _navbar_storage(["p1"]) as main:
+            stream = await _open_navbar_stream(
+                main, endpoint, username="bob", is_admin=False
+            )
+            try:
+                initial = [await stream.__anext__() for _ in range(2)]
+                assert not any("pending-count" in chunk for chunk in initial)
+                assert not main._pending_count_listeners
+                main.notify_pending_count_changed()
+                # The next chunk would only be the 30s keepalive.
+                with pytest.raises((TimeoutError, StopAsyncIteration)):
+                    await _next_or_timeout(stream)
+            finally:
+                await stream.aclose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["multiplexed", "standalone"])
+    async def test_revoked_admin_stops_receiving_counts(self, endpoint):
+        """Admin rights are re-checked on every notification (#227 security)."""
+        pending = ["p1", "p2"]
+        with _navbar_storage(pending) as main:
+            stream = await _open_navbar_stream(
+                main, endpoint, username="boss", is_admin=True
+            )
+            event = _PENDING_EVENT[endpoint]
+            try:
+                await stream.__anext__()
+                await stream.__anext__()
+                await stream.__anext__()  # initial pending count
+                listener = next(iter(main._pending_count_listeners))
+
+                # Admin downgraded to reviewer while the stream stays open
+                with _navbar_storage(pending, role="reviewer"):
+                    main.notify_pending_count_changed()
+                    # Badge is cleared once...
+                    assert await _next_or_timeout(stream) == (
+                        f"event: {event}\ndata: 0\n\n"
+                    )
+                assert listener not in main._pending_count_listeners
+                pending.clear()
+                main.notify_pending_count_changed()
+                # ...and no further counts are delivered.
+                with pytest.raises((TimeoutError, StopAsyncIteration)):
+                    await _next_or_timeout(stream)
+            finally:
+                await stream.aclose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["multiplexed", "standalone"])
+    async def test_failed_role_lookup_keeps_listener_and_recovers(self, endpoint):
+        """An unverifiable role is not a revocation: emit nothing, stay retryable."""
+        pending = ["p1", "p2"]
+        fail: dict[str, BaseException] = {}
+        with (
+            _navbar_storage(pending, fail=fail) as main,
+            patch.object(main, "_PENDING_RETRY_SECONDS", 0.01),
+        ):
+            stream = await _open_navbar_stream(
+                main, endpoint, username="boss", is_admin=True
+            )
+            try:
+                initial = [await stream.__anext__() for _ in range(3)]
+                assert initial[2] == f"event: {_PENDING_EVENT[endpoint]}\ndata: 2\n\n"
+                listener = next(iter(main._pending_count_listeners))
+
+                # The role lookup starts failing while the stream stays open
+                pending.clear()
+                fail["role"] = aiosqlite.OperationalError("database is locked")
+                main.notify_pending_count_changed()
+                nxt = asyncio.create_task(stream.__anext__())
+                await asyncio.sleep(0.05)  # several retries, all unverifiable
+                # An unverifiable role gets no count at all, but the listener
+                # is not discarded: the stream is still waiting on a retry.
+                assert not nxt.done()
+                assert listener in main._pending_count_listeners
+
+                # The database recovers: the scheduled retry delivers the count
+                # on this same connection, with no new notification.
+                fail.clear()
+                pending.append("p3")  # count is 1 until the retry lands
+                assert await asyncio.wait_for(nxt, 1) == (
+                    f"event: {_PENDING_EVENT[endpoint]}\ndata: 1\n\n"
+                )
+            finally:
+                await stream.aclose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["multiplexed", "standalone"])
+    async def test_failed_count_lookup_emits_no_zero(self, endpoint):
+        """A failed pending lookup must not masquerade as a real count (#227)."""
+        pending = ["p1", "p2"]
+        fail: dict[str, BaseException] = {}
+        with _navbar_storage(pending, fail=fail) as main:
+            stream = await _open_navbar_stream(
+                main, endpoint, username="boss", is_admin=True
+            )
+            try:
+                for _ in range(3):  # active, unread, initial pending count
+                    await stream.__anext__()
+                assert main._pending_count_listeners  # still registered
+
+                fail["count"] = aiosqlite.OperationalError("database is locked")
+                pending.clear()
+                main.notify_pending_count_changed()
+                # The badge keeps its last good count instead of reading 0.
+                with pytest.raises((TimeoutError, StopAsyncIteration)):
+                    await _next_or_timeout(stream)
+            finally:
+                await stream.aclose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("endpoint", ["multiplexed", "standalone"])
+    async def test_failed_count_lookup_retries_on_its_own_deadline(self, endpoint):
+        """A failed pending lookup is retried without a new mutation (#227)."""
+        pending = ["p1", "p2"]
+        fail: dict[str, BaseException] = {}
+        with (
+            _navbar_storage(pending, fail=fail) as main,
+            patch.object(main, "_PENDING_RETRY_SECONDS", 0.01),
+        ):
+            stream = await _open_navbar_stream(
+                main, endpoint, username="boss", is_admin=True
+            )
+            try:
+                for _ in range(3):  # active, unread, initial pending count
+                    await stream.__anext__()
+                lookup = main.storage.list_pending_users
+                seen = lookup.await_count
+
+                fail["count"] = aiosqlite.OperationalError("database is locked")
+                pending.clear()
+                main.notify_pending_count_changed()
+                # Consume while the error is live: the lookup really has to fail.
+                async with _background(stream.__anext__()) as (nxt,):
+                    await _wait_for_call(lookup, seen + 1)
+                    # A failed lookup defers instead of counting: nothing is
+                    # emitted, and the retry is sooner than the 30s keepalive.
+                    await asyncio.sleep(0.05)  # well inside the retry deadline
+                    assert not nxt.done()
+
+                    # The database recovers: the scheduled retry delivers the
+                    # count on this same connection, no new notification.
+                    fail.clear()
+                    pending.append("p3")  # count is 1 until the retry lands
+                    assert await asyncio.wait_for(nxt, 2) == (
+                        f"event: {_PENDING_EVENT[endpoint]}\ndata: 1\n\n"
+                    )
+            finally:
+                await stream.aclose()
+
+    @pytest.mark.asyncio
+    async def test_busy_multiplexed_stream_still_retries(self):
+        """Other topics firing must not postpone the pending-count retry."""
+        pending = ["p1", "p2"]
+        fail: dict[str, BaseException] = {}
+        with (
+            _navbar_storage(pending, fail=fail) as main,
+            patch.object(main, "_PENDING_RETRY_SECONDS", 0.2),
+        ):
+            stream = await _open_navbar_stream(
+                main,
+                "multiplexed",
+                username="boss",
+                is_admin=True,
+                topics="navbar,dashboard",
+            )
+            event = _PENDING_EVENT["multiplexed"]
+            try:
+                for _ in range(3):  # active, unread, initial pending count
+                    await stream.__anext__()
+
+                fail["count"] = aiosqlite.OperationalError("database is locked")
+                pending.clear()
+                main.notify_pending_count_changed()
+                chunks: list[str] = []
+                # Both tasks are cancelled in the context manager's finally,
+                # so a failed assertion cannot leave them running.
+                async with _background(
+                    _drain_until(stream, chunks, event),
+                    _notify_every(main._dashboard_listeners, 0.05),
+                ) as tasks:
+                    drain = tasks[0]
+                    # A busy stream: another subscribed topic fires every 50ms,
+                    # so the 30s keepalive timeout is never reached.
+                    await asyncio.sleep(0.1)
+                    assert any("dashboard" in chunk for chunk in chunks)
+                    assert not any(": keepalive" in chunk for chunk in chunks)
+
+                    # The retry deadline comes due mid-traffic and delivers the
+                    # count, without a keepalive or a new pending notification.
+                    fail.clear()
+                    pending.append("p3")  # count is 1 until the retry lands
+                    await asyncio.wait_for(drain, 2)
+                    assert f"event: {event}\ndata: 1\n\n" in chunks
+            finally:
+                await stream.aclose()
+
+
+class TestPendingCountBroadcast:
+    """Endpoints that change the pending list broadcast a refresh (#227)."""
+
+    def test_register_broadcasts(self, client_approval_on):
+        from rootcoz import main
+
+        with patch.object(main, "notify_pending_count_changed") as notify:
+            resp = client_approval_on.post(
+                "/api/auth/register", json={"username": "bcast0"}
+            )
+        assert resp.status_code == 200
+        notify.assert_called_once()
+
+    def test_register_without_approval_does_not_broadcast(self, client_approval_off):
+        """No pending user was created, so listeners must not be woken."""
+        from rootcoz import main
+
+        with patch.object(main, "notify_pending_count_changed") as notify:
+            resp = client_approval_off.post(
+                "/api/auth/register", json={"username": "noapproval"}
+            )
+        assert resp.status_code == 200
+        notify.assert_not_called()
+
+    def test_approve_broadcasts(self, client_approval_on):
+        from rootcoz import main
+
+        client_approval_on.post("/api/auth/register", json={"username": "bcast1"})
+        with patch.object(main, "notify_pending_count_changed") as notify:
+            resp = client_approval_on.post(
+                "/api/admin/users/bcast1/approve", headers=_admin_headers()
+            )
+        assert resp.status_code == 200
+        notify.assert_called_once()
+
+    def test_reject_broadcasts(self, client_approval_on):
+        from rootcoz import main
+
+        client_approval_on.post("/api/auth/register", json={"username": "bcast2"})
+        with patch.object(main, "notify_pending_count_changed") as notify:
+            resp = client_approval_on.post(
+                "/api/admin/users/bcast2/reject", headers=_admin_headers()
+            )
+        assert resp.status_code == 200
+        notify.assert_called_once()
+
+    def test_delete_broadcasts(self, client_approval_on):
+        from rootcoz import main
+
+        client_approval_on.post("/api/auth/register", json={"username": "bcast3"})
+        with patch.object(main, "notify_pending_count_changed") as notify:
+            resp = client_approval_on.delete(
+                "/api/admin/users/bcast3", headers=_admin_headers()
+            )
+        assert resp.status_code == 200
+        notify.assert_called_once()
+
+    def test_role_change_broadcasts(self, client_approval_on):
+        """Promoting a pending user drops them from the pending list."""
+        from rootcoz import main
+
+        client_approval_on.post("/api/auth/register", json={"username": "bcast4"})
+        with patch.object(main, "notify_pending_count_changed") as notify:
+            resp = client_approval_on.put(
+                "/api/admin/users/bcast4/role",
+                json={"role": "admin"},
+                headers=_admin_headers(),
+            )
+        assert resp.status_code == 200
+        notify.assert_called_once()
