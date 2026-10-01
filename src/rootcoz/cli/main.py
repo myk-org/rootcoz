@@ -682,6 +682,11 @@ def backfill_signatures_cmd(
             f"Updated {data['history_rows_changed']} failure_history rows, "
             f"{data['comment_rows_changed']} comment rows."
         )
+    if data["jobs_deferred"]:
+        typer.echo(
+            f"{data['jobs_deferred']} job(s) were left to a running analysis; "
+            "their signatures are rewritten when it saves."
+        )
     unrecoverable = data["unrecoverable_failures_count"]
     if unrecoverable:
         typer.echo(

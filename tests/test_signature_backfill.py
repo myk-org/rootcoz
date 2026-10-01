@@ -122,6 +122,29 @@ class TestTraceOnlyFailures:
         assert stats["failures_changed"] == 0
         assert stats["unrecoverable_failures_count"] == 0
 
+    async def test_history_stores_the_trace_so_search_can_find_it(self, db):
+        """error is a signature input and stays empty; the history copy shows it."""
+        await _store_job(
+            db, "job1", _result(failures=[self._ingested(_failed_test("t", "", TRACE))])
+        )
+
+        assert (await _history(db, "job1"))[0]["error_message"] == TRACE
+        found = await db.get_all_failures(search="t.py:1")
+        assert [row["job_id"] for row in found["failures"]] == ["job1"]
+
+    async def test_backfill_still_matches_a_trace_only_history_row(self, db):
+        """The history discriminator is the same text the row was written with."""
+        stored = self._ingested(_failed_test("t", "", TRACE))
+        stored.error_signature = "stale-hash"
+        await _store_job(db, "job1", _result(failures=[stored]))
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert stats["history_rows_changed"] == 1
+        assert (await _history(db, "job1"))[0]["error_signature"] == compute_signature(
+            "", TRACE
+        )
+
 
 class TestIterStoredFailures:
     def test_walks_top_level_and_nested_children(self):
@@ -415,6 +438,52 @@ class TestConcurrentUpdateSafety:
         assert comments[0]["error_signature"] == compute_signature("boom", "at a.py:1")
         assert stats["history_rows_changed"] == 2
 
+    async def test_a_shared_old_hash_does_not_give_both_rows_the_first_hash(self, db):
+        """A rollback splits one old hash into two: each history row gets its own."""
+        failures = []
+        for trace in ("at a.py:1", "at b.py:2"):
+            failure = _failure("t", "boom", trace)
+            # The old rules hashed both traces to this one value.
+            failure.error_signature = "shared-old-hash"
+            failures.append(failure)
+        await _store_job(db, "job1", _result(failures=failures))
+        await db.add_comment("job1", "t", "about a", error_signature="shared-old-hash")
+
+        stats = await backfill_signatures(dry_run=False)
+
+        stored = await _signatures(db, "job1")
+        assert len(set(stored)) == 2
+        assert stored == [
+            compute_signature("boom", "at a.py:1"),
+            compute_signature("boom", "at b.py:2"),
+        ]
+        # Rows are seeded in stored-failure order, so each keeps its own hash.
+        assert [row["error_signature"] for row in await _history(db, "job1")] == stored
+        # The comment row is ambiguous; it leaves with the first failure's hash,
+        # never with the dead one.
+        assert (await db.get_comments_for_job("job1"))[0]["error_signature"] == stored[
+            0
+        ]
+        assert stats["history_rows_changed"] == 2
+
+    async def test_every_comment_of_one_failure_keeps_its_new_hash(self, db):
+        """A failure can hold several comments; they are rewritten as a group."""
+        failure = _failure("t", "boom")
+        failure.error_signature = "stale-hash"
+        await _store_job(db, "job1", _result(failures=[failure]))
+        for index in range(3):
+            await db.add_comment(
+                "job1", "t", f"note {index}", error_signature="stale-hash"
+            )
+
+        stats = await backfill_signatures(dry_run=False)
+
+        expected = compute_signature("boom", TRACE)
+        assert {
+            row["error_signature"] for row in await db.get_comments_for_job("job1")
+        } == {expected}
+        assert stats["comment_rows_changed"] == 3
+
     async def test_result_and_history_are_rewritten_atomically(self, db):
         """An interrupted run leaves neither the result nor history half-written."""
         await _store_job(
@@ -452,6 +521,28 @@ class TestConcurrentUpdateSafety:
         assert await _signatures(db, "job1") == ["stale-hash"]
         assert stats["jobs_changed"] == 0
         assert stats["history_rows_changed"] == 0
+        assert stats["deferred_jobs"] == ["job1"]
+
+    async def test_a_job_that_goes_in_flight_reports_no_rewrite(self, db, monkeypatch):
+        """The probe found it stale; the write lock found it already running."""
+        await _store_job(
+            db, "job1", _result(failures=_stale(_failure("t", MESSAGE_WITH_NOISE)))
+        )
+        real_patch = signature_backfill.patch_result_json
+
+        async def in_flight_patch(job_id, *args, **kwargs):
+            await _set_status(db, job_id, "running")
+            return await real_patch(job_id, *args, **kwargs)
+
+        monkeypatch.setattr(signature_backfill, "patch_result_json", in_flight_patch)
+
+        stats = await backfill_signatures(dry_run=False)
+
+        # Nothing was rewritten, so nothing is counted as rewritten.
+        assert await _signatures(db, "job1") == ["stale-hash"]
+        assert stats["failures_changed"] == 0
+        assert stats["jobs_changed"] == 0
+        assert stats["deferred_jobs"] == ["job1"]
 
     async def test_backfill_between_history_and_result_save_changes_nothing(self, db):
         """A live analysis writes history first, its result in a later write."""
@@ -498,6 +589,7 @@ class TestWriteLockAvoidance:
         assert patched == ["job2"]
         assert stats["jobs_scanned"] == 3
         assert stats["jobs_changed"] == 1
+        assert stats["failures_changed"] == 1
         assert stats["unrecoverable_failures_count"] == 1
 
 
@@ -658,6 +750,33 @@ class TestEnsureSignaturesCurrent:
         await _store_job(db, "job1", _result(failures=[_failure("t", "boom")]))
         assert await ensure_signatures_current() is not None
         assert await ensure_signatures_current() is None
+
+    async def test_a_deferred_job_keeps_the_version_unapplied(self, db):
+        """A job left to a running analysis is revisited by the next start."""
+        await _store_job(
+            db, "job1", _result(failures=_stale(_failure("t", MESSAGE_WITH_NOISE)))
+        )
+        await _set_status(db, "job1", "pending")
+
+        stats = await ensure_signatures_current()
+
+        version = normalization_rules_version()
+        assert stats is not None
+        assert stats["jobs_deferred"] == 1
+        assert await _signatures(db, "job1") == ["stale-hash"]
+        assert not await db.migration_applied(MIGRATION_KEY_PREFIX + version)
+        assert await db.get_signature_versions() == ("", version)
+
+        # The analysis gave up and restored the job: the next start finishes it.
+        await _set_status(db, "job1", "completed")
+        stats = await ensure_signatures_current()
+
+        assert stats is not None
+        assert stats["jobs_deferred"] == 0
+        assert (await _signatures(db, "job1"))[0] == compute_signature(
+            MESSAGE_WITH_NOISE, TRACE
+        )
+        assert await db.migration_applied(MIGRATION_KEY_PREFIX + version)
 
     async def test_rollback_to_an_earlier_version_rehashes_again(self, db):
         """A stale-but-present migration key must not gate the backfill."""

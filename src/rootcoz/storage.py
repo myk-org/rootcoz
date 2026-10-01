@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 import time
 import uuid
+from collections import defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
@@ -2250,12 +2251,82 @@ class ResultPatch(NamedTuple):
 
     The denormalized row counts matter only to callers that pass
     ``denormalized`` updates (the signature backfill); everyone else ignores
-    them.
+    them. ``in_flight`` says the row was left alone because ``skip_in_flight``
+    was set and its analysis is still running -- a skip the backfill has to
+    revisit, as opposed to a row that was simply already up to date.
     """
 
     written: bool
     history_rows: int = 0
     comment_rows: int = 0
+    in_flight: bool = False
+
+
+def failure_error_text(failure: dict[str, Any]) -> str:
+    """Return the text to denormalize into ``failure_history.error_message``.
+
+    ``error`` is a signature input and is persisted verbatim (see
+    :meth:`rootcoz.models.FailureAnalysis.display_error`), so a trace-only
+    failure stores an empty message. The history copy exists to be read and
+    searched, so it takes the trace standing in for the missing message --
+    otherwise those failures have nothing to show and cannot be found by
+    :func:`get_all_failures`.
+    """
+    error = failure.get("error")
+    if isinstance(error, str) and error:
+        return error
+    trace = failure.get("stack_trace")
+    return trace if isinstance(trace, str) else ""
+
+
+async def _resign_rows(
+    db: aiosqlite.Connection,
+    table: str,
+    where: str,
+    params: tuple[Any, ...],
+    updates: Sequence[SignatureUpdate],
+) -> int:
+    """Point every row of *table* matching *where* at its own failure's hash.
+
+    Rows are claimed one failure at a time, oldest id first, because the match
+    predicate cannot always tell two failures apart: the denormalized tables
+    store no stack trace, so two failures sharing a test name, message and old
+    hash are indistinguishable there while the stored result gives each its own
+    new hash. A plain ``UPDATE ... WHERE <predicate>`` would hand both rows to
+    whichever failure came first and leave the other's row dead.
+
+    When every failure in the group collapses onto one hash -- the common case --
+    the whole group is rewritten in a single statement.
+
+    Args:
+        db: Open transaction.
+        table: ``failure_history`` or ``comments``.
+        where: The identity predicate, without the parameters.
+        params: Parameters for *where*; identical for every failure in
+            *updates*, which is what makes them one group.
+        updates: The failures matching *where*.
+
+    Returns:
+        The number of rows rewritten.
+    """
+    cursor = await db.execute(
+        f"SELECT id FROM {table} WHERE {where} ORDER BY id", params
+    )
+    row_ids = [row[0] for row in await cursor.fetchall()]
+    if not row_ids:
+        return 0
+    if len({update.new_signature for update in updates}) == 1:
+        cursor = await db.execute(
+            f"UPDATE {table} SET error_signature = ? WHERE {where}",
+            (updates[0].new_signature, *params),
+        )
+        return cursor.rowcount or 0
+    for index, row_id in enumerate(row_ids):
+        await db.execute(
+            f"UPDATE {table} SET error_signature = ? WHERE id = ?",
+            (updates[index % len(updates)].new_signature, row_id),
+        )
+    return len(row_ids)
 
 
 async def _apply_denormalized_signatures(
@@ -2273,46 +2344,78 @@ async def _apply_denormalized_signatures(
     alone is not an identity: signatures cover the stack trace too, so two
     failures can share a test name and message and differ only in trace, and
     matching by message would write one failure's hash onto the other's row.
+    Updates are then applied *per distinct match*, oldest row first, so a match
+    covering two indistinguishable failures hands each its own row instead of
+    both to the first (see :func:`_resign_rows`).
 
     Returns:
         ``(history_rows_updated, comment_rows_updated)``.
     """
-    history = 0
-    comments = 0
+    identity = (
+        "job_id = ? AND test_name = ? AND child_job_name = ? AND child_build_number = ?"
+    )
+    history_groups: dict[tuple[str, str, int, str, str], list[SignatureUpdate]] = (
+        defaultdict(list)
+    )
+    # comments carry no message column, so a group is keyed without it.
+    comment_groups: dict[tuple[str, str, int, str], list[SignatureUpdate]] = (
+        defaultdict(list)
+    )
     for update in updates:
-        identity = (
-            "job_id = ? AND test_name = ? AND child_job_name = ?"
-            " AND child_build_number = ?"
-        )
-        cursor = await db.execute(
-            f"UPDATE failure_history SET error_signature = ? "
-            f"WHERE {identity} AND error_message = ? AND error_signature = ?",
+        history_groups[
             (
-                update.new_signature,
-                job_id,
                 update.test_name,
                 update.child_job_name,
                 update.child_build_number,
                 update.error_message,
                 update.previous_signature,
-            ),
-        )
-        history += cursor.rowcount or 0
-        # comments carry no message column, so the signature the row was
-        # written with is the only per-failure discriminator available.
-        cursor = await db.execute(
-            f"UPDATE comments SET error_signature = ? "
-            f"WHERE {identity} AND error_signature = ?",
+            )
+        ].append(update)
+        comment_groups[
             (
-                update.new_signature,
-                job_id,
                 update.test_name,
                 update.child_job_name,
                 update.child_build_number,
                 update.previous_signature,
+            )
+        ].append(update)
+
+    history = 0
+    for (
+        test_name,
+        child_name,
+        child_build,
+        error_message,
+        previous,
+    ), group in history_groups.items():
+        history += await _resign_rows(
+            db,
+            "failure_history",
+            f"{identity} AND error_message = ? AND error_signature = ?",
+            (
+                job_id,
+                test_name,
+                child_name,
+                child_build,
+                error_message,
+                previous,
             ),
+            group,
         )
-        comments += cursor.rowcount or 0
+
+    comments = 0
+    # ponytail: comment rows hold no message and no failure id, so when the
+    # failures in a group end on different hashes the rows are dealt out
+    # round-robin instead of by ownership. Every row still leaves with a live
+    # hash; add a failure id column if per-failure comment counts matter.
+    for (test_name, child_name, child_build, previous), group in comment_groups.items():
+        comments += await _resign_rows(
+            db,
+            "comments",
+            f"{identity} AND error_signature = ?",
+            (job_id, test_name, child_name, child_build, previous),
+            group,
+        )
     return history, comments
 
 
@@ -2349,7 +2452,9 @@ async def patch_result_json(
     ``skip_in_flight`` leaves jobs whose analysis is still running
     (:data:`ACTIVE_STATUSES`) to that analysis, which writes current-rule
     signatures when it saves; used by the signature backfill, whose read of the
-    stored result would otherwise be stale by the time it commits.
+    stored result would otherwise be stale by the time it commits. Such a skip
+    is reported as ``ResultPatch.in_flight`` so the backfill knows the job still
+    owes it a rewrite.
 
     Returns:
         The patch outcome (see :class:`ResultPatch`).
@@ -2361,10 +2466,11 @@ async def patch_result_json(
                 "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
             )
             row = await cursor.fetchone()
+            in_flight = bool(skip_in_flight and row and row[1] in ACTIVE_STATUSES)
             if (
                 not row
                 or not row[0]
-                or (skip_in_flight and row[1] in ACTIVE_STATUSES)
+                or in_flight
                 or (
                     skip_terminal
                     and (
@@ -2377,7 +2483,7 @@ async def patch_result_json(
                 )
             ):
                 await db.execute("ROLLBACK")
-                return ResultPatch(False)
+                return ResultPatch(False, in_flight=in_flight)
             result_data = parse_result_json(row[0], job_id=job_id)
             if result_data is None:
                 await db.execute("ROLLBACK")
@@ -2847,7 +2953,7 @@ def _failure_to_history_row(
         build_number,
         build_id,
         failure.get("test_name", ""),
-        failure.get("error", ""),
+        failure_error_text(failure),
         failure.get("error_signature", ""),
         classification,
         pattern,
