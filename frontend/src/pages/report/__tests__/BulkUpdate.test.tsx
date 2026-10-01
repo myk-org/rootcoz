@@ -392,7 +392,7 @@ function generate(seed: number): Generated {
   return { scopes, before, selection, live: genReport(scopes, lists) }
 }
 
-/** The three invariants, asserted after EVERY generated pass. */
+/** The four invariants, asserted after EVERY generated pass. */
 function expectInvariants({ scopes, live }: Generated, state: Record<string, SelectedGroup>, label: string) {
   const groups = Object.values(state)
   if (groups.length === 0) return
@@ -428,6 +428,19 @@ function expectInvariants({ scopes, live }: Generated, state: Record<string, Sel
           msg(`P3 ${n} lives in one scope but the entry claims another`)).toEqual(owners[0][0])
       }
     }
+  }
+
+  // P4 — the EMITTED KEY is a live group id in the entry's own scope, so a card
+  // exists for it. Cards render `isSelected = !!selection[group.id]`: a key no
+  // card answers to leaves the tests counted in the bulk bar with nothing ticked
+  // on screen and nothing the user can untick. This is the merge case where the
+  // refresh keeps the EARLIER selected group's id while the fold roots on the
+  // later one.
+  const liveIds = new Set(scopes.flatMap((s) =>
+    scopedGroups(live, s.childJobName, s.childBuildNumber).map((x) => `${s.childJobName}#${s.childBuildNumber}:${x.id}`)))
+  for (const [key, g] of Object.entries(state)) {
+    expect(liveIds.has(`${g.childJobName ?? ''}#${g.childBuildNumber ?? 0}:${key}`),
+      msg(`P4 ${key} is not a live group id, so no card can be unchecked`)).toBe(true)
   }
 }
 

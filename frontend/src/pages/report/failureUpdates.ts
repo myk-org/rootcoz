@@ -181,9 +181,11 @@ export function selectedScopes(groups: SelectedGroup[]): FailureScope[] {
  *    when the user selected them) grows its bucket past a bucket folded earlier,
  *    so a first-match fold leaves two entries claiming one live group.
  *
- *  ponytail: keeps the original group ids, so a regrouped signature can leave an id
- *  with no card (at worst one duplicated write if the user re-selects everything).
- *  Re-derive the `child-<hash>` card prefix here if that ever matters.
+ *  ponytail: an entry that spans two live groups (the split) can only be keyed by
+ *  ONE of them, so the other half's card reads unchecked while the bar counts its
+ *  tests — the same 1-vs-2 disagreement the split display test pins. Making every
+ *  spanned card selected means one entry per live group; add when the product
+ *  owner picks that side.
  */
 export function reconcileSelection(
   result: AnalysisResult,
@@ -199,7 +201,7 @@ export function reconcileSelection(
     const testNames = g.narrowed
       ? g.testNames.filter((n) => alive.has(n))
       : groupNames(siblings)
-    return { id, g, testNames, liveKeys: siblings.map((x) => scopeKey(g, x.id)) }
+    return { id, g, testNames, liveIds: siblings.map((x) => x.id) }
   }).filter((r) => r.testNames.length > 0)
 
   // Fold: ONE entry per CONNECTED set of live groups — a merge (two selected groups
@@ -207,8 +209,8 @@ export function reconcileSelection(
   // bridging entry that reaches two buckets at once. Connected components of the
   // "shares a live group" relation, so the result is closed: no two surviving
   // entries claim the same live group, however the chain got there. The entry
-  // survives under the first contributor's id, `narrowed` if ANY contributor was
-  // narrowed, holding the union of the contributors' names.
+  // holds the union of the contributors' names, and `narrowed` if ANY contributor
+  // was narrowed.
   //
   // Every contributor to a component shares a scope-qualified key with it, so a
   // component never spans two scopes: the emitted scope is every contributor's.
@@ -216,7 +218,7 @@ export function reconcileSelection(
   const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])))
   const owners = new Map<string, number>()
   resolved.forEach((r, i) => {
-    for (const key of r.liveKeys) {
+    for (const key of r.liveIds.map((liveId) => scopeKey(r.g, liveId))) {
       const owner = owners.get(key)
       if (owner === undefined) owners.set(key, i)
       else parent[find(owner)] = find(i)
@@ -235,7 +237,24 @@ export function reconcileSelection(
       existing.narrowed = existing.narrowed || resolved[i].g.narrowed
     }
   }
-  return Object.fromEntries([...buckets].map(([root, group]) => [resolved[root].id, group]))
+
+  // THE EMIT KEY is a LIVE group id of the component, in the scope the entry is
+  // emitted under — a card is `isSelected = !!selection[group.id]`, so a key no
+  // card answers to renders unchecked AND cannot be unticked, with its tests still
+  // counted in the bulk bar. Not the union-find root's contributor: a merge roots
+  // on the LATER contributor, whose id a refresh that kept the earlier group's id
+  // has already dropped. Prefer the FIRST contributor's id when the refresh kept
+  // it (that is the card the user is looking at), else the first live id the
+  // component claims. A component always has one — a surviving entry has a live
+  // sibling by construction — so no entry is dropped here.
+  return Object.fromEntries(
+    [...buckets].flatMap(([root, group]) => {
+      const members = resolved.filter((_, i) => find(i) === root)
+      const liveIds = members.flatMap((r) => r.liveIds)
+      const id = [members[0].id, ...liveIds].find((candidate) => liveIds.includes(candidate))
+      return id === undefined ? [] : [[id, { ...group, id }]]
+    }),
+  )
 }
 
 /** Widen each group back to its full error-signature group(s): the backend applies an
