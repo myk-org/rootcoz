@@ -695,9 +695,43 @@ def build_artifacts_section(artifacts_context: str) -> str:
     )
 
 
+def _canonical_header(match: re.Match[str]) -> str:
+    """Normalize an HTTP header line to a case-stable placeholder."""
+    return f"{match.group(1).lower()}: <HEADER>"
+
+
+# Per-request HTTP response headers, plus any x-* custom header, so header
+# churn (ids, lengths, encodings, routing) never splits a signature.
+_HEADER_NAMES = (
+    r"x-[a-z0-9-]+"
+    r"|date|content-length|content-encoding|content-range|transfer-encoding"
+    r"|connection|keep-alive|vary|etag|last-modified|age|expires|cache-control"
+    r"|retry-after|via|request-id|cf-ray|traceparent|tracestate"
+)
+
 # Pre-compiled patterns for signature normalization.
 # Strips run-specific data so the same underlying failure produces identical hashes.
-_NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+_NORMALIZE_PATTERNS: list[
+    tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]
+] = [
+    # HTTP response header lines: "Date: Sun, 31 May 2026 06:50:48 GMT",
+    # "Content-Length: 812", "X-Request-Id: 9c1f...". Must run before the date
+    # rules below, otherwise the date part is replaced and the time-of-day
+    # survives as new signature noise.
+    (
+        re.compile(rf"(?im)^[ \t]*({_HEADER_NAMES})[ \t]*:[^\r\n]*$"),
+        _canonical_header,
+    ),
+    # RFC 1123 date-time (surviving time-of-day of a partially normalized date):
+    # "Sun, 31 May 2026 06:50:48 GMT"
+    (
+        re.compile(
+            r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{1,2} "
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} "
+            r"\d{2}:\d{2}:\d{2}(?: \w+)?"
+        ),
+        "<DATE>",
+    ),
     # ISO timestamps: 2026-05-31T06:50:48.123Z, 2026-05-31T06:50:48+00:00
     (
         re.compile(
@@ -733,15 +767,19 @@ _NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?:build|run)[/\-]\d+", re.IGNORECASE), "<BUILD_REF>"),
     # Standalone date: 2026-05-31 (not already caught by timestamp patterns)
     (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), "<DATE>"),
+    # Runtime pointers: 0x7f3c8a1b2c40 (must run after UUID/pod-suffix rules).
+    (re.compile(r"\b0[xX][0-9a-fA-F]{6,}\b"), "<PTR>"),
+    # Bare long hex tokens: heap/object addresses, 7f3c8a1b2c40, commit SHAs.
+    (re.compile(r"\b[0-9a-fA-F]{12,}\b"), "<HEX>"),
 ]
 
 
 def normalize_for_signature(text: str) -> str:
     """Strip run-specific data from text before signature hashing.
 
-    Removes timestamps, dates, UUIDs, pod name suffixes, and build
-    numbers so that the same underlying failure produces the same
-    hash across different runs.
+    Removes timestamps, dates, HTTP response-header noise, UUIDs, pod name
+    suffixes, build numbers, and runtime pointer/hex tokens so that the same
+    underlying failure produces the same hash across different runs.
 
     Args:
         text: Error message or stack trace text.
@@ -759,8 +797,8 @@ def get_failure_signature(failure: FailedTest) -> str:
 
     Uses the full error message and stack trace to identify failures that
     are essentially the same issue. Text is normalized to strip
-    run-specific data (timestamps, UUIDs, pod names, build numbers)
-    before hashing.
+    run-specific data (timestamps, UUIDs, pod names, build numbers, HTTP
+    header noise, pointer/hex tokens) before hashing.
 
     Args:
         failure: The test failure to create a signature for.

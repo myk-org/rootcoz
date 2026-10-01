@@ -113,6 +113,114 @@ class TestNormalizeForSignature:
         result = normalize_for_signature(text)
         assert result == text
 
+
+class TestNormalizeHttpHeaderNoise:
+    """HTTP/API response-header noise (issue #239)."""
+
+    def test_strips_date_header_line(self):
+        text = "HTTPError 502\nDate: Sun, 31 May 2026 06:50:48 GMT\nbody"
+        result = normalize_for_signature(text)
+        assert "06:50:48" not in result
+        assert result == "HTTPError 502\ndate: <HEADER>\nbody"
+
+    def test_strips_content_length_and_request_id(self):
+        text = (
+            "Content-Length: 812\n"
+            "X-Request-Id: 9c1f7d2e-1111-2222-3333-444455556666\n"
+            "Status: 502"
+        )
+        result = normalize_for_signature(text)
+        assert "812" not in result
+        assert "9c1f7d2e" not in result
+        assert result == "content-length: <HEADER>\nx-request-id: <HEADER>\nStatus: 502"
+
+    def test_strips_custom_x_header(self):
+        text = "X-Amzn-Trace-Id: Root=1-67891234-abcdef012345678912345678\nStatus: 500"
+        result = normalize_for_signature(text)
+        assert "67891234" not in result
+        assert "x-amzn-trace-id: <HEADER>" in result
+
+    def test_header_case_variance_does_not_split(self):
+        a = normalize_for_signature("content-length: 812\nStatus: 502")
+        b = normalize_for_signature("Content-Length: 4096\nStatus: 502")
+        assert a == b == "content-length: <HEADER>\nStatus: 502"
+
+    def test_strips_rfc1123_datetime_outside_header_line(self):
+        text = "Proxy stamped the response Sun, 31 May 2026 06:50:48 GMT before failing"
+        result = normalize_for_signature(text)
+        assert "06:50:48" not in result
+        assert "<DATE>" in result
+
+
+class TestNormalizeRuntimePointers:
+    """Runtime pointer / long hex noise (issue #239)."""
+
+    def test_strips_hex_pointer(self):
+        text = "java.lang.NullPointerException at 0x7f3c8a1b2c40 in main"
+        result = normalize_for_signature(text)
+        assert "0x7f3c8a1b2c40" not in result
+        assert "<PTR>" in result
+
+    def test_strips_bare_long_hex_address(self):
+        text = "object 7f3c8a1b2c40 freed unexpectedly"  # pragma: allowlist secret
+        result = normalize_for_signature(text)
+        assert "7f3c8a1b2c40" not in result  # pragma: allowlist secret
+        assert "<HEX>" in result
+
+    def test_preserves_short_hex_and_words(self):
+        text = "deadbeef cafe 0x1f failed"
+        result = normalize_for_signature(text)
+        assert result == text
+
+
+class TestSignatureCollapsesHttpNoise:
+    """Errors differing only in per-request noise share one signature (issue #239)."""
+
+    def test_header_noise_same_signature(self):
+        f1 = FailedTest(
+            test_name="test_gateway",
+            error_message=(
+                "HTTPError 502 Bad Gateway\nDate: Sun, 31 May 2026 06:50:48 GMT\n"
+                "Content-Length: 812\nX-Request-Id: 9c1f7d2e-1111-2222-3333-444455556666"
+            ),
+            stack_trace="await response  # httpx",
+        )
+        f2 = FailedTest(
+            test_name="test_gateway",
+            error_message=(
+                "HTTPError 502 Bad Gateway\nDate: Mon, 02 Jan 2027 23:59:01 GMT\n"
+                "Content-Length: 4096\nX-Request-Id: aaaaaaaa-bbbb-cccc-dddd-eeeeffff0000"
+            ),
+            stack_trace="await response  # httpx",
+        )
+        assert get_failure_signature(f1) == get_failure_signature(f2)
+
+    def test_pointer_noise_same_signature(self):
+        f1 = FailedTest(
+            test_name="test_native",
+            error_message="Segfault at 0x7f3c8a1b2c40 (object 7f3c8a1b2c40)",
+            stack_trace="frame 0x7f3c8a1b99f0",
+        )
+        f2 = FailedTest(
+            test_name="test_native",
+            error_message="Segfault at 0x55d1a0c0d123 (object 55d1a0c0d123)",
+            stack_trace="frame 0x55d1a0c0d432",
+        )
+        assert get_failure_signature(f1) == get_failure_signature(f2)
+
+    def test_pointer_noise_still_distinguishes_real_errors(self):
+        f1 = FailedTest(
+            test_name="test_native",
+            error_message="Segfault at 0x7f3c8a1b2c40",
+            stack_trace="frame",
+        )
+        f2 = FailedTest(
+            test_name="test_native",
+            error_message="NullPointerException",
+            stack_trace="frame",
+        )
+        assert get_failure_signature(f1) != get_failure_signature(f2)
+
     def test_multiple_replacements(self):
         text = (
             "Error at 2026-01-15T12:00:00Z on pod my-pod-abc123 "
