@@ -12,6 +12,7 @@ import httpx
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import call_ai_once
+from rootcoz.attribution import AiProvenance, apply_ai_attribution, build_ai_attribution
 from rootcoz.config import Settings
 from rootcoz.jira import JiraClient
 from rootcoz.models import (
@@ -24,31 +25,9 @@ from rootcoz.models import (
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 # AI attribution footers appended to all generated issues.
-GITHUB_AI_FOOTER = (
-    "\n\n---\n*Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)*"
-)
+GITHUB_AI_FOOTER = build_ai_attribution(AiProvenance(ai_used=True))
 JIRA_AI_FOOTER = (
     "\n\n----\n_Generated using AI with [rootcoz|https://github.com/myk-org/rootcoz]_"
-)
-
-# A rootcoz AI attribution line, whatever variant it is: the generic footer
-# above, the resolved provider/model footer, or the "no AI model" fallback.
-# Anchored on the two rootcoz-specific openings (the rootcoz repo link, and the
-# fallback sentence) so only rootcoz's own footer is recognised — a broad
-# "--- + *Generated using AI*" shape also matches user prose that merely looks
-# like a footer, and stripping that deletes the user's own words (#297).
-# Unanchored on purpose: main.py appends "— Reported by: …" AFTER the footer, so
-# end-anchored detection would miss it and double the footer on that route.
-GITHUB_AI_ATTRIBUTION_RE = re.compile(
-    r"\n*---\n\*(?:Generated using AI with \[rootcoz\]"
-    r"\(https://github\.com/myk-org/rootcoz\)|No AI model generated this issue)"
-    r"[^\n]*\*"
-)
-
-# Same text, but only as the body's trailing footer — what the preview replaces.
-# Never used for detection: it would miss a footer followed by other trailing text.
-GITHUB_AI_TRAILING_ATTRIBUTION_RE = re.compile(
-    GITHUB_AI_ATTRIBUTION_RE.pattern + r"\s*\Z"
 )
 
 
@@ -688,8 +667,17 @@ async def create_github_issue(
     repo_url: str,
     github_token: str,
     labels: list[str] | None = None,
+    *,
+    attribution: AiProvenance | None = None,
 ) -> dict[str, Any]:
     """Create a GitHub issue via the REST API.
+
+    Args:
+        attribution: The caller's verified AI provenance — the only authority
+            for the issue footer.  Without it the issue is credited to no
+            model.  Body text never decides: every attribution-looking line in
+            *body* is stripped here first, so a client-supplied line can
+            neither survive nor suppress the server's own footer.
 
     Returns dict with url, number, and title keys.
 
@@ -697,11 +685,7 @@ async def create_github_issue(
     """
     owner, repo = parse_github_repo_url(repo_url)
 
-    # Append the AI attribution footer exactly once. A body already carrying any
-    # rootcoz attribution variant (e.g. feedback's provider/model footer) keeps
-    # it instead of gaining a second, generic — and possibly contradicting — one.
-    if not GITHUB_AI_ATTRIBUTION_RE.search(body):
-        body += GITHUB_AI_FOOTER
+    body = apply_ai_attribution(body, attribution or AiProvenance(ai_used=False))
 
     headers = {
         "Accept": "application/vnd.github.v3+json",

@@ -2,7 +2,7 @@
 
 import json
 import os
-from contextlib import contextmanager
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
-from rootcoz.bug_creation import GITHUB_AI_FOOTER
+from rootcoz.attribution import AiProvenance, read_provenance
 from rootcoz.config import get_settings
 from rootcoz.feedback import (
     _build_fallback_feedback,
@@ -36,6 +36,56 @@ _TEST_GITHUB_TOKEN = "test-token-placeholder"
 _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
 )
+
+# The host variables the app-under-test may legitimately see. An allowlist, never
+# "real environment minus a denylist": a denylist leaks every credential the
+# developer happens to export (JIRA_PAT, GEMINI_API_KEY, TESTS_REPO_TOKEN, ...)
+# into TestClient(app), so the app then boots with real keys on a dev machine and
+# behaves differently there than in CI.
+#
+# HOME is deliberately absent: with DB_PATH unset, vapid/encryption fall back to
+# ~/.local/share/rootcoz and would read the developer's real key files. TMPDIR
+# covers the home-dir case there (the factories always set DB_PATH anyway).
+_ENV_ALLOWLIST = (
+    "PATH",  # subprocess (git) lookups
+    "TMPDIR",  # tempfile / sqlite spill files
+    "TMP",  # ditto (Windows)
+    "TEMP",  # ditto (Windows)
+    "SYSTEMROOT",  # Windows temp dir resolution
+    "LANG",  # locale-dependent formatting
+    "LC_ALL",  # ditto
+    "TZ",  # timestamp rendering
+)
+
+
+def _host_env() -> dict[str, str]:
+    """Return the allowlisted subset of the real environment (see _ENV_ALLOWLIST)."""
+    return {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
+
+
+async def _posted_body(title: str, body: str, labels: list[str]) -> str:
+    """Create the issue through the real creator and return what GitHub got."""
+    response = httpx.Response(
+        201,
+        json={
+            "number": 7,
+            "title": title,
+            "html_url": "https://github.com/myk-org/rootcoz/issues/7",
+        },
+        request=httpx.Request("POST", "https://api.github.com/repos/o/r/issues"),
+    )
+    client = AsyncMock()
+    client.post.return_value = response
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    with patch("rootcoz.bug_creation.httpx.AsyncClient", return_value=client):
+        await create_feedback_from_preview(
+            title=title,
+            body=body,
+            labels=labels,
+            github_token=_TEST_GITHUB_TOKEN,
+        )
+    return client.post.call_args.kwargs["json"]["body"]
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +343,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, body, labels, _ai_generated = await format_feedback_with_ai(
+            title, body, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert title == "Analyze button not responding"
@@ -313,7 +363,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, _, labels, _ai_generated = await format_feedback_with_ai(
+            title, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert title == "Add CSV export feature"
@@ -325,7 +375,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="CLI error")
-            title, body, labels, _ai_generated = await format_feedback_with_ai(
+            title, body, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -338,7 +388,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text="not json at all")
-            title, _, labels, _ai_generated = await format_feedback_with_ai(
+            title, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -361,7 +411,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, _, labels, _ai_generated = await format_feedback_with_ai(
+            title, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert title == "Page load error"
@@ -401,7 +451,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            _, _, labels, _ai_generated = await format_feedback_with_ai(
+            _, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert labels == ["enhancement"]
@@ -412,7 +462,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
-            title, _, labels, _ai_generated = await format_feedback_with_ai(
+            title, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -425,7 +475,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="fail")
-            _, _, labels, _ai_generated = await format_feedback_with_ai(
+            _, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert labels == ["bug"]
@@ -439,7 +489,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
-            _, _, labels, _ai_generated = await format_feedback_with_ai(
+            _, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert labels == ["bug"]
@@ -449,7 +499,7 @@ class TestFormatFeedbackWithAi:
         ai_response = json.dumps({"title": "", "body": "Details", "labels": ["bug"]})
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, _, labels, _ai_generated = await format_feedback_with_ai(
+            title, _, labels, _ai = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -493,10 +543,11 @@ class TestGenerateFeedbackPreview:
         assert isinstance(result, FeedbackPreviewResponse)
         assert result.title == "Dashboard crash on load"
         assert _GITHUB_FOOTER_MARKER in result.body
-        # #282: attribution names the RESOLVED pair, not a raw browser value.
-        assert "claude/test-model" in result.body
+        # #292: the resolved pair and whether AI ran are on the RESPONSE too, so
+        # the dialog can show the attribution it is about to publish.
         assert (result.ai_provider, result.ai_model) == ("claude", "test-model")
         assert result.ai_generated is True
+        assert "(claude / test-model)" in result.body
         assert result.labels == ["bug"]
 
     async def test_feature_preview_returns_correct_labels(self, settings):
@@ -517,7 +568,7 @@ class TestGenerateFeedbackPreview:
         assert isinstance(result, FeedbackPreviewResponse)
         assert result.title == "Add dark mode support"
         assert _GITHUB_FOOTER_MARKER in result.body
-        assert "claude/test-model" in result.body
+        assert "(claude / test-model)" in result.body
         assert result.labels == ["enhancement"]
 
     async def test_fallback_preview_says_no_ai_model(self, settings):
@@ -536,21 +587,42 @@ class TestGenerateFeedbackPreview:
 
         assert "No AI model generated this issue" in result.body
         assert "Generated using AI" not in result.body
+        assert "test-model" not in result.body
         assert result.ai_generated is False
-        # Still reports the pair that was attempted, so the UI can name it.
+        # The attempted pair is still reported, so the UI can name what was tried.
         assert (result.ai_provider, result.ai_model) == ("claude", "test-model")
 
     async def test_attribution_replaces_generic_footer(self, settings):
         """An echoed generic footer is replaced, never duplicated."""
+        generic = f"Body\n\n---\n*{_GITHUB_FOOTER_MARKER}*"
         req = FeedbackRequest(description="Boom")
         with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
-            mock_format.return_value = ("T", "Body" + GITHUB_AI_FOOTER, ["bug"], True)
+            mock_format.return_value = ("T", generic, ["bug"], True)
             result = await generate_feedback_preview(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
 
         assert result.body.count("Generated using AI") == 1
         assert result.body.startswith("Body")
+
+    async def test_crlf_stale_rootcoz_footer_is_replaced(self, settings):
+        """A Windows-style body must not keep a stale rootcoz footer.
+
+        The strip pattern is newline-agnostic: an LF-shaped one misses a CRLF
+        footer and republishes it as a second claim (Qodo: stale AI attribution
+        on Windows-style bodies).
+        """
+        stale = f"## Bug\r\n\r\nBroken.\r\n\r\n---\r\n*{_GITHUB_FOOTER_MARKER}*"
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = ("T", stale, ["bug"], True)
+            result = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="test-model"
+            )
+
+        assert result.body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "(claude / test-model)" in result.body
+        assert result.body.startswith("## Bug")
 
 
 # ---------------------------------------------------------------------------
@@ -743,20 +815,7 @@ class TestFeedbackEndpoint:
         ai_model: str = "test-model",
     ):
         """Create a TestClient with optional GITHUB_TOKEN."""
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if k
-            not in {
-                "GITHUB_TOKEN",
-                "ADMIN_KEY",
-                "ROOTCOZ_ENCRYPTION_KEY",
-                "ALLOWED_USERS",
-                "ENABLE_GITHUB_ISSUES",
-                "AI_PROVIDER",
-                "AI_MODEL",
-            }
-        }
+        env = _host_env()
         env["SECURE_COOKIES"] = "false"
         env["DB_PATH"] = str(temp_db_path)
         env["ADMIN_KEY"] = "test-admin-key-16chars"  # pragma: allowlist secret
@@ -834,64 +893,6 @@ class TestFeedbackEndpoint:
             assert "Test body" in data["body"]
             assert _GITHUB_FOOTER_MARKER in data["body"]
             assert data["labels"] == ["bug"]
-
-    def test_preview_attribution_uses_server_resolved_pair(
-        self, _init_db, temp_db_path
-    ):
-        """#282: attribution names the pair the SERVER resolved (#282), not a raw
-        browser value — nothing sent by the client is echoed back as-is."""
-        for client in self._make_client(
-            temp_db_path,
-            github_token=_TEST_GITHUB_TOKEN,
-            ai_provider="claude",
-            ai_model="test-model",
-        ):
-            with patch(
-                "rootcoz.feedback.format_feedback_with_ai",
-                return_value=("T", "B", ["bug"], True),
-            ) as mock_format:
-                resp = client.post(
-                    "/api/feedback/preview", json={"description": "Something broke"}
-                )
-            assert resp.status_code == 200
-            data = resp.json()
-            # No ai_provider/ai_model sent -> server default is resolved and attributed.
-            assert mock_format.call_args.kwargs == {
-                "ai_provider": "claude",
-                "ai_model": "test-model",
-            }
-            assert (data["ai_provider"], data["ai_model"]) == ("claude", "test-model")
-            assert "claude/test-model" in data["body"]
-            assert data["ai_generated"] is True
-
-            with patch(
-                "rootcoz.feedback.format_feedback_with_ai",
-                return_value=("T", "B", ["bug"], True),
-            ) as mock_format:
-                resp = client.post(
-                    "/api/feedback/preview",
-                    json={
-                        "description": "Something broke",
-                        "ai_provider": "claude",
-                        "ai_model": "test-model",
-                    },
-                )
-            assert resp.status_code == 200
-            assert resp.json()["ai_provider"] == "claude"
-
-    def test_preview_rejects_unknown_pair(self, _init_db, temp_db_path):
-        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
-            with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
-                resp = client.post(
-                    "/api/feedback/preview",
-                    json={
-                        "description": "x",
-                        "ai_provider": "not-a-provider",
-                        "ai_model": "nope",
-                    },
-                )
-            assert resp.status_code == 422
-            mock_format.assert_not_called()
 
     def test_preview_feature_returns_enhancement_label(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
@@ -1080,89 +1081,551 @@ class TestFeedbackEndpoint:
 
 
 # ---------------------------------------------------------------------------
-# Attribution survives the preview -> create round-trip exactly once (#297)
+# AI model attribution (issue #282)
 # ---------------------------------------------------------------------------
 
 
-def _capture_posted_body(mock_client):
-    """Return the body POSTed to GitHub by the mocked AsyncClient."""
-    return mock_client.post.call_args.kwargs["json"]["body"]
+class TestAiAttribution:
+    _AI_MARKER = _GITHUB_FOOTER_MARKER
+    _NO_AI_MARKER = "No AI model generated this issue"
 
+    @pytest.fixture
+    def settings(self):
+        env = {
+            "JENKINS_URL": "https://jenkins.example.com",
+            "JENKINS_USER": "user",
+            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+        }
+        with patch.dict(os.environ, env, clear=True):
+            get_settings.cache_clear()
+            s = get_settings()
+            get_settings.cache_clear()
+            return s
 
-@contextmanager
-def _mocked_github_client():
-    """Yield the AsyncClient mock used by create_github_issue (fake 201 issue)."""
-    mock_response = httpx.Response(
-        201,
-        json={
-            "number": 7,
-            "title": "T",
-            "html_url": "https://github.com/myk-org/rootcoz/issues/7",
-        },
-        request=httpx.Request("POST", "https://api.github.com"),
-    )
-    mock_client = AsyncMock()
-    mock_client.post.return_value = mock_response
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    with patch("rootcoz.bug_creation.httpx.AsyncClient", return_value=mock_client):
-        yield mock_client
+    @staticmethod
+    def _ai_response() -> AIResult:
+        return AIResult(
+            success=True,
+            text=json.dumps(
+                {"title": "Broken", "body": "## Bug\n\nBroken.", "labels": ["bug"]}
+            ),
+        )
 
+    # Every Unicode character a client could swap for a plain newline.  The
+    # digest must NOT treat them as line breaks, or the swap verifies.
+    _SEPARATORS: ClassVar[list[str]] = [
+        "\v",
+        "\f",
+        "\x1c",
+        "\x1d",
+        "\x1e",
+        "\u0085",
+        "\u2028",
+        "\u2029",
+    ]
 
-class TestSingleAttributionFooterEndToEnd:
-    """A preview footer naming the resolved pair must not be doubled on create."""
-
-    async def test_dynamic_footer_is_not_doubled(self, settings):
-        """Preview naming provider/model -> created issue has exactly one footer."""
-        req = FeedbackRequest(description="Chart crashes")
-        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
-            mock_format.return_value = ("T", "## Bug\n\nBoom", ["bug"], True)
-            preview = await generate_feedback_preview(
-                req, settings, ai_provider="claude", ai_model="gpt-5"
+    @classmethod
+    async def _preview_with_separator(cls, settings, separator: str):
+        """Return a real AI preview whose body carries *separator* mid-text."""
+        response = AIResult(
+            success=True,
+            text=json.dumps(
+                {
+                    "title": "Broken",
+                    "body": f"## Bug{separator}separator{separator}Broken.",
+                    "labels": ["bug"],
+                }
+            ),
+        )
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=response):
+            return await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
             )
-        assert "claude/gpt-5" in preview.body
 
-        with _mocked_github_client() as posted:
+    async def test_preview_names_provider_and_model(self, settings):
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            result = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        assert self._AI_MARKER in result.body
+        assert "(claude / sonnet-4-5)" in result.body
+
+    async def test_preview_fallback_states_no_ai_model(self, settings):
+        req = FeedbackRequest(description="The button is broken")
+        with patch(
+            "rootcoz.feedback.call_ai_once",
+            return_value=AIResult(success=False, text="sidecar down"),
+        ):
+            result = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        assert self._NO_AI_MARKER in result.body
+        assert "sonnet-4-5" not in result.body
+
+    async def test_preview_credits_the_call_that_wrote_it_without_config(
+        self, settings
+    ):
+        """No resolved pair still credits the AI that answered (no model name)."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            result = await generate_feedback_preview(req, settings)
+        assert self._AI_MARKER in result.body
+        assert self._NO_AI_MARKER not in result.body
+
+    async def test_cli_provider_id_is_published_as_its_public_name(self, settings):
+        """Catalog `cli-*` IDs never leak; the public API names the provider."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="cli-claude", ai_model="sonnet-4-5"
+            )
+        assert "(claude / sonnet-4-5)" in preview.body
+        assert "cli-" not in preview.body
+        body = await _posted_body(preview.title, preview.body, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert "cli-" not in body
+
+    async def test_create_replaces_client_supplied_attribution(self):
+        spoofed = (
+            "## Bug\n\nBroken.\n\n---\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*"
+        )
+        with patch("rootcoz.feedback.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/myk-org/rootcoz/issues/7",
+                "number": 7,
+                "title": "Broken",
+            }
             await create_feedback_from_preview(
-                title=preview.title,
-                body=preview.body,
-                labels=preview.labels,
+                title="Broken",
+                body=spoofed,
+                labels=["bug"],
+                github_token=_TEST_GITHUB_TOKEN,
+                provenance=AiProvenance(
+                    ai_used=True, provider="claude", model="sonnet-4-5"
+                ),
+            )
+        body = mock_create.call_args.kwargs["body"]
+        assert "spoofed-model" not in body
+        assert "(claude / sonnet-4-5)" in body
+        assert body.count(self._AI_MARKER) == 1
+
+    async def test_mid_body_spoofed_footer_is_stripped(self):
+        """A fake footer anywhere in the body must not survive (issue #282)."""
+        spoofed = (
+            "## Bug\n\nBroken.\n\n---\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\n\nExtra detail."
+        )
+        body = await _posted_body("Broken", spoofed, ["bug"])
+        assert "spoofed-model" not in body
+        assert "Extra detail." in body
+        # Exactly one footer remains: the server's (no verified provenance).
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_crlf_client_footer_is_stripped(self):
+        """A CRLF fake footer must not survive creation (Qodo HIGH, issue #282).
+
+        The strip pattern must be newline-agnostic: an LF-shaped pattern lets
+        a Windows-style footer through and publishes it as a second claim.
+        """
+        spoofed = (
+            "## Bug\r\n\r\nBroken.\r\n\r\n---\r\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\r\n\r\nExtra detail."
+        )
+        body = await _posted_body("Broken", spoofed, ["bug"])
+        assert "spoofed-model" not in body
+        assert "Extra detail." in body
+        # Exactly one footer in the published issue: the server's own (no AI).
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_crlf_provenance_token_cannot_claim_a_model(self):
+        """A CRLF-embedded spoofed token is stripped, never credited."""
+        forged = (
+            "## Bug\r\n\r\nBroken.\r\n\r\n---\r\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\r\n"
+            '<!--rootcoz-ai:deadbeef:[true,"evil","spoofed-model","deadbeef"]-->\r\n'
+        )
+        body = await _posted_body("Broken", forged, ["bug"])
+        assert "spoofed-model" not in body
+        assert "deadbeef" not in body  # the forged token is gone, not the real one
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert body.count(self._AI_MARKER) == 0
+
+    async def test_crlf_round_trip_keeps_the_credit(self, settings):
+        """Digest normalizes line endings: same body verifies, changed body does not."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        crlf = preview.body.replace("\n", "\r\n")
+        body = await _posted_body(preview.title, crlf, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert body.count(self._AI_MARKER) == 1
+        # Same content, different line endings — still the same digest.
+        assert read_provenance(crlf) == read_provenance(preview.body)
+        # Changed content is still rejected, whatever the line endings are.
+        tampered = crlf.replace("## Bug", "## Something else")
+        assert read_provenance(tampered) is None
+
+    @pytest.mark.parametrize("separator", _SEPARATORS)
+    async def test_unicode_separator_swapped_for_newline_loses_credit(
+        self, settings, separator
+    ):
+        """\v, \f, \\x1c-\\x1e, U+2028/U+2029 are not line breaks (Qodo HIGH).
+
+        ``str.splitlines`` folded them into LF, so a client could swap one for
+        a real newline and the signed digest still verified — model credit on
+        a body whose text changed.
+        """
+        preview = await self._preview_with_separator(settings, separator)
+        # The positive control: the untouched preview verifies and credits.
+        assert read_provenance(preview.body) == AiProvenance(
+            ai_used=True, provider="claude", model="sonnet-4-5"
+        )
+        tampered = preview.body.replace(separator, "\n")
+        assert tampered != preview.body
+        assert read_provenance(tampered) is None
+        body = await _posted_body(preview.title, tampered, preview.labels)
+        assert "sonnet-4-5" not in body
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_lone_cr_round_trip_keeps_the_credit(self, settings):
+        """The CRLF tolerance is CRLF *and* lone CR, nothing else."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        expected = AiProvenance(ai_used=True, provider="claude", model="sonnet-4-5")
+        lone_cr = preview.body.replace("\n", "\r")
+        assert read_provenance(lone_cr) == expected
+        body = await _posted_body(preview.title, lone_cr, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert body.count(self._AI_MARKER) == 1
+
+    async def test_forged_provenance_token_is_ignored(self):
+        """A hand-written provenance token fails signature verification."""
+        forged = (
+            "## Bug\n\nBroken.\n\n---\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\n"
+            '<!--rootcoz-ai:deadbeef:[true,"evil","spoofed-model","deadbeef"]-->'
+        )
+        body = await _posted_body("Broken", forged, ["bug"])
+        assert "spoofed-model" not in body
+        assert self._NO_AI_MARKER in body
+        assert body.count(self._AI_MARKER) == 0
+
+    async def test_replayed_provenance_token_credits_no_model(self, settings):
+        """A token copied from another preview cannot credit an unrelated body."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        attribution_region = preview.body[preview.body.index("\n\n---\n") :]
+        replayed = (
+            "## Bug\n\nSomething else entirely, hand-written.\n" + attribution_region
+        )
+        body = await _posted_body("Broken", replayed, ["bug"])
+        assert "sonnet-4-5" not in body
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_edited_attribution_region_keeps_preview_credit(self, settings):
+        """Editing inside the attribution region does not cost the credit."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        edited = preview.body.replace(
+            "(claude / sonnet-4-5)*",
+            "(claude / sonnet-4-5) — see the linked run*",
+        )
+        body = await _posted_body(preview.title, edited, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert body.count(self._AI_MARKER) == 1
+
+    async def test_ai_preview_issues_exactly_one_footer(self, settings):
+        """The final GitHub body carries one footer, not the legacy + model one."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        body = await _posted_body(preview.title, preview.body, preview.labels)
+        assert body.count(self._AI_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in body
+
+    async def test_fallback_preview_issues_exactly_one_no_ai_footer(self, settings):
+        """Raw fallback content is published as raw, with one footer."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch(
+            "rootcoz.feedback.call_ai_once",
+            return_value=AIResult(success=False, text="sidecar down"),
+        ):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        body = await _posted_body(preview.title, preview.body, preview.labels)
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert body.count(self._AI_MARKER) == 0
+        assert "sonnet-4-5" not in body
+
+    async def test_create_uses_preview_provenance_only(self, settings):
+        """Create credits the preview's model without any provider/model input."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        body = await _posted_body(preview.title, preview.body, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+
+    async def test_create_without_ai_config_states_no_ai_model(self):
+        with patch("rootcoz.feedback.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/myk-org/rootcoz/issues/8",
+                "number": 8,
+                "title": "Broken",
+            }
+            await create_feedback_from_preview(
+                title="Broken",
+                body="## Bug\n\nBroken.",
+                labels=["bug"],
                 github_token=_TEST_GITHUB_TOKEN,
             )
-        body = _capture_posted_body(posted)
+        body = mock_create.call_args.kwargs["body"]
+        assert self._NO_AI_MARKER in body
 
-        assert body.count("Generated using AI") == 1
-        assert body.count("No AI model generated") == 0
-        assert "claude/gpt-5" in body
-        assert body.rstrip().endswith("*")
 
-    async def test_fallback_does_not_claim_ai_authorship(self, settings):
-        """Fallback preview -> created issue never claims AI wrote it."""
-        req = FeedbackRequest(description="Add dark mode")
-        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
-            mock_format.return_value = (
-                "Feedback: Add dark mode",
-                "## Feedback",
-                ["enhancement"],
-                False,
+class TestFeedbackAttributionEndpoints:
+    @pytest.fixture
+    def _init_db(self, temp_db_path):
+        return temp_db_path
+
+    @pytest.fixture
+    def _make_client(self, _init_db, temp_db_path):
+        from rootcoz.config import clear_db_settings_cache
+
+        def _factory(
+            temp_db_path, github_token="", ai_provider="claude", ai_model="test-model"
+        ):
+            env = _host_env()
+            env["SECURE_COOKIES"] = "false"
+            env["DB_PATH"] = str(temp_db_path)
+            env["ADMIN_KEY"] = "test-admin-key-16chars"  # pragma: allowlist secret
+            env["ROOTCOZ_ENCRYPTION_KEY"] = (
+                "test-encryption-key-for-hmac"  # pragma: allowlist secret
             )
-            preview = await generate_feedback_preview(
-                req, settings, ai_provider="claude", ai_model="gpt-5"
-            )
+            env["REQUIRE_APPROVAL"] = "false"
+            if github_token:
+                env["GITHUB_TOKEN"] = github_token
+            if ai_provider:
+                env["AI_PROVIDER"] = ai_provider
+            if ai_model:
+                env["AI_MODEL"] = ai_model
+            with patch.dict(os.environ, env, clear=True):
+                clear_db_settings_cache()
+                with patch.object(storage, "DB_PATH", temp_db_path):
+                    from rootcoz.main import app
 
-        with _mocked_github_client() as posted:
-            await create_feedback_from_preview(
-                title=preview.title,
-                body=preview.body,
-                labels=preview.labels,
-                github_token=_TEST_GITHUB_TOKEN,
-            )
-        body = _capture_posted_body(posted)
+                    with TestClient(
+                        app, headers={"Authorization": "Bearer test-admin-key-16chars"}
+                    ) as c:
+                        yield c
+                clear_db_settings_cache()
 
-        assert "No AI model generated this issue" in body
-        assert "Generated using AI" not in body
-        assert _GITHUB_FOOTER_MARKER not in body
-        assert body.count("---") == 1
+        return _factory
+
+    def test_preview_endpoint_reports_resolved_pair_to_the_ui(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        """#292: the response carries the pair the SERVER resolved (#282).
+
+        Nothing sent by the browser is echoed back, and the footer and the
+        response fields name the same pair — they read one provenance.
+        """
+        for client in _make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_provider="claude",
+            ai_model="test-model",
+        ):
+            with patch(
+                "rootcoz.feedback.format_feedback_with_ai",
+                return_value=("T", "B", ["bug"], True),
+            ) as mock_format:
+                resp = client.post(
+                    "/api/feedback/preview", json={"description": "Something broke"}
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            # No ai_provider/ai_model sent -> server default is resolved and named.
+            assert mock_format.call_args.kwargs == {
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            }
+            assert (data["ai_provider"], data["ai_model"]) == ("claude", "test-model")
+            assert data["ai_generated"] is True
+            assert "(claude / test-model)" in data["body"]
+
+    def test_preview_endpoint_rejects_unknown_pair(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        """A client-supplied pair is rejected, never resolved and never named.
+
+        (Replaces main's ``..._ignores_body_supplied_model``, which let an
+        unknown model through with 200; #292 validates the pair instead.)
+        """
+        for client in _make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
+            with patch("rootcoz.feedback.call_ai_once") as mock_ai:
+                resp = client.post(
+                    "/api/feedback/preview",
+                    json={"description": "broke", "ai_model": "spoofed-model"},
+                )
+            assert resp.status_code == 422
+            mock_ai.assert_not_called()
+
+    def test_preview_endpoint_names_server_resolved_model(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        for client in _make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_provider="claude",
+            ai_model="test-model",
+        ):
+            with patch("rootcoz.feedback.call_ai_once") as mock_ai:
+                mock_ai.return_value = AIResult(
+                    success=True,
+                    text=json.dumps({"title": "T", "body": "B", "labels": ["bug"]}),
+                )
+                resp = client.post(
+                    "/api/feedback/preview", json={"description": "broke"}
+                )
+        assert resp.status_code == 200
+        assert "(claude / test-model)" in resp.json()["body"]
+
+    def test_preview_endpoint_never_publishes_a_cli_provider_id(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        """The public API exposes `claude`, never the catalog `cli-claude`."""
+        for client in _make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_provider="cli-claude",
+            ai_model="test-model",
+        ):
+            with (
+                patch(
+                    "rootcoz.main._validate_catalog_pair",
+                    AsyncMock(return_value=("cli-claude", "test-model")),
+                ) as _pair,
+                patch("rootcoz.feedback.call_ai_once") as mock_ai,
+            ):
+                mock_ai.return_value = AIResult(
+                    success=True,
+                    text=json.dumps({"title": "T", "body": "B", "labels": ["bug"]}),
+                )
+                resp = client.post(
+                    "/api/feedback/preview", json={"description": "broke"}
+                )
+        assert resp.status_code == 200
+        body = resp.json()["body"]
+        assert "(claude / test-model)" in body
+        assert "cli-" not in body
+
+    def test_create_endpoint_attribution_is_server_resolved(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        spoofed = (
+            "Body\n\n---\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*"
+        )
+        for client in _make_client(temp_db_path):
+            with (
+                patch.object(
+                    storage,
+                    "get_user_tokens",
+                    return_value={"github_token": _TEST_GITHUB_TOKEN},
+                ),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                mock_create.return_value = {
+                    "url": "https://github.com/myk-org/rootcoz/issues/12",
+                    "number": 12,
+                    "title": "T",
+                }
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={"title": "T", "body": spoofed, "labels": ["bug"]},
+                )
+            assert resp.status_code == 201
+        created_body = mock_create.call_args.kwargs["body"]
+        assert "spoofed-model" not in created_body
+        # No server-verified provenance in the request → nothing is credited.
+        assert "No AI model generated this issue" in created_body
+
+    def test_create_endpoint_credits_preview_time_model(
+        self, _init_db, temp_db_path, _make_client
+    ):
+        """Server Settings changing between preview and create is ignored (D)."""
+        from rootcoz.config import update_db_settings_cache
+
+        for client in _make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_provider="claude",
+            ai_model="test-model",
+        ):
+            with patch("rootcoz.feedback.call_ai_once") as mock_ai:
+                mock_ai.return_value = AIResult(
+                    success=True,
+                    text=json.dumps({"title": "T", "body": "B", "labels": ["bug"]}),
+                )
+                preview = client.post(
+                    "/api/feedback/preview", json={"description": "broke"}
+                )
+            assert preview.status_code == 200
+            # Admin switches the configured model before the user submits.
+            update_db_settings_cache({"ai_model": "other-model"})
+            with (
+                patch.object(
+                    storage,
+                    "get_user_tokens",
+                    return_value={"github_token": _TEST_GITHUB_TOKEN},
+                ),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                mock_create.return_value = {
+                    "url": "https://github.com/myk-org/rootcoz/issues/13",
+                    "number": 13,
+                    "title": "T",
+                }
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={
+                        "title": preview.json()["title"],
+                        "body": preview.json()["body"],
+                        "labels": ["bug"],
+                        "ai_provider": "evil",
+                        "ai_model": "evil-model",
+                    },
+                )
+            assert resp.status_code == 201
+        created_body = mock_create.call_args.kwargs["body"]
+        assert "(claude / test-model)" in created_body
+        assert "other-model" not in created_body
+        assert "evil" not in created_body
+        assert created_body.count(_GITHUB_FOOTER_MARKER) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1176,93 +1639,3 @@ _LOOKALIKE_PROSE = (
     "*Generated using AI by [OtherTool](https://example.com/othertool)*"
 )
 _REPORTED_BY = "\n\n---\n_Reported by: alice via rootcoz_"
-
-
-class TestAttributionShapedProsePreserved:
-    """Only rootcoz's own footer is stripped; lookalike user text is not."""
-
-    @pytest.fixture
-    def settings(self):
-        env = {
-            "JENKINS_URL": "https://jenkins.example.com",
-            "JENKINS_USER": "user",
-            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
-        }
-        with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
-            s = get_settings()
-            get_settings.cache_clear()
-            return s
-
-    async def _preview(self, settings, body, *, ai_generated=True):
-        req = FeedbackRequest(description="Chart crashes")
-        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
-            mock_format.return_value = ("T", body, ["bug"], ai_generated)
-            return await generate_feedback_preview(
-                req, settings, ai_provider="claude", ai_model="gpt-5"
-            )
-
-    async def test_preview_keeps_lookalike_prose(self, settings):
-        preview = await self._preview(settings, _LOOKALIKE_PROSE)
-
-        assert _LOOKALIKE_PROSE in preview.body
-        assert "OtherTool" in preview.body
-        # The lookalike plus exactly one rootcoz footer.
-        assert preview.body.count("Generated using AI") == 2
-        assert preview.body.count(_GITHUB_FOOTER_MARKER) == 1
-
-    async def test_created_issue_keeps_lookalike_prose(self, settings):
-        preview = await self._preview(settings, _LOOKALIKE_PROSE)
-
-        with _mocked_github_client() as posted:
-            await create_feedback_from_preview(
-                title=preview.title,
-                body=preview.body,
-                labels=preview.labels,
-                github_token=_TEST_GITHUB_TOKEN,
-            )
-        body = _capture_posted_body(posted)
-
-        assert _LOOKALIKE_PROSE in body
-        assert body.count(_GITHUB_FOOTER_MARKER) == 1
-        assert body.count("claude/gpt-5") == 1
-
-    async def test_fallback_keeps_lookalike_prose(self, settings):
-        """The no-AI fallback path must not eat user text either."""
-        preview = await self._preview(settings, _LOOKALIKE_PROSE, ai_generated=False)
-
-        assert _LOOKALIKE_PROSE in preview.body
-        assert "No AI model generated this issue" in preview.body
-        assert _GITHUB_FOOTER_MARKER not in preview.body
-
-    async def test_reported_by_after_footer_does_not_double_it(self, settings):
-        """main.py appends "Reported by" AFTER the footer: detection must still see it."""
-        preview = await self._preview(settings, "## Bug\n\nBoom")
-
-        with _mocked_github_client() as posted:
-            await create_feedback_from_preview(
-                title=preview.title,
-                body=preview.body + _REPORTED_BY,
-                labels=preview.labels,
-                github_token=_TEST_GITHUB_TOKEN,
-            )
-        body = _capture_posted_body(posted)
-
-        assert body.count("Generated using AI") == 1
-        assert body.count(_GITHUB_FOOTER_MARKER) == 1
-        assert "Reported by: alice" in body
-
-    async def test_reported_by_after_fallback_does_not_double_it(self, settings):
-        preview = await self._preview(settings, "## Feedback", ai_generated=False)
-
-        with _mocked_github_client() as posted:
-            await create_feedback_from_preview(
-                title=preview.title,
-                body=preview.body + _REPORTED_BY,
-                labels=preview.labels,
-                github_token=_TEST_GITHUB_TOKEN,
-            )
-        body = _capture_posted_body(posted)
-
-        assert body.count("No AI model generated this issue") == 1
-        assert body.count("Generated using AI") == 0

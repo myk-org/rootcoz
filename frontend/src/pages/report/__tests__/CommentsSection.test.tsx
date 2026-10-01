@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { useEffect } from 'react'
 import { CommentsSection, MENTION_RE } from '../CommentsSection'
 import { ReportProvider, useReportDispatch } from '../ReportContext'
@@ -168,6 +168,44 @@ describe('CommentsSection – review suggestion errors', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert').textContent).toContain('Intent check failed')
     })
+    expect(screen.queryByText('Mark as reviewed?')).toBeNull()
+  })
+
+  it('keeps the newest error when an earlier intent request resolves late', async () => {
+    // Two comment posts in a row: the first intent request hangs, the second fails fast.
+    let intentCalls = 0
+    let resolveFirst!: () => void
+    const firstIntent = new Promise<{ suggests_reviewed: boolean }>((res) => {
+      resolveFirst = () => res({ suggests_reviewed: false })
+    })
+    mockPost.mockImplementation((url: string) => {
+      if (url === '/api/analyze-comment-intent') {
+        intentCalls += 1
+        return intentCalls === 1 ? firstIntent : Promise.reject(new Error('Intent check failed'))
+      }
+      return Promise.resolve({ id: intentCalls + 1 })
+    })
+    renderWithComments([makeComment()])
+
+    const textarea = screen.getByPlaceholderText('Add a comment...')
+    fireEvent.change(textarea, { target: { value: 'first comment' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Post' }))
+    })
+    fireEvent.change(textarea, { target: { value: 'second comment' } })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Post' }))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain('Intent check failed')
+    })
+
+    // The first request lands late with a success; the newer failure must survive it.
+    await act(async () => {
+      resolveFirst()
+    })
+    expect(screen.getByRole('alert').textContent).toContain('Intent check failed')
     expect(screen.queryByText('Mark as reviewed?')).toBeNull()
   })
 })

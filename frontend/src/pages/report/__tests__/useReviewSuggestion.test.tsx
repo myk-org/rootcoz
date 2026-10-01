@@ -249,6 +249,113 @@ describe('useReviewSuggestion hook', () => {
 })
 
 /* ------------------------------------------------------------------ */
+/*  Out-of-order responses                                             */
+/* ------------------------------------------------------------------ */
+
+/** A promise a test settles by hand, to interleave two in-flight requests. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+describe('useReviewSuggestion – out-of-order intent responses', () => {
+  it('keeps the newest error when an older success resolves late', async () => {
+    const first = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    const second = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    mockPost.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+    renderHarness()
+
+    fireEvent.click(screen.getByTestId('suggest-reviewed'))
+    fireEvent.click(screen.getByTestId('suggest-not-reviewed'))
+
+    // The newer request fails first and the message lands.
+    await act(async () => {
+      second.reject(new Error('Intent check failed'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('error').textContent).toBe('Intent check failed')
+    })
+
+    // The older request now succeeds; it must not wipe the newer failure.
+    await act(async () => {
+      first.resolve({ suggests_reviewed: false, reason: 'Generic comment' })
+    })
+    expect(screen.getByTestId('error').textContent).toBe('Intent check failed')
+  })
+
+  it('keeps the newest error when an older suggestion resolves late', async () => {
+    const first = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    const second = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    mockPost.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+    renderHarness()
+
+    fireEvent.click(screen.getByTestId('suggest-reviewed'))
+    fireEvent.click(screen.getByTestId('suggest-not-reviewed'))
+
+    await act(async () => {
+      second.reject(new Error('Intent check failed'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('error').textContent).toBe('Intent check failed')
+    })
+
+    // A stale "yes, reviewed" must not raise the dialog on top of the newer failure.
+    await act(async () => {
+      first.resolve({ suggests_reviewed: true, reason: 'Known issue' })
+    })
+    expect(screen.getByTestId('show').textContent).toBe('false')
+    expect(screen.getByTestId('error').textContent).toBe('Intent check failed')
+  })
+
+  it('does not let an older success re-raise a dismissed suggestion the newer request refused', async () => {
+    const first = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    const second = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    mockPost.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+    renderHarness()
+
+    fireEvent.click(screen.getByTestId('suggest-reviewed'))
+    fireEvent.click(screen.getByTestId('suggest-not-reviewed'))
+
+    await act(async () => {
+      first.resolve({ suggests_reviewed: true, reason: 'Known issue' })
+    })
+    expect(screen.getByTestId('show').textContent).toBe('false')
+
+    // Newest request succeeds without a suggestion; the stale one must stay ignored.
+    await act(async () => {
+      second.resolve({ suggests_reviewed: false, reason: 'Generic comment' })
+    })
+    expect(screen.getByTestId('show').textContent).toBe('false')
+  })
+
+  it('ignores a stale failure that lands before the newer request settles', async () => {
+    const first = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    const second = deferred<{ suggests_reviewed: boolean; reason: string }>()
+    mockPost.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise)
+    renderHarness()
+
+    fireEvent.click(screen.getByTestId('suggest-reviewed'))
+    fireEvent.click(screen.getByTestId('suggest-not-reviewed'))
+
+    await act(async () => {
+      first.reject(new Error('Intent check failed'))
+    })
+
+    // Newest request succeeds: it owns the error slot, so nothing stale shows through.
+    await act(async () => {
+      second.resolve({ suggests_reviewed: false, reason: 'Generic comment' })
+    })
+    expect(screen.getByTestId('error').textContent).toBe('')
+    expect(screen.getByTestId('show').textContent).toBe('false')
+  })
+})
+
+/* ------------------------------------------------------------------ */
 /*  AI pair selection (report-scoped, shared by every AI surface)     */
 /* ------------------------------------------------------------------ */
 

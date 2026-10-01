@@ -73,6 +73,7 @@ from rootcoz.ai_client import (
     supported_key_providers,
     update_model_catalog,
 )
+from rootcoz.attribution import AiProvenance
 from rootcoz.bug_creation import (
     create_github_issue,
     create_jira_bug,
@@ -7146,11 +7147,15 @@ async def create_github_issue_endpoint(
         )
 
     try:
+        # This path always creates from rootcoz's own failure analysis, so the
+        # server states the attribution explicitly; a model-specific line in a
+        # client-supplied --body is stripped and never decides the footer.
         result = await create_github_issue(
             title=body.title,
             body=issue_body,
             repo_url=tests_repo_url,
             github_token=github_token,
+            attribution=AiProvenance(ai_used=True),
         )
     except ValueError as exc:
         raise HTTPException(
@@ -11990,6 +11995,10 @@ async def create_feedback(
         )
 
     try:
+        # Attribution comes from the signed provenance the preview embedded in
+        # its body — never from the request (which carries no provider/model)
+        # and never re-resolved here, so a settings change between preview and
+        # create cannot miscredit the model that wrote the body.
         return await create_feedback_from_preview(
             title=body.title,
             body=body.body,

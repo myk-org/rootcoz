@@ -12,11 +12,9 @@ from typing import Any
 
 from simple_logger.logger import get_logger
 
-from rootcoz.ai_client import call_ai_once
-from rootcoz.bug_creation import (
-    GITHUB_AI_TRAILING_ATTRIBUTION_RE,
-    create_github_issue,
-)
+from rootcoz.ai_client import call_ai_once, public_provider_name
+from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
+from rootcoz.bug_creation import create_github_issue
 from rootcoz.config import Settings
 from rootcoz.models import (
     FeedbackPreviewResponse,
@@ -27,6 +25,10 @@ from rootcoz.models import (
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
+
+# Issue attribution is owned by rootcoz.attribution: the footer, its regex and
+# the signed preview-time provenance all live there so feedback creation and
+# the shared issue creator cannot disagree about who gets credit.
 
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
@@ -98,8 +100,8 @@ async def format_feedback_with_ai(
         ai_model: Resolved AI model identifier.
 
     Returns:
-        Tuple of (title, body, labels, ai_generated). ``ai_generated`` is False
-        when the non-AI fallback template was used instead.
+        Tuple of (title, body, labels, ai_generated) for the GitHub issue.
+        ``ai_generated`` is False when the non-AI fallback template was used.
     """
     ai_call_timeout = settings.ai_call_timeout
 
@@ -308,46 +310,34 @@ async def generate_feedback_preview(
         ai_model: Resolved AI model identifier.
 
     Returns:
-        FeedbackPreviewResponse with generated title, body, labels, and the
-        resolved provider/model used for attribution.
+        FeedbackPreviewResponse with the generated title, body and labels, plus
+        the resolved provider/model and whether AI generated it, so the UI can
+        show who gets credit.  The body carries a server-owned attribution
+        footer naming the provider/model that wrote it, or stating that no AI
+        model did, plus the signed provenance that
+        :func:`create_feedback_from_preview` re-verifies so the credit cannot
+        drift with later settings changes.
     """
     title, body, labels, ai_generated = await format_feedback_with_ai(
         request, settings, ai_provider=ai_provider, ai_model=ai_model
     )
-    # Attribution names the RESOLVED pair the caller resolved server-side, never a
-    # raw client-supplied string (#282): the body travels verbatim to create.
-    # Strip whatever attribution variant is already there — trailing footer only,
-    # so a dynamic provider/model footer is replaced instead of duplicated while
-    # attribution-shaped prose in the middle of the user's report stays (#297).
-    body = GITHUB_AI_TRAILING_ATTRIBUTION_RE.sub(
-        "", body
-    ).rstrip() + feedback_ai_attribution(
-        ai_provider, ai_model, ai_generated=ai_generated
+    # Fallback template content is credited to no model, whatever the server
+    # has configured — the footer follows what actually generated the body.
+    # One provenance, one pair: the response and the footer read the same
+    # object, so the pair is never resolved twice (#292).
+    provenance = AiProvenance(
+        ai_used=ai_generated, provider=ai_provider, model=ai_model
     )
+    body = apply_ai_attribution(body, provenance)
     return FeedbackPreviewResponse(
         title=title,
         body=body,
         labels=labels,
-        ai_provider=ai_provider,
-        ai_model=ai_model,
-        ai_generated=ai_generated,
-    )
-
-
-_NO_AI_ATTRIBUTION = (
-    "\n\n---\n*No AI model generated this issue — the fallback template was used*"
-)
-
-
-def feedback_ai_attribution(
-    ai_provider: str, ai_model: str, *, ai_generated: bool
-) -> str:
-    """Attribution footer naming the resolved provider/model that wrote the issue."""
-    if not ai_generated or not (ai_provider and ai_model):
-        return _NO_AI_ATTRIBUTION
-    return (
-        "\n\n---\n*Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
-        f" — {ai_provider}/{ai_model}*"
+        # Public names only — catalog IDs such as ``cli-claude`` never reach
+        # the browser, exactly as they never reach a footer.
+        ai_provider=public_provider_name(provenance.provider),
+        ai_model=provenance.model,
+        ai_generated=provenance.ai_used,
     )
 
 
@@ -366,7 +356,12 @@ def _derive_fallback_labels(request: FeedbackRequest) -> list[str]:
 
 
 async def create_feedback_from_preview(
-    title: str, body: str, labels: list[str], github_token: str
+    title: str,
+    body: str,
+    labels: list[str],
+    github_token: str,
+    *,
+    provenance: AiProvenance | None = None,
 ) -> FeedbackResponse:
     """Create a GitHub issue from a previously previewed feedback.
 
@@ -375,6 +370,9 @@ async def create_feedback_from_preview(
         body: Issue body (from preview).
         labels: Issue labels (from preview).
         github_token: User's GitHub token for authentication.
+        provenance: Server-side preview-time AI provenance.  When omitted it
+            is read from the signed token in *body* (the create endpoint's
+            only source — it never accepts a provider/model from the browser).
 
     Returns:
         FeedbackResponse with the created issue details.
@@ -389,7 +387,13 @@ async def create_feedback_from_preview(
         )
 
     title = scrub_sensitive_data(title)
-    body = scrub_sensitive_data(body)
+    # Re-apply the attribution the preview was granted: the body round-trips
+    # through the browser and may carry a stale, hand-edited or spoofed footer.
+    # Read provenance before scrubbing so the signed token is still intact, and
+    # hand the same verified provenance to the creator — attribution is decided
+    # by this one signal, never by the body text.
+    resolved = provenance or read_provenance(body) or AiProvenance(ai_used=False)
+    body = apply_ai_attribution(scrub_sensitive_data(body), resolved)
     labels = [lbl for lbl in labels if lbl in _ALLOWED_LABELS]
 
     result = await create_github_issue(
@@ -398,6 +402,7 @@ async def create_feedback_from_preview(
         repo_url=_FEEDBACK_REPO_URL,
         github_token=github_token,
         labels=labels,
+        attribution=resolved,
     )
 
     return FeedbackResponse(
@@ -424,7 +429,12 @@ async def create_feedback_issue(
     Returns:
         FeedbackResponse with the created issue details.
     """
-    preview = await generate_feedback_preview(request, settings)
+    preview = await generate_feedback_preview(
+        request,
+        settings,
+        ai_provider=settings.ai_provider,
+        ai_model=settings.ai_model,
+    )
     return await create_feedback_from_preview(
         title=preview.title,
         body=preview.body,

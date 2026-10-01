@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from rootcoz import storage
 from rootcoz.config import get_settings
+from rootcoz.vapid import _generate_vapid_keys
 
 
 def _nullcontext():
@@ -62,9 +63,12 @@ def _make_client(
                         get_settings.cache_clear()
 
 
+# A real P-256 pair: rootcoz always serves the public key derived from the
+# private key, so a fake key pair would be discarded as unusable.
+_VAPID_KEYS = _generate_vapid_keys()
 _VAPID_ENV = {
-    "VAPID_PUBLIC_KEY": "BFakePublicKeyForTesting123456789012345678901234567890",  # pragma: allowlist secret
-    "VAPID_PRIVATE_KEY": "fake-private-key-for-testing",  # pragma: allowlist secret
+    "VAPID_PUBLIC_KEY": _VAPID_KEYS["public_key"],
+    "VAPID_PRIVATE_KEY": _VAPID_KEYS["private_key"],
     "VAPID_CLAIM_EMAIL": "admin@example.com",
 }
 
