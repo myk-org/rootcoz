@@ -546,6 +546,25 @@ async def _next_or_timeout(stream, timeout: float = 0.5):
     return await asyncio.wait_for(stream.__anext__(), timeout=timeout)
 
 
+async def _wait_for_call(mock: AsyncMock, count: int, timeout: float = 1.0) -> None:
+    """Wait until ``mock`` has been awaited at least ``count`` times."""
+    async with asyncio.timeout(timeout):
+        while mock.await_count < count:
+            await asyncio.sleep(0.001)
+
+
+@contextlib.asynccontextmanager
+async def _background(*coros):
+    """Run coroutines as tasks and cancel every one of them on exit."""
+    tasks = tuple(asyncio.create_task(coro) for coro in coros)
+    try:
+        yield tasks
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def _open_navbar_stream(
     main, endpoint: str, *, username: str, is_admin: bool, topics: str = "navbar"
 ):
@@ -765,17 +784,27 @@ class TestNavbarPendingCountStream:
             try:
                 for _ in range(3):  # active, unread, initial pending count
                     await stream.__anext__()
+                lookup = main.storage.list_pending_users
+                seen = lookup.await_count
 
                 fail["count"] = aiosqlite.OperationalError("database is locked")
                 pending.clear()
                 main.notify_pending_count_changed()
-                # The retry deadline is well ahead of the 30s keepalive, so no
-                # keepalive is emitted; the retry alone delivers the count.
-                fail.clear()
-                pending.append("p3")  # count is 1 until the retry lands
-                assert await _next_or_timeout(stream) == (
-                    f"event: {_PENDING_EVENT[endpoint]}\ndata: 1\n\n"
-                )
+                # Consume while the error is live: the lookup really has to fail.
+                async with _background(stream.__anext__()) as (nxt,):
+                    await _wait_for_call(lookup, seen + 1)
+                    # A failed lookup defers instead of counting: nothing is
+                    # emitted, and the retry is sooner than the 30s keepalive.
+                    await asyncio.sleep(0.05)  # well inside the retry deadline
+                    assert not nxt.done()
+
+                    # The database recovers: the scheduled retry delivers the
+                    # count on this same connection, no new notification.
+                    fail.clear()
+                    pending.append("p3")  # count is 1 until the retry lands
+                    assert await asyncio.wait_for(nxt, 2) == (
+                        f"event: {_PENDING_EVENT[endpoint]}\ndata: 1\n\n"
+                    )
             finally:
                 await stream.aclose()
 
@@ -804,24 +833,25 @@ class TestNavbarPendingCountStream:
                 pending.clear()
                 main.notify_pending_count_changed()
                 chunks: list[str] = []
-                drain = asyncio.create_task(_drain_until(stream, chunks, event))
+                # Both tasks are cancelled in the context manager's finally,
+                # so a failed assertion cannot leave them running.
+                async with _background(
+                    _drain_until(stream, chunks, event),
+                    _notify_every(main._dashboard_listeners, 0.05),
+                ) as tasks:
+                    drain = tasks[0]
+                    # A busy stream: another subscribed topic fires every 50ms,
+                    # so the 30s keepalive timeout is never reached.
+                    await asyncio.sleep(0.1)
+                    assert any("dashboard" in chunk for chunk in chunks)
+                    assert not any(": keepalive" in chunk for chunk in chunks)
 
-                # A busy stream: another subscribed topic fires every 50ms, so
-                # the 30s keepalive timeout is never reached.
-                busy = asyncio.create_task(
-                    _notify_every(main._dashboard_listeners, 0.05)
-                )
-                await asyncio.sleep(0.1)
-                assert any("dashboard" in chunk for chunk in chunks)
-                assert not any(": keepalive" in chunk for chunk in chunks)
-
-                # The retry deadline comes due mid-traffic and delivers the
-                # count, without a keepalive or a new pending notification.
-                fail.clear()
-                pending.append("p3")  # count is 1 until the retry lands
-                await asyncio.wait_for(drain, 2)
-                busy.cancel()
-                assert f"event: {event}\ndata: 1\n\n" in chunks
+                    # The retry deadline comes due mid-traffic and delivers the
+                    # count, without a keepalive or a new pending notification.
+                    fail.clear()
+                    pending.append("p3")  # count is 1 until the retry lands
+                    await asyncio.wait_for(drain, 2)
+                    assert f"event: {event}\ndata: 1\n\n" in chunks
             finally:
                 await stream.aclose()
 
