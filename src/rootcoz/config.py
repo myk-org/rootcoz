@@ -574,23 +574,14 @@ class Settings(BaseSettings):
 
     @property
     def web_push_enabled(self) -> bool:
-        """Check if Web Push is enabled (env vars or auto-generated keys)."""
+        """Check if Web Push is enabled (configured keys or auto-generated keys)."""
         if hasattr(self, "_vapid_config_cache"):
             return bool(self._vapid_config_cache)
 
-        pub = self.vapid_public_key.strip()
-        priv = self.vapid_private_key.strip()
-
-        # Detect partial env config
-        if bool(pub) != bool(priv):
-            logger.warning(
-                "Partial VAPID configuration: only one of VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY is set. "
-                "Both must be provided, or neither (auto-generation will be used)."
+        if bool(self.vapid_public_key.strip()) != bool(self.vapid_private_key.strip()):
+            logger.info(
+                "Partial VAPID configuration: the public key is derived from the private key."
             )
-
-        if pub and priv:
-            object.__setattr__(self, "_vapid_config_cache", True)
-            return True
 
         result = bool(get_vapid_config())
         object.__setattr__(self, "_vapid_config_cache", result)
@@ -751,6 +742,15 @@ async def load_db_settings() -> None:
             )
     except Exception:
         logger.warning("Failed to load server settings from DB", exc_info=True)
+
+
+def get_db_setting(key: str) -> str:
+    """Return a Server Settings DB override (decrypted), or "" when unset.
+
+    Only DB overrides are returned — environment variables are not merged in.
+    Callers that want "env > DB" precedence read the env var first.
+    """
+    return _db_settings_cache.get(key, "")
 
 
 def update_db_settings_cache(updates: dict[str, str]) -> None:
