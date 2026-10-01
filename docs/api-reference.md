@@ -75,7 +75,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | GET | `/api/version` | viewer | Running version |
 | POST | `/api/auth/logout` | authenticated | Clears the session cookie |
 | GET | `/api/auth/me` | viewer | Username, role, `can_view_reports`, `can_use_server_providers` |
-| POST | `/api/auth/rotate-key` | viewer | Rotates your own API key; the old key stops working |
+| POST | `/api/auth/rotate-key` | reviewer | Rotates your own API key; the old key stops working |
 | GET | `/api/user/ai-credentials` | viewer | Personal provider credentials, secrets masked |
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |

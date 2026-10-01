@@ -247,10 +247,11 @@
 </tr>
 <tr>
 <td><code>Additional Repositories</code></td>
-<td><code>api=https://github.com/org/api, web=https://github.com/org/web</code></td>
+<td>Two rows, one per repository: <code>Name</code> <code>api</code> with <code>URL</code> <code>https://github.com/org/api</code>, and <code>Name</code> <code>web</code> with <code>URL</code> <code>https://github.com/org/web</code></td>
 </tr>
 </tbody>
 </table></div>
+<p><code>Additional Repositories</code> is a list of inputs, not a single string: click <code>Add Repository</code> once per extra repository and fill the <code>Name</code>, <code>URL</code>, and optional <code>Ref</code> fields on that row. The comma-separated <code>name:url</code> spelling belongs to the CLI <code>--additional-repos</code> flag and the <code>additional_repos</code> server setting, not to this form.</p>
 <p>This clones the tests repository plus both extra repositories into the analysis workspace and tells the AI that all three are available to read.</p>
 <h2 id="step-by-step">Step-by-Step</h2>
 <ol>

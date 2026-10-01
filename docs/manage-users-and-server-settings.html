@@ -222,7 +222,7 @@
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>You are signed in as an <code>admin</code>.</li>
-<li>The bootstrap <code>admin</code> account exists. It authenticates with the username <code>admin</code> and the <code>ADMIN_KEY</code> value, and it lives outside the users table so it is always available as a fallback.</li>
+<li>The bootstrap <code>admin</code> account exists. It authenticates with the username <code>admin</code> and the <code>ADMIN_KEY</code> value, and it lives outside the users table, so it is not affected by user deletion. It exists <strong>only</strong> while <code>ADMIN_KEY</code> is non-empty: login compares the supplied key against <code>ADMIN_KEY</code> and refuses an empty one, so a deployment left at the empty default has no bootstrap path into admin at all. Set <code>admin.key</code> in the Helm chart, which auto-generates a key on first install when the value is empty — <code>chart/README.md</code> shows how to read it back out of the Secret.</li>
 <li>For server settings changes, you have a current server value for anything you are changing, because sensitive values are stored masked.</li>
 </ul>
 <h2 id="quick-example">Quick Example</h2>

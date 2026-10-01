@@ -18,7 +18,9 @@ In `New Analysis`, fill the `Source Repositories` section:
 | --- | --- |
 | `Tests Repo URL` | `https://github.com/org/my-tests` |
 | `Ref / Branch` | `main` |
-| `Additional Repositories` | `api=https://github.com/org/api, web=https://github.com/org/web` |
+| `Additional Repositories` | Two rows, one per repository: `Name` `api` with `URL` `https://github.com/org/api`, and `Name` `web` with `URL` `https://github.com/org/web` |
+
+`Additional Repositories` is a list of inputs, not a single string: click `Add Repository` once per extra repository and fill the `Name`, `URL`, and optional `Ref` fields on that row. The comma-separated `name:url` spelling belongs to the CLI `--additional-repos` flag and the `additional_repos` server setting, not to this form.
 
 This clones the tests repository plus both extra repositories into the analysis workspace and tells the AI that all three are available to read.
 

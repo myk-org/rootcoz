@@ -5,7 +5,7 @@ This page is for RootCoz administrators. It covers the role ladder, what each ro
 ## Prerequisites
 
 - You are signed in as an `admin`.
-- The bootstrap `admin` account exists. It authenticates with the username `admin` and the `ADMIN_KEY` value, and it lives outside the users table so it is always available as a fallback.
+- The bootstrap `admin` account exists. It authenticates with the username `admin` and the `ADMIN_KEY` value, and it lives outside the users table, so it is not affected by user deletion. It exists **only** while `ADMIN_KEY` is non-empty: login compares the supplied key against `ADMIN_KEY` and refuses an empty one, so a deployment left at the empty default has no bootstrap path into admin at all. Set `admin.key` in the Helm chart, which auto-generates a key on first install when the value is empty — `chart/README.md` shows how to read it back out of the Secret.
 - For server settings changes, you have a current server value for anything you are changing, because sensitive values are stored masked.
 
 ## Quick Example

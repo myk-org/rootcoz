@@ -213,7 +213,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | `rootcoz admin-chat history` | `--limit`/`-l` (200) | Admin transcript. |
 | `rootcoz admin-chat clear` | — | Clear admin history and saved artifacts. |
 | `rootcoz admin-chat save-artifact HTML_FILE` | `--filename`/`-f` | Upload a local HTML report. |
-| `rootcoz admin-chat download-artifact ARTIFACT_ID` | `--output`/`-o` | Download an artifact; defaults to `report-<id>.html`. |
+| `rootcoz admin-chat download-artifact ARTIFACT_ID` | `--output`/`-o` | Download an artifact; without `-o` it writes `report-<id>.html`, where `<id>` is the first eight characters of the artifact id. |
 
 See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analysis.html) for prompt patterns and artifact behaviour.
 

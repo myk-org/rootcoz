@@ -143,7 +143,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `ALLOWED_USERS` | empty | string | no | no | **no** |
    | `DEFAULT_USER_ROLE` | `reviewer` | string | no | **yes** | **no** |
 
-   `ADMIN_KEY` bootstraps the `admin` superuser that lives outside the database; log in as `admin` with that key. `DEFAULT_USER_ROLE` accepts only `viewer`, `reviewer`, or `operator` — any other value fails validation at startup. `ALLOWED_USERS` is a comma-separated allow list evaluated only after authentication, and it is empty (open) by default.
+   `ADMIN_KEY` bootstraps the `admin` superuser that lives outside the database; log in as `admin` with that key. `DEFAULT_USER_ROLE` accepts only `viewer`, `reviewer`, or `operator` — any other value fails validation at startup. `ALLOWED_USERS` is a comma-separated list of usernames and is empty (open) by default. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with `403 Registration is restricted. Contact an admin.` before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets `403 User not allowed. Contact an administrator to be added to the allow list.` A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes.
 
    > **Warning:** Set `SECURE_COOKIES=false` only for local HTTP development. Behind a TLS-terminating proxy, leave it `true` or sessions will not be stored by the browser.
 
@@ -209,7 +209,7 @@ These are read straight from the process environment and have no `Settings` fiel
 | `ACPX_AGENTS` | unset | Comma-separated providers exposed through the Cursor ACPX bridge |
 | `CLI_AGENTS` | unset | Comma-separated providers exposed through the local CLI agents |
 
-Only one of `ANTHROPIC_API_KEY` or the Vertex trio is needed for `claude`. Gemini can also authenticate via `gemini auth login`, which needs no variable at all.
+`gemini` resolves to the `google` provider, and `GEMINI_API_KEY` is the credential RootCoz documents and charts for it (`ai.provider=gemini` pairs with `ai.geminiApiKey`). `gemini auth login` is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — `cli-gemini`, the canonical form of the legacy `gemini-cli` name — not under `google`, so it is not a substitute for `GEMINI_API_KEY` on the `gemini` alias. For `claude`, see the resolution rules above: the alias maps to `google-vertex-claude`, so `ANTHROPIC_API_KEY` on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.
 
 RootCoz does not read the Vertex trio itself — `config.py` documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting `ai.vertex.enabled` writes `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`, and separately mounts `ai.vertex.serviceAccountKey` and points `GOOGLE_APPLICATION_CREDENTIALS` at the mounted `application_default_credentials.json`. Install fails outright if `ai.vertex.enabled` is set without `ai.vertex.projectId` or `ai.vertex.serviceAccountKey`, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.
 
@@ -260,7 +260,7 @@ Sensitive values are returned masked as `••••••••`. `GET /api/ad
 
 Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only five of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.  
