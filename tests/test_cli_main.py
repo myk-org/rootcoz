@@ -4172,12 +4172,30 @@ class TestAdminBackfillSignaturesCommand:
             "jobs_changed": 2,
             "failures_scanned": 50,
             "failures_changed": 7,
+            "unrecoverable_failures_count": 0,
+            "unrecoverable_failures": [],
         }
         result = runner.invoke(app, ["admin", "backfill-signatures"])
         assert result.exit_code == 0
         mock_client.admin_backfill_signatures.assert_called_once_with(dry_run=True)
         assert "7/50" in result.output
         assert "Re-run with --apply" in result.output
+        assert "kept their stored signature" not in result.output
+
+    def test_reports_unrecoverable_failures(self, mock_client):
+        mock_client.admin_backfill_signatures.return_value = {
+            "dry_run": True,
+            "jobs_scanned": 10,
+            "jobs_changed": 2,
+            "failures_scanned": 50,
+            "failures_changed": 7,
+            "unrecoverable_failures_count": 412,
+            "unrecoverable_failures": [{"job_id": "j"}] * 100,
+        }
+        result = runner.invoke(app, ["admin", "backfill-signatures"])
+        assert result.exit_code == 0
+        assert "412 failure(s) kept their stored signature" in result.output
+        assert "Sample of 100 reported." in result.output
 
     def test_apply_writes(self, mock_client):
         mock_client.admin_backfill_signatures.return_value = {
@@ -4188,6 +4206,8 @@ class TestAdminBackfillSignaturesCommand:
             "failures_changed": 7,
             "history_rows_changed": 7,
             "comment_rows_changed": 3,
+            "unrecoverable_failures_count": 0,
+            "unrecoverable_failures": [],
         }
         result = runner.invoke(
             app, ["admin", "backfill-signatures", "--apply", "--yes"]

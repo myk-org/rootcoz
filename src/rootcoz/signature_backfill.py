@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 # storage.get_signature_versions() -- the history alone cannot answer that.
 MIGRATION_KEY_PREFIX = "failure-signatures-"
 
+#: Unrecoverable records kept in memory and returned. The count is always
+#: exact; the list is a sample, because the first run after traces started
+#: being persisted reports every row stored before that -- one entry per
+#: failure in the database, which is neither bounded nor usable as a report.
+UNRECOVERABLE_SAMPLE_SIZE = 100
+
 
 class BackfillStats:
     """Counts for one backfill run."""
@@ -55,10 +61,20 @@ class BackfillStats:
         self.history_rows_changed = 0
         self.comment_rows_changed = 0
         self.unparsable_jobs: list[str] = []
-        # Records whose signature inputs cannot be recovered (see
-        # signature_inputs). Reported rather than rehashed with a guessed trace.
+        # Failures whose signature inputs cannot be recovered (see
+        # signature_inputs): counted exactly, sampled in the report, and left
+        # with the hash they already carry rather than rehashed from a guess.
+        self.unrecoverable_count = 0
         self.unrecoverable_failures: list[dict[str, Any]] = []
         self.migration_preempted = False
+
+    def record_unrecoverable(self, record: dict[str, Any]) -> None:
+        """Count one unrecoverable failure, keeping a bounded sample of them."""
+        self.unrecoverable_count += 1
+        if len(self.unrecoverable_failures) < UNRECOVERABLE_SAMPLE_SIZE:
+            self.unrecoverable_failures.append(record)
+        else:
+            logger.debug("Unrecoverable signature inputs (not sampled): %s", record)
 
     def as_dict(self) -> dict[str, Any]:
         """Return the stats as a JSON-serializable dict."""
@@ -71,6 +87,7 @@ class BackfillStats:
             "history_rows_changed": self.history_rows_changed,
             "comment_rows_changed": self.comment_rows_changed,
             "unparsable_jobs": self.unparsable_jobs,
+            "unrecoverable_failures_count": self.unrecoverable_count,
             "unrecoverable_failures": self.unrecoverable_failures,
             "migration_preempted": self.migration_preempted,
         }
@@ -166,7 +183,7 @@ def _rehash_stored_failures(
         inputs = signature_inputs(failure)
         if inputs is None:
             if stats is not None:
-                stats.unrecoverable_failures.append(
+                stats.record_unrecoverable(
                     {
                         "job_id": job_id,
                         "test_name": failure.get("test_name", ""),
@@ -199,7 +216,7 @@ def _rehash_stored_failures(
 
 
 def _make_updater(
-    collect: list[SignatureUpdate], stats: BackfillStats, job_id: str
+    collect: list[SignatureUpdate],
 ) -> Callable[[dict[str, Any]], None]:
     """Return a ``patch_result_json`` callback that re-hashes *only* signatures.
 
@@ -211,14 +228,10 @@ def _make_updater(
 
     Args:
         collect: Collects the matching denormalized updates for this job.
-        stats: Counts the changes applied to the current row.
-        job_id: Identifies the job, for the unrecoverable-record report.
     """
 
     def _update(data: dict[str, Any]) -> None:
-        _rehash_stored_failures(
-            data, collect=collect.append, stats=stats, job_id=job_id
-        )
+        _rehash_stored_failures(data, collect=collect.append)
 
     return _update
 
@@ -267,10 +280,12 @@ async def ensure_signatures_current() -> dict[str, Any] | None:
         )
     logger.info(
         "Signature backfill complete: %s/%s failures re-hashed across %s jobs "
-        "(%s records had unrecoverable signature inputs)",
+        "(%s failures kept their hash -- unrecoverable signature inputs; "
+        "sample of %s reported)",
         stats["failures_changed"],
         stats["failures_scanned"],
         stats["jobs_scanned"],
+        stats["unrecoverable_failures_count"],
         len(stats["unrecoverable_failures"]),
     )
     return stats
@@ -286,7 +301,10 @@ async def backfill_signatures(
 
     Each job's result and its ``failure_history`` / ``comments`` rows are
     rewritten in one transaction, in bounded batches, so the run is safe to
-    interrupt and safe to retry.
+    interrupt and safe to retry. Jobs whose analysis is still running are left
+    alone: that analysis writes current-rule signatures itself when it saves,
+    and a backfill landing between its history and result writes would only
+    race it.
 
     Args:
         dry_run: When True (the default) nothing is written and the returned
@@ -323,12 +341,26 @@ async def backfill_signatures(
                     stats.jobs_changed += 1
                 continue
 
+            # Probe the scanned copy first: patch_result_json opens
+            # BEGIN IMMEDIATE before it can tell that nothing changed, and most
+            # rows are already current or unrecoverable. Only a job the probe
+            # finds stale is worth the write lock.
+            if not _rehash_stored_failures(result_data, stats=stats, job_id=job_id):
+                continue
+
             updates: list[SignatureUpdate] = []
             outcome = await patch_result_json(
                 job_id,
-                _make_updater(updates, stats, job_id),
+                _make_updater(updates),
                 denormalized=updates,
                 write_if_changed=True,
+                # A live analysis writes its failure history and then, in a
+                # separate operation, its result. A backfill landing between
+                # the two re-hashes the *previous* result and leaves the history
+                # the analysis just wrote pointing at a different hash. That
+                # analysis writes current-rule signatures itself when it saves,
+                # so its job is left alone.
+                skip_in_flight=True,
             )
             if outcome.written:
                 stats.jobs_changed += 1

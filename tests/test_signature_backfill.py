@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from rootcoz import signature_backfill
 from rootcoz.engine.core import (
     compute_signature,
     get_failure_signature,
@@ -17,6 +18,7 @@ from rootcoz.signature_backfill import (
     iter_stored_failures,
     signature_inputs,
 )
+from rootcoz.sources.base import CISourceResult
 
 MESSAGE_WITH_NOISE = "HTTPError 502\nDate: Sun, 31 May 2026 06:50:48 GMT"
 TRACE = "at t.py:1"
@@ -87,6 +89,38 @@ class TestPersistedSchema:
     def test_non_string_inputs_are_not_recoverable(self):
         assert signature_inputs({"error": "boom"}) is None
         assert signature_inputs({"error": "boom", "stack_trace": 3}) is None
+
+
+class TestTraceOnlyFailures:
+    """A failure with no message must store the message it was signed with."""
+
+    def _ingested(self, failure: FailedTest) -> FailureAnalysis:
+        (analysis,) = CISourceResult(failures=[failure]).unanalyzed_failure_analyses()
+        return analysis
+
+    def test_ingest_keeps_the_signature_inputs_it_hashed(self):
+        analysis = self._ingested(_failed_test("t", "", TRACE))
+
+        stored = analysis.model_dump(mode="json")
+        assert stored["error"] == ""
+        assert stored["stack_trace"] == TRACE
+        assert signature_inputs(stored) == ("", TRACE)
+        assert stored["error_signature"] == compute_signature("", TRACE)
+
+    def test_display_falls_back_to_the_trace(self):
+        assert self._ingested(_failed_test("t", "", TRACE)).display_error == TRACE
+        assert self._ingested(_failed_test("t", "boom")).display_error == "boom"
+
+    async def test_backfill_leaves_a_trace_only_failure_alone(self, db):
+        await _store_job(
+            db, "job1", _result(failures=[self._ingested(_failed_test("t", "", TRACE))])
+        )
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert await _signatures(db, "job1") == [compute_signature("", TRACE)]
+        assert stats["failures_changed"] == 0
+        assert stats["unrecoverable_failures_count"] == 0
 
 
 class TestIterStoredFailures:
@@ -163,6 +197,14 @@ def _stale(*failures: FailureAnalysis) -> list[FailureAnalysis]:
     for failure in failures:
         failure.error_signature = "stale-hash"
     return list(failures)
+
+
+async def _set_status(db, job_id: str, status: str) -> None:
+    async with db._connect_db() as conn:
+        await conn.execute(
+            "UPDATE results SET status = ? WHERE job_id = ?", (status, job_id)
+        )
+        await conn.commit()
 
 
 class TestBackfillSignatures:
@@ -257,6 +299,19 @@ class TestBackfillSignatures:
             }
         ]
 
+    async def test_unrecoverable_report_stays_bounded(self, db, monkeypatch):
+        """The first run reports a sample, not one record per stored failure."""
+        monkeypatch.setattr(signature_backfill, "UNRECOVERABLE_SAMPLE_SIZE", 2)
+        for index in range(5):
+            legacy = _failure(f"t{index}", "boom").model_dump(mode="json")
+            del legacy["stack_trace"]
+            await _store_job(db, f"job{index}", {"failures": [legacy]})
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert stats["unrecoverable_failures_count"] == 5
+        assert len(stats["unrecoverable_failures"]) == 2
+
     async def test_unparsable_job_is_reported_and_skipped(self, db):
         await _store_job(db, "good", _result())
         async with db._connect_db() as conn:
@@ -339,6 +394,27 @@ class TestConcurrentUpdateSafety:
         comments = await db.get_comments_for_job("job1")
         assert comments[0]["error_signature"] == compute_signature("first", TRACE)
 
+    async def test_same_name_and_message_different_traces_keep_their_own_hash(self, db):
+        """History rows are matched by the hash they carry, not by message."""
+        failures = []
+        for trace, previous in (("at a.py:1", "old-a"), ("at b.py:2", "old-b")):
+            failure = _failure("t", "boom", trace)
+            failure.error_signature = previous
+            failures.append(failure)
+        await _store_job(db, "job1", _result(failures=failures))
+        await db.add_comment("job1", "t", "about a", error_signature="old-a")
+
+        stats = await backfill_signatures(dry_run=False)
+
+        history = await _history(db, "job1")
+        assert {row["error_signature"] for row in history} == {
+            compute_signature("boom", "at a.py:1"),
+            compute_signature("boom", "at b.py:2"),
+        }
+        comments = await db.get_comments_for_job("job1")
+        assert comments[0]["error_signature"] == compute_signature("boom", "at a.py:1")
+        assert stats["history_rows_changed"] == 2
+
     async def test_result_and_history_are_rewritten_atomically(self, db):
         """An interrupted run leaves neither the result nor history half-written."""
         await _store_job(
@@ -363,6 +439,66 @@ class TestConcurrentUpdateSafety:
         assert history[0]["error_signature"] == compute_signature(
             MESSAGE_WITH_NOISE, TRACE
         )
+
+    async def test_a_job_whose_analysis_is_running_is_left_alone(self, db):
+        """The running analysis writes current-rule signatures when it saves."""
+        await _store_job(
+            db, "job1", _result(failures=_stale(_failure("t", MESSAGE_WITH_NOISE)))
+        )
+        await _set_status(db, "job1", "running")
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert await _signatures(db, "job1") == ["stale-hash"]
+        assert stats["jobs_changed"] == 0
+        assert stats["history_rows_changed"] == 0
+
+    async def test_backfill_between_history_and_result_save_changes_nothing(self, db):
+        """A live analysis writes history first, its result in a later write."""
+        stored = _result(failures=_stale(_failure("t", "boom", "at old.py:1")))
+        await _store_job(db, "job1", stored)
+        await _set_status(db, "job1", "running")
+
+        # The analysis repopulates history with its own signatures, then the
+        # backfill walks the job before the analysis saves its result.
+        fresh = _result(failures=[_failure("t", "boom", "at new.py:2")])
+        await db.populate_failure_history("job1", fresh)
+        await backfill_signatures(dry_run=False)
+
+        # The stored result still holds what the running analysis will replace.
+        assert await _signatures(db, "job1") == ["stale-hash"]
+
+        await db.update_status("job1", "completed", fresh)
+
+        history = await _history(db, "job1")
+        assert history[0]["error_signature"] == compute_signature("boom", "at new.py:2")
+        assert await _signatures(db, "job1") == [history[0]["error_signature"]]
+
+
+class TestWriteLockAvoidance:
+    async def test_only_stale_jobs_are_patched(self, db, monkeypatch):
+        """patch_result_json takes BEGIN IMMEDIATE; unchanged rows skip it."""
+        await _store_job(db, "job1", _result(failures=[_failure("t", "boom")]))
+        await _store_job(db, "job2", _result(failures=_stale(_failure("t", "boom"))))
+        legacy = _failure("t", "legacy").model_dump(mode="json")
+        del legacy["stack_trace"]
+        await _store_job(db, "job3", {"failures": [legacy]})
+
+        patched: list[str] = []
+        real_patch = db.patch_result_json
+
+        async def spy(job_id, *args, **kwargs):
+            patched.append(job_id)
+            return await real_patch(job_id, *args, **kwargs)
+
+        monkeypatch.setattr(signature_backfill, "patch_result_json", spy)
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert patched == ["job2"]
+        assert stats["jobs_scanned"] == 3
+        assert stats["jobs_changed"] == 1
+        assert stats["unrecoverable_failures_count"] == 1
 
 
 class TestBoundedIteration:
@@ -443,27 +579,48 @@ class TestNormalizationRulesVersion:
         assert normalization_rules_version() != before
 
     def test_changes_when_a_replacement_callable_body_changes(self, monkeypatch):
-        """Same qualified name, different implementation -> new fingerprint."""
+        """Same pattern, different replacement behaviour -> new fingerprint."""
+        import re
+
+        from rootcoz.engine import core
+
+        def _versioned(replacement):
+            monkeypatch.setattr(
+                core,
+                "_NORMALIZE_PATTERNS",
+                core._NORMALIZE_PATTERNS + [(re.compile(r"\d+"), replacement)],
+            )
+            return normalization_rules_version()
+
+        assert _versioned(lambda match: "one") != _versioned(lambda match: "two")
+
+    def test_changes_when_a_pattern_flag_changes(self, monkeypatch):
         import re
 
         from rootcoz.engine import core
 
         before = normalization_rules_version()
-        first, second = re.compile(r"^$"), re.compile(r"^$")
         monkeypatch.setattr(
             core,
             "_NORMALIZE_PATTERNS",
-            core._NORMALIZE_PATTERNS + [(first, lambda m: "one")],
+            core._NORMALIZE_PATTERNS + [(re.compile(r"build"), "<B>")],
         )
-        one = normalization_rules_version()
+        insensitive = normalization_rules_version()
         monkeypatch.setattr(
             core,
             "_NORMALIZE_PATTERNS",
-            core._NORMALIZE_PATTERNS + [(second, lambda m: "two")],
+            core._NORMALIZE_PATTERNS + [(re.compile(r"build", re.IGNORECASE), "<B>")],
         )
-        two = normalization_rules_version()
-        assert one != before
-        assert two != one
+        assert insensitive != before
+        assert insensitive != normalization_rules_version()
+
+    def test_docstring_edits_do_not_trigger_a_backfill(self, monkeypatch):
+        """Bytecode/consts hashing made a comment change a migration."""
+        from rootcoz.engine import core
+
+        before = normalization_rules_version()
+        monkeypatch.setattr(core.normalize_for_signature, "__doc__", "rewritten")
+        assert normalization_rules_version() == before
 
 
 class TestHeaderNormalization:
