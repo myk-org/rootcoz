@@ -5633,3 +5633,122 @@ class TestConfigDefaults:
         )
         result = runner.invoke(app, ["config", "defaults"])
         assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Child scope flag validation (--child-build requires --child-job)
+# ---------------------------------------------------------------------------
+
+# (argv prefix, client method name) for every command accepting both flags.
+_CHILD_SCOPE_COMMANDS: ClassVar[list[tuple[list[str], str]]] = [
+    (["results", "set-reviewed", "job-1", "--test", "t", "--reviewed"], "set_reviewed"),
+    (
+        ["results", "set-tracked-in", "job-1", "--test", "t", "--url", "https://x/1"],
+        "set_tracked_in",
+    ),
+    (["classify", "t", "--type", "FLAKY", "--job-id", "job-1"], "classify_test"),
+    (["comments", "add", "job-1", "--test", "t", "--message", "m"], "add_comment"),
+    (
+        ["preview-issue", "job-1", "--test", "t", "--type", "github"],
+        "preview_github_issue",
+    ),
+    (
+        [
+            "create-issue",
+            "job-1",
+            "--test",
+            "t",
+            "--type",
+            "github",
+            "--title",
+            "T",
+            "--body",
+            "B",
+        ],
+        "create_github_issue",
+    ),
+    (
+        [
+            "override-classification",
+            "job-1",
+            "--test",
+            "t",
+            "--classification",
+            "CODE ISSUE",
+        ],
+        "override_classification",
+    ),
+    (
+        ["override-pattern", "job-1", "--test", "t", "--pattern", "NEW"],
+        "override_pattern",
+    ),
+]
+
+
+@pytest.mark.parametrize(("argv", "method"), _CHILD_SCOPE_COMMANDS)
+class TestChildScopeValidation:
+    """--child-build without --child-job is rejected before any request."""
+
+    def test_child_build_requires_child_job(self, mock_client, argv, method):
+        result = runner.invoke(app, [*argv, "--child-build", "7"])
+        assert result.exit_code == 1
+        assert "--child-build requires --child-job" in result.output
+        getattr(mock_client, method).assert_not_called()
+
+    def test_negative_child_build_rejected(self, mock_client, argv, method):
+        result = runner.invoke(app, [*argv, "--child-build", "-1"])
+        assert result.exit_code == 1
+        assert "--child-build must be non-negative" in result.output
+        getattr(mock_client, method).assert_not_called()
+
+
+class TestSetTrackedInChildScope:
+    def test_paired_flags_are_sent(self, mock_client):
+        mock_client.set_tracked_in.return_value = {
+            "tracked_in_url": "https://x/1",
+            "tracked_in_type": "jira",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "set-tracked-in",
+                "job-1",
+                "--test",
+                "t",
+                "--url",
+                "https://x/1",
+                "--child-job",
+                "child-runner",
+                "--child-build",
+                "5",
+            ],
+        )
+        assert result.exit_code == 0
+        kwargs = mock_client.set_tracked_in.call_args[1]
+        assert kwargs["child_job_name"] == "child-runner"
+        assert kwargs["child_build_number"] == 5
+
+    def test_child_job_without_build_is_allowed(self, mock_client):
+        mock_client.set_tracked_in.return_value = {
+            "tracked_in_url": "https://x/1",
+            "tracked_in_type": "jira",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "set-tracked-in",
+                "job-1",
+                "--test",
+                "t",
+                "--url",
+                "https://x/1",
+                "--child-job",
+                "child-runner",
+            ],
+        )
+        assert result.exit_code == 0
+        kwargs = mock_client.set_tracked_in.call_args[1]
+        assert kwargs["child_job_name"] == "child-runner"
+        assert kwargs["child_build_number"] == 0
