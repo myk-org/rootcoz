@@ -1,4 +1,5 @@
-import type { FailureAnalysis, GroupedFailure } from '@/types'
+import { walkChildTree } from './failureKeys'
+import type { AnalysisResult, FailureAnalysis, GroupedFailure } from '@/types'
 
 /** Check whether a comment belongs to the given test-group scope. */
 export function isCommentInScope(
@@ -63,4 +64,20 @@ export function groupFailures(
     })
   }
   return groups
+}
+
+/** Failure groups of one child-job scope — the top-level failures when no child job
+ *  is named, otherwise every failure list of that job anywhere in the tree. */
+export function scopedGroups(
+  result: Pick<AnalysisResult, 'failures' | 'child_job_analyses'>,
+  childJobName?: string,
+  childBuildNumber?: number,
+): GroupedFailure[] {
+  const name = childJobName ?? ''
+  const build = childBuildNumber ?? 0
+  const scoped: FailureAnalysis[] = []
+  walkChildTree(result.failures ?? [], result.child_job_analyses ?? [], (fs, jobName, jobBuild) => {
+    if ((jobName ?? '') === name && (jobBuild ?? 0) === build) scoped.push(...(fs as FailureAnalysis[]))
+  })
+  return groupFailures(scoped)
 }

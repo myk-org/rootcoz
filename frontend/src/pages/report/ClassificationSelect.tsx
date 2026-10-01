@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { api } from '@/lib/api'
 import { useReportDispatch } from './ReportContext'
+import { putOverrideClassification } from './failureUpdates'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { OVERRIDE_CLASSIFICATIONS } from '@/constants/classifications'
 
@@ -33,12 +33,8 @@ export function ClassificationSelect({
       const namesForApi = testNames && testNames.length > 0 ? testNames : [testName]
       const results = await Promise.allSettled(
         namesForApi.map((name) =>
-          api.put(`/results/${jobId}/override-classification`, {
-            test_name: name,
-            classification: value,
-            child_job_name: childJobName ?? '',
-            child_build_number: childBuildNumber ?? 0,
-          }).then(() => name),
+          putOverrideClassification(jobId, { testName: name, childJobName, childBuildNumber }, value)
+            .then(() => name),
         ),
       )
       const persisted = results.filter((r): r is PromiseSettledResult<string> & { status: 'fulfilled' } => r.status === 'fulfilled').map((r) => r.value)

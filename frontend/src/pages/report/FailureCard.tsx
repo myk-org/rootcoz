@@ -1,16 +1,17 @@
 import { useState, useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useClipboard } from '@/lib/useClipboard'
-import type { GroupedFailure, PreviousAnalysis, TrackedInEntry } from '@/types'
+import type { GroupedFailure, PreviousAnalysis } from '@/types'
 import { buildFileUrl, buildRepoUrls, isSafeHref, matchRepo, type RepoUrl } from '@/lib/autoLink'
 import { isCommentInScope } from '@/lib/grouping'
 import { expandKey } from '@/lib/childJobHash'
 import { api, extractApiDetail } from '@/lib/api'
-import { getUsername } from '@/lib/cookies'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/utils'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { getTrackedIn, notifyReviewChanged, putReviewed, runBatched, scopeKey, scopedReviewState } from './failureUpdates'
+import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { Button } from '@/components/ui/button'
@@ -191,7 +192,7 @@ interface FailureCardProps {
 export function FailureCard({ group, jobId, childJobName, childBuildNumber, index, activeHash }: FailureCardProps) {
   const scopedChildJobName = childJobName ?? ''
   const scopedChildBuildNumber = childBuildNumber ?? 0
-  const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, result, classifications, trackedIn } = useReportState()
+    const { githubIssuesEnabled, jiraIssuesEnabled, serverJiraProjectKey, comments, reviews, result, classifications, trackedIn, selection } = useReportState()
   const dispatch = useReportDispatch()
   const { role, isOperator, isAdmin, username } = useAuth()
   const isViewer = role === 'viewer'
@@ -268,49 +269,26 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     const key = scopedReviewKey(t.test_name)
     return reviews[key]?.reviewed
   }).length
+  const isSelected = !!selection[scopeKey({ childJobName: scopedChildJobName, childBuildNumber: scopedChildBuildNumber }, group.id)]
   const allReviewed = reviewedCount === group.tests.length
 
   async function handleReviewAll() {
     setReviewingAll(true)
     setReviewAllError(null)
     const newState = !allReviewed
-    const BATCH_SIZE = 5
     try {
-      let failedCount = 0
-      const failedTestNames: string[] = []
-      for (let batchStart = 0; batchStart < group.tests.length; batchStart += BATCH_SIZE) {
-        const batch = group.tests.slice(batchStart, batchStart + BATCH_SIZE)
-        const results = await Promise.allSettled(
-          batch.map((t) =>
-            api.put<{ status: string; reviewed_by: string }>(`/results/${jobId}/reviewed`, {
-              test_name: t.test_name,
-              reviewed: newState,
-              child_job_name: scopedChildJobName,
-              child_build_number: scopedChildBuildNumber,
-            }).then((res) => ({ test: t, reviewed_by: res.reviewed_by })),
-          ),
-        )
-        for (let i = 0; i < results.length; i++) {
-          const result = results[i]
-          if (result.status === 'fulfilled') {
-            const { test: t, reviewed_by } = result.value
-            const key = scopedReviewKey(t.test_name)
-            dispatch({
-              type: 'SET_REVIEW',
-              payload: { key, state: { reviewed: newState, updated_at: new Date().toISOString(), username: reviewed_by ?? getUsername() } },
-            })
-          } else {
-            failedCount++
-            failedTestNames.push(batch[i].test_name)
-          }
-        }
+      const failed = await runBatched(group.tests, async (t) => {
+        const res = await putReviewed(jobId, { testName: t.test_name, childJobName: scopedChildJobName, childBuildNumber: scopedChildBuildNumber }, newState)
+        dispatch({
+          type: 'SET_REVIEW',
+          payload: { key: scopedReviewKey(t.test_name), state: scopedReviewState(newState, res.reviewed_by) },
+        })
+      })
+      if (failed.length > 0) {
+        setReviewAllError(`Failed to update ${failed.length} of ${group.tests.length} tests: ${failed.map((t) => t.test_name).join(', ')}`)
       }
-      if (failedCount > 0) {
-        setReviewAllError(`Failed to update ${failedCount} of ${group.tests.length} tests: ${failedTestNames.join(', ')}`)
-      }
-
       // Notify AllReviewedPrompt to check if all failures are now reviewed
-      setTimeout(() => window.dispatchEvent(new CustomEvent('rootcoz:review-changed', { detail: { jobId } })), 100)
+      notifyReviewChanged(jobId)
     } finally {
       setReviewingAll(false)
     }
@@ -321,11 +299,21 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
       <Card
         ref={cardRef}
         id={group.id}
-        className={`border-l-4 ${borderColor} animate-slide-up scroll-mt-24${activeHash === group.id ? ' ring-2 ring-accent-blue/50' : ''}`}
+        className={`border-l-4 ${borderColor} animate-slide-up scroll-mt-24${activeHash === group.id ? ' ring-2 ring-accent-blue/50' : ''}${isSelected ? ' ring-2 ring-signal-blue/50' : ''}`}
         style={{ animationDelay: `${index * 50}ms`, animationFillMode: 'backwards' }}
       >
         {/* Header */}
         <div className="flex w-full items-center gap-3 p-4">
+          {!isViewer && (
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={() => dispatch({ type: 'TOGGLE_GROUP_SELECTION', payload: { id: group.id, testNames: groupTestNames, childJobName: scopedChildJobName, childBuildNumber: scopedChildBuildNumber } })}
+              onClick={(e) => e.stopPropagation()}
+              className={`${BULK_SELECT_CHECKBOX_CLASS} shrink-0`}
+              aria-label={`Select ${rep.test_name}`}
+            />
+          )}
           <button
             className="flex min-w-0 flex-1 items-center gap-3 text-left"
             onClick={() => setExpanded(!expanded)}
@@ -410,6 +398,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge key={cls} classification={cls} />
               ))
             })()}
+            {/* Review is a reviewer-only edit (the endpoint returns 403 otherwise), so
+                viewers get no control at all rather than an inert one — the same
+                read-only rule the bulk selection checkbox and bulk bar already follow. */}
             {!isViewer && (group.count === 1 ? (
               <ReviewToggle jobId={jobId} testName={rep.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
             ) : (
@@ -717,7 +708,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                             onClick={() => {
                               setTrackedLinkError(null)
                               api.delete(`/results/${jobId}/tracked-in/${link.id}`)
-                                .then(() => api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`))
+                                .then(() => getTrackedIn(jobId))
                                 .then((res) => {
                                   dispatch({ type: 'SET_TRACKED_IN', payload: res.tracked_in ?? {} })
                                 })
@@ -773,7 +764,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
           }
           onIssueCreated={(url) => {
             // Refetch tracked-in to get real data from server
-            api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
+            getTrackedIn(jobId)
               .then((res) => dispatch({ type: 'SET_TRACKED_IN', payload: res.tracked_in ?? {} }))
               .catch(() => {})
             void maybeSuggestBugReview(url)
