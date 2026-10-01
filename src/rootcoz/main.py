@@ -20,6 +20,7 @@ from collections.abc import (
     Callable,
     Coroutine,
     Iterable,
+    Mapping,
     Sequence,
 )
 from contextlib import asynccontextmanager
@@ -966,14 +967,18 @@ def _attach_result_links(
 
 
 async def _attach_origin_job_info(result: dict[str, Any]) -> None:
-    """Attach origin job reference when the result is a re-analysis.
+    """Attach re-analysis links (both directions) to the top-level response.
 
-    If ``request_params.reanalyzed_from_job_id`` exists, adds
-    ``reanalyzed_from_job_id`` and ``origin_job_name`` to the top-level
-    response.  Prefers the denormalized ``reanalyzed_from_job_name``
-    stored at creation time; falls back to a DB lookup for legacy data.
+    ``reanalyzed_to_job_ids`` lists the re-analyses of this job (forward
+    links, appended in enqueue order); ``reanalyzed_from_job_id`` and
+    ``origin_job_name`` describe this job's origin.  Prefers the
+    denormalized ``reanalyzed_from_job_name`` stored at creation time;
+    falls back to a DB lookup for legacy data.
     """
     params = (result.get("result") or {}).get("request_params", {})
+    forward_links = params.get("reanalyzed_to_job_ids") or []
+    if isinstance(forward_links, list) and forward_links:
+        result["reanalyzed_to_job_ids"] = forward_links
     origin_id = params.get("reanalyzed_from_job_id", "")
     if not origin_id:
         return
@@ -3257,6 +3262,86 @@ def _stamp_reanalysis_metadata(
             request_params["reanalyzed_from_job_name"] = reanalyzed_from_job_name
 
 
+def _append_reanalysis_forward_link(
+    result_data: dict[str, Any], new_job_id: str
+) -> None:
+    """Record *new_job_id* in the original job's ``reanalyzed_to_job_ids``."""
+    params = result_data.get("request_params")
+    if not new_job_id or not isinstance(params, dict):
+        return
+    links = params.get("reanalyzed_to_job_ids") or []
+    if not isinstance(links, list):
+        links = []
+    if new_job_id not in links:
+        links.append(new_job_id)
+    params["reanalyzed_to_job_ids"] = links
+
+
+def _remove_reanalysis_forward_link(result_data: dict[str, Any], job_id: str) -> None:
+    """Drop *job_id* from the original job's ``reanalyzed_to_job_ids``."""
+    params = result_data.get("request_params")
+    if not isinstance(params, dict):
+        return
+    links = params.get("reanalyzed_to_job_ids")
+    if isinstance(links, list) and job_id in links:
+        params["reanalyzed_to_job_ids"] = [j for j in links if j != job_id]
+
+
+def _make_unlinker(job_id: str) -> Callable[[dict[str, Any]], None]:
+    """Return a ``patch_result_json`` callback unlinking *job_id*.
+
+    A factory rather than an inline lambda: the value is bound instead of the
+    loop variable (ruff B023) and the callback type is inferable by mypy.
+    """
+
+    def _unlink(data: dict[str, Any]) -> None:
+        _remove_reanalysis_forward_link(data, job_id)
+
+    return _unlink
+
+
+async def _reanalysis_origins(job_ids: Iterable[str]) -> dict[str, str]:
+    """Map each re-analysis job id to the origin job it points back to.
+
+    Read before the rows are deleted.  A failed lookup is logged, never
+    raised — the deletion itself must still succeed.
+    """
+    origins: dict[str, str] = {}
+    for job_id in job_ids:
+        origin_id = ""
+        try:
+            stored = await storage.get_result(job_id)
+            params = ((stored or {}).get("result") or {}).get("request_params") or {}
+            origin_id = str(params.get("reanalyzed_from_job_id") or "")
+        except Exception:
+            logger.warning(
+                f"Failed to look up the origin of deleted job {job_id}",
+                exc_info=True,
+            )
+        if origin_id:
+            origins[job_id] = origin_id
+    return origins
+
+
+async def _unlink_reanalysis_origins(origins: Mapping[str, str]) -> None:
+    """Remove the deleted job ids in *origins* from their origins' links.
+
+    Called *after* the rows are deleted so a link committed while the deletion
+    was in flight is unlinked too, and a link created afterwards is skipped by
+    the job-existence check on the enqueue patch.  A failed patch is logged,
+    never raised — the deletion itself must still succeed.
+    """
+    for job_id, origin_id in origins.items():
+        try:
+            await patch_result_json(origin_id, _make_unlinker(job_id))
+            notify_job_status_changed(origin_id)
+        except Exception:
+            logger.warning(
+                f"Failed to remove deleted re-analysis {job_id} from origin {origin_id}",
+                exc_info=True,
+            )
+
+
 def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     """Return *tags* with *username* included (lowercased, deduplicated)."""
     result = list(tags) if tags else []
@@ -3505,6 +3590,13 @@ async def _enqueue_ci_source_analysis(
                 continue
             merged_result[key] = value
         initial_result = merged_result
+        # request_params was rebuilt above, so carry the recorded re-analysis
+        # links of the job analyzed in place over to the new params.
+        prior_links = (prior.get("request_params") or {}).get("reanalyzed_to_job_ids")
+        if isinstance(prior_links, list) and prior_links:
+            initial_result["request_params"]["reanalyzed_to_job_ids"] = list(
+                prior_links
+            )
     await save_result(job_id, initial_build_url, initial_status, initial_result)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -3530,6 +3622,26 @@ async def _enqueue_ci_source_analysis(
         )
     )
     _register_job_task(job_id, task)
+
+    if reanalyzed_from_job_id:
+        # Point the original job at this re-analysis (accumulating list) and
+        # wake its open report.  The patch is conditional on this job still
+        # existing, so a concurrent deletion can never be left with a dead link.
+        # The job is already running, so a failed patch is logged rather than
+        # raised — it must not orphan the new job.
+        try:
+            await patch_result_json(
+                reanalyzed_from_job_id,
+                lambda data: _append_reanalysis_forward_link(data, job_id),
+                require_job_id=job_id,
+            )
+            notify_job_status_changed(reanalyzed_from_job_id)
+        except Exception:
+            logger.warning(
+                f"Failed to record re-analysis {job_id} on origin "
+                f"{reanalyzed_from_job_id}",
+                exc_info=True,
+            )
 
     response: dict[str, Any] = {
         "status": "queued",
@@ -8181,7 +8293,13 @@ async def bulk_delete_jobs_endpoint(
         job_ids = [jid for jid in job_ids if submitters.get(jid) == username]
         unauthorized_ids = [jid for jid in body.job_ids if jid not in job_ids]
 
+    origins = await _reanalysis_origins(job_ids)
     result = await storage.delete_jobs_bulk(job_ids)
+    # A job whose deletion failed keeps its row, so its origin keeps the link.
+    deleted_ids = set(result["deleted"])
+    await _unlink_reanalysis_origins(
+        {jid: origin_id for jid, origin_id in origins.items() if jid in deleted_ids}
+    )
     await _cleanup_revoked_ai_sessions()
     result["unauthorized"] = unauthorized_ids
 
@@ -8224,7 +8342,9 @@ async def delete_job_endpoint(
             detail="You can only delete jobs you submitted",
         )
 
+    origins = await _reanalysis_origins([job_id])
     await storage.delete_job(job_id)
+    await _unlink_reanalysis_origins(origins)
     await _cleanup_revoked_ai_sessions()
     await _cleanup_deleted_job_chat_workspaces(job_id)
 
