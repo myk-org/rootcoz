@@ -1163,3 +1163,106 @@ class TestSingleAttributionFooterEndToEnd:
         assert "Generated using AI" not in body
         assert _GITHUB_FOOTER_MARKER not in body
         assert body.count("---") == 1
+
+
+# ---------------------------------------------------------------------------
+# Attribution-shaped USER prose is never deleted (#297)
+# ---------------------------------------------------------------------------
+
+# A user's own text that happens to look like a rootcoz footer: separator plus
+# an italic "Generated using AI" line, naming another tool.
+_LOOKALIKE_PROSE = (
+    "## Bug\n\nChart crashes on load.\n\n---\n"
+    "*Generated using AI by [OtherTool](https://example.com/othertool)*"
+)
+_REPORTED_BY = "\n\n---\n_Reported by: alice via rootcoz_"
+
+
+class TestAttributionShapedProsePreserved:
+    """Only rootcoz's own footer is stripped; lookalike user text is not."""
+
+    @pytest.fixture
+    def settings(self):
+        env = {
+            "JENKINS_URL": "https://jenkins.example.com",
+            "JENKINS_USER": "user",
+            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
+        }
+        with patch.dict(os.environ, env, clear=True):
+            get_settings.cache_clear()
+            s = get_settings()
+            get_settings.cache_clear()
+            return s
+
+    async def _preview(self, settings, body, *, ai_generated=True):
+        req = FeedbackRequest(description="Chart crashes")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = ("T", body, ["bug"], ai_generated)
+            return await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="gpt-5"
+            )
+
+    async def test_preview_keeps_lookalike_prose(self, settings):
+        preview = await self._preview(settings, _LOOKALIKE_PROSE)
+
+        assert _LOOKALIKE_PROSE in preview.body
+        assert "OtherTool" in preview.body
+        # The lookalike plus exactly one rootcoz footer.
+        assert preview.body.count("Generated using AI") == 2
+        assert preview.body.count(_GITHUB_FOOTER_MARKER) == 1
+
+    async def test_created_issue_keeps_lookalike_prose(self, settings):
+        preview = await self._preview(settings, _LOOKALIKE_PROSE)
+
+        with _mocked_github_client() as posted:
+            await create_feedback_from_preview(
+                title=preview.title,
+                body=preview.body,
+                labels=preview.labels,
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+        body = _capture_posted_body(posted)
+
+        assert _LOOKALIKE_PROSE in body
+        assert body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert body.count("claude/gpt-5") == 1
+
+    async def test_fallback_keeps_lookalike_prose(self, settings):
+        """The no-AI fallback path must not eat user text either."""
+        preview = await self._preview(settings, _LOOKALIKE_PROSE, ai_generated=False)
+
+        assert _LOOKALIKE_PROSE in preview.body
+        assert "No AI model generated this issue" in preview.body
+        assert _GITHUB_FOOTER_MARKER not in preview.body
+
+    async def test_reported_by_after_footer_does_not_double_it(self, settings):
+        """main.py appends "Reported by" AFTER the footer: detection must still see it."""
+        preview = await self._preview(settings, "## Bug\n\nBoom")
+
+        with _mocked_github_client() as posted:
+            await create_feedback_from_preview(
+                title=preview.title,
+                body=preview.body + _REPORTED_BY,
+                labels=preview.labels,
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+        body = _capture_posted_body(posted)
+
+        assert body.count("Generated using AI") == 1
+        assert body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "Reported by: alice" in body
+
+    async def test_reported_by_after_fallback_does_not_double_it(self, settings):
+        preview = await self._preview(settings, "## Feedback", ai_generated=False)
+
+        with _mocked_github_client() as posted:
+            await create_feedback_from_preview(
+                title=preview.title,
+                body=preview.body + _REPORTED_BY,
+                labels=preview.labels,
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+        body = _capture_posted_body(posted)
+
+        assert body.count("No AI model generated this issue") == 1
+        assert body.count("Generated using AI") == 0

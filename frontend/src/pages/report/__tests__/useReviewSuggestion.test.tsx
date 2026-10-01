@@ -143,6 +143,28 @@ describe('useReviewSuggestion hook', () => {
     })
   })
 
+  it('clears a failed intent error when a later analysis succeeds', async () => {
+    mockPost.mockRejectedValueOnce(new Error('Intent check failed'))
+    renderHarness()
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('suggest-reviewed'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('error').textContent).toBe('Intent check failed')
+    })
+
+    mockPost.mockResolvedValueOnce({ suggests_reviewed: false, reason: 'Generic comment' })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('suggest-not-reviewed'))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('error').textContent).toBe('')
+    })
+    expect(mockPost).toHaveBeenCalledTimes(2)
+  })
+
   it('does not call API when already reviewed', async () => {
     renderHarness({ setReviewed: true })
     // Wait for the SET_REVIEW dispatch to take effect

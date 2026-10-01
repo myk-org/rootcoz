@@ -31,12 +31,24 @@ JIRA_AI_FOOTER = (
     "\n\n----\n_Generated using AI with [rootcoz|https://github.com/myk-org/rootcoz]_"
 )
 
-# Shape of a rootcoz AI attribution line, whatever variant it is: the generic
-# footer above, the resolved provider/model footer, or the "no AI model"
-# fallback. Matched by shape so a dynamic variant is never mistaken for "no
-# attribution present" and duplicated with the generic footer.
+# A rootcoz AI attribution line, whatever variant it is: the generic footer
+# above, the resolved provider/model footer, or the "no AI model" fallback.
+# Anchored on the two rootcoz-specific openings (the rootcoz repo link, and the
+# fallback sentence) so only rootcoz's own footer is recognised — a broad
+# "--- + *Generated using AI*" shape also matches user prose that merely looks
+# like a footer, and stripping that deletes the user's own words (#297).
+# Unanchored on purpose: main.py appends "— Reported by: …" AFTER the footer, so
+# end-anchored detection would miss it and double the footer on that route.
 GITHUB_AI_ATTRIBUTION_RE = re.compile(
-    r"\n*---\n\*(?:Generated using AI|No AI model generated)[^\n]*\*"
+    r"\n*---\n\*(?:Generated using AI with \[rootcoz\]"
+    r"\(https://github\.com/myk-org/rootcoz\)|No AI model generated this issue)"
+    r"[^\n]*\*"
+)
+
+# Same text, but only as the body's trailing footer — what the preview replaces.
+# Never used for detection: it would miss a footer followed by other trailing text.
+GITHUB_AI_TRAILING_ATTRIBUTION_RE = re.compile(
+    GITHUB_AI_ATTRIBUTION_RE.pattern + r"\s*\Z"
 )
 
 

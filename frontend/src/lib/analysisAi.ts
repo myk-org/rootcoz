@@ -1,6 +1,16 @@
 import { normalizeProvider } from '@/lib/aiProviders'
 import type { AiModel, ProviderStatus } from '@/types'
 
+/**
+ * Request override for a user-chosen AI pair. Only a complete provider+model pair is
+ * transmitted: a bare provider makes the server substitute its own model, which may not
+ * exist for that provider, so an incomplete selection is treated as no selection.
+ * Spread into the payload; a partial selection yields an empty object.
+ */
+export function completeAiPairOverride(provider: string, model: string): Partial<{ ai_provider: string; ai_model: string }> {
+  return provider && model ? { ai_provider: provider, ai_model: model } : {}
+}
+
 export function allowsUnverified(status: Record<string, ProviderStatus>, provider: string, forceServer: boolean): boolean {
   const state = status[normalizeProvider(provider)]
   return !forceServer && state?.has_api_key === true && state.modelListingSupported === false

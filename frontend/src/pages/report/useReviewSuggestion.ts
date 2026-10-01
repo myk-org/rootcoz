@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { api } from '@/lib/api'
+import { completeAiPairOverride } from '@/lib/analysisAi'
 import { getUsername } from '@/lib/cookies'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import { useAiSelection } from './useAiSelection'
@@ -31,17 +32,19 @@ export function useReviewSuggestion({ jobId, testName, childJobName, childBuildN
   const maybeSuggest = useCallback(
     async (commentText: string) => {
       if (isAlreadyReviewed) return
+      // A stale failure from an earlier comment must not survive into this analysis.
+      setError(null)
       try {
         const res = await api.post<{ suggests_reviewed: boolean; reason: string }>(
           '/api/analyze-comment-intent',
           {
             comment: commentText,
             job_id: jobId,
-            // Only a complete pair is transmitted; a bare provider would make the server
-            // substitute its own model, which may not exist for that provider.
-            ...(aiProvider && aiModel ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
+            ...completeAiPairOverride(aiProvider, aiModel),
           },
         )
+        // Also cleared here: a slower earlier failure can land after this one started.
+        setError(null)
         if (res.suggests_reviewed) {
           setShowSuggestion(true)
         }

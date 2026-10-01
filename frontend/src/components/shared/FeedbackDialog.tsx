@@ -18,6 +18,7 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
+import { completeAiPairOverride } from '@/lib/analysisAi'
 import type {
   FeedbackRequest,
   FeedbackPreviewResponse,
@@ -110,10 +111,8 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         })),
         page_state: collectPageState(),
         user_agent: navigator.userAgent,
-        // Only a complete pair is transmitted: a provider with no model makes the server
-        // substitute its own configured model, which may not exist for that provider.
-        // An incomplete selection is treated as no selection so the server resolves the pair.
-        ...(aiProvider && aiModel ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
+        // Incomplete selection = no selection; the server resolves the pair.
+        ...completeAiPairOverride(aiProvider, aiModel),
       }
 
       const res = await api.post<FeedbackPreviewResponse>('/api/feedback/preview', payload)
