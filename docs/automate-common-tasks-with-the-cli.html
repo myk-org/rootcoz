@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Automating Common Tasks with the CLI - rootcoz</title>
-    <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
-    <link rel="stylesheet" href="assets/style.css">
+    <meta name="description" content="AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML">
+    <link rel="stylesheet" href="assets/style.css?v=5a6efa51d2">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
     <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
     <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
@@ -14,7 +14,7 @@
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <a href="index.html" class="sidebar-logo">rootcoz</a>
-            <p class="sidebar-tagline">Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.</p>
+            <p class="sidebar-tagline">AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML</p>
         </div>
 
         <div class="sidebar-search">
@@ -23,147 +23,154 @@
         </div>
 
         <nav class="sidebar-nav">
-            
+
             <div class="nav-group">
                 <h3 class="nav-group-title">Getting Started</h3>
                 <ul class="nav-group-pages">
-                    
+
                     <li>
                         <a href="quickstart.html"
                            class="nav-link">
                             Quickstart
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">User Guides</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="submit-analyses.html"
-                           class="nav-link">
-                            Submitting Analyses
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="configure-analysis-context.html"
-                           class="nav-link">
-                            Configuring Analysis Context
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="track-analysis-progress.html"
-                           class="nav-link">
-                            Tracking Analysis Progress
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="review-and-classify-failures.html"
-                           class="nav-link">
-                            Reviewing and Classifying Failures
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="collaborate-on-results.html"
-                           class="nav-link">
-                            Collaborating on Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-account-and-notifications.html"
-                           class="nav-link">
-                            Managing Your Account and Notifications
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="create-follow-up-issues-and-push-results.html"
-                           class="nav-link">
-                            Creating Follow-Up Issues and Pushing Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="explore-history-and-reports.html"
-                           class="nav-link">
-                            Exploring History and Reports
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-users-and-server-settings.html"
-                           class="nav-link">
-                            Managing Users and Server Settings
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="use-server-chat-for-cross-job-analysis.html"
-                           class="nav-link">
-                            Use Server Chat for Cross-Job Analysis
-                        </a>
-                    </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Recipes</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="automate-common-tasks-with-the-cli.html"
-                           class="nav-link active" aria-current="page">
-                            Automating Common Tasks with the CLI
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="deploy-rootcoz.html"
                            class="nav-link">
                             Deploying RootCoz
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Reference</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="api-reference.html"
-                           class="nav-link">
-                            API Endpoint Reference
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="cli-reference.html"
-                           class="nav-link">
-                            CLI Command Reference
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="configuration-reference.html"
                            class="nav-link">
                             Configuration Reference
                         </a>
                     </li>
-                    
+
                 </ul>
             </div>
-            
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Analyzing Results</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="submit-analyses.html"
+                           class="nav-link">
+                            Submitting Analyses
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="track-analysis-progress.html"
+                           class="nav-link">
+                            Tracking Analysis Progress
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Reviewing and Classifying Failures
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="collaborate-on-results.html"
+                           class="nav-link">
+                            Collaborating on Results
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="create-follow-up-issues-and-push-results.html"
+                           class="nav-link">
+                            Creating Follow-Up Issues and Pushing Results
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Exploring Data</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="explore-history-and-reports.html"
+                           class="nav-link">
+                            Exploring History and Reports
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="use-server-chat-for-cross-job-analysis.html"
+                           class="nav-link">
+                            Use Server Chat for Cross-Job Analysis
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Account and Administration</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="manage-account-and-notifications.html"
+                           class="nav-link">
+                            Managing Your Account and Notifications
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="manage-users-and-server-settings.html"
+                           class="nav-link">
+                            Managing Users and Server Settings
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="api-reference.html"
+                           class="nav-link">
+                            API Endpoint Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="cli-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="automate-common-tasks-with-the-cli.html"
+                           class="nav-link active" aria-current="page">
+                            Automating Common Tasks with the CLI
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="configure-analysis-context.html"
+                           class="nav-link">
+                            Configuring Analysis Context
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
         </nav>
     </aside>
 
@@ -182,15 +189,15 @@
                 <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
                     <kbd>&#8984;K</kbd> Search
                 </button>
-                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
-                    ⚡ docs<span class="brand-accent">fy</span>
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener" class="docsite-badge" title="documentation">
+                    ⚡ pi<span class="brand-accent">-docsite</span>
                 </a>
-                
-                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
                     <span class="github-stars" id="github-stars" title="GitHub stars"></span>
                 </a>
-                
+
                 <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
                     <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                         <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
@@ -203,7 +210,7 @@
         </header>
 
         <main class="content">
-            
+
             <article class="article">
                 <div class="article-body">
                     <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
@@ -211,43 +218,333 @@
                          user-supplied input. XSS risk is minimal and accepted since
                          the AI generates the content, not end users. -->
                     <h1 id="automating-common-tasks-with-the-cli">Automating Common Tasks with the CLI</h1>
-<p><em>Documentation generation failed. Please re-run.</em></p>
+<p>The <code>rootcoz</code> CLI is the scripting surface for RootCoz. This page walks the workflows an integrator actually automates — authenticating without a prompt, submitting an analysis, waiting for it, pulling structured results, reviewing, and pushing to an exporter — and then composes them into one script. For the full flag list, see <a href="cli-reference.html">CLI Command Reference</a>.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>The <code>rootcoz</code> CLI on your <code>PATH</code>.</li>
+<li>A server URL and an API key. Get the key with <code>rootcoz register USERNAME</code> or from an administrator.</li>
+<li><code>jq</code> for the examples below. Everything except the CSV mode of <code>rootcoz admin token-usage</code> is JSON with <code>--json</code>.</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_SERVER</span><span class="o">=</span>https://rootcoz.example.com
+<span class="nb">export</span><span class="w"> </span><span class="nv">ROOTCOZ_API_KEY</span><span class="o">=</span>your-api-key
+
+<span class="nv">JOB_ID</span><span class="o">=</span><span class="k">$(</span>rootcoz<span class="w"> </span>--json<span class="w"> </span>analyze<span class="w"> </span>--source<span class="w"> </span>jenkins<span class="w"> </span>-j<span class="w"> </span>nightly<span class="w"> </span>-b<span class="w"> </span><span class="m">412</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--provider<span class="w"> </span>claude<span class="w"> </span>--model<span class="w"> </span>claude-opus-4-6<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.job_id<span class="k">)</span>
+
+<span class="k">until</span><span class="w"> </span><span class="o">[</span><span class="w"> </span><span class="s2">"</span><span class="k">$(</span>rootcoz<span class="w"> </span>--json<span class="w"> </span>status<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.status<span class="k">)</span><span class="s2">"</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"completed"</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">do</span><span class="w"> </span>sleep<span class="w"> </span><span class="m">15</span><span class="p">;</span><span class="w"> </span><span class="k">done</span>
+
+rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span>--fields<span class="w"> </span>result.summary,result.failed_count
+</code></pre></div>
+
+<p>That submits a Jenkins analysis, waits for it to finish, and prints a two-field summary — the whole submit-poll-read loop in six lines.</p>
+<blockquote>
+<p><strong>Warning:</strong> The <code>until</code> loop above exits only on <code>completed</code>. A job that ends as <code>failed</code> or <code>aborted</code> never satisfies the condition, so the script polls forever instead of reporting the problem. In automation, branch on the terminal statuses and exit non-zero:</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code><span class="nv">STATUS</span><span class="o">=</span><span class="k">$(</span>rootcoz<span class="w"> </span>--json<span class="w"> </span>status<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.status<span class="k">)</span>
+<span class="k">case</span><span class="w"> </span><span class="s2">"</span><span class="nv">$STATUS</span><span class="s2">"</span><span class="w"> </span><span class="k">in</span>
+<span class="w">  </span>completed<span class="o">)</span><span class="w"> </span>rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span>--fields<span class="w"> </span>result.summary,result.failed_count<span class="w"> </span><span class="p">;;</span>
+<span class="w">  </span>failed<span class="p">|</span>aborted<span class="p">|</span>error<span class="o">)</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"analysis </span><span class="nv">$JOB_ID</span><span class="s2"> ended as </span><span class="nv">$STATUS</span><span class="s2">"</span><span class="w"> </span>&gt;<span class="p">&amp;</span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="p">;;</span>
+<span class="w">  </span>*<span class="o">)</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"unexpected status </span><span class="nv">$STATUS</span><span class="s2">"</span><span class="w"> </span>&gt;<span class="p">&amp;</span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="p">;;</span>
+<span class="k">esac</span>
+</code></pre></div>
+
+<p>Bound the wait as well (for example <code>for i in $(seq 1 240)</code>) so a job stuck in <code>pending</code> or <code>running</code> cannot hang the pipeline. See <a href="track-analysis-progress.html">Tracking Analysis Progress</a> for every status value.</p>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li><strong>Authenticate without any interactive prompt.</strong></li>
+</ol>
+<p>The CLI has no session store. <code>rootcoz auth login</code> only validates a key and prints your role; it does not save anything. For unattended runs, supply credentials in one of these ways, in order of preference:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Environment</td>
+<td><code>export ROOTCOZ_SERVER=... ROOTCOZ_API_KEY=... ROOTCOZ_USERNAME=...</code></td>
+</tr>
+<tr>
+<td>Config file</td>
+<td><code>api_key</code> and <code>username</code> under <code>[servers.NAME]</code> in <code>~/.config/rootcoz/config.toml</code></td>
+</tr>
+<tr>
+<td>Per command</td>
+<td><code>rootcoz --server NAME --api-key KEY ...</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>```toml
+   # ~/.config/rootcoz/config.toml
+   [default]
+   server = "prod"</p>
+<p>[servers.prod]
+   url = "https://rootcoz.example.com"
+   username = "ci-bot"
+   api_key = "rootcoz_..."
+   ```</p>
+<p>With that file in place, every later command drops <code>--server</code> and <code>--api-key</code>.</p>
+<p><code>bash
+   rootcoz config servers   # confirm which name is the default
+   rootcoz auth whoami      # confirm the role the key resolves to</code></p>
+<blockquote>
+<p><strong>Warning:</strong> A key written into a config file is plaintext. On a shared CI runner, prefer <code>ROOTCOZ_API_KEY</code> from a masked secret over a checked-in config file.</p>
+</blockquote>
+<ol>
+<li><strong>Submit an analysis and capture the job ID.</strong></li>
+</ol>
+<p><code>analyze</code> prints human-readable confirmation lines, so add <code>--json</code> when you need to pipe it.</p>
+<p>```bash
+   # Jenkins
+   JOB_ID=$(rootcoz --json analyze --source jenkins -j nightly -b 412 \
+     --provider claude --model claude-opus-4-6 | jq -r .job_id)</p>
+<p># JUnit XML, no CI connectivity needed
+   JOB_ID=$(rootcoz --json analyze --source file -f results.xml | jq -r .job_id)</p>
+<p># Prow
+   JOB_ID=$(rootcoz --json analyze --source prow -j my-periodic-test -b 20250731 \
+     --prow-url https://prow.example.com --gcs-bucket prow-artifacts | jq -r .job_id)
+   ```</p>
+<p>Use <code>rootcoz submit</code> instead of <code>analyze</code> when you want the CI results stored without paying for AI, then <code>rootcoz results analyze JOB_ID</code> to run the analysis later on the same job ID. Both take the same flags — <code>submit</code> is the same command registered under a second name, and the CLI posts to the ingest-only endpoint when you invoke it under that name.</p>
+<p>Tag and label the run so it shows up in filtered dashboards and reports:</p>
+<p><code>bash
+   rootcoz --json analyze --source jenkins -j nightly -b 412 \
+     --tag smoke --label team-alpha --label tier-1 | jq -r .job_id</code></p>
+<blockquote>
+<p><strong>Note:</strong> <code>--tag</code> categorizes the run; <code>--label</code> attaches job metadata. They are different fields and both are repeatable.</p>
+</blockquote>
+<ol>
+<li><strong>Poll until the analysis completes.</strong></li>
+</ol>
+<p><code>rootcoz status JOB_ID</code> returns the job status. In-progress statuses are <code>pending</code>, <code>running</code>, and <code>waiting</code>; <code>completed</code> is the terminal success state.</p>
+<p><code>bash
+   while true; do
+     STATE=$(rootcoz --json status "$JOB_ID" | jq -r .status)
+     case "$STATE" in
+       completed) echo "done: $JOB_ID"; break ;;
+       failed|error|aborted) echo "analysis did not complete: $JOB_ID ($STATE)"; exit 1 ;;
+     esac
+     sleep 15
+   done</code></p>
+<p>Cap the loop in real automation so a stuck job does not spin forever:</p>
+<p><code>bash
+   for _ in $(seq 1 80); do
+     case "$(rootcoz --json status "$JOB_ID" | jq -r .status)" in
+       completed) break ;;
+       failed|aborted) echo "analysis did not complete"; exit 1 ;;
+     esac
+     sleep 15
+   done</code></p>
+<p>Handle the terminal status explicitly: a loop that only breaks on <code>completed</code> will fall through to the result-fetch step for a job that failed, was aborted, or is still running once the iterations run out, and the script will read as though the analysis succeeded. Check the status after the loop and treat <code>failed</code> and <code>aborted</code> as errors.</p>
+<p><code>rootcoz abort JOB_ID</code> cancels a run you no longer want.</p>
+<ol>
+<li><strong>Fetch the result.</strong></li>
+</ol>
+<p><code>rootcoz results show JOB_ID</code> prints a one-line summary by default. For anything machine-readable, add <code>--json</code>, or project a subset with <code>--fields</code>.</p>
+<p>```bash
+   rootcoz results show "$JOB_ID"</p>
+<p># Sparse payload: cheap to poll even for a large job
+   rootcoz --json results show "$JOB_ID" \
+     --fields result.summary,result.failed_count,result.ai_provider \
+     | jq '.result'
+   ```</p>
+<p><code>rootcoz results fields</code> lists every accepted path. Unknown paths are rejected with HTTP 400, so check that list before building long <code>--fields</code> strings.</p>
+<ol>
+<li><strong>Paginate through test entries.</strong></li>
+</ol>
+<p><code>rootcoz results tests</code> returns <code>entries</code>, <code>total</code>, and <code>has_more</code> under <code>--json</code>. Page size is capped at 200.</p>
+<p><code>bash
+   OFFSET=0
+   while :; do
+     PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed --limit 200 --offset "$OFFSET")
+     echo "$PAGE" | jq -r '.entries[] | "\(.test_name)\t\(.duration)"'
+     [ "$(echo "$PAGE" | jq -r '.has_more')" = "true" ] || break
+     OFFSET=$((OFFSET + $(echo "$PAGE" | jq -r '.entries | length')))
+   done</code></p>
+<p>For pipeline jobs, scope to one child with <code>--child-job</code> and <code>--child-build</code>.</p>
+<ol>
+<li><strong>Review and classify.</strong></li>
+</ol>
+<p>```bash
+   # Look at progress first
+   rootcoz results review-status "$JOB_ID"</p>
+<p># Mark a failure reviewed
+   rootcoz results set-reviewed "$JOB_ID" --test "TEST_NAME" --reviewed</p>
+<p># Override what the AI decided
+   rootcoz override-classification "$JOB_ID" --test "TEST_NAME" --classification "PRODUCT BUG"
+   rootcoz override-pattern "$JOB_ID" --test "TEST_NAME" --pattern "REGRESSION"</p>
+<p># Add your own classification with a reason and a ticket link
+   rootcoz classify "TEST_NAME" --type REGRESSION --job-id "$JOB_ID" \
+     --reason "Fails only on the new checkout path" --references "PLAT-1234"</p>
+<p># Record where the follow-up work lives
+   rootcoz results set-tracked-in "$JOB_ID" --test "TEST_NAME" --url "https://jira.example.com/browse/PLAT-1234"</p>
+<p># Leave a note for the next reviewer
+   rootcoz comments add "$JOB_ID" --test "TEST_NAME" --message "Reproduced on the staging pool"
+   ```</p>
+<p>If the job is a pipeline parent, add <code>--child-job CHILD_JOB --child-build 12345</code> to the write commands — <code>results set-reviewed</code>, <code>override-classification</code>, <code>override-pattern</code>, <code>classify</code>, <code>results set-tracked-in</code>, and <code>comments add</code> — so the change lands on the right failure. <code>results review-status</code> takes neither flag, so it always reports across the whole job.</p>
+<ol>
+<li><strong>Push to an exporter.</strong></li>
+</ol>
+<p><code>bash
+   rootcoz exporters                                        # which plugins are enabled
+   rootcoz --json push "$JOB_ID" --plugin reportportal | jq .
+   rootcoz --json push "$JOB_ID" --plugin reportportal \
+     --child-job-name CHILD_JOB --child-build-number 12345</code></p>
+<p>Report Portal has a shortcut that skips <code>--plugin</code>:</p>
+<p><code>bash
+   rootcoz --json push-reportportal "$JOB_ID"</code></p>
+<p>The response includes <code>pushed</code>, <code>errors</code>, <code>unmatched</code>, and <code>launch_id</code>, so an automation can fail loudly when <code>unmatched</code> is non-empty.</p>
+<ol>
+<li><strong>Script report output.</strong></li>
+</ol>
+<p>Reports need <code>admin</code> or <code>can_view_reports</code>. All three subcommands take the same filters.</p>
+<p>```bash
+   rootcoz --json reports totals --team alpha --from 2025-01-01 --to 2025-06-30 \
+     --review-status reviewed | jq '.total_jobs, .total_failures, .total_reviewed'</p>
+<p>rootcoz --json reports overrides --tags nightly,smoke | jq '.groups'
+   rootcoz --json reports issues --team alpha | jq -r '.issues[] | "(.issue_type)\t(.title)"'</p>
+<p># Trend lookup before you even submit anything
+   rootcoz --json history failures --search tests.test_auth --classification INFRASTRUCTURE \
+     --limit 50 | jq -r '.failures[].test_name'
+   ```</p>
+<p>For cost reporting, <code>rootcoz admin token-usage</code> is the one command with a native CSV mode:</p>
+<p><code>bash
+   rootcoz admin token-usage --period month --group-by model --format csv &gt; usage.csv
+   rootcoz --json admin token-usage --job-id "$JOB_ID" | jq '.records[].cost_usd'</code></p>
+<ol>
+<li><strong>Compose it into one script.</strong></li>
+</ol>
+<p>```bash
+   #!/usr/bin/env bash
+   set -euo pipefail</p>
+<p>: "${ROOTCOZ_SERVER:?set ROOTCOZ_SERVER}"
+   : "${ROOTCOZ_API_KEY:?set ROOTCOZ_API_KEY}"</p>
+<p>JOB_NAME="${1:?usage: analyze.sh JOB_NAME BUILD_NUMBER}"
+   BUILD_NUMBER="${2:?usage: analyze.sh JOB_NAME BUILD_NUMBER}"</p>
+<p>JOB_ID=$(rootcoz --json analyze --source jenkins -j "$JOB_NAME" -b "$BUILD_NUMBER" \
+     --provider claude --model claude-opus-4-6 --tag ci \
+     | jq -r '.job_id')
+   echo "queued $JOB_ID"</p>
+<p>for _ in $(seq 1 80); do
+     STATE=$(rootcoz --json status "$JOB_ID" | jq -r '.status')
+     [ "$STATE" = "completed" ] &amp;&amp; break
+     [ "$STATE" = "failed" ] &amp;&amp; { echo "analysis failed" &gt;&amp;2; exit 1; }
+     sleep 15
+   done</p>
+<p>SUMMARY=$(rootcoz --json results show "$JOB_ID" \
+     --fields result.summary,result.failed_count | jq -c '.result')
+   echo "summary: $SUMMARY"</p>
+<p># Page through failed tests. --limit bounds a single page on its own, so a
+   # job with more than 200 failed tests would leave the rest unreviewed and
+   # unpushed. The API returns has_more, so follow it until it is false.
+   OFFSET=0
+   while :; do
+     PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed \
+       --limit 200 --offset "$OFFSET")
+     # Process the page first, then decide whether another one exists.
+     jq -r '.entries[].test_name' &lt;&lt;&lt;"$PAGE" | while read -r TEST; do
+       rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
+       rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
+         --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
+     done
+     [ "$(jq -r '.has_more' &lt;&lt;&lt;"$PAGE")" = "true" ] || break
+     OFFSET=$((OFFSET + 200))
+   done</p>
+<p>rootcoz --json push "$JOB_ID" --plugin reportportal | jq '{pushed, unmatched, errors}'
+   ```</p>
+<p>The same shape works for a cron-driven report: swap step 2 for <code>reports totals</code> and drop the polling loop entirely.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<ul>
+<li>Pass <code>--api-key</code> from a CI secret and <code>--server</code> from a variable to run the same script against dev, staging, and prod without editing it.</li>
+<li>Use <code>rootcoz analyze --source file -f results.xml</code> to analyze artifacts downloaded after the fact, which is the easiest way to backfill historical CI runs.</li>
+<li><code>rootcoz results delete --all --confirm</code> deletes jobs in bulk. The <code>--confirm</code> requirement exists so an accidental flag cannot wipe the server. The command collects job IDs from a single unpaginated <code>/api/dashboard</code> request, so on a server with more than 500 jobs it only sees the first page and leaves the rest in place. For a full cleanup, delete the remainder by explicit <code>JOB_ID</code> values from <code>rootcoz --json results list</code>.</li>
+<li><code>rootcoz re-analyze JOB_ID</code> re-runs a finished analysis by replaying the job's stored request parameters, which is faster than resubmitting when the inputs are unchanged. Note what that means for models: because the replay includes the <code>ai_model</code> resolved when the job first ran, a model you have since changed on the server is <strong>not</strong> picked up. The <code>re-analyze</code> command itself takes no model option — it accepts only <code>JOB_ID</code> — so there is no CLI path to override it. To re-run with a different model, call <code>POST /re-analyze/{job_id}</code> directly with a JSON body containing <code>ai_model</code> (and <code>ai_provider</code>); the endpoint takes a <code>ReAnalyzeRequest</code> and merges it over the stored parameters. Do not use <code>POST /results/{job_id}/analyze</code> for this — that route only accepts jobs in the <code>submitted</code> state and returns <code>409</code> for an analyzed one.</li>
+<li><code>rootcoz history search --signature HASH</code> finds every other test that failed with the same error signature, useful for deciding whether a new failure is really a new problem.</li>
+<li><code>rootcoz --json admin-chat send "Which jobs regressed this week?"</code> is the fastest way to get a cross-job answer in a pipeline log.</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>
+<p>The script hangs on the first command.<br>
+  The CLI is waiting for a prompt. <code>auth ai-keys set</code> prompts unless you pass <code>--stdin</code>, <code>validate-token</code> always prompts for <code>--token</code>, and <code>admin users delete</code> prompts unless you pass <code>--force</code>.</p>
+</li>
+<li>
+<p><code>Error: No server specified.</code> on the first call.<br>
+<code>ROOTCOZ_SERVER</code> is not exported in the script's environment, and no config file exists. Set both variables, or add a <code>[default]</code> server to <code>~/.config/rootcoz/config.toml</code>.</p>
+</li>
+<li>
+<p><code>Error: 401</code> partway through a long script.<br>
+  The key expired or was rotated. Re-run <code>rootcoz auth whoami</code> to confirm, then issue a new one with <code>rootcoz auth rotate-key</code>.</p>
+</li>
+<li>
+<p>The poll loop never exits.<br>
+  A <code>--wait</code> submission stays in <code>waiting</code> until the CI build finishes. Add an iteration cap, and check <code>rootcoz status JOB_ID</code> manually to see which state it is stuck in.</p>
+</li>
+<li>
+<p><code>results tests</code> returns fewer entries than the dashboard failure count.<br>
+  The dashboard counts analysis failures, while <code>results tests</code> pages the CI test entries. Raise <code>--limit</code> to 200 and keep incrementing <code>--offset</code> until <code>has_more</code> is <code>false</code>.</p>
+</li>
+<li>
+<p><code>push</code> reports unmatched tests.<br>
+  The exporter could not line the test names up. Run <code>rootcoz exporters</code> to confirm the plugin is enabled, and add <code>--child-job-name</code> and <code>--child-build-number</code> for pipeline jobs.</p>
+</li>
+<li>
+<p>A <code>403</code> mentions <code>can_view_reports</code>.<br>
+  Your role is fine but the reports grant is missing. An admin can add it with <code>rootcoz admin users set-can-view-reports USERNAME true</code>.</p>
+</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="cli-reference.html">CLI Command Reference</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="submit-analyses.html">Submitting Analyses</a></li>
+<li><a href="track-analysis-progress.html">Tracking Analysis Progress</a></li>
+<li><a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a></li>
+<li><a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a></li>
+<li><a href="explore-history-and-reports.html">Exploring History and Reports</a></li>
+</ul>
                 </div>
             </article>
             <nav class="page-nav">
-                
-                <a href="use-server-chat-for-cross-job-analysis.html" class="page-nav-link page-nav-prev">
+
+                <a href="cli-reference.html" class="page-nav-link page-nav-prev">
                     <span class="page-nav-label">Previous</span>
-                    <span class="page-nav-title">Use Server Chat for Cross-Job Analysis</span>
+                    <span class="page-nav-title">CLI Command Reference</span>
                 </a>
-                
-                
-                <a href="deploy-rootcoz.html" class="page-nav-link page-nav-next">
+
+
+                <a href="configure-analysis-context.html" class="page-nav-link page-nav-next">
                     <span class="page-nav-label">Next</span>
-                    <span class="page-nav-title">Deploying RootCoz</span>
+                    <span class="page-nav-title">Configuring Analysis Context</span>
                 </a>
-                
+
             </nav>
-            
+
             <aside class="toc-sidebar">
                 <div class="toc-container">
                     <h3>On this page</h3>
                     <div class="toc">
-<ul></ul>
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
 </div>
 
                 </div>
             </aside>
-            
+
 
         </main>
 
         <footer class="page-footer">
-            
-            <span class="footer-version">Generated from version 4.4.2</span>
-            <span class="footer-sep">&middot;</span>
-            
-            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+
+            Built from <code>docs/*.md</code> by <code>pi-docsite</code>
             <span class="footer-sep">&middot;</span>
             <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
         </footer>
@@ -255,13 +552,14 @@
 
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-    <script src="assets/theme.js"></script>
-    <script src="assets/search.js"></script>
-    <script src="assets/copy.js"></script>
-    <script src="assets/callouts.js"></script>
-    <script src="assets/scrollspy.js"></script>
-    <script src="assets/codelabels.js"></script>
-    <script src="assets/github.js"></script>
+    <script src="assets/theme.js?v=5a6efa51d2"></script>
+
+    <script src="assets/search.js?v=5a6efa51d2"></script>
+    <script src="assets/copy.js?v=5a6efa51d2"></script>
+    <script src="assets/callouts.js?v=5a6efa51d2"></script>
+    <script src="assets/scrollspy.js?v=5a6efa51d2"></script>
+    <script src="assets/codelabels.js?v=5a6efa51d2"></script>
+    <script src="assets/github.js?v=5a6efa51d2"></script>
     <script>
 (function() {
     var toggle = document.getElementById('sidebar-toggle');
@@ -307,5 +605,6 @@
     }
 })();
 </script>
+<!-- generated by pi-docsite -->
 </body>
 </html>

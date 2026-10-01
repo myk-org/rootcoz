@@ -131,7 +131,10 @@ class TestSendMentionNotifications:
             payload = json.loads(call_args.kwargs["data"])
             assert payload["title"] == "Mentioned by @alice"
             assert "test_foo" in payload["body"]
-            assert payload["url"] == "https://rootcoz.example.com/report/job-1"
+            # The report page is served at /results/:jobId (frontend/src/App.tsx);
+            # /report/:id is not a registered route, so pointing notifications
+            # at it makes every tap land on an unmatched URL.
+            assert payload["url"] == "https://rootcoz.example.com/results/job-1"
 
     @pytest.mark.asyncio
     async def test_stale_subscriptions_cleaned_up(self) -> None:
@@ -313,4 +316,4 @@ class TestSendMentionNotifications:
                 public_base_url=None,
             )
             payload = json.loads(mock_to_thread.call_args.kwargs["data"])
-            assert payload["url"] == "/report/job-1"
+            assert payload["url"] == "/results/job-1"

@@ -17,6 +17,7 @@ from rootcoz.cli.config import (
     load_config,
 )
 from rootcoz.cli.main import app
+from tests.conftest import host_env
 
 runner = CliRunner()
 
@@ -602,14 +603,15 @@ def _reload_config_under_env(env_patch: dict[str, str], *, clear: bool = False):
 class TestXDGConfigHome:
     """CONFIG_DIR and CONFIG_FILE respect XDG_CONFIG_HOME."""
 
-    def test_default_config_dir_uses_home_dot_config(self):
+    def test_default_config_dir_uses_home_dot_config(self, tmp_path: Path):
         """When XDG_CONFIG_HOME is unset, falls back to ~/.config."""
-        env = {k: v for k, v in os.environ.items() if k != "XDG_CONFIG_HOME"}
+        # Path.home() reads HOME on POSIX but USERPROFILE on Windows, so pin both
+        # or the reload resolves the real home directory instead of tmp_path.
+        env = host_env(HOME=str(tmp_path), USERPROFILE=str(tmp_path))
         with _reload_config_under_env(env, clear=True) as cfg_mod:
-            assert cfg_mod.CONFIG_DIR == Path.home() / ".config" / "rootcoz"
+            assert cfg_mod.CONFIG_DIR == tmp_path / ".config" / "rootcoz"
             assert (
-                cfg_mod.CONFIG_FILE
-                == Path.home() / ".config" / "rootcoz" / "config.toml"
+                cfg_mod.CONFIG_FILE == tmp_path / ".config" / "rootcoz" / "config.toml"
             )
 
     def test_xdg_config_home_override(self, tmp_path: Path):

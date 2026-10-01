@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>API Endpoint Reference - rootcoz</title>
-    <meta name="description" content="Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.">
-    <link rel="stylesheet" href="assets/style.css">
+    <meta name="description" content="AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML">
+    <link rel="stylesheet" href="assets/style.css?v=5a6efa51d2">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
     <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
     <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
@@ -14,7 +14,7 @@
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
             <a href="index.html" class="sidebar-logo">rootcoz</a>
-            <p class="sidebar-tagline">Understand failing CI runs, collaborate on fixes, and create follow-up issues faster.</p>
+            <p class="sidebar-tagline">AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML</p>
         </div>
 
         <div class="sidebar-search">
@@ -23,147 +23,154 @@
         </div>
 
         <nav class="sidebar-nav">
-            
+
             <div class="nav-group">
                 <h3 class="nav-group-title">Getting Started</h3>
                 <ul class="nav-group-pages">
-                    
+
                     <li>
                         <a href="quickstart.html"
                            class="nav-link">
                             Quickstart
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">User Guides</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="submit-analyses.html"
-                           class="nav-link">
-                            Submitting Analyses
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="configure-analysis-context.html"
-                           class="nav-link">
-                            Configuring Analysis Context
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="track-analysis-progress.html"
-                           class="nav-link">
-                            Tracking Analysis Progress
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="review-and-classify-failures.html"
-                           class="nav-link">
-                            Reviewing and Classifying Failures
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="collaborate-on-results.html"
-                           class="nav-link">
-                            Collaborating on Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-account-and-notifications.html"
-                           class="nav-link">
-                            Managing Your Account and Notifications
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="create-follow-up-issues-and-push-results.html"
-                           class="nav-link">
-                            Creating Follow-Up Issues and Pushing Results
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="explore-history-and-reports.html"
-                           class="nav-link">
-                            Exploring History and Reports
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="manage-users-and-server-settings.html"
-                           class="nav-link">
-                            Managing Users and Server Settings
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="use-server-chat-for-cross-job-analysis.html"
-                           class="nav-link">
-                            Use Server Chat for Cross-Job Analysis
-                        </a>
-                    </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Recipes</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="automate-common-tasks-with-the-cli.html"
-                           class="nav-link">
-                            Automating Common Tasks with the CLI
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="deploy-rootcoz.html"
                            class="nav-link">
                             Deploying RootCoz
                         </a>
                     </li>
-                    
-                </ul>
-            </div>
-            
-            <div class="nav-group">
-                <h3 class="nav-group-title">Reference</h3>
-                <ul class="nav-group-pages">
-                    
-                    <li>
-                        <a href="api-reference.html"
-                           class="nav-link active" aria-current="page">
-                            API Endpoint Reference
-                        </a>
-                    </li>
-                    
-                    <li>
-                        <a href="cli-reference.html"
-                           class="nav-link">
-                            CLI Command Reference
-                        </a>
-                    </li>
-                    
+
                     <li>
                         <a href="configuration-reference.html"
                            class="nav-link">
                             Configuration Reference
                         </a>
                     </li>
-                    
+
                 </ul>
             </div>
-            
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Analyzing Results</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="submit-analyses.html"
+                           class="nav-link">
+                            Submitting Analyses
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="track-analysis-progress.html"
+                           class="nav-link">
+                            Tracking Analysis Progress
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="review-and-classify-failures.html"
+                           class="nav-link">
+                            Reviewing and Classifying Failures
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="collaborate-on-results.html"
+                           class="nav-link">
+                            Collaborating on Results
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="create-follow-up-issues-and-push-results.html"
+                           class="nav-link">
+                            Creating Follow-Up Issues and Pushing Results
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Exploring Data</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="explore-history-and-reports.html"
+                           class="nav-link">
+                            Exploring History and Reports
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="use-server-chat-for-cross-job-analysis.html"
+                           class="nav-link">
+                            Use Server Chat for Cross-Job Analysis
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Account and Administration</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="manage-account-and-notifications.html"
+                           class="nav-link">
+                            Managing Your Account and Notifications
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="manage-users-and-server-settings.html"
+                           class="nav-link">
+                            Managing Users and Server Settings
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
+            <div class="nav-group">
+                <h3 class="nav-group-title">Reference</h3>
+                <ul class="nav-group-pages">
+
+                    <li>
+                        <a href="api-reference.html"
+                           class="nav-link active" aria-current="page">
+                            API Endpoint Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="cli-reference.html"
+                           class="nav-link">
+                            CLI Command Reference
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="automate-common-tasks-with-the-cli.html"
+                           class="nav-link">
+                            Automating Common Tasks with the CLI
+                        </a>
+                    </li>
+
+                    <li>
+                        <a href="configure-analysis-context.html"
+                           class="nav-link">
+                            Configuring Analysis Context
+                        </a>
+                    </li>
+
+                </ul>
+            </div>
+
         </nav>
     </aside>
 
@@ -182,15 +189,15 @@
                 <button class="top-bar-search-btn" id="search-trigger" aria-label="Search">
                     <kbd>&#8984;K</kbd> Search
                 </button>
-                <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener" class="docsfy-badge" title="Generated with docsfy">
-                    ⚡ docs<span class="brand-accent">fy</span>
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener" class="docsite-badge" title="documentation">
+                    ⚡ pi<span class="brand-accent">-docsite</span>
                 </a>
-                
-                <a href="https://github.com/myk-org/rootcoz.git" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz.git">
+
+                <a href="https://github.com/myk-org/rootcoz" target="_blank" rel="noopener noreferrer" class="top-bar-github" id="github-link" data-repo-url="https://github.com/myk-org/rootcoz">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
                     <span class="github-stars" id="github-stars" title="GitHub stars"></span>
                 </a>
-                
+
                 <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
                     <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                         <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
@@ -203,7 +210,7 @@
         </header>
 
         <main class="content">
-            
+
             <article class="article">
                 <div class="article-body">
                     <!-- SECURITY: |safe is intentional. Content is AI-generated markdown
@@ -211,43 +218,1197 @@
                          user-supplied input. XSS risk is minimal and accepted since
                          the AI generates the content, not end users. -->
                     <h1 id="api-endpoint-reference">API Endpoint Reference</h1>
-<p><em>Documentation generation failed. Please re-run.</em></p>
+<p>Everything the web UI does goes through the same HTTP API the CLI and the AI chat tools use, so you can script RootCoz from CI, from a shell, or from your own tooling. This page groups the endpoints by what they do, states the minimum role each one needs, and points at the live OpenAPI schema for exact field-level detail.</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ul>
+<li>A running RootCoz server. The examples use <code>http://localhost:8000</code>; see <a href="quickstart.html">Quickstart</a>.</li>
+<li>An API key. Register or log in in the web UI, or send <code>Authorization: Bearer &lt;API_KEY&gt;</code> with any request.</li>
+<li>The role your call needs: <code>viewer</code>, <code>reviewer</code>, <code>operator</code>, or <code>admin</code>. See <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a>.</li>
+</ul>
+<h2 id="quick-example">Quick Example</h2>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$ROOTCOZ_API_KEY</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>http://localhost:8000/results/JOB_ID
+</code></pre></div>
+
+<p>That single authenticated GET returns the stored analysis for one job, including failures, classifications, patterns, classification overrides, tracker links, capabilities, and child jobs. It does <strong>not</strong> include the comment thread — call <code>GET /results/{job_id}/comments</code> separately for that.</p>
+<h2 id="step-by-step">Step-by-Step</h2>
+<ol>
+<li><strong>Authenticate.</strong></li>
+</ol>
+<p>Send your API key as a bearer token. The <code>rootcoz_session</code> cookie set at login works too, and <code>X-Forwarded-User</code> works when the server runs behind a trusted proxy with <code>TRUST_PROXY_HEADERS=true</code>.</p>
+<p><code>bash
+   curl -H "Authorization: Bearer $ROOTCOZ_API_KEY" \
+     http://localhost:8000/api/auth/me</code></p>
+<p><code>GET /api/auth/me</code> is the cheapest way to confirm your identity, role, and reports access. Send <code>OPTIONS</code> requests freely — CORS preflight bypasses authentication everywhere.</p>
+<ol>
+<li><strong>Discover the schema instead of guessing field names.</strong></li>
+</ol>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Path</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /openapi.json</code></td>
+<td>Full OpenAPI schema, public</td>
+</tr>
+<tr>
+<td><code>GET /docs</code></td>
+<td>Swagger UI, public</td>
+</tr>
+<tr>
+<td><code>GET /redoc</code></td>
+<td>ReDoc UI, public</td>
+</tr>
+</tbody>
+</table></div>
+<p>These three are public so an integrator can read the contract without credentials. Every route in the schema sets an explicit camelCase <code>operation_id</code> derived from the handler name, so generated clients get stable method names such as <code>getJobResult</code> and <code>analyzeSubmittedJob</code>.</p>
+<blockquote>
+<p><strong>Note:</strong> This page is a curated map of the endpoints people actually call. The live schema at <code>/openapi.json</code> is the exhaustive list.</p>
+</blockquote>
+<ol>
+<li><strong>Know the role ladder before you script anything.</strong></li>
+</ol>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Role</th>
+<th>Can do</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>viewer</code></td>
+<td>Read jobs, results, tests, history, dashboards, reports when granted</td>
+</tr>
+<tr>
+<td><code>reviewer</code></td>
+<td>Everything a viewer can, plus comments, chat, review state, classification and pattern overrides, tags, tracker links, personal tokens</td>
+</tr>
+<tr>
+<td><code>operator</code></td>
+<td>Everything a reviewer can, plus submit analyses, re-analyze, abort, delete own jobs, push to exporters</td>
+</tr>
+<tr>
+<td><code>admin</code></td>
+<td>Everything an operator can, plus delete any job, manage users and roles, server settings, token usage, log stream, admin chat</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>can_view_reports</code> is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the <code>ALLOWED_USERS</code> allow list, which is empty (open) by default and always bypassed for admins. The check is per-handler, not global, so a few endpoints enforce role without also consulting the list — <code>PUT /api/user/tokens</code> is one: it requires <code>reviewer</code> but does not call the allow-list check, so an authenticated reviewer who is off the list can still update their own stored tracker tokens. Treat the list as defence in depth on most routes rather than a guarantee.</p>
+<blockquote>
+<p><strong>Warning:</strong> A role you do not hold returns <code>403</code>, not <code>404</code>. <code>403 Admin access required</code>, <code>403 Reviewer access required</code>, and <code>403 Operator access required</code> name the exact gate you hit.</p>
+</blockquote>
+<h3 id="public-and-unauthenticated-routes">Public and unauthenticated routes</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/health</code></td>
+<td>Liveness, returns immediately</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/health</code></td>
+<td>Detailed health including database and AI sidecar</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/metrics</code></td>
+<td>Prometheus metrics</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/releases/latest</code></td>
+<td>Proxies GitHub release metadata (version, changelog)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/openapi.json</code>, <code>/docs</code>, <code>/redoc</code></td>
+<td>Schema and interactive API browsers</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/auth/register</code></td>
+<td>Create a user, returns the raw API key once</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/auth/login</code></td>
+<td>Exchange username + API key for a session cookie</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/auth/needs-key</code></td>
+<td>Browser-only identity probe</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/auth/pending-status</code></td>
+<td>Poll while an account awaits approval</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="authentication-and-your-account">Authentication and your account</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/api/version</code></td>
+<td>viewer</td>
+<td>Running version</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/auth/logout</code></td>
+<td>authenticated</td>
+<td>Clears the session cookie</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/auth/me</code></td>
+<td>viewer</td>
+<td>Username, role, <code>can_view_reports</code>, <code>can_use_server_providers</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/auth/rotate-key</code></td>
+<td>viewer</td>
+<td>Rotates your own API key; the old key stops working. Known gap — see the note below</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/user/ai-credentials</code></td>
+<td>viewer</td>
+<td>Supported provider IDs with a <code>configured</code> flag each. Keys are never returned</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/user/ai-credentials/{provider}</code></td>
+<td>reviewer</td>
+<td>Store a personal key. Body is <code>{api_key, model}</code> — <code>model</code> is required (<code>400</code> without it, since the key is verified against it) and the key is only persisted when the provider returns <code>accepted</code>. A <code>rejected</code> or <code>inconclusive</code> check is not an HTTP error: it returns <code>200</code> with <code>ok: false</code>, an <code>outcome</code>, and an explanatory <code>message</code>, leaving any existing credential unchanged, so clients must check <code>ok</code> rather than the status code. <code>{provider}</code> is an exact provider ID from <code>GET /api/user/ai-credentials</code> (for example <code>anthropic</code> or <code>google</code>), not the <code>claude</code>/<code>gemini</code>/<code>cursor</code> names used for analysis settings. Unknown IDs are rejected with 400</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/user/ai-credentials/{provider}</code></td>
+<td>reviewer</td>
+<td>Remove a personal provider key</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/user/tokens</code></td>
+<td>viewer</td>
+<td>Stored Jira and GitHub tracker tokens</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/user/tokens</code></td>
+<td>reviewer</td>
+<td>Save Jira and GitHub tracker tokens</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/validate-token</code></td>
+<td>viewer</td>
+<td>Validate a GitHub or Jira token before saving</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/jira-projects</code></td>
+<td>viewer</td>
+<td>List Jira projects visible to the supplied credentials</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/jira-security-levels</code></td>
+<td>viewer</td>
+<td>List Jira security levels for a project</td>
+</tr>
+</tbody>
+</table></div>
+<p>Registration returns the raw API key exactly once and sends <code>Cache-Control: no-store</code>. Store it before you navigate away.</p>
+<h3 id="submitting-and-driving-analyses">Submitting and driving analyses</h3>
+<p>All of these continue in the background and return <code>202 Accepted</code>, except <code>POST /results/{job_id}/abort</code>, which returns <code>200 OK</code>. <code>POST /submit</code> ingests only and stops before cloning or AI work; <code>POST /analyze</code> runs the full pipeline.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Body highlights</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>POST</td>
+<td><code>/analyze</code></td>
+<td>operator</td>
+<td><code>type</code> (<code>jenkins</code>, <code>file</code>, <code>raw</code>, <code>prow</code>) plus source-specific fields</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/submit</code></td>
+<td>operator</td>
+<td>Same body; stops at ingest, <code>analysis_state=submitted</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/analyze</code></td>
+<td>operator</td>
+<td>Runs the AI pipeline on a submitted job; optional <code>ReAnalyzeRequest</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/re-analyze/{job_id}</code></td>
+<td>operator</td>
+<td>Re-runs analysis with a new <code>ReAnalyzeRequest</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/failures/{failure_uuid}/re-analyze</code></td>
+<td>operator</td>
+<td>Re-analyzes one failure in place, keeps the previous answer</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/abort</code></td>
+<td>reviewer</td>
+<td>Cancels a running analysis</td>
+</tr>
+</tbody>
+</table></div>
+<p>The shared body accepts the server defaults as per-request overrides:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>type</code></td>
+<td><code>jenkins</code>, <code>file</code>, <code>raw</code>, or <code>prow</code></td>
+</tr>
+<tr>
+<td><code>job_name</code>, <code>build_number</code></td>
+<td>Jenkins job and build</td>
+</tr>
+<tr>
+<td><code>raw_xml</code>, <code>failures</code>, <code>passed_tests</code>, <code>skipped_tests</code></td>
+<td>File and raw sources</td>
+</tr>
+<tr>
+<td><code>prow_job_name</code>, <code>build_id</code>, <code>gcs_prefix</code></td>
+<td>Prow build identity and artifact prefix</td>
+</tr>
+<tr>
+<td><code>prow_url</code>, <code>gcs_bucket</code></td>
+<td>Prow server defaults, overridable per request</td>
+</tr>
+<tr>
+<td><code>ai_provider</code>, <code>ai_model</code>, <code>force_server_credentials</code></td>
+<td><code>claude</code>, <code>gemini</code>, or <code>cursor</code></td>
+</tr>
+<tr>
+<td><code>ai_call_timeout</code>, <code>max_concurrent_ai_calls</code></td>
+<td>AI budget for this run</td>
+</tr>
+<tr>
+<td><code>peer_ai_configs</code>, <code>peer_analysis_max_rounds</code></td>
+<td>Multi-AI debate settings</td>
+</tr>
+<tr>
+<td><code>additional_repos</code></td>
+<td>Extra repositories to clone for context</td>
+</tr>
+<tr>
+<td><code>tests_repo_url</code>, <code>tests_repo_token</code></td>
+<td>Tests repository used for history and context</td>
+</tr>
+<tr>
+<td><code>jira_url</code>, <code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_project_key</code>, <code>jira_ssl_verify</code>, <code>jira_max_results</code>, <code>enable_jira</code></td>
+<td>Jira search during analysis</td>
+</tr>
+<tr>
+<td><code>github_token</code></td>
+<td>GitHub access for comment enrichment</td>
+</tr>
+<tr>
+<td><code>raw_prompt</code>, <code>issue_prompt</code></td>
+<td>Additive prompt instructions</td>
+</tr>
+<tr>
+<td><code>labels</code>, plus name and tag fields</td>
+<td>Metadata for the job</td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p><strong>Note:</strong> Resolution order for provider, model, timeout, concurrency, peers, and additional repos is request → <code>.rootcoz/settings.json</code> in the cloned tests repo → server setting → environment variable. See <a href="configure-analysis-context.html">Configuring Analysis Context</a>.</p>
+</blockquote>
+<h3 id="reading-results">Reading results</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Query parameters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/results</code></td>
+<td>viewer</td>
+<td><code>limit</code> (max 100), <code>analysis_state</code> (<code>submitted</code>, <code>analyzed</code>)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/results/{job_id}</code></td>
+<td>viewer</td>
+<td><code>fields</code> — comma-separated allowlisted paths</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/results/fields</code></td>
+<td>viewer</td>
+<td>none; returns the allowlist</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/results/{job_id}/tests</code></td>
+<td>viewer</td>
+<td><code>status</code> (repeatable: <code>passed</code>, <code>skipped</code>, <code>failed</code>), <code>child_job_name</code>, <code>child_build_number</code>, <code>offset</code>, <code>limit</code> (1–200, default 50)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/failures/{failure_uuid}</code></td>
+<td>viewer</td>
+<td>none</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/results/{job_id}/review-status</code></td>
+<td>viewer</td>
+<td>none</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/dashboard</code></td>
+<td>viewer</td>
+<td><code>limit</code>, <code>offset</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/dashboard/filtered</code></td>
+<td>viewer</td>
+<td><code>search</code>, <code>status</code>, <code>date_from</code>, <code>date_to</code>, <code>review_status</code>, <code>analysis_state</code>, <code>limit</code>, <code>offset</code>, plus metadata filters <code>team</code>, <code>tier</code>, <code>version</code>, <code>label</code>, <code>exclude_label</code> (each repeatable)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/dashboard/active-count</code></td>
+<td>viewer</td>
+<td>none</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>fields</code> returns full values for allowlisted paths only and is never truncated. Unknown paths return <code>400</code>, so fetch <code>/api/results/fields</code> first when you build against it.</p>
+<h3 id="review-classification-and-job-maintenance">Review, classification, and job maintenance</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Body</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PUT</td>
+<td><code>/results/{job_id}/reviewed</code></td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>reviewed</code>.</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/results/{job_id}/override-classification</code></td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>classification</code></td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/results/{job_id}/override-pattern</code></td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>pattern</code></td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/results/{job_id}/tags</code></td>
+<td>reviewer</td>
+<td>JSON body <code>{"tags": ["a", "b"]}</code> — a list of strings. A non-list value is rejected with <code>400 tags must be a list of strings</code></td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/results/{job_id}</code></td>
+<td>operator</td>
+<td>none; deletes your own job, admins delete any</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/results/bulk</code></td>
+<td>operator</td>
+<td><code>job_ids</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Classification values are <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, and <code>INFRASTRUCTURE</code>. Pattern values are <code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITTENT</code>, <code>KNOWN_BUG</code>, and <code>PERSISTENT</code>. These are the exact API values; the UI renders <code>KNOWN_BUG</code> as <code>Known Bug</code> and spaces the words for readability.</p>
+<blockquote>
+<p><strong>Note:</strong> This table lists the role each route <strong>actually enforces</strong>. One route marked "Known gap" enforces no role beyond authentication — <code>viewer</code> is therefore its effective minimum, even though the documented model reserves it for <code>reviewer</code>: <code>POST /api/auth/rotate-key</code>, tracked in <a href="https://github.com/myk-org/rootcoz/issues/289">#289</a>. Treat it as a bug, not as a supported way to operate. <code>PUT /results/{job_id}/reviewed</code> and <code>PUT /results/{job_id}/tags</code> were previously gaps as well and now require <code>reviewer</code>. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.</p>
+</blockquote>
+<h3 id="comments-and-mentions">Comments and mentions</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/results/{job_id}/comments</code></td>
+<td>viewer</td>
+<td>Full thread for one job</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/comments</code></td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>comment</code>; returns <code>201</code></td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/results/{job_id}/comments/{comment_id}</code></td>
+<td>reviewer</td>
+<td>Comment author or admin</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/enrich-comments</code></td>
+<td>viewer</td>
+<td>Live GitHub PR and Jira ticket status</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/analyze-comment-intent</code></td>
+<td>reviewer</td>
+<td>Classifies an incoming comment as a question or an action</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/users/mentions</code></td>
+<td>viewer</td>
+<td>Mentions for the current user</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/users/mentions/unread-count</code></td>
+<td>viewer</td>
+<td>Navbar badge count</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/users/mentions/read</code></td>
+<td>viewer</td>
+<td>Mark selected mentions read</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/users/mentions/read-all</code></td>
+<td>viewer</td>
+<td>Clear the unread badge</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/users/mentionable</code></td>
+<td>viewer</td>
+<td>Users who can be <code>@</code>-mentioned</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="trackers-issues-and-exporters">Trackers, issues, and exporters</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/results/{job_id}/issue-prompt</code></td>
+<td>viewer</td>
+<td>Custom <code>.rootcoz/ROOTCOZ_ISSUE_PROMPT.md</code> for the repo</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/preview-github-issue</code></td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>include_links</code>, AI overrides; returns preview content</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/preview-jira-bug</code></td>
+<td>reviewer</td>
+<td>Same shape, Jira flavour</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/create-github-issue</code></td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>title</code>, <code>body</code>; returns <code>201</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/create-jira-bug</code></td>
+<td>reviewer</td>
+<td>Adds <code>jira_issue_type</code>; returns <code>201</code></td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/results/{job_id}/tracked-in</code></td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>url</code>, <code>type</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/results/{job_id}/tracked-in</code></td>
+<td>reviewer</td>
+<td>Current tracker links</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/results/{job_id}/tracked-in/{link_id}</code></td>
+<td>reviewer</td>
+<td>Remove one link</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/exporters</code></td>
+<td>viewer</td>
+<td>Available exporter plugins and enabled state</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/push/{plugin_name}</code></td>
+<td>operator</td>
+<td>Generic push; <code>child_job_name</code> and <code>child_build_number</code> optional</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/results/{job_id}/push-reportportal</code></td>
+<td>operator</td>
+<td>Backward-compatible Report Portal push</td>
+</tr>
+</tbody>
+</table></div>
+<blockquote>
+<p><strong>Note:</strong> All four issue preview and create endpoints call <code>_require_reviewer</code>, so a <code>viewer</code> receives <code>403</code> before the allow list is consulted. They additionally require valid tracker credentials and the matching <code>ENABLE_GITHUB_ISSUES</code> or <code>ENABLE_JIRA_ISSUES</code> toggle.</p>
+</blockquote>
+<h3 id="history-and-classification-lookup">History and classification lookup</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Query parameters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/history/failures</code></td>
+<td>viewer</td>
+<td><code>search</code>, <code>job_name</code>, <code>classification</code>, <code>from</code>, <code>to</code>, <code>limit</code>, <code>offset</code>. The date bounds are named <code>from</code> and <code>to</code> on the wire, not <code>date_from</code>/<code>date_to</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/history/test/{test_name}</code></td>
+<td>viewer</td>
+<td><code>limit</code>, <code>job_name</code>, <code>exclude_job_id</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/history/search</code></td>
+<td>viewer</td>
+<td><code>signature</code>, <code>exclude_job_id</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/history/stats/{job_name}</code></td>
+<td>viewer</td>
+<td><code>exclude_job_id</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/history/classifications</code></td>
+<td>viewer</td>
+<td><code>test_name</code>, <code>classification</code>, <code>job_name</code>, <code>parent_job_name</code>, <code>job_id</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/history/classify</code></td>
+<td>reviewer</td>
+<td><strong>JSON body</strong> (not query string): <code>test_name</code>, <code>classification</code>, <code>reason</code>, <code>job_id</code>, <code>source</code>; returns <code>201</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Send <code>source="ai"</code> to attribute the classification to the reserved <code>rootcoz-ai</code> identity. The backend blocks AI callers from overriding classifications a human has already set.</p>
+<h3 id="chat">Chat</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/api/chat/{job_id}</code></td>
+<td>viewer</td>
+<td><code>limit</code> (1–500), <code>offset</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/chat/{job_id}</code></td>
+<td>reviewer</td>
+<td><code>message</code> plus optional AI overrides; returns <code>202</code>, answer arrives over SSE</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/chat/{job_id}/init</code></td>
+<td>reviewer</td>
+<td>Explicit <code>ai_provider</code>, <code>ai_model</code>, <code>force_server_credentials</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/chat/{job_id}/abort</code></td>
+<td>reviewer</td>
+<td>Cancel the in-flight answer</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/chat/{job_id}/close</code></td>
+<td>reviewer</td>
+<td>Close the AI session</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/chat/{job_id}</code></td>
+<td>reviewer</td>
+<td>Clear chat history</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/chat/{job_id}/stream</code></td>
+<td>viewer</td>
+<td>SSE stream of new messages</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="server-sent-events-streams">Server-Sent Events streams</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Min role</th>
+<th>Pushes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/api/stream</code></td>
+<td>viewer</td>
+<td>Multiplexed stream; subscribe with <code>?topics=navbar,dashboard,results:JOB_ID,comments:JOB_ID,chat:JOB_ID</code></td>
+</tr>
+<tr>
+<td><code>/api/navbar/stream</code></td>
+<td>viewer</td>
+<td>Active analysis count and unread mentions</td>
+</tr>
+<tr>
+<td><code>/api/dashboard/stream</code></td>
+<td>viewer</td>
+<td>Job list changes</td>
+</tr>
+<tr>
+<td><code>/api/results/{job_id}/stream</code></td>
+<td>viewer</td>
+<td>Per-job status changes</td>
+</tr>
+<tr>
+<td><code>/api/results/{job_id}/comments/stream</code></td>
+<td>viewer</td>
+<td>Per-job comment changes</td>
+</tr>
+<tr>
+<td><code>/api/chat/{job_id}/stream</code></td>
+<td>viewer</td>
+<td>Per-job chat messages</td>
+</tr>
+<tr>
+<td><code>/api/admin/token-usage/stream</code></td>
+<td>admin</td>
+<td>Token usage changes. Enforced by middleware before the handler runs</td>
+</tr>
+<tr>
+<td><code>/api/admin/logs/stream</code></td>
+<td>admin</td>
+<td>Live server log tail; <code>lines</code> and <code>level</code> query parameters</td>
+</tr>
+<tr>
+<td><code>/api/admin/settings/stream</code></td>
+<td>admin</td>
+<td>Server setting changes</td>
+</tr>
+</tbody>
+</table></div>
+<p>Use <code>/api/stream</code> when you want one connection instead of six. It accepts up to 50 comma-separated topics; <code>token-usage</code> and <code>settings</code> are delivered only to admins.</p>
+<h3 id="reports-and-analytics">Reports and analytics</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Query parameters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/api/reports/totals</code></td>
+<td>admin or <code>can_view_reports</code></td>
+<td><code>team</code>, <code>tier</code>, <code>version</code>, <code>from</code>, <code>to</code>, <code>status</code>, <code>tags</code>, <code>exclude_tags</code>, <code>review_status</code>, <code>limit</code>, <code>offset</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/reports/classification-overrides</code></td>
+<td>admin or <code>can_view_reports</code></td>
+<td>same filter set</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/reports/issues-created</code></td>
+<td>admin or <code>can_view_reports</code></td>
+<td>same filter set</td>
+</tr>
+</tbody>
+</table></div>
+<p>Date bounds use the <code>from</code> and <code>to</code> query names. Without the flag you get <code>403 Reports access required</code>.</p>
+<h3 id="metadata-assignment">Metadata assignment</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/api/jobs/metadata</code></td>
+<td>viewer</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/jobs/{job_name}/metadata</code></td>
+<td>viewer</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/jobs/{job_name}/metadata</code></td>
+<td>admin</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/jobs/{job_name}/metadata</code></td>
+<td>admin</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/jobs/metadata/bulk</code></td>
+<td>admin</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/jobs/metadata/rules</code></td>
+<td>viewer</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/jobs/metadata/rules/preview</code></td>
+<td>viewer</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="notifications-and-ai-discovery">Notifications and AI discovery</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Min role</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/api/notifications/vapid-public-key</code></td>
+<td>viewer</td>
+<td>Web Push public key</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/notifications/subscribe</code></td>
+<td>viewer</td>
+<td><code>endpoint</code>, <code>p256dh_key</code>, <code>auth_key</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/notifications/unsubscribe</code></td>
+<td>viewer</td>
+<td>Removes a subscription</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/ai-models</code></td>
+<td>viewer</td>
+<td><code>provider</code>, <code>force_server_credentials</code>; lists models for <code>claude</code>, <code>gemini</code>, <code>cursor</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/capabilities</code></td>
+<td>viewer</td>
+<td>Feature toggles and whether server credentials exist</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/default-server-settings</code></td>
+<td>viewer</td>
+<td>Non-sensitive settings and defaults only</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/feedback/preview</code></td>
+<td>viewer</td>
+<td>AI-drafted feedback issue</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/feedback/create</code></td>
+<td>viewer</td>
+<td>Creates the GitHub issue; returns <code>201</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="admin">Admin</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Path</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/users</code></td>
+<td>List users</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/users/pending</code></td>
+<td>Accounts awaiting approval</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/users/create</code></td>
+<td><code>username</code>, <code>role</code>, <code>can_view_reports</code>, <code>can_use_server_providers</code></td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/admin/users/{username}</code></td>
+<td>Delete a user</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/admin/users/{username}/role</code></td>
+<td>Change role</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/users/{username}/approve</code></td>
+<td>Approve a pending registration</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/users/{username}/reject</code></td>
+<td>Reject a pending registration</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/users/{username}/rotate-key</code></td>
+<td>Re-issue a user's API key</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/admin/users/{username}/can-view-reports</code></td>
+<td>Grant or revoke reports access</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/admin/users/{username}/can-use-server-providers</code></td>
+<td>Grant or revoke server AI credentials</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/settings</code></td>
+<td>All settings with value, source, and metadata; <code>reveal_key</code> unmasks one key or <code>__all__</code></td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/admin/settings</code></td>
+<td><code>{"settings": {"KEY": "value"}}</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/settings/history</code></td>
+<td><code>key</code>, <code>limit</code> change history</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/admin/settings/{key}</code></td>
+<td>Reset one setting to its default</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/token-usage</code></td>
+<td><code>start_date</code>, <code>end_date</code>, <code>ai_provider</code>, <code>ai_model</code>, <code>call_type</code>, <code>group_by</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/token-usage/summary</code></td>
+<td>Dashboard totals</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/token-usage/{job_id}</code></td>
+<td>Per-job usage</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/ai-models/refresh</code></td>
+<td>Re-discover models from the sidecar</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/component-versions</code></td>
+<td>Backend, sidecar, and chart versions</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/db/schema</code></td>
+<td>Read-only schema dump</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/db/query</code></td>
+<td>Read-only SQL for the admin chat</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/chat</code></td>
+<td>Admin chat history</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/chat</code></td>
+<td>Send an admin chat message; returns <code>202</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/chat/init</code>, <code>/close</code>, <code>/abort</code></td>
+<td>Admin chat session control</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/admin/chat</code></td>
+<td>Clear admin chat history</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/chat/stream</code></td>
+<td>Admin chat SSE</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin-chat/artifacts</code></td>
+<td>Save a generated HTML report artifact</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin-chat/artifacts/{artifact_id}</code></td>
+<td>Download that artifact</td>
+</tr>
+</tbody>
+</table></div>
+<p>See <a href="configuration-reference.html">Configuration Reference</a> for the full environment variable surface behind these admin settings.</p>
+<h2 id="advanced-usage">Advanced Usage</h2>
+<p>Prefer the CLI when you can. Most endpoints above have a <code>rootcoz</code> command counterpart. SSE streams have none, because the CLI is a one-shot tool, and the user-token endpoints (<code>GET</code>/<code>PUT /api/user/tokens</code>) have client methods but no registered CLI command either. See <a href="cli-reference.html">CLI Command Reference</a> and <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a>.</p>
+<p>A three-call integration that skips the UI entirely:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">KEY</span><span class="o">=</span><span class="s2">"</span><span class="nv">$ROOTCOZ_API_KEY</span><span class="s2">"</span>
+<span class="nv">BASE</span><span class="o">=</span>http://localhost:8000
+
+<span class="nv">JOB</span><span class="o">=</span><span class="k">$(</span>curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span><span class="s2">"</span><span class="nv">$BASE</span><span class="s2">/analyze"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$KEY</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s1">'Content-Type: application/json'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"type":"file","raw_xml":"&lt;testsuite&gt;...&lt;/testsuite&gt;","labels":["nightly"]}'</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s1">'import json,sys; print(json.load(sys.stdin)["job_id"])'</span><span class="k">)</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$KEY</span><span class="s2">"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$BASE</span><span class="s2">/results/</span><span class="nv">$JOB</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">'.status'</span>
+
+curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$KEY</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"</span><span class="nv">$BASE</span><span class="s2">/results/</span><span class="nv">$JOB</span><span class="s2">?fields=status,result.summary"</span>
+</code></pre></div>
+
+<p>For long-lived integrations, open <code>/api/stream?topics=navbar,results:$JOB</code> once instead of polling the result endpoint.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>
+<p><code>403 Authentication required</code> or a <code>401</code> on a supposedly public path.<br>
+  The path is not in the public allow list. Use <code>POST /api/auth/login</code> for a session cookie or send <code>Authorization: Bearer &lt;API_KEY&gt;</code>.</p>
+</li>
+<li>
+<p><code>403 Admin access required</code> on <code>/api/admin/*</code>.<br>
+  Your account is not <code>admin</code>. The bootstrap <code>admin</code> superuser is created from <code>ADMIN_KEY</code>; see <a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a>.</p>
+</li>
+<li>
+<p><code>403 Reports access required</code> from <code>/api/reports/*</code>.<br>
+  You need the <code>can_view_reports</code> flag, which is independent of role. Admins always have it.</p>
+</li>
+<li>
+<p><code>400</code> from <code>GET /results/{job_id}?fields=...</code>.<br>
+  One path is not on the allowlist. Fetch <code>GET /api/results/fields</code> and use an exact path.</p>
+</li>
+<li>
+<p><code>404</code> on <code>/api/results/{job_id}/tests</code> for tests you expect.<br>
+  A <code>404</code> here means the job ID does not exist — the endpoint checks that before applying any filter, so no amount of <code>child_job_name</code> or <code>child_build_number</code> will help. An existing job that simply has no matching entries returns <code>200</code> with an empty <code>entries</code> list; to narrow or widen that, confirm the status filter matches <code>passed</code>, <code>skipped</code>, or <code>failed</code>, and add <code>child_job_name</code> and <code>child_build_number</code> when the tests live under a child job.</p>
+</li>
+<li>
+<p><code>403</code> on <code>POST /analyze</code> right after registering.<br>
+  Your default role is <code>viewer</code> or the account is still pending approval. Check <code>GET /api/auth/me</code>, then ask an admin to raise your role or approve the account.</p>
+</li>
+</ul>
+<h2 id="related-pages">Related Pages</h2>
+<ul>
+<li><a href="configuration-reference.html">Configuration Reference</a></li>
+<li><a href="cli-reference.html">CLI Command Reference</a></li>
+<li><a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a></li>
+<li><a href="submit-analyses.html">Submitting Analyses</a></li>
+<li><a href="review-and-classify-failures.html">Reviewing and Classifying Failures</a></li>
+<li><a href="use-server-chat-for-cross-job-analysis.html">Using Server Chat for Cross-Job Analysis</a></li>
+<li><a href="explore-history-and-reports.html">Exploring History and Reports</a></li>
+<li><a href="manage-users-and-server-settings.html">Managing Users and Server Settings</a></li>
+</ul>
                 </div>
             </article>
             <nav class="page-nav">
-                
-                <a href="deploy-rootcoz.html" class="page-nav-link page-nav-prev">
+
+                <a href="manage-users-and-server-settings.html" class="page-nav-link page-nav-prev">
                     <span class="page-nav-label">Previous</span>
-                    <span class="page-nav-title">Deploying RootCoz</span>
+                    <span class="page-nav-title">Managing Users and Server Settings</span>
                 </a>
-                
-                
+
+
                 <a href="cli-reference.html" class="page-nav-link page-nav-next">
                     <span class="page-nav-label">Next</span>
                     <span class="page-nav-title">CLI Command Reference</span>
                 </a>
-                
+
             </nav>
-            
+
             <aside class="toc-sidebar">
                 <div class="toc-container">
                     <h3>On this page</h3>
                     <div class="toc">
-<ul></ul>
+<ul>
+<li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#quick-example">Quick Example</a></li>
+<li><a href="#step-by-step">Step-by-Step</a><ul>
+<li><a href="#public-and-unauthenticated-routes">Public and unauthenticated routes</a></li>
+<li><a href="#authentication-and-your-account">Authentication and your account</a></li>
+<li><a href="#submitting-and-driving-analyses">Submitting and driving analyses</a></li>
+<li><a href="#reading-results">Reading results</a></li>
+<li><a href="#review-classification-and-job-maintenance">Review, classification, and job maintenance</a></li>
+<li><a href="#comments-and-mentions">Comments and mentions</a></li>
+<li><a href="#trackers-issues-and-exporters">Trackers, issues, and exporters</a></li>
+<li><a href="#history-and-classification-lookup">History and classification lookup</a></li>
+<li><a href="#chat">Chat</a></li>
+<li><a href="#server-sent-events-streams">Server-Sent Events streams</a></li>
+<li><a href="#reports-and-analytics">Reports and analytics</a></li>
+<li><a href="#metadata-assignment">Metadata assignment</a></li>
+<li><a href="#notifications-and-ai-discovery">Notifications and AI discovery</a></li>
+<li><a href="#admin">Admin</a></li>
+</ul>
+</li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
+<li><a href="#related-pages">Related Pages</a></li>
+</ul>
 </div>
 
                 </div>
             </aside>
-            
+
 
         </main>
 
         <footer class="page-footer">
-            
-            <span class="footer-version">Generated from version 4.4.2</span>
-            <span class="footer-sep">&middot;</span>
-            
-            Generated with <a href="https://github.com/myk-org/docsfy" target="_blank" rel="noopener">docs<span class="brand-accent">fy</span></a>
+
+            Built from <code>docs/*.md</code> by <code>pi-docsite</code>
             <span class="footer-sep">&middot;</span>
             <span class="footer-llm">LLM-friendly: <a href="llms.txt">llms.txt</a> &middot; <a href="llms-full.txt">llms-full.txt</a></span>
         </footer>
@@ -255,13 +1416,14 @@
 
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-    <script src="assets/theme.js"></script>
-    <script src="assets/search.js"></script>
-    <script src="assets/copy.js"></script>
-    <script src="assets/callouts.js"></script>
-    <script src="assets/scrollspy.js"></script>
-    <script src="assets/codelabels.js"></script>
-    <script src="assets/github.js"></script>
+    <script src="assets/theme.js?v=5a6efa51d2"></script>
+
+    <script src="assets/search.js?v=5a6efa51d2"></script>
+    <script src="assets/copy.js?v=5a6efa51d2"></script>
+    <script src="assets/callouts.js?v=5a6efa51d2"></script>
+    <script src="assets/scrollspy.js?v=5a6efa51d2"></script>
+    <script src="assets/codelabels.js?v=5a6efa51d2"></script>
+    <script src="assets/github.js?v=5a6efa51d2"></script>
     <script>
 (function() {
     var toggle = document.getElementById('sidebar-toggle');
@@ -307,5 +1469,6 @@
     }
 })();
 </script>
+<!-- generated by pi-docsite -->
 </body>
 </html>

@@ -17,6 +17,7 @@ export ROOTCOZ_API_KEY
 echo
 
 rootcoz auth whoami
+rootcoz admin-chat init --provider claude --model claude-opus-4-6
 rootcoz admin-chat send "Summarize the top failure trends from the last 7 days."
 ```
 
@@ -132,11 +133,20 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
 
 ## Troubleshooting
 
-- The `Send` button is disabled in the web UI: choose both an AI provider and a model, type a message, and wait for any current reply to finish.
-- `rootcoz admin-chat send` fails with an admin error: verify the CLI is using an admin API key with `rootcoz auth whoami`.
-- Server Chat says AI is not configured or the page never finishes initializing: configure the default AI provider and model in Server Settings. See [Managing Users and Server Settings](manage-users-and-server-settings.html) and [Configuration Reference](configuration-reference.html) for details.
-- A saved artifact link returns `404`: you likely started a new session or ran `rootcoz admin-chat clear`, which removes saved artifacts for your account.
-- The CLI did not show a final answer: check later with `rootcoz admin-chat history --limit 20`. If you need the raw endpoints instead, see [API Endpoint Reference](api-reference.html) for details.
+- `The send button stays disabled in the web UI.`  
+  The chat session only starts once a valid provider and model pair is selected in the header. Pick both, type a message, and wait for any in-flight reply to finish.
+
+- `rootcoz admin-chat send` fails with an admin error, or returns `409 Start a new chat session first`. The 409 means no session exists yet — run `rootcoz admin-chat init` first, which needs `--provider` and `--model`. A genuine admin error is a different failure: check the caller's role.  
+  The CLI is not using an admin identity. Confirm it with `rootcoz auth whoami`.
+
+- Server Chat says AI is not configured, or the page never finishes initializing.  
+  Set the default AI provider and model in Server Settings. See [Managing Users and Server Settings](manage-users-and-server-settings.html) and [Configuration Reference](configuration-reference.html) for details.
+
+- `A saved artifact link returns 404.`  
+  You started a new session or ran `rootcoz admin-chat clear`, which deletes saved artifacts for your account.
+
+- `The CLI did not show a final answer.`  
+  `admin-chat send` waits up to about two minutes. Check the result later with `rootcoz admin-chat history --limit 20`. For the raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 
 ## Related Pages
 
