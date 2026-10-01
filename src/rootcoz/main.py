@@ -509,6 +509,35 @@ def notify_pending_count_changed() -> None:
         event.set()
 
 
+async def _pending_user_count() -> int:
+    """Pending approval count for navbar SSE; 0 when storage cannot answer."""
+    try:
+        return len(await storage.list_pending_users())
+    except aiosqlite.Error, OSError, TypeError, ValueError:
+        return 0
+
+
+async def _pending_count_after_change(
+    event: asyncio.Event, username: str
+) -> tuple[int, bool]:
+    """Recount pending users for an admin navbar stream.
+
+    Returns ``(count, still_admin)``.  The admin role is re-read from the
+    database on every notification: when it was revoked while the stream was
+    open, the listener is unregistered and the count reported as 0 so the
+    badge clears instead of keeping an admin-only number.
+    """
+    try:
+        still_admin = await _ai_admin_role_current(username)
+    except aiosqlite.Error, OSError, TypeError, ValueError:
+        logger.debug("Failed to re-check admin role for navbar SSE", exc_info=True)
+        still_admin = True
+    if not still_admin:
+        _pending_count_listeners.discard(event)
+        return 0, False
+    return await _pending_user_count(), True
+
+
 def notify_mentions_changed(username: str) -> None:
     """Signal SSE listeners for a specific user that their mention count changed."""
     listeners = _mention_listeners.get(username)
@@ -8299,13 +8328,8 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
 
             last_pending = -1
             if pending_event is not None:
-                try:
-                    pending_count = len(await storage.list_pending_users())
-                    last_pending = pending_count
-                    yield f"event: pending-count\ndata: {pending_count}\n\n"
-                except aiosqlite.Error, OSError, TypeError, ValueError:
-                    last_pending = 0
-                    yield "event: pending-count\ndata: 0\n\n"
+                last_pending = await _pending_user_count()
+                yield f"event: pending-count\ndata: {last_pending}\n\n"
 
             active_wait_tasks: list[asyncio.Task[Any]] = []
             while True:
@@ -8365,15 +8389,17 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
 
                 if pending_event is not None and pending_event.is_set():
                     pending_event.clear()
-                    try:
-                        pending_count = len(await storage.list_pending_users())
-                        if pending_count != last_pending:
-                            yield f"event: pending-count\ndata: {pending_count}\n\n"
-                            last_pending = pending_count
-                    except Exception:
-                        logger.debug(
-                            "Failed to fetch pending count for SSE", exc_info=True
-                        )
+                    pending_count, still_admin = await _pending_count_after_change(
+                        pending_event, username
+                    )
+                    if not still_admin:
+                        # Admin revoked mid-stream: stop listening, force one
+                        # final clear so the badge does not keep a stale count.
+                        pending_event = None
+                        last_pending = -1
+                    if pending_count != last_pending:
+                        yield f"event: pending-count\ndata: {pending_count}\n\n"
+                        last_pending = pending_count
         finally:
             # Cancel any pending wait tasks on disconnect
             for task in active_wait_tasks:
@@ -8453,7 +8479,8 @@ async def stream_multiplexed(
 
     Supported topics:
 
-    - ``navbar`` — active analysis count + unread mention count
+    - ``navbar`` — active analysis count + unread mention count + pending
+      user approval count (pending count is admin only)
     - ``dashboard`` — job list changes
     - ``results:{job_id}`` — per-job status changes
     - ``comments:{job_id}`` — per-job comment changes
@@ -8555,8 +8582,10 @@ async def stream_multiplexed(
         # Navbar events (special handling)
         active_event: asyncio.Event | None = None
         mention_event: asyncio.Event | None = None
+        pending_event: asyncio.Event | None = None
         last_active = -1
         last_unread = -1
+        last_pending = -1
 
         if navbar_requested:
             active_event = asyncio.Event()
@@ -8564,6 +8593,9 @@ async def stream_multiplexed(
             if username:
                 mention_event = asyncio.Event()
                 _mention_listeners.setdefault(username, set()).add(mention_event)
+            if is_admin:
+                pending_event = asyncio.Event()
+                _pending_count_listeners.add(pending_event)
 
         wait_tasks: list[asyncio.Task[Any]] = []
 
@@ -8585,6 +8617,9 @@ async def stream_multiplexed(
                     except aiosqlite.Error, OSError, TypeError, ValueError:
                         last_unread = 0
                         yield "event: navbar:unread-count\ndata: 0\n\n"
+                if pending_event is not None:
+                    last_pending = await _pending_user_count()
+                    yield f"event: navbar:pending-count\ndata: {last_pending}\n\n"
 
             while True:
                 # Build wait list from all registered events
@@ -8596,6 +8631,8 @@ async def stream_multiplexed(
                     all_events.append(("navbar:active", active_event))
                 if mention_event is not None:
                     all_events.append(("navbar:mention", mention_event))
+                if pending_event is not None:
+                    all_events.append(("navbar:pending", pending_event))
 
                 wait_tasks = [asyncio.create_task(ev.wait()) for _, ev in all_events]
 
@@ -8649,6 +8686,20 @@ async def stream_multiplexed(
                                 "Failed to fetch unread count for multiplexed SSE",
                                 exc_info=True,
                             )
+                    elif prefix == "navbar:pending":
+                        pending_count, still_admin = await _pending_count_after_change(
+                            ev, username
+                        )
+                        if not still_admin:
+                            # Admin revoked mid-stream: stop listening and force
+                            # one final clear of the badge.
+                            pending_event = None
+                            last_pending = -1
+                        if pending_count != last_pending:
+                            yield (
+                                f"event: navbar:pending-count\ndata: {pending_count}\n\n"
+                            )
+                            last_pending = pending_count
                     else:
                         # Simple notification topics — emit event with topic prefix
                         event_map = {
@@ -8693,6 +8744,8 @@ async def stream_multiplexed(
                     listeners.discard(mention_event)
                     if not listeners:
                         _mention_listeners.pop(username, None)
+            if pending_event is not None:
+                _pending_count_listeners.discard(pending_event)
 
     return StreamingResponse(
         event_generator(),
@@ -9879,6 +9932,9 @@ async def register_user(request: Request) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    if user_status == "pending":
+        notify_pending_count_changed()
+
     # Create a session for the user with the default role
     default_role = settings.default_user_role
     session_token = await storage.create_session(
@@ -10527,6 +10583,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if not deleted:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
+    notify_pending_count_changed()
     await _cleanup_revoked_ai_sessions()
     logger.info(f"[AUDIT] Admin '{request.state.username}' deleted user '{username}'")
     return {"deleted": username}
@@ -10556,6 +10613,9 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
         detail = str(exc)
         status = 404 if "not found" in detail.lower() else 400
         raise HTTPException(status_code=status, detail=detail) from exc
+
+    # Promoting a pending user removes them from the pending list.
+    notify_pending_count_changed()
 
     logger.info(
         f"[AUDIT] Admin '{request.state.username}' changed role of '{username}' to '{new_role}'"

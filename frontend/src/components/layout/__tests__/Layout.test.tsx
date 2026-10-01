@@ -96,6 +96,18 @@ describe('Layout', () => {
     expect(screen.getByTestId('mobile-menu-toggle')).toBeDefined()
   })
 
+  it('subscribes to the multiplexed navbar topic and handles pending-count', () => {
+    // #227: the badge is driven by /api/stream?topics=navbar, which emits
+    // topic-prefixed events (navbar:pending-count) that useSSE maps to the
+    // unprefixed handler name.
+    mockAuth.isAdmin = true
+    renderLayout()
+    const [topic, events] = mockUseSSE.mock.calls.at(-1)!
+    expect(topic).toBe('navbar')
+    expect(Object.keys(events)).toContain('pending-count')
+    mockAuth.isAdmin = false
+  })
+
   it('updates the pending badge from the navbar pending-count SSE event', () => {
     // #227: the badge is driven by SSE, not a one-shot fetch on mount
     mockAuth.isAdmin = true
