@@ -482,9 +482,12 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
 _active_count_listeners: set[asyncio.Event] = set()
 _mention_listeners: dict[str, set[asyncio.Event]] = {}
 _pending_count_listeners: set[asyncio.Event] = set()
-# Seconds an SSE stream waits before emitting a keepalive.  The navbar streams
-# also retry a failed pending-count lookup on this tick.
+# Seconds an SSE stream waits before emitting a keepalive.
 _SSE_KEEPALIVE_SECONDS = 30
+# Seconds before a failed pending-count lookup is role-checked again.  The
+# navbar streams wait for whichever comes first: this retry or the keepalive,
+# so unrelated events cannot postpone the retry.
+_PENDING_RETRY_SECONDS = 10
 
 
 async def _periodic_session_cleanup() -> None:
@@ -524,53 +527,63 @@ async def _pending_user_count() -> int | None:
 class _PendingFeed:
     """Per-connection pending-count state for a navbar SSE stream.
 
-    Owns the admin re-check, the recount and the dedup bookkeeping so the
-    navbar and multiplexed streams share one implementation.
+    Owns the admin re-check, the recount, the dedup bookkeeping and the retry
+    deadline so the navbar and multiplexed streams share one implementation.
     """
 
     def __init__(self, event: asyncio.Event | None, username: str, name: str):
         self.event = event
         self.username = username
         self.name = name
-        # ``None`` = no count delivered yet, or the last lookup failed.
+        # ``None`` = no count delivered to this stream yet.
         self.last: int | None = None
+        # ``None`` = nothing to retry; otherwise the monotonic retry deadline.
+        self.retry_at: float | None = None
 
     async def step(self) -> str | None:
         """Re-verify the admin role and recount; return the chunk to emit."""
         if self.event is None:
             return None
-        event = self.event
         try:
-            still_admin: bool | None = await _ai_admin_role_current(self.username)
+            still_admin = await _ai_admin_role_current(self.username)
         except aiosqlite.Error, OSError, TypeError, ValueError:
-            # Unverifiable is treated as unauthorized: a revoked admin must
-            # not receive a pending count on an already-open stream.
+            # Unverifiable is not revoked: send nothing, but stay registered and
+            # retry, so a transient database error does not freeze the badge.
             logger.debug("Failed to re-check admin role for navbar SSE", exc_info=True)
-            still_admin = None
+            self._defer()
+            return None
         if not still_admin:
-            _pending_count_listeners.discard(event)
+            # Confirmed revocation: unregister for good and clear the badge.
+            _pending_count_listeners.discard(self.event)
             self.event = None
             self.last = None
-            # A confirmed revocation clears the badge once; an unverifiable
-            # role is not emitted to at all.
-            if still_admin is None:
-                return None
+            self.retry_at = None
             return f"event: {self.name}\ndata: 0\n\n"
         count = await _pending_user_count()
         if count is None:
-            # Storage failure: keep the last good count on the badge, retry on
-            # the next keepalive instead of waiting for a pending mutation.
-            self.last = None
+            # Storage failure: keep the last good count on the badge and retry
+            # instead of waiting for the next pending-user mutation.
+            self._defer()
             return None
+        self.retry_at = None
         if count != self.last:
             self.last = count
             return f"event: {self.name}\ndata: {count}\n\n"
         return None
 
-    def request_retry(self) -> None:
-        """Re-trigger a failed lookup on the next keepalive tick."""
-        if self.event is not None and self.last is None:
-            self.event.set()
+    def _defer(self) -> None:
+        """Schedule a role-checked retry; nothing is sent to the stream."""
+        self.retry_at = _time.monotonic() + _PENDING_RETRY_SECONDS
+
+    def retry_due(self) -> bool:
+        """True when a scheduled retry has come due."""
+        return self.retry_at is not None and _time.monotonic() >= self.retry_at
+
+    def wait_timeout(self) -> float:
+        """Seconds to wait: the earliest of the keepalive and the retry."""
+        if self.retry_at is None:
+            return _SSE_KEEPALIVE_SECONDS
+        return min(_SSE_KEEPALIVE_SECONDS, max(0.0, self.retry_at - _time.monotonic()))
 
 
 def notify_mentions_changed(username: str) -> None:
@@ -8377,7 +8390,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                 try:
                     done, pending = await asyncio.wait(
                         active_wait_tasks,
-                        timeout=_SSE_KEEPALIVE_SECONDS,
+                        timeout=pending_feed.wait_timeout(),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -8389,10 +8402,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     active_wait_tasks = []
                     break
 
-                if not done:
-                    # A failed pending lookup retries here rather than waiting
-                    # for the next pending-user mutation.
-                    pending_feed.request_retry()
+                if not done and not pending_feed.retry_due():
                     yield ": keepalive\n\n"
                     continue
 
@@ -8424,7 +8434,9 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                             "Failed to fetch unread count for SSE", exc_info=True
                         )
 
-                if pending_event is not None and pending_event.is_set():
+                if pending_event is not None and (
+                    pending_event.is_set() or pending_feed.retry_due()
+                ):
                     pending_event.clear()
                     if chunk := await pending_feed.step():
                         yield chunk
@@ -8666,7 +8678,7 @@ async def stream_multiplexed(
                 try:
                     done, pending = await asyncio.wait(
                         wait_tasks,
-                        timeout=_SSE_KEEPALIVE_SECONDS,
+                        timeout=pending_feed.wait_timeout(),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -8678,19 +8690,17 @@ async def stream_multiplexed(
                     wait_tasks = []
                     break
 
-                if not done:
-                    # A failed pending lookup retries here rather than waiting
-                    # for the next pending-user mutation.
-                    pending_feed.request_retry()
+                if not done and not pending_feed.retry_due():
                     yield ": keepalive\n\n"
                     continue
 
                 if await request.is_disconnected():
                     break
 
-                # Emit events for all fired topics
+                # Emit events for all fired topics, plus a due pending retry
+                retry = pending_feed.retry_due()
                 for prefix, ev in all_events:
-                    if not ev.is_set():
+                    if not ev.is_set() and not (retry and prefix == "navbar:pending"):
                         continue
                     ev.clear()
 

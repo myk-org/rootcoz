@@ -546,14 +546,34 @@ async def _next_or_timeout(stream, timeout: float = 0.5):
     return await asyncio.wait_for(stream.__anext__(), timeout=timeout)
 
 
-async def _open_navbar_stream(main, endpoint: str, *, username: str, is_admin: bool):
+async def _open_navbar_stream(
+    main, endpoint: str, *, username: str, is_admin: bool, topics: str = "navbar"
+):
     """Open the navbar SSE stream on either endpoint and return its body."""
     request = _StubRequest(username=username, is_admin=is_admin)
     if endpoint == "multiplexed":
-        resp = await main.stream_multiplexed(request, topics="navbar")
+        resp = await main.stream_multiplexed(request, topics=topics)
     else:
         resp = await main.stream_navbar_counts(request)
     return resp.body_iterator
+
+
+async def _notify_every(listeners: set[asyncio.Event], interval: float) -> None:
+    """Fire a listener set on a fixed interval to keep an SSE stream busy."""
+    while True:
+        await asyncio.sleep(interval)
+        for event in list(listeners):
+            event.set()
+
+
+async def _drain_until(stream, sink: list[str], needle: str, timeout: float = 2.0):
+    """Consume SSE chunks into ``sink`` until one contains ``needle``."""
+    async with asyncio.timeout(timeout):
+        while True:
+            chunk = await stream.__anext__()
+            sink.append(chunk)
+            if needle in chunk:
+                return
 
 
 # SSE event name carrying the pending count, per endpoint.
@@ -668,11 +688,14 @@ class TestNavbarPendingCountStream:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("endpoint", ["multiplexed", "standalone"])
-    async def test_failed_role_lookup_sends_no_pending_count(self, endpoint):
-        """An unverifiable role must not be treated as admin (#227 security)."""
+    async def test_failed_role_lookup_keeps_listener_and_recovers(self, endpoint):
+        """An unverifiable role is not a revocation: emit nothing, stay retryable."""
         pending = ["p1", "p2"]
         fail: dict[str, BaseException] = {}
-        with _navbar_storage(pending, fail=fail) as main:
+        with (
+            _navbar_storage(pending, fail=fail) as main,
+            patch.object(main, "_PENDING_RETRY_SECONDS", 0.01),
+        ):
             stream = await _open_navbar_stream(
                 main, endpoint, username="boss", is_admin=True
             )
@@ -685,15 +708,20 @@ class TestNavbarPendingCountStream:
                 pending.clear()
                 fail["role"] = aiosqlite.OperationalError("database is locked")
                 main.notify_pending_count_changed()
-                # Nothing is emitted — an unverified role gets no count at all.
-                with pytest.raises((TimeoutError, StopAsyncIteration)):
-                    await _next_or_timeout(stream)
-                assert listener not in main._pending_count_listeners
+                nxt = asyncio.create_task(stream.__anext__())
+                await asyncio.sleep(0.05)  # several retries, all unverifiable
+                # An unverifiable role gets no count at all, but the listener
+                # is not discarded: the stream is still waiting on a retry.
+                assert not nxt.done()
+                assert listener in main._pending_count_listeners
+
+                # The database recovers: the scheduled retry delivers the count
+                # on this same connection, with no new notification.
                 fail.clear()
-                main.notify_pending_count_changed()
-                # ...and delivery never resumes on this connection.
-                with pytest.raises((TimeoutError, StopAsyncIteration)):
-                    await _next_or_timeout(stream)
+                pending.append("p3")  # count is 1 until the retry lands
+                assert await asyncio.wait_for(nxt, 1) == (
+                    f"event: {_PENDING_EVENT[endpoint]}\ndata: 1\n\n"
+                )
             finally:
                 await stream.aclose()
 
@@ -723,13 +751,13 @@ class TestNavbarPendingCountStream:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("endpoint", ["multiplexed", "standalone"])
-    async def test_failed_count_lookup_retries_on_keepalive(self, endpoint):
+    async def test_failed_count_lookup_retries_on_its_own_deadline(self, endpoint):
         """A failed pending lookup is retried without a new mutation (#227)."""
         pending = ["p1", "p2"]
         fail: dict[str, BaseException] = {}
         with (
             _navbar_storage(pending, fail=fail) as main,
-            patch.object(main, "_SSE_KEEPALIVE_SECONDS", 0.01),
+            patch.object(main, "_PENDING_RETRY_SECONDS", 0.01),
         ):
             stream = await _open_navbar_stream(
                 main, endpoint, username="boss", is_admin=True
@@ -741,14 +769,59 @@ class TestNavbarPendingCountStream:
                 fail["count"] = aiosqlite.OperationalError("database is locked")
                 pending.clear()
                 main.notify_pending_count_changed()
-                # The keepalive is emitted once the failed lookup is observed.
-                assert await _next_or_timeout(stream) == ": keepalive\n\n"
+                # The retry deadline is well ahead of the 30s keepalive, so no
+                # keepalive is emitted; the retry alone delivers the count.
                 fail.clear()
-                pending.append("p3")  # count is 3 until the retry lands
-                # No further notification happens: the retry alone delivers it.
+                pending.append("p3")  # count is 1 until the retry lands
                 assert await _next_or_timeout(stream) == (
                     f"event: {_PENDING_EVENT[endpoint]}\ndata: 1\n\n"
                 )
+            finally:
+                await stream.aclose()
+
+    @pytest.mark.asyncio
+    async def test_busy_multiplexed_stream_still_retries(self):
+        """Other topics firing must not postpone the pending-count retry."""
+        pending = ["p1", "p2"]
+        fail: dict[str, BaseException] = {}
+        with (
+            _navbar_storage(pending, fail=fail) as main,
+            patch.object(main, "_PENDING_RETRY_SECONDS", 0.2),
+        ):
+            stream = await _open_navbar_stream(
+                main,
+                "multiplexed",
+                username="boss",
+                is_admin=True,
+                topics="navbar,dashboard",
+            )
+            event = _PENDING_EVENT["multiplexed"]
+            try:
+                for _ in range(3):  # active, unread, initial pending count
+                    await stream.__anext__()
+
+                fail["count"] = aiosqlite.OperationalError("database is locked")
+                pending.clear()
+                main.notify_pending_count_changed()
+                chunks: list[str] = []
+                drain = asyncio.create_task(_drain_until(stream, chunks, event))
+
+                # A busy stream: another subscribed topic fires every 50ms, so
+                # the 30s keepalive timeout is never reached.
+                busy = asyncio.create_task(
+                    _notify_every(main._dashboard_listeners, 0.05)
+                )
+                await asyncio.sleep(0.1)
+                assert any("dashboard" in chunk for chunk in chunks)
+                assert not any(": keepalive" in chunk for chunk in chunks)
+
+                # The retry deadline comes due mid-traffic and delivers the
+                # count, without a keepalive or a new pending notification.
+                fail.clear()
+                pending.append("p3")  # count is 1 until the retry lands
+                await asyncio.wait_for(drain, 2)
+                busy.cancel()
+                assert f"event: {event}\ndata: 1\n\n" in chunks
             finally:
                 await stream.aclose()
 
