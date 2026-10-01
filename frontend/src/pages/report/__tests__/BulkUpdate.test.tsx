@@ -29,12 +29,12 @@ function failure(testName: string, signature: string): FailureAnalysis {
 const FAILURES = [failure('test-a', 'sig-a'), failure('test-b', 'sig-b'), failure('test-c1', 'sig-c'), failure('test-c2', 'sig-c')]
 
 /** The report page always has a result loaded; the bulk bar reads the job id from it. */
-function resultPayload() {
+function resultPayload(failures: FailureAnalysis[] = FAILURES) {
   return {
     result: {
       job_id: 'job-1', job_name: 'test-job', build_number: 1, jenkins_url: null,
       status: 'completed' as const, summary: '', ai_provider: 'p', ai_model: 'm',
-      failures: FAILURES, child_job_analyses: [],
+      failures, child_job_analyses: [],
     },
     createdAt: '', completedAt: '', analysisStartedAt: '',
   }
@@ -47,12 +47,12 @@ function SeedResult() {
 }
 
 /** Stands in for the SSE status-changed refresh that re-dispatches SET_RESULT. */
-function SseRefresh() {
+function SseRefresh({ label = 'Simulate background refresh', failures }: { label?: string; failures?: FailureAnalysis[] }) {
   const dispatch = useReportDispatch()
-  return <button onClick={() => dispatch({ type: 'SET_RESULT', payload: resultPayload() })}>Simulate background refresh</button>
+  return <button onClick={() => dispatch({ type: 'SET_RESULT', payload: resultPayload(failures) })}>{label}</button>
 }
 
-function Harness({ seedGroupId }: { seedGroupId?: string }) {
+function Harness({ seedGroupId, removedFailures }: { seedGroupId?: string; removedFailures?: FailureAnalysis[] }) {
   const groups = groupFailures(FAILURES)
   return (
     <MemoryRouter>
@@ -60,6 +60,9 @@ function Harness({ seedGroupId }: { seedGroupId?: string }) {
         <ReportProvider>
           <SeedResult />
           <SseRefresh />
+          {removedFailures && (
+            <SseRefresh label="Simulate refresh without removed failures" failures={removedFailures} />
+          )}
           <GroupSelectAll groups={groups} scopeLabel="Failures" />
           {groups.map((g, i) => (
             <FailureCard key={g.id} group={g} jobId="job-1" index={i} />
@@ -82,7 +85,7 @@ function SeedSelection({ groupId, groups }: { groupId: string; groups: ReturnTyp
   return null
 }
 
-function renderHarness(props: { seedGroupId?: string } = {}) {
+function renderHarness(props: { seedGroupId?: string; removedFailures?: FailureAnalysis[] } = {}) {
   render(<Harness {...props} />)
   return userEvent.setup()
 }
@@ -290,10 +293,82 @@ describe('bulk failure selection', () => {
     await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Link' }))
 
     await waitFor(() => expect(put).toHaveBeenCalledWith('/results/job-1/tracked-in', expect.objectContaining({ test_name: 'test-a' })))
-    // The write is not reported as a bulk failure — only the refresh is.
+    // The write is not reported as a bulk failure — only the refresh is, and it
+    // outlives the bar that the successful run removed.
     expect(await screen.findByRole('alert')).toHaveTextContent('Links saved, but refreshing the tracked links failed.')
     expect(screen.queryByRole('alert')).not.toHaveTextContent('Failed to update')
+    expect(screen.queryByText(/selected in/)).not.toBeInTheDocument()
+  })
+
+  it('reports a failed link write even when the tracked-in refresh also fails', async () => {
+    put.mockImplementation(async (path: string, body: { test_name: string }) => {
+      if (path.endsWith('/tracked-in') && body.test_name === 'test-b') throw new Error('boom')
+      return { reviewed_by: 'rev' }
+    })
+    get.mockRejectedValue(new Error('boom'))
+    const user = renderHarness()
+    await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
+
+    await user.click(screen.getByRole('button', { name: 'Track in...' }))
+    const urlDialog = await screen.findByRole('dialog')
+    await user.type(within(urlDialog).getByLabelText('Issue URL'), 'https://jira.example.com/browse/PROJ-1')
+    await user.click(within(urlDialog).getByRole('button', { name: 'Continue' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Link' }))
+
+    // Both problems are reported: the link that was never written and the refresh.
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Failed to update 1 of 4: test-b')
+    expect(alert).toHaveTextContent('Refreshing the tracked links also failed.')
+    // Only the link that was not written stays selected for a retry.
     expect(screen.getByText(/1 test selected in 1 failure/)).toBeInTheDocument()
+  })
+
+  it('prunes a removed failure from the selection on a background refresh', async () => {
+    // The refreshed report dropped test-b entirely and split the sig-c group.
+    const user = renderHarness({ removedFailures: [FAILURES[0], FAILURES[3]] })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
+    expect(screen.getByText(/4 tests selected in 3 failures/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Simulate refresh without removed failures' }))
+    expect(screen.getByText(/2 tests selected in 2 failures/)).toBeInTheDocument()
+
+    // The retained names are the live ones — a mutation must not send a dead name.
+    await confirmBulkAction(user, 'Mark reviewed')
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    for (const name of ['test-a', 'test-c2']) {
+      expect(put).toHaveBeenCalledWith('/results/job-1/reviewed', {
+        test_name: name, reviewed: true, child_job_name: '', child_build_number: 0,
+      })
+    }
+    expect(put).not.toHaveBeenCalledWith('/results/job-1/reviewed', expect.objectContaining({ test_name: 'test-b' }))
+  })
+
+  it('applies an override to the whole signature group after the selection was narrowed', async () => {
+    // Narrow the sig-c group down to a single test with a failed review run.
+    put.mockImplementation(async (path: string, body: { test_name: string }) => {
+      if (path.endsWith('/reviewed') && body.test_name === 'test-c2') throw new Error('boom')
+      return { reviewed_by: 'rev' }
+    })
+    const user = renderHarness()
+    await user.click(screen.getByRole('checkbox', { name: 'Select test-c1' }))
+    await confirmBulkAction(user, 'Mark reviewed')
+    await waitFor(() => expect(screen.getByText(/1 test selected in 1 failure/)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('combobox', { name: 'Bulk classification' }))
+    await user.click(await screen.findByRole('option', { name: 'INFRASTRUCTURE' }))
+    const dialog = await screen.findByRole('dialog')
+    // The widened scope is stated, not silently applied.
+    expect(dialog).toHaveTextContent('every test sharing the error signature — 2 tests in 1 failure')
+    await user.click(within(dialog).getByRole('button', { name: 'Apply' }))
+
+    // One request for the group (the backend propagates it to both tests), but
+    // the optimistic patch now covers the unselected sibling.
+    await waitFor(() => expect(put).toHaveBeenLastCalledWith('/results/job-1/override-classification', {
+      test_name: 'test-c1', classification: 'INFRASTRUCTURE', child_job_name: '', child_build_number: 0,
+    }))
+    const card = within(document.getElementById('group-id-test-c1') as HTMLElement)
+    expect(card.getByText('INFRASTRUCTURE')).toBeInTheDocument()
+    expect(card.queryByText('CODE ISSUE')).toBeNull()
   })
 
   it('clears the previous bulk error when the selection is cleared', async () => {
@@ -322,6 +397,23 @@ describe('bulk failure selection', () => {
     expect(screen.queryByRole('checkbox', { name: 'Select test-a' })).not.toBeInTheDocument()
     expect(screen.queryByText(/selected in/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Mark reviewed' })).not.toBeInTheDocument()
+  })
+
+  it('makes every review control read-only for viewers', async () => {
+    role.current = 'viewer'
+    const user = renderHarness()
+
+    // The state stays readable, but nothing may start a review edit (403).
+    for (const name of ['Review', 'Review 0/2']) {
+      expect(screen.getAllByRole('button', { name }).length).toBeGreaterThan(0)
+      for (const button of screen.getAllByRole('button', { name })) expect(button).toBeDisabled()
+    }
+    await user.click(screen.getByRole('button', { name: /test-c1/ }))
+    expect(screen.getByRole('button', { name: 'Review All (0/2)' })).toBeDisabled()
+    for (const button of screen.getAllByRole('button', { name: 'Review' })) expect(button).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: 'Review 0/2' }))
+    expect(put).not.toHaveBeenCalled()
   })
 
   it('keeps the existing signature-scoped "Review all" behaviour', async () => {

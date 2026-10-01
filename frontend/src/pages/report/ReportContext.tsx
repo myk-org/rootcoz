@@ -2,6 +2,7 @@ import { createContext, useContext, useReducer, useRef, useCallback, type Dispat
 import { api } from '@/lib/api'
 import { reviewKey } from '@/lib/reviewKey'
 import type { SelectedGroup } from './failureUpdates'
+import { reconcileSelection } from './failureUpdates'
 import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
 
 interface ReportState {
@@ -144,11 +145,10 @@ function applyOverrideToResult(
 function reportReducer(state: ReportState, action: ReportAction): ReportState {
   switch (action.type) {
     case 'SET_RESULT':
-      // The selection is kept: background SSE refreshes re-dispatch SET_RESULT
-      // (progress, usage, abort) and must not discard what the user picked.
-      // ponytail: a re-analysis can leave ids of failures that no longer exist;
-      // drop them there if a user ever reports phantom bulk entries.
-      return { ...state, result: action.payload.result, graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', loading: false, error: '' }
+      // The selection survives background SSE refreshes (progress, usage, abort),
+      // reconciled against the refreshed result so removed or regrouped failures
+      // cannot linger in the bulk bar or feed dead test names to a mutation.
+      return { ...state, result: action.payload.result, selection: reconcileSelection(action.payload.result, state.selection), graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', loading: false, error: '' }
     case 'SET_COMMENTS_AND_REVIEWS':
       return { ...state, comments: action.payload.comments, reviews: action.payload.reviews }
     case 'ADD_COMMENT':

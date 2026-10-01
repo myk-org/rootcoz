@@ -410,14 +410,16 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge key={cls} classification={cls} />
               ))
             })()}
+            {/* Review is a reviewer-only edit (the endpoint returns 403 otherwise):
+                keep the state readable for viewers, but never clickable. */}
             {group.count === 1 ? (
-              <ReviewToggle jobId={jobId} testName={rep.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
+              <ReviewToggle jobId={jobId} testName={rep.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={isViewer} />
             ) : (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     onClick={(e) => { e.stopPropagation(); handleReviewAll() }}
-                    disabled={reviewingAll}
+                    disabled={reviewingAll || isViewer}
                     className={`flex items-center gap-1 rounded-md px-2 py-1 text-[10px] font-mono transition-colors ${
                       allReviewed
                         ? 'bg-signal-green/15 text-signal-green'
@@ -448,7 +450,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleReviewAll}
-                  disabled={reviewingAll}
+                  disabled={reviewingAll || isViewer}
                   className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-xs font-bold transition-colors ${
                     allReviewed
                       ? 'bg-signal-green/15 text-signal-green'
@@ -478,7 +480,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                         </Tooltip>
                         <UuidCopyButton uuid={t.id} sectionKey={`uuid-${t.id}`} copiedSection={copiedSection} onCopy={copyToClipboard} />
                       </div>
-                      <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll} />
+                      <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll || isViewer} />
                     </div>
                   ))}
                 </div>

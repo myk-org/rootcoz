@@ -14,6 +14,7 @@ import {
   scopedReviewState,
   selectedScopes,
   trackedInUrlError,
+  widenToSignatureGroups,
 } from './failureUpdates'
 import { detectTrackerType } from './TrackedInBadge'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -51,6 +52,9 @@ export function BulkUpdateBar() {
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // A run message that must outlive the bar itself: the selection it applied to is
+  // gone, but the user still has to read what did not land.
+  const [standaloneError, setStandaloneError] = useState<string | null>(null)
   const [trackOpen, setTrackOpen] = useState(false)
   const [trackUrl, setTrackUrl] = useState('')
 
@@ -70,15 +74,33 @@ export function BulkUpdateBar() {
       setTrackOpen(false)
       setTrackUrl('')
       setError(null)
+    } else {
+      setStandaloneError(null)
     }
   }, [groups.length])
 
-  if (isViewer || groups.length === 0) return null
+  if (isViewer) return null
+  if (groups.length === 0) {
+    return standaloneError ? (
+      <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex justify-center px-6 py-3">
+        <span role="alert" className="rounded-md bg-surface-card px-3 py-1.5 text-xs text-signal-red shadow">
+          {standaloneError}
+        </span>
+      </div>
+    ) : null
+  }
   const jobId = result?.job_id ?? ''
   const scopes = selectedScopes(groups)
   const scopeText = `${scopes.length} ${scopes.length === 1 ? 'test' : 'tests'} in ${groups.length} ${groups.length === 1 ? 'failure' : 'failures'}`
+  // An override is applied to the whole error-signature group by the backend, so
+  // the scope the user is asked to confirm — and the optimistic patch — must be
+  // the full group, not a selection narrowed by an earlier failure.
+  const overrideTargets = widenToSignatureGroups(result, groups)
+  const overrideScopes = selectedScopes(overrideTargets)
+  const overrideScopeText = `every test sharing the error signature — ${overrideScopes.length} ${overrideScopes.length === 1 ? 'test' : 'tests'} in ${overrideTargets.length} ${overrideTargets.length === 1 ? 'failure' : 'failures'}`
 
-  /** Keep only what the run did not finish: untried scopes and the failed ones. */
+  /** Keep only what the run did not finish: untried scopes and the failed ones.
+   *  Returns true when nothing is left selected. */
   function keepSelectionAfterRun(covered: FailureScope[], failed: SelectedGroup[]) {
     const coveredKeys = new Set(covered.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber)))
     const failedKeys = new Set(failed.flatMap((g) => g.testNames.map((n) => reviewKey(n, g.childJobName, g.childBuildNumber))))
@@ -90,8 +112,12 @@ export function BulkUpdateBar() {
       })
       if (kept.length > 0) next[id] = { ...g, testNames: kept }
     }
-    if (Object.keys(next).length === 0) dispatch({ type: 'CLEAR_SELECTION' })
-    else dispatch({ type: 'REPLACE_SELECTION', payload: next })
+    if (Object.keys(next).length === 0) {
+      dispatch({ type: 'CLEAR_SELECTION' })
+      return true
+    }
+    dispatch({ type: 'REPLACE_SELECTION', payload: next })
+    return false
   }
 
   async function apply(action: PendingAction) {
@@ -99,12 +125,13 @@ export function BulkUpdateBar() {
     setError(null)
     try {
       const { failed, warning } = await action.run()
-      keepSelectionAfterRun(scopes, failed)
-      if (warning) setError(warning)
-      else if (failed.length > 0) {
-        const names = failed.flatMap((g) => g.testNames)
-        setError(`Failed to update ${names.length} of ${scopes.length}: ${names.join(', ')}`)
-      }
+      const emptied = keepSelectionAfterRun(scopes, failed)
+      // Both can happen at once: some writes failed and a post-write step did not land.
+      const names = failed.flatMap((g) => g.testNames)
+      const failureText = names.length > 0 ? `Failed to update ${names.length} of ${scopes.length}: ${names.join(', ')}. ` : ''
+      const message = `${failureText}${warning ?? ''}`.trim()
+      if (emptied) setStandaloneError(message || null)
+      else setError(message || null)
     } catch {
       setError('Bulk update failed. Please try again.')
     } finally {
@@ -113,12 +140,12 @@ export function BulkUpdateBar() {
     }
   }
 
-  /** One request per selected group — the backend propagates an override to every
+  /** One request per signature group — the backend propagates an override to every
    *  test sharing the error signature, so a per-test call would write the same
    *  rows (and history entries) once per test. */
   function overrideGroups(run: (group: SelectedGroup, rep: FailureScope) => Promise<void>) {
     return runBatched(
-      groups,
+      overrideTargets,
       async (g) => run(g, { testName: g.testNames[0], childJobName: g.childJobName, childBuildNumber: g.childBuildNumber }),
       BULK_BATCH_SIZE,
     )
@@ -149,7 +176,7 @@ export function BulkUpdateBar() {
   function requestClassification(classification: string) {
     setPending({
       title: `Set classification to ${classification}`,
-      description: `Apply to ${scopeText}?`,
+      description: `The override applies to ${overrideScopeText}?`,
       confirmLabel: 'Apply',
       run: async () => ({
         failed: await overrideGroups(async (g, rep) => {
@@ -166,7 +193,7 @@ export function BulkUpdateBar() {
   function requestPattern(pattern: string) {
     setPending({
       title: `Set pattern to ${pattern}`,
-      description: `Apply to ${scopeText}?`,
+      description: `The override applies to ${overrideScopeText}?`,
       confirmLabel: 'Apply',
       run: async () => ({
         failed: await overrideGroups(async (g, rep) => {
@@ -196,9 +223,12 @@ export function BulkUpdateBar() {
           dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
           return { failed: failedGroups(groups, failed) }
         } catch {
-          // The links were written — only the refresh failed, so keep the
-          // selection and report the refresh instead of failing the whole action.
-          return { failed: groups, warning: 'Links saved, but refreshing the tracked links failed.' }
+          // Only the refresh failed. The writes still stand, but a link that was
+          // never written must not be claimed as saved — report both.
+          const notWritten = failedGroups(groups, failed)
+          return notWritten.length > 0
+            ? { failed: notWritten, warning: 'Refreshing the tracked links also failed.' }
+            : { failed: [], warning: 'Links saved, but refreshing the tracked links failed.' }
         }
       },
     })

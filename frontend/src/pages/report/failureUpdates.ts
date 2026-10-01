@@ -1,6 +1,7 @@
 import { api } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
-import type { ReviewState, TrackedInEntry } from '@/types'
+import { scopedGroups } from '@/lib/grouping'
+import type { AnalysisResult, ReviewState, TrackedInEntry } from '@/types'
 
 /** Every per-failure mutation is scoped by the reviewKey triple. */
 export interface FailureScope {
@@ -102,6 +103,40 @@ export function selectedScopes(groups: SelectedGroup[]): FailureScope[] {
       childBuildNumber: g.childBuildNumber,
     })),
   )
+}
+
+/** Drop selected groups and test names a refreshed result no longer contains.
+ *
+ *  ponytail: keeps the original group ids, so a regrouped signature can leave an id
+ *  with no card (at worst one duplicated write if the user re-selects everything).
+ *  Re-derive the `child-<hash>` card prefix here if that ever matters.
+ */
+export function reconcileSelection(
+  result: AnalysisResult,
+  selection: Record<string, SelectedGroup>,
+): Record<string, SelectedGroup> {
+  const next: Record<string, SelectedGroup> = {}
+  for (const [id, g] of Object.entries(selection)) {
+    const live = new Set(
+      scopedGroups(result, g.childJobName, g.childBuildNumber).flatMap((x) => x.tests.map((t) => t.test_name)),
+    )
+    const testNames = g.testNames.filter((n) => live.has(n))
+    if (testNames.length > 0) next[id] = { ...g, testNames }
+  }
+  return next
+}
+
+/** Widen each group back to its full error-signature group: the backend applies an
+ *  override to every sibling, so the optimistic patch must cover them too. */
+export function widenToSignatureGroups(
+  result: AnalysisResult | null,
+  groups: SelectedGroup[],
+): SelectedGroup[] {
+  return groups.map((g) => {
+    const sibling = result && scopedGroups(result, g.childJobName, g.childBuildNumber)
+      .find((x) => x.tests.some((t) => g.testNames.includes(t.test_name)))
+    return sibling ? { ...g, testNames: sibling.tests.map((t) => t.test_name) } : g
+  })
 }
 
 /** Run a mutation over every scope in batches; never rejects — returns the failed scopes. */
