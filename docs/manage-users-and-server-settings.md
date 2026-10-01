@@ -28,7 +28,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | View jobs and results | yes | yes | yes | yes |
    | Chat about a job | no | yes | yes | yes |
    | Comment on a job, mentions | no | yes | yes | yes |
-   | Rotate own API key, manage own tokens | no | yes | yes | yes |
+   | Rotate own API key, manage own tokens | yes | yes | yes | yes |
    | Submit a new analysis (`POST /analyze`, ingest-only `POST /submit`) | no | no | yes | yes |
    | Re-analyze any job | no | no | yes | yes |
    | Delete own jobs | no | no | yes | yes |
@@ -37,6 +37,8 @@ That creates an active operator who can submit analyses, and one server setting 
    | Create and delete users, change roles, grant reports access | no | no | no | yes |
    | Rotate another user's API key | no | no | no | yes |
    | Access `/api/admin/*` (Users, Tokens, Logs, Settings, admin Chat, DB tools) | no | no | no | yes |
+
+   > **Note:** This table describes what the server currently enforces, which is not always what `AGENTS.md` describes. Rotating your own API key works for a `viewer` today because `POST /api/auth/rotate-key` checks no role, so this row reads `yes`; `AGENTS.md` reserves it for `reviewer`. Three further routes are affected — `PUT /results/{job_id}/reviewed` (which feeds auto-review and the exporter push), `PUT /results/{job_id}/tags`, and `GET /api/admin/token-usage/stream`. Tracked in [#295](https://github.com/myk-org/rootcoz/issues/295) and [#289](https://github.com/myk-org/rootcoz/issues/289); treat the current behaviour as a bug rather than a supported capability.
 
    Two flags sit outside the role ladder:
 

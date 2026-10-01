@@ -75,7 +75,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | GET | `/api/version` | viewer | Running version |
 | POST | `/api/auth/logout` | authenticated | Clears the session cookie |
 | GET | `/api/auth/me` | viewer | Username, role, `can_view_reports`, `can_use_server_providers` |
-| POST | `/api/auth/rotate-key` | reviewer | Rotates your own API key; the old key stops working |
+| POST | `/api/auth/rotate-key` | viewer | Rotates your own API key; the old key stops working. Known gap — see the note below |
 | GET | `/api/user/ai-credentials` | viewer | Personal provider credentials, secrets masked |
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
@@ -141,14 +141,16 @@ The shared body accepts the server defaults as per-request overrides:
 
 | Method | Path | Min role | Body |
 | --- | --- | --- | --- |
-| PUT | `/results/{job_id}/reviewed` | reviewer | `test_name`, `reviewed` |
+| PUT | `/results/{job_id}/reviewed` | viewer | `test_name`, `reviewed`. Known gap — see the note below |
 | PUT | `/results/{job_id}/override-classification` | reviewer | `test_name`, `classification` |
 | PUT | `/results/{job_id}/override-pattern` | reviewer | `test_name`, `pattern` |
-| PUT | `/results/{job_id}/tags` | reviewer | name and tag fields |
+| PUT | `/results/{job_id}/tags` | viewer | name and tag fields. Known gap — see the note below |
 | DELETE | `/results/{job_id}` | operator | none; deletes your own job, admins delete any |
 | DELETE | `/api/results/bulk` | operator | `job_ids` |
 
-Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, and `PERSISTENT`. These are the exact API values; the UI renders `KNOWN_BUG` as `Known Bug` and spaces the words for readability. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
+Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, and `PERSISTENT`. These are the exact API values; the UI renders `KNOWN_BUG` as `Known Bug` and spaces the words for readability.
+
+> **Note:** This table lists the role each route **actually enforces**, not the role the role table in AGENTS.md describes. Four routes marked "Known gap" enforce no role beyond authentication — `viewer` is therefore the effective minimum, even though the documented model reserves them for `reviewer` or `admin`. They are tracked in issues [#295](https://github.com/myk-org/rootcoz/issues/295) (`PUT /results/{job_id}/reviewed`), and [#289](https://github.com/myk-org/rootcoz/issues/289) (`POST /api/auth/rotate-key`, `PUT /results/{job_id}/tags`, `GET /api/admin/token-usage/stream`). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 
 ### Comments and mentions
 
@@ -218,7 +220,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | `/api/results/{job_id}/stream` | viewer | Per-job status changes |
 | `/api/results/{job_id}/comments/stream` | viewer | Per-job comment changes |
 | `/api/chat/{job_id}/stream` | viewer | Per-job chat messages |
-| `/api/admin/token-usage/stream` | admin | Token usage changes |
+| `/api/admin/token-usage/stream` | viewer | Token usage changes. Known gap — see the note below |
 | `/api/admin/logs/stream` | admin | Live server log tail; `lines` and `level` query parameters |
 | `/api/admin/settings/stream` | admin | Server setting changes |
 

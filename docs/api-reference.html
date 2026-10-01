@@ -391,8 +391,8 @@
 <tr>
 <td>POST</td>
 <td><code>/api/auth/rotate-key</code></td>
-<td>reviewer</td>
-<td>Rotates your own API key; the old key stops working</td>
+<td>viewer</td>
+<td>Rotates your own API key; the old key stops working. Known gap — see the note below</td>
 </tr>
 <tr>
 <td>GET</td>
@@ -647,8 +647,8 @@
 <tr>
 <td>PUT</td>
 <td><code>/results/{job_id}/reviewed</code></td>
-<td>reviewer</td>
-<td><code>test_name</code>, <code>reviewed</code></td>
+<td>viewer</td>
+<td><code>test_name</code>, <code>reviewed</code>. Known gap — see the note below</td>
 </tr>
 <tr>
 <td>PUT</td>
@@ -665,8 +665,8 @@
 <tr>
 <td>PUT</td>
 <td><code>/results/{job_id}/tags</code></td>
-<td>reviewer</td>
-<td>name and tag fields</td>
+<td>viewer</td>
+<td>name and tag fields. Known gap — see the note below</td>
 </tr>
 <tr>
 <td>DELETE</td>
@@ -682,7 +682,10 @@
 </tr>
 </tbody>
 </table></div>
-<p>Classification values are <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, and <code>INFRASTRUCTURE</code>. Pattern values are <code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITTENT</code>, <code>KNOWN_BUG</code>, and <code>PERSISTENT</code>. These are the exact API values; the UI renders <code>KNOWN_BUG</code> as <code>Known Bug</code> and spaces the words for readability. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.</p>
+<p>Classification values are <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, and <code>INFRASTRUCTURE</code>. Pattern values are <code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITTENT</code>, <code>KNOWN_BUG</code>, and <code>PERSISTENT</code>. These are the exact API values; the UI renders <code>KNOWN_BUG</code> as <code>Known Bug</code> and spaces the words for readability.</p>
+<blockquote>
+<p><strong>Note:</strong> This table lists the role each route <strong>actually enforces</strong>, not the role the role table in AGENTS.md describes. Four routes marked "Known gap" enforce no role beyond authentication — <code>viewer</code> is therefore the effective minimum, even though the documented model reserves them for <code>reviewer</code> or <code>admin</code>. They are tracked in issues <a href="https://github.com/myk-org/rootcoz/issues/295">#295</a> (<code>PUT /results/{job_id}/reviewed</code>), and <a href="https://github.com/myk-org/rootcoz/issues/289">#289</a> (<code>POST /api/auth/rotate-key</code>, <code>PUT /results/{job_id}/tags</code>, <code>GET /api/admin/token-usage/stream</code>). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.</p>
+</blockquote>
 <h3 id="comments-and-mentions">Comments and mentions</h3>
 <div class="table-wrap"><table>
 <thead>
@@ -985,8 +988,8 @@
 </tr>
 <tr>
 <td><code>/api/admin/token-usage/stream</code></td>
-<td>admin</td>
-<td>Token usage changes</td>
+<td>viewer</td>
+<td>Token usage changes. Known gap — see the note below</td>
 </tr>
 <tr>
 <td><code>/api/admin/logs/stream</code></td>
