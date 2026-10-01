@@ -4046,12 +4046,15 @@ async def _analyze_failures_or_exit(
         try:
             await replace_job_test_entries(job_id, _all_test_entries, _scopes)
         except Exception:
+            # Do NOT cache counts from entries that were not persisted - the
+            # stored result must never claim test outcomes the DB does not have.
             logger.warning(
                 "Failed to persist test entries for fully failed job_id=%s",
                 job_id,
                 exc_info=True,
             )
-        _apply_cached_test_counts(fail_data, _all_test_entries, _scopes)
+        else:
+            _apply_cached_test_counts(fail_data, _all_test_entries, _scopes)
         await update_status(job_id, "failed", fail_data)
         notify_active_count_changed()
         notify_dashboard_changed()
