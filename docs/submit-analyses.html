@@ -459,12 +459,11 @@
 <p><strong>Change the analysis context for one run.</strong> <code>Tests Repo URL</code> and <code>Ref / Branch</code>, <code>Additional Repositories</code>, <code>Raw Prompt</code>, <code>Peer Analysis</code>, <code>Jira Integration</code>, and <code>AI Call Timeout</code> are all per-submission overrides that take precedence over server settings. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</p>
 </li>
 <li>
-<p><strong>Submit from the terminal.</strong> <code>rootcoz analyze</code> and <code>rootcoz submit</code> take the same flags, and <code>--source</code> selects between <code>jenkins</code>, <code>file</code>, and <code>prow</code>. The CLI reads the same server for defaults, so anything you set in the form is set in your CLI profile.</p>
+<p><strong>Submit from the terminal.</strong> <code>rootcoz analyze</code> takes <code>--source</code> to select between <code>jenkins</code>, <code>file</code>, and <code>prow</code>. The CLI reads the same server for defaults, so anything you set in the form is set in your CLI profile. There is no ingest-only CLI command: use <code>POST /submit</code> if you need to record results without running AI.</p>
 </li>
 </ul>
 <p><code>bash
-  rootcoz analyze --source jenkins --job-name folder/job-name --build-number 123
-  rootcoz submit --source jenkins --job-name folder/job-name --build-number 123</code></p>
+  rootcoz analyze --source jenkins --job-name folder/job-name --build-number 123</code></p>
 <p>See <a href="cli-reference.html">CLI Command Reference</a> for the full flag list and <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> for scripted workflows.</p>
 <ul>
 <li><strong>Reuse a stored submission.</strong> <code>Re-Analyze</code> in the report header replays the original request with your overrides applied and produces a new job ID. Sensitive fields such as the tests repo token are stored encrypted and restored automatically, so you do not re-enter credentials. The new report links back to its origin.</li>

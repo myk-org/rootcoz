@@ -69,7 +69,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 
 5. **Submit analyses.**
 
-`rootcoz analyze [OPTIONS]` and `rootcoz submit [OPTIONS]` share one flag set. `submit` queues the CI ingest without running AI; `analyze` does both.
+`rootcoz analyze [OPTIONS]` submits a job and runs the full pipeline. There is no `rootcoz submit` command and no ingest-only flag: ingest-without-analysis (`POST /submit`) is available through the API only.
 
 | Option | Purpose |
 | --- | --- |
@@ -128,7 +128,7 @@ Related lifecycle commands:
 
 Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, and `result.failures.details`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
 
-> **Note:** `--child-job` must be set before `--child-build`; a build number without a job name is rejected. This scoping applies to every command that takes both flags.
+> **Note:** Pass `--child-job` before `--child-build`; most commands reject a build number without a job name. `results set-tracked-in` is the exception — it does not enforce the pairing and silently drops `child_build_number` when `--child-job` is absent, so always pass both.
 
 7. **Query failure history.** `rootcoz history ...`
 

@@ -644,7 +644,7 @@
 </li>
 <li>
 <p>The job fails with <code>Invalid additional_repos url</code>.<br>
-  The URL must use <code>https://</code> or <code>git://</code>, and the entry must have a non-empty <code>name</code>.</p>
+  The URL must be a valid HTTP(S) URL — <code>additional_repos</code> entries are validated as <code>HttpUrl</code>, so <code>git://</code> is rejected — and the entry must have a non-empty <code>name</code>.</p>
 </li>
 <li>
 <p>The job fails with <code>additional_repos contains name '…' which collides with the tests repo clone directory</code>.<br>

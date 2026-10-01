@@ -101,11 +101,10 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
 - **Change the analysis context for one run.** `Tests Repo URL` and `Ref / Branch`, `Additional Repositories`, `Raw Prompt`, `Peer Analysis`, `Jira Integration`, and `AI Call Timeout` are all per-submission overrides that take precedence over server settings. See [Configuring Analysis Context](configure-analysis-context.html) for details.
 
-- **Submit from the terminal.** `rootcoz analyze` and `rootcoz submit` take the same flags, and `--source` selects between `jenkins`, `file`, and `prow`. The CLI reads the same server for defaults, so anything you set in the form is set in your CLI profile.
+- **Submit from the terminal.** `rootcoz analyze` takes `--source` to select between `jenkins`, `file`, and `prow`. The CLI reads the same server for defaults, so anything you set in the form is set in your CLI profile. There is no ingest-only CLI command: use `POST /submit` if you need to record results without running AI.
 
   ```bash
   rootcoz analyze --source jenkins --job-name folder/job-name --build-number 123
-  rootcoz submit --source jenkins --job-name folder/job-name --build-number 123
   ```
 
   See [CLI Command Reference](cli-reference.html) for the full flag list and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) for scripted workflows.

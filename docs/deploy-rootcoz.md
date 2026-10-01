@@ -9,7 +9,7 @@
 
 - Docker with Docker Compose for the local recipe, or Helm 3 plus `kubectl` or `oc` for the cluster recipes
 - A cluster with a `ReadWriteOnce` PersistentVolume provisioner for the SQLite data volume
-- One AI provider credential: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` (or a Vertex service account key), or `CURSOR_API_KEY`
+- One AI provider credential: `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` (or a Vertex service account key). `CURSOR_API_KEY` alone is not enough — the bundled Compose file leaves `CURSOR_API_KEY`, `ACPX_AGENTS`, and `CLI_AGENTS` commented out, so a Cursor deployment needs those uncommented and `ACPX_AGENTS` (or `CLI_AGENTS`) set before Cursor models are discovered.
 - An admin API key of at least 16 characters if you want to set `admin.key` yourself; otherwise the interactive setup script requires one and plain `helm install` auto-generates it
 - `openssl`, only for the self-signed certificate in the Ingress recipe
 

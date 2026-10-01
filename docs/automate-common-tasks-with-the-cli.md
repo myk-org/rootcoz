@@ -86,7 +86,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
      --prow-url https://prow.example.com --gcs-bucket prow-artifacts | jq -r .job_id)
    ```
 
-   Use `rootcoz submit` instead of `analyze` when you want the CI results stored without paying for AI, then `rootcoz results analyze JOB_ID` to run the analysis later on the same job ID.
+   To record CI results without paying for AI, call `POST /submit` directly — the CLI has no ingest-only command. Then run `rootcoz results analyze JOB_ID` to analyze the stored job later on the same job ID.
 
    Tag and label the run so it shows up in filtered dashboards and reports:
 
@@ -106,7 +106,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
      STATE=$(rootcoz --json status "$JOB_ID" | jq -r .status)
      case "$STATE" in
        completed) echo "done: $JOB_ID"; break ;;
-       failed|error) echo "analysis failed: $JOB_ID"; exit 1 ;;
+       failed|error|aborted) echo "analysis did not complete: $JOB_ID ($STATE)"; exit 1 ;;
      esac
      sleep 15
    done

@@ -214,7 +214,7 @@ This clones the tests repository plus both extra repositories into the analysis 
   Only the eight keys in the table above are allowed. Remove anything else — including secrets like `token`.
 
 - The job fails with `Invalid additional_repos url`.  
-  The URL must use `https://` or `git://`, and the entry must have a non-empty `name`.
+  The URL must be a valid HTTP(S) URL — `additional_repos` entries are validated as `HttpUrl`, so `git://` is rejected — and the entry must have a non-empty `name`.
 
 - The job fails with `additional_repos contains name '…' which collides with the tests repo clone directory`.  
   Rename the additional repository so it differs from the tests repository's clone directory name.

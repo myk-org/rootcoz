@@ -149,7 +149,7 @@ Source: deploy-rootcoz.md
 
 - Docker with Docker Compose for the local recipe, or Helm 3 plus `kubectl` or `oc` for the cluster recipes
 - A cluster with a `ReadWriteOnce` PersistentVolume provisioner for the SQLite data volume
-- One AI provider credential: `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` (or a Vertex service account key), or `CURSOR_API_KEY`
+- One AI provider credential: `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` (or a Vertex service account key). `CURSOR_API_KEY` alone is not enough — the bundled Compose file leaves `CURSOR_API_KEY`, `ACPX_AGENTS`, and `CLI_AGENTS` commented out, so a Cursor deployment needs those uncommented and `ACPX_AGENTS` (or `CLI_AGENTS`) set before Cursor models are discovered.
 - An admin API key of at least 16 characters if you want to set `admin.key` yourself; otherwise the interactive setup script requires one and plain `helm install` auto-generates it
 - `openssl`, only for the self-signed certificate in the Ingress recipe
 
@@ -574,7 +574,7 @@ Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails
     | `VAPID_PRIVATE_KEY` | empty | string | yes | **yes** | yes |
     | `VAPID_CLAIM_EMAIL` | empty | string | no | **yes** | **no** |
 
-    Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning and disables Web Push. Note the asymmetry: the private key is changeable from the UI, but the public key and claim email are environment-only, because changing them would invalidate subscriptions already registered with browsers.
+    Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that the public key and claim email are environment-only, because changing them would invalidate subscriptions already registered with browsers.
 
 ### Variables that never reach the Server Settings UI
 
@@ -628,7 +628,7 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage, stripped from API responses, and never logged at any level.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
 Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace.
 
@@ -772,11 +772,10 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
 - **Change the analysis context for one run.** `Tests Repo URL` and `Ref / Branch`, `Additional Repositories`, `Raw Prompt`, `Peer Analysis`, `Jira Integration`, and `AI Call Timeout` are all per-submission overrides that take precedence over server settings. See [Configuring Analysis Context](configure-analysis-context.html) for details.
 
-- **Submit from the terminal.** `rootcoz analyze` and `rootcoz submit` take the same flags, and `--source` selects between `jenkins`, `file`, and `prow`. The CLI reads the same server for defaults, so anything you set in the form is set in your CLI profile.
+- **Submit from the terminal.** `rootcoz analyze` takes `--source` to select between `jenkins`, `file`, and `prow`. The CLI reads the same server for defaults, so anything you set in the form is set in your CLI profile. There is no ingest-only CLI command: use `POST /submit` if you need to record results without running AI.
 
   ```bash
   rootcoz analyze --source jenkins --job-name folder/job-name --build-number 123
-  rootcoz submit --source jenkins --job-name folder/job-name --build-number 123
   ```
 
   See [CLI Command Reference](cli-reference.html) for the full flag list and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html) for scripted workflows.
@@ -1727,7 +1726,7 @@ The registration key is the only credential that signs you in; the tracker token
    | --- | --- |
    | `Mentions` page | Lists every comment that mentions you, newest first, with an unread count and `Mark all as read`. Opening a mention marks it read and jumps to the exact comment on the report. |
    | Sidebar badge | Live unread count, pushed over the `/api/navbar/stream` SSE channel. |
-   | `Push Notifications` toggle | Browser notifications titled `Mentioned by @author` that link straight to the report. |
+   | `Push Notifications` toggle | Browser notifications titled `Mentioned by @author`. Note that the notification link is currently built as `/report/{job_id}` while the app serves the report at `/results/:jobId`, so a tap lands on a route the SPA does not register. Use the `Mentions` page or the sidebar badge until that is corrected. |
 
    Enabling push notifications asks the browser for permission and registers the device with the server. Delivery is best effort: a subscription the push service reports as gone is deleted automatically, and at most 10 subscriptions are kept per user.
 
@@ -2089,7 +2088,7 @@ Registration returns the raw API key exactly once and sends `Cache-Control: no-s
 
 ### Submitting and driving analyses
 
-All of these return `202 Accepted` and continue in the background. `POST /submit` ingests only and stops before cloning or AI work; `POST /analyze` runs the full pipeline.
+All of these continue in the background and return `202 Accepted`, except `POST /results/{job_id}/abort`, which returns `200 OK`. `POST /submit` ingests only and stops before cloning or AI work; `POST /analyze` runs the full pipeline.
 
 | Method | Path | Min role | Body highlights |
 | --- | --- | --- | --- |
@@ -2148,7 +2147,7 @@ The shared body accepts the server defaults as per-request overrides:
 | DELETE | `/results/{job_id}` | operator | none; deletes your own job, admins delete any |
 | DELETE | `/api/results/bulk` | operator | `job_ids` |
 
-Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITENT`, `KNOWN BUG`, and `PERSISTENT`. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
+Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, and `PERSISTENT`. These are the exact API values; the UI renders `KNOWN_BUG` as `Known Bug` and spaces the words for readability. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 
 ### Comments and mentions
 
@@ -2296,7 +2295,7 @@ See [Configuration Reference](configuration-reference.html) for the full environ
 
 ## Advanced Usage
 
-Prefer the CLI when you can. Every endpoint above has a `rootcoz` command counterpart, with SSE streams as the documented exception since the CLI is a one-shot tool. See [CLI Command Reference](cli-reference.html) and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html).
+Prefer the CLI when you can. Most endpoints above have a `rootcoz` command counterpart. SSE streams have none, because the CLI is a one-shot tool, and the user-token endpoints (`GET`/`PUT /api/user/tokens`) have client methods but no registered CLI command either. See [CLI Command Reference](cli-reference.html) and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html).
 
 A three-call integration that skips the UI entirely:
 
@@ -2421,7 +2420,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 
 5. **Submit analyses.**
 
-`rootcoz analyze [OPTIONS]` and `rootcoz submit [OPTIONS]` share one flag set. `submit` queues the CI ingest without running AI; `analyze` does both.
+`rootcoz analyze [OPTIONS]` submits a job and runs the full pipeline. There is no `rootcoz submit` command and no ingest-only flag: ingest-without-analysis (`POST /submit`) is available through the API only.
 
 | Option | Purpose |
 | --- | --- |
@@ -2480,7 +2479,7 @@ Related lifecycle commands:
 
 Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, and `result.failures.details`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
 
-> **Note:** `--child-job` must be set before `--child-build`; a build number without a job name is rejected. This scoping applies to every command that takes both flags.
+> **Note:** Pass `--child-job` before `--child-build`; most commands reject a build number without a job name. `results set-tracked-in` is the exception — it does not enforce the pairing and silently drops `child_build_number` when `--child-job` is absent, so always pass both.
 
 7. **Query failure history.** `rootcoz history ...`
 
@@ -2733,7 +2732,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
      --prow-url https://prow.example.com --gcs-bucket prow-artifacts | jq -r .job_id)
    ```
 
-   Use `rootcoz submit` instead of `analyze` when you want the CI results stored without paying for AI, then `rootcoz results analyze JOB_ID` to run the analysis later on the same job ID.
+   To record CI results without paying for AI, call `POST /submit` directly — the CLI has no ingest-only command. Then run `rootcoz results analyze JOB_ID` to analyze the stored job later on the same job ID.
 
    Tag and label the run so it shows up in filtered dashboards and reports:
 
@@ -2753,7 +2752,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
      STATE=$(rootcoz --json status "$JOB_ID" | jq -r .status)
      case "$STATE" in
        completed) echo "done: $JOB_ID"; break ;;
-       failed|error) echo "analysis failed: $JOB_ID"; exit 1 ;;
+       failed|error|aborted) echo "analysis did not complete: $JOB_ID ($STATE)"; exit 1 ;;
      esac
      sleep 15
    done
@@ -3164,7 +3163,7 @@ This clones the tests repository plus both extra repositories into the analysis 
   Only the eight keys in the table above are allowed. Remove anything else — including secrets like `token`.
 
 - The job fails with `Invalid additional_repos url`.
-  The URL must use `https://` or `git://`, and the entry must have a non-empty `name`.
+  The URL must be a valid HTTP(S) URL — `additional_repos` entries are validated as `HttpUrl`, so `git://` is rejected — and the entry must have a non-empty `name`.
 
 - The job fails with `additional_repos contains name '…' which collides with the tests repo clone directory`.
   Rename the additional repository so it differs from the tests repository's clone directory name.

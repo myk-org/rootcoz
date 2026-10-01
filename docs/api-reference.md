@@ -89,7 +89,7 @@ Registration returns the raw API key exactly once and sends `Cache-Control: no-s
 
 ### Submitting and driving analyses
 
-All of these return `202 Accepted` and continue in the background. `POST /submit` ingests only and stops before cloning or AI work; `POST /analyze` runs the full pipeline.
+All of these continue in the background and return `202 Accepted`, except `POST /results/{job_id}/abort`, which returns `200 OK`. `POST /submit` ingests only and stops before cloning or AI work; `POST /analyze` runs the full pipeline.
 
 | Method | Path | Min role | Body highlights |
 | --- | --- | --- | --- |
@@ -148,7 +148,7 @@ The shared body accepts the server defaults as per-request overrides:
 | DELETE | `/results/{job_id}` | operator | none; deletes your own job, admins delete any |
 | DELETE | `/api/results/bulk` | operator | `job_ids` |
 
-Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITENT`, `KNOWN BUG`, and `PERSISTENT`. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
+Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, and `PERSISTENT`. These are the exact API values; the UI renders `KNOWN_BUG` as `Known Bug` and spaces the words for readability. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 
 ### Comments and mentions
 
@@ -296,7 +296,7 @@ See [Configuration Reference](configuration-reference.html) for the full environ
 
 ## Advanced Usage
 
-Prefer the CLI when you can. Every endpoint above has a `rootcoz` command counterpart, with SSE streams as the documented exception since the CLI is a one-shot tool. See [CLI Command Reference](cli-reference.html) and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html).
+Prefer the CLI when you can. Most endpoints above have a `rootcoz` command counterpart. SSE streams have none, because the CLI is a one-shot tool, and the user-token endpoints (`GET`/`PUT /api/user/tokens`) have client methods but no registered CLI command either. See [CLI Command Reference](cli-reference.html) and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html).
 
 A three-call integration that skips the UI entirely:
 

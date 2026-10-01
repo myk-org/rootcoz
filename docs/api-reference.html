@@ -446,7 +446,7 @@
 </table></div>
 <p>Registration returns the raw API key exactly once and sends <code>Cache-Control: no-store</code>. Store it before you navigate away.</p>
 <h3 id="submitting-and-driving-analyses">Submitting and driving analyses</h3>
-<p>All of these return <code>202 Accepted</code> and continue in the background. <code>POST /submit</code> ingests only and stops before cloning or AI work; <code>POST /analyze</code> runs the full pipeline.</p>
+<p>All of these continue in the background and return <code>202 Accepted</code>, except <code>POST /results/{job_id}/abort</code>, which returns <code>200 OK</code>. <code>POST /submit</code> ingests only and stops before cloning or AI work; <code>POST /analyze</code> runs the full pipeline.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -682,7 +682,7 @@
 </tr>
 </tbody>
 </table></div>
-<p>Classification values are <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, and <code>INFRASTRUCTURE</code>. Pattern values are <code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITENT</code>, <code>KNOWN BUG</code>, and <code>PERSISTENT</code>. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.</p>
+<p>Classification values are <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, and <code>INFRASTRUCTURE</code>. Pattern values are <code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITTENT</code>, <code>KNOWN_BUG</code>, and <code>PERSISTENT</code>. These are the exact API values; the UI renders <code>KNOWN_BUG</code> as <code>Known Bug</code> and spaces the words for readability. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.</p>
 <h3 id="comments-and-mentions">Comments and mentions</h3>
 <div class="table-wrap"><table>
 <thead>
@@ -1295,7 +1295,7 @@
 </table></div>
 <p>See <a href="configuration-reference.html">Configuration Reference</a> for the full environment variable surface behind these admin settings.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
-<p>Prefer the CLI when you can. Every endpoint above has a <code>rootcoz</code> command counterpart, with SSE streams as the documented exception since the CLI is a one-shot tool. See <a href="cli-reference.html">CLI Command Reference</a> and <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a>.</p>
+<p>Prefer the CLI when you can. Most endpoints above have a <code>rootcoz</code> command counterpart. SSE streams have none, because the CLI is a one-shot tool, and the user-token endpoints (<code>GET</code>/<code>PUT /api/user/tokens</code>) have client methods but no registered CLI command either. See <a href="cli-reference.html">CLI Command Reference</a> and <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a>.</p>
 <p>A three-call integration that skips the UI entirely:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">KEY</span><span class="o">=</span><span class="s2">"</span><span class="nv">$ROOTCOZ_API_KEY</span><span class="s2">"</span>
 <span class="nv">BASE</span><span class="o">=</span>http://localhost:8000

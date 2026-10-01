@@ -176,7 +176,7 @@ Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails
     | `VAPID_PRIVATE_KEY` | empty | string | yes | **yes** | yes |
     | `VAPID_CLAIM_EMAIL` | empty | string | no | **yes** | **no** |
 
-    Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning and disables Web Push. Note the asymmetry: the private key is changeable from the UI, but the public key and claim email are environment-only, because changing them would invalidate subscriptions already registered with browsers.
+    Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that the public key and claim email are environment-only, because changing them would invalidate subscriptions already registered with browsers.
 
 ### Variables that never reach the Server Settings UI
 
@@ -230,7 +230,7 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage, stripped from API responses, and never logged at any level.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
 Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace.
 
