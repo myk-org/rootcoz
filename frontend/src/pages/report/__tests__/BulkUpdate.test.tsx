@@ -638,6 +638,40 @@ describe('bulk failure selection', () => {
     await waitFor(() => expect(screen.queryByText(/selected in/)).not.toBeInTheDocument())
   })
 
+  // PRODUCT DECISION PENDING — this test pins CONTESTED display behaviour, not
+  // settled correctness. It exists so the disagreement is visible and so the fix
+  // is a one-line change once the product owner decides which number is right.
+  //
+  // A selected signature group splits across two live groups on refresh. The bulk
+  // BAR counts selection entries (BulkUpdateBar.tsx:273 renders
+  // `{scopes.length} tests selected in {groups.length} failures`, groups = entries)
+  // and therefore says ONE failure. The CONFIRMATION DIALOG counts live groups
+  // after widening and says TWO. The same fact is reported two ways on one screen.
+  //
+  // The argument for "2 failures" being correct: the user checked one failure, the
+  // refresh split it into two, and they now own two. Under-reporting the blast
+  // radius of a bulk mutation is the worse error — the bar exists to tell the user
+  // how wide the action they are about to confirm is.
+  //
+  // If the product owner decides the bar should say 2, the fix is to hold one
+  // selection entry per live group after reconciliation (the stronger invariant),
+  // and this expectation flips from 1 to 2. Nothing else in the test changes.
+  it('DISPLAY: a split group is reported as 1 failure by the bar and 2 by the dialog', async () => {
+    const user = renderHarness({
+      refreshedFailures: [FAILURES[0], FAILURES[1], failure('test-c1', 'sig-c'), failure('test-c2', 'sig-c-split')],
+    })
+    await user.click(screen.getByRole('checkbox', { name: 'Select test-c1' }))
+    await user.click(screen.getByRole('button', { name: 'Simulate refresh with changed failures' }))
+
+    // What the user reads on the bar.
+    expect(screen.getByText(/2 tests selected in 1 failure/)).toBeInTheDocument()
+
+    // What the user reads when asked to confirm the blast radius.
+    await user.click(screen.getByRole('combobox', { name: 'Bulk classification' }))
+    await user.click(await screen.findByRole('option', { name: 'PRODUCT BUG' }))
+    expect(await screen.findByRole('dialog')).toHaveTextContent('every test sharing the error signature — 2 tests in 2 failures')
+  })
+
   it('collapses a card toggle that re-selects half of a split group into one override request', async () => {
     // A split leaves the entry spanning both live groups under the ORIGINAL id, so
     // ticking one of the two cards is a SECOND entry for a live group already in
