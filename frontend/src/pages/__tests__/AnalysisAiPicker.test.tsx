@@ -161,7 +161,11 @@ describe('analysis credential-scoped pickers', () => {
     render(<MemoryRouter><PeerConfigList peerConfigs={[{ id: 'peer', ai_provider: 'openrouter', ai_model: 'suggested' }]} setPeerConfigs={() => {}} peerModels={{}} maxRounds={1} setMaxRounds={() => {}} strict forceServer /></MemoryRouter>)
     const provider = await screen.findByRole('combobox', { name: 'Peer 1 provider' })
     expect(provider).toHaveTextContent('openrouter (unavailable)')
-    expect(screen.getByRole('combobox', { name: 'Peer 1 model' })).toHaveValue('suggested (unavailable)')
+    // The model input stays a real combobox: raw value, never decorated, so the
+    // user can edit it. Unavailability is conveyed by the disabled list option.
+    const model = screen.getByRole('combobox', { name: 'Peer 1 model' })
+    expect(model).toHaveValue('suggested')
+    expect(model).not.toHaveAttribute('readonly')
     await user.click(provider)
     expect(screen.queryByRole('option', { name: /Openrouter|Openai/ })).not.toBeInTheDocument()
   })
@@ -173,7 +177,9 @@ describe('analysis credential-scoped pickers', () => {
     render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
     const provider = await screen.findByRole('combobox', { name: 'AI Provider' })
     expect(provider).toHaveTextContent('missing (unavailable)')
-    expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('old (unavailable)')
+    const modelInput = screen.getByRole('combobox', { name: 'AI Model' })
+    expect(modelInput).toHaveValue('old')
+    expect(modelInput).not.toHaveAttribute('readonly')
     expect(screen.getByRole('button', { name: 'Re-Analyze' })).toBeDisabled()
     await user.click(provider)
     expect(screen.queryByRole('option', { name: /missing/i })).not.toBeInTheDocument()

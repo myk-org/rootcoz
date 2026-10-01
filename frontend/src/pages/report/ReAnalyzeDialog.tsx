@@ -11,7 +11,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { api } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import { toIntInRange, resolveBuildDisplayId, ciSourceLabel } from '@/lib/utils'
 import type { AnalysisResult } from '@/types'
 import { Section } from '@/components/shared/Section'
@@ -174,7 +174,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         navigate(`/results/${data.job_id}`)
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to submit re-analysis')
+      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to submit re-analysis'))
     } finally {
       setSubmitting(false)
     }

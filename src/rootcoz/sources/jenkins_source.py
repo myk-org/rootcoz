@@ -1015,8 +1015,9 @@ class JenkinsSource(CISource):
         build_number = decrypted_params.get("build_number", 0)
         if not job_name or not build_number:
             raise ValueError(
-                "Original analysis has no stored job_name/build_number; "
-                "cannot re-analyze"
+                "Cannot re-analyze: this job has no stored Jenkins job name and "
+                "build number (missing Jenkins data). Submit the job again from "
+                "Jenkins to analyze it."
             )
         fields["job_name"] = job_name
         fields["build_number"] = build_number
