@@ -1,6 +1,6 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { it, expect, vi } from 'vitest'
+import { it, expect } from 'vitest'
 import { useState } from 'react'
 import { ModelCombobox } from './ModelCombobox'
 
