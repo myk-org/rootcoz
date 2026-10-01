@@ -5,51 +5,25 @@ import os
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
-import click
 import pytest
-import typer.main
 from typer.testing import CliRunner
 
 from rootcoz.cli.client import RootCozError
 from rootcoz.cli.config import ServerConfig
 from rootcoz.cli.main import app
+from tests.conftest import host_env
 
 runner = CliRunner()
 
 
-def _extract_envvar_names(command_name: str) -> tuple[str, ...]:
-    """Extract envvar names bound to a typer command's options.
-
-    Derives the set directly from the Click command object so it stays
-    in sync with the analyze command definition automatically.
-    """
-    # Resolve the underlying Click command via the typer-created Click Group
-    click_group = typer.main.get_command(app)
-    assert isinstance(click_group, click.Group)
-    cmd = click_group.commands.get(command_name)
-    if not cmd:
-        raise AssertionError(
-            f"Command {command_name!r} not found in {click_group.name!r}; "
-            f"available: {sorted(click_group.commands)}"
-        )
-    names: list[str] = []
-    for param in cmd.params:
-        if isinstance(param, click.Option) and param.envvar:
-            names.extend(
-                param.envvar if isinstance(param.envvar, list) else [param.envvar]
-            )
-    return tuple(sorted(names))
-
-
-# Environment variables that the analyze CLI options bind to via envvar=.
-# Used by tests that need a clean environment without inherited CI/local values.
-# Derived from the analyze command definition to avoid hard-coded duplication.
-_ANALYZE_ENV_VARS = _extract_envvar_names("analyze")
-
-
 def _env_without_analyze_bindings() -> dict[str, str]:
-    """Return a copy of os.environ without analyze-related env vars."""
-    return {k: v for k, v in os.environ.items() if k not in _ANALYZE_ENV_VARS}
+    """Return the host allowlist, which contains no analyze env-var bindings.
+
+    The analyze command binds its options to env vars (AI_PROVIDER, AI_MODEL,
+    ...), all of them rootcoz variables. ``host_env()`` allowlists host
+    variables only, so the analyze bindings cannot be inherited.
+    """
+    return host_env()
 
 
 _TEST_SERVER = "http://test-server:8000"
@@ -78,7 +52,6 @@ def mock_client():
         patch.dict(
             os.environ,
             {
-                **{k: v for k, v in os.environ.items() if not k.startswith("ROOTCOZ_")},
                 "ROOTCOZ_SERVER": _TEST_SERVER,
             },
             clear=True,
@@ -868,7 +841,7 @@ class TestServerFlag:
 
     def test_missing_server(self):
         """CLI exits with error when no server is configured."""
-        env = {k: v for k, v in os.environ.items() if k != "ROOTCOZ_SERVER"}
+        env = host_env()
         with (
             patch("rootcoz.cli.main._state", {}),
             patch.dict(os.environ, env, clear=True),

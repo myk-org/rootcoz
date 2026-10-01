@@ -30,6 +30,7 @@ from rootcoz.models import (
     FeedbackResponse,
     PageState,
 )
+from tests.conftest import host_env
 
 _TEST_GITHUB_TOKEN = "test-token-placeholder"
 
@@ -37,30 +38,14 @@ _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
 )
 
-# The host variables the app-under-test may legitimately see. An allowlist, never
-# "real environment minus a denylist": a denylist leaks every credential the
-# developer happens to export (JIRA_PAT, GEMINI_API_KEY, TESTS_REPO_TOKEN, ...)
-# into TestClient(app), so the app then boots with real keys on a dev machine and
-# behaves differently there than in CI.
-#
-# HOME is deliberately absent: with DB_PATH unset, vapid/encryption fall back to
-# ~/.local/share/rootcoz and would read the developer's real key files. TMPDIR
-# covers the home-dir case there (the factories always set DB_PATH anyway).
-_ENV_ALLOWLIST = (
-    "PATH",  # subprocess (git) lookups
-    "TMPDIR",  # tempfile / sqlite spill files
-    "TMP",  # ditto (Windows)
-    "TEMP",  # ditto (Windows)
-    "SYSTEMROOT",  # Windows temp dir resolution
-    "LANG",  # locale-dependent formatting
-    "LC_ALL",  # ditto
-    "TZ",  # timestamp rendering
-)
+# The host variables the app-under-test may legitimately see now come from
+# conftest.host_env(), shared with every other test module that hands an
+# environment to the app under test.
 
 
 def _host_env() -> dict[str, str]:
-    """Return the allowlisted subset of the real environment (see _ENV_ALLOWLIST)."""
-    return {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
+    """Return the allowlisted subset of the real environment (see conftest.host_env)."""
+    return host_env()
 
 
 async def _posted_body(title: str, body: str, labels: list[str]) -> str:

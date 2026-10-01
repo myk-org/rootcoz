@@ -14,6 +14,7 @@ from rootcoz.encryption import (
     encrypt_sensitive_fields,
     strip_sensitive_from_response,
 )
+from tests.conftest import host_env
 
 
 @pytest.fixture
@@ -30,7 +31,7 @@ def fallback_key_env(tmp_path):
     Yields inside the patched environment so tests run with the
     file-based fallback key mechanism.
     """
-    env = {k: v for k, v in os.environ.items() if k != "ROOTCOZ_ENCRYPTION_KEY"}
+    env = host_env()
     env["XDG_DATA_HOME"] = str(tmp_path)
     with patch.dict(os.environ, env, clear=True):
         yield
