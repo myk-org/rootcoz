@@ -1852,7 +1852,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Rotate another user's API key | no | no | no | yes |
    | Access `/api/admin/*` (Users, Tokens, Logs, Settings, admin Chat, DB tools) | no | no | no | yes |
 
-   > **Note:** This table describes what the server currently enforces, which is not always what `AGENTS.md` describes. Rotating your own API key works for a `viewer` today because `POST /api/auth/rotate-key` checks no role, so this row reads `yes`; `AGENTS.md` reserves it for `reviewer`. Two further routes are affected — `PUT /results/{job_id}/reviewed` (which feeds auto-review and the exporter push) and `PUT /results/{job_id}/tags`. Tracked in [#295](https://github.com/myk-org/rootcoz/issues/295) and [#289](https://github.com/myk-org/rootcoz/issues/289); treat the current behaviour as a bug rather than a supported capability. `GET /api/admin/token-usage/stream` is correctly admin-only: the authentication middleware rejects every non-admin request under `/api/admin/` before the handler runs, so it does not belong in this list.
+   > **Note:** This table describes what the server currently enforces, which is not always what `AGENTS.md` describes. Rotating your own API key works for a `viewer` today because `POST /api/auth/rotate-key` checks no role, so this row reads `yes`; `AGENTS.md` reserves it for `reviewer`. Two further routes used to have the same gap — `PUT /results/{job_id}/reviewed` (which feeds auto-review and the exporter push) and `PUT /results/{job_id}/tags` — and now require `reviewer`. `POST /api/auth/rotate-key` remains tracked in [#289](https://github.com/myk-org/rootcoz/issues/289); treat the current behaviour as a bug rather than a supported capability. `GET /api/admin/token-usage/stream` is correctly admin-only: the authentication middleware rejects every non-admin request under `/api/admin/` before the handler runs, so it does not belong in this list.
 
    Two flags sit outside the role ladder:
 
@@ -2173,16 +2173,16 @@ The shared body accepts the server defaults as per-request overrides:
 
 | Method | Path | Min role | Body |
 | --- | --- | --- | --- |
-| PUT | `/results/{job_id}/reviewed` | viewer | `test_name`, `reviewed`. Known gap — see the note below |
+| PUT | `/results/{job_id}/reviewed` | reviewer | `test_name`, `reviewed`. |
 | PUT | `/results/{job_id}/override-classification` | reviewer | `test_name`, `classification` |
 | PUT | `/results/{job_id}/override-pattern` | reviewer | `test_name`, `pattern` |
-| PUT | `/results/{job_id}/tags` | viewer | name and tag fields. Known gap — see the note below |
+| PUT | `/results/{job_id}/tags` | reviewer | name and tag fields. |
 | DELETE | `/results/{job_id}` | operator | none; deletes your own job, admins delete any |
 | DELETE | `/api/results/bulk` | operator | `job_ids` |
 
 Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, and `PERSISTENT`. These are the exact API values; the UI renders `KNOWN_BUG` as `Known Bug` and spaces the words for readability.
 
-> **Note:** This table lists the role each route **actually enforces**, not the role the role table in AGENTS.md describes. Three routes marked "Known gap" enforce no role beyond authentication — `viewer` is therefore the effective minimum, even though the documented model reserves them for `reviewer`. They are tracked in issues [#295](https://github.com/myk-org/rootcoz/issues/295) (`PUT /results/{job_id}/reviewed`) and [#289](https://github.com/myk-org/rootcoz/issues/289) (`POST /api/auth/rotate-key`, `PUT /results/{job_id}/tags`). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
+> **Note:** This table lists the role each route **actually enforces**. One route marked "Known gap" enforces no role beyond authentication — `viewer` is therefore its effective minimum, even though the documented model reserves it for `reviewer`: `POST /api/auth/rotate-key`, tracked in [#289](https://github.com/myk-org/rootcoz/issues/289). Treat it as a bug, not as a supported way to operate. `PUT /results/{job_id}/reviewed` and `PUT /results/{job_id}/tags` were previously gaps as well and now require `reviewer`. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 
 ### Comments and mentions
 

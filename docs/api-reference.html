@@ -647,8 +647,8 @@
 <tr>
 <td>PUT</td>
 <td><code>/results/{job_id}/reviewed</code></td>
-<td>viewer</td>
-<td><code>test_name</code>, <code>reviewed</code>. Known gap — see the note below</td>
+<td>reviewer</td>
+<td><code>test_name</code>, <code>reviewed</code>.</td>
 </tr>
 <tr>
 <td>PUT</td>
@@ -665,8 +665,8 @@
 <tr>
 <td>PUT</td>
 <td><code>/results/{job_id}/tags</code></td>
-<td>viewer</td>
-<td>name and tag fields. Known gap — see the note below</td>
+<td>reviewer</td>
+<td>name and tag fields.</td>
 </tr>
 <tr>
 <td>DELETE</td>
@@ -684,7 +684,7 @@
 </table></div>
 <p>Classification values are <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, and <code>INFRASTRUCTURE</code>. Pattern values are <code>NEW</code>, <code>REGRESSION</code>, <code>FLAKY</code>, <code>INTERMITTENT</code>, <code>KNOWN_BUG</code>, and <code>PERSISTENT</code>. These are the exact API values; the UI renders <code>KNOWN_BUG</code> as <code>Known Bug</code> and spaces the words for readability.</p>
 <blockquote>
-<p><strong>Note:</strong> This table lists the role each route <strong>actually enforces</strong>, not the role the role table in AGENTS.md describes. Three routes marked "Known gap" enforce no role beyond authentication — <code>viewer</code> is therefore the effective minimum, even though the documented model reserves them for <code>reviewer</code>. They are tracked in issues <a href="https://github.com/myk-org/rootcoz/issues/295">#295</a> (<code>PUT /results/{job_id}/reviewed</code>) and <a href="https://github.com/myk-org/rootcoz/issues/289">#289</a> (<code>POST /api/auth/rotate-key</code>, <code>PUT /results/{job_id}/tags</code>). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.</p>
+<p><strong>Note:</strong> This table lists the role each route <strong>actually enforces</strong>. One route marked "Known gap" enforces no role beyond authentication — <code>viewer</code> is therefore its effective minimum, even though the documented model reserves it for <code>reviewer</code>: <code>POST /api/auth/rotate-key</code>, tracked in <a href="https://github.com/myk-org/rootcoz/issues/289">#289</a>. Treat it as a bug, not as a supported way to operate. <code>PUT /results/{job_id}/reviewed</code> and <code>PUT /results/{job_id}/tags</code> were previously gaps as well and now require <code>reviewer</code>. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.</p>
 </blockquote>
 <h3 id="comments-and-mentions">Comments and mentions</h3>
 <div class="table-wrap"><table>
