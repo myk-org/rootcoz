@@ -43,6 +43,7 @@ vi.mock('@/lib/SSEProvider', () => ({
 
 beforeEach(() => {
   localStorage.clear()
+  mockAuth.isAdmin = false
   mockUseSSE.mockClear()
 })
 
@@ -105,7 +106,6 @@ describe('Layout', () => {
     const [topic, events] = mockUseSSE.mock.calls.at(-1)!
     expect(topic).toBe('navbar')
     expect(Object.keys(events)).toContain('pending-count')
-    mockAuth.isAdmin = false
   })
 
   it('updates the pending badge from the navbar pending-count SSE event', () => {
@@ -120,6 +120,12 @@ describe('Layout', () => {
 
     act(() => events['pending-count']('0'))
     expect(screen.queryByText('3')).toBeNull()
-    mockAuth.isAdmin = false
+  })
+
+  it('hides admin navigation for a non-admin after an admin test', () => {
+    // Guards the shared mockAuth: an admin test that leaked isAdmin=true
+    // would keep the admin nav items mounted for every later test.
+    renderLayout()
+    expect(screen.queryByText('Users')).toBeNull()
   })
 })

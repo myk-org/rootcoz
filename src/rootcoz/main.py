@@ -482,6 +482,9 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
 _active_count_listeners: set[asyncio.Event] = set()
 _mention_listeners: dict[str, set[asyncio.Event]] = {}
 _pending_count_listeners: set[asyncio.Event] = set()
+# Seconds an SSE stream waits before emitting a keepalive.  The navbar streams
+# also retry a failed pending-count lookup on this tick.
+_SSE_KEEPALIVE_SECONDS = 30
 
 
 async def _periodic_session_cleanup() -> None:
@@ -509,33 +512,65 @@ def notify_pending_count_changed() -> None:
         event.set()
 
 
-async def _pending_user_count() -> int:
-    """Pending approval count for navbar SSE; 0 when storage cannot answer."""
+async def _pending_user_count() -> int | None:
+    """Pending approval count for navbar SSE; ``None`` when storage cannot answer."""
     try:
         return len(await storage.list_pending_users())
     except aiosqlite.Error, OSError, TypeError, ValueError:
-        return 0
+        logger.debug("Failed to fetch pending user count for navbar SSE", exc_info=True)
+        return None
 
 
-async def _pending_count_after_change(
-    event: asyncio.Event, username: str
-) -> tuple[int, bool]:
-    """Recount pending users for an admin navbar stream.
+class _PendingFeed:
+    """Per-connection pending-count state for a navbar SSE stream.
 
-    Returns ``(count, still_admin)``.  The admin role is re-read from the
-    database on every notification: when it was revoked while the stream was
-    open, the listener is unregistered and the count reported as 0 so the
-    badge clears instead of keeping an admin-only number.
+    Owns the admin re-check, the recount and the dedup bookkeeping so the
+    navbar and multiplexed streams share one implementation.
     """
-    try:
-        still_admin = await _ai_admin_role_current(username)
-    except aiosqlite.Error, OSError, TypeError, ValueError:
-        logger.debug("Failed to re-check admin role for navbar SSE", exc_info=True)
-        still_admin = True
-    if not still_admin:
-        _pending_count_listeners.discard(event)
-        return 0, False
-    return await _pending_user_count(), True
+
+    def __init__(self, event: asyncio.Event | None, username: str, name: str):
+        self.event = event
+        self.username = username
+        self.name = name
+        # ``None`` = no count delivered yet, or the last lookup failed.
+        self.last: int | None = None
+
+    async def step(self) -> str | None:
+        """Re-verify the admin role and recount; return the chunk to emit."""
+        if self.event is None:
+            return None
+        event = self.event
+        try:
+            still_admin: bool | None = await _ai_admin_role_current(self.username)
+        except aiosqlite.Error, OSError, TypeError, ValueError:
+            # Unverifiable is treated as unauthorized: a revoked admin must
+            # not receive a pending count on an already-open stream.
+            logger.debug("Failed to re-check admin role for navbar SSE", exc_info=True)
+            still_admin = None
+        if not still_admin:
+            _pending_count_listeners.discard(event)
+            self.event = None
+            self.last = None
+            # A confirmed revocation clears the badge once; an unverifiable
+            # role is not emitted to at all.
+            if still_admin is None:
+                return None
+            return f"event: {self.name}\ndata: 0\n\n"
+        count = await _pending_user_count()
+        if count is None:
+            # Storage failure: keep the last good count on the badge, retry on
+            # the next keepalive instead of waiting for a pending mutation.
+            self.last = None
+            return None
+        if count != self.last:
+            self.last = count
+            return f"event: {self.name}\ndata: {count}\n\n"
+        return None
+
+    def request_retry(self) -> None:
+        """Re-trigger a failed lookup on the next keepalive tick."""
+        if self.event is not None and self.last is None:
+            self.event.set()
 
 
 def notify_mentions_changed(username: str) -> None:
@@ -641,7 +676,7 @@ def _make_sse_stream(
                     wait_task = asyncio.create_task(my_event.wait())
                     done, pending = await asyncio.wait(
                         [wait_task],
-                        timeout=30,
+                        timeout=_SSE_KEEPALIVE_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -8305,6 +8340,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
             _mention_listeners.setdefault(username, set()).add(mention_event)
         if pending_event is not None:
             _pending_count_listeners.add(pending_event)
+        pending_feed = _PendingFeed(pending_event, username, "pending-count")
 
         try:
             # Send both counts immediately on connect
@@ -8326,10 +8362,8 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     last_unread = 0
                     yield "event: unread-count\ndata: 0\n\n"
 
-            last_pending = -1
-            if pending_event is not None:
-                last_pending = await _pending_user_count()
-                yield f"event: pending-count\ndata: {last_pending}\n\n"
+            if chunk := await pending_feed.step():
+                yield chunk
 
             active_wait_tasks: list[asyncio.Task[Any]] = []
             while True:
@@ -8343,7 +8377,7 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                 try:
                     done, pending = await asyncio.wait(
                         active_wait_tasks,
-                        timeout=30,
+                        timeout=_SSE_KEEPALIVE_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -8356,6 +8390,9 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
                     break
 
                 if not done:
+                    # A failed pending lookup retries here rather than waiting
+                    # for the next pending-user mutation.
+                    pending_feed.request_retry()
                     yield ": keepalive\n\n"
                     continue
 
@@ -8389,17 +8426,8 @@ async def stream_navbar_counts(request: Request) -> StreamingResponse:
 
                 if pending_event is not None and pending_event.is_set():
                     pending_event.clear()
-                    pending_count, still_admin = await _pending_count_after_change(
-                        pending_event, username
-                    )
-                    if not still_admin:
-                        # Admin revoked mid-stream: stop listening, force one
-                        # final clear so the badge does not keep a stale count.
-                        pending_event = None
-                        last_pending = -1
-                    if pending_count != last_pending:
-                        yield f"event: pending-count\ndata: {pending_count}\n\n"
-                        last_pending = pending_count
+                    if chunk := await pending_feed.step():
+                        yield chunk
         finally:
             # Cancel any pending wait tasks on disconnect
             for task in active_wait_tasks:
@@ -8585,7 +8613,6 @@ async def stream_multiplexed(
         pending_event: asyncio.Event | None = None
         last_active = -1
         last_unread = -1
-        last_pending = -1
 
         if navbar_requested:
             active_event = asyncio.Event()
@@ -8596,6 +8623,7 @@ async def stream_multiplexed(
             if is_admin:
                 pending_event = asyncio.Event()
                 _pending_count_listeners.add(pending_event)
+        pending_feed = _PendingFeed(pending_event, username, "navbar:pending-count")
 
         wait_tasks: list[asyncio.Task[Any]] = []
 
@@ -8617,9 +8645,8 @@ async def stream_multiplexed(
                     except aiosqlite.Error, OSError, TypeError, ValueError:
                         last_unread = 0
                         yield "event: navbar:unread-count\ndata: 0\n\n"
-                if pending_event is not None:
-                    last_pending = await _pending_user_count()
-                    yield f"event: navbar:pending-count\ndata: {last_pending}\n\n"
+                if chunk := await pending_feed.step():
+                    yield chunk
 
             while True:
                 # Build wait list from all registered events
@@ -8639,7 +8666,7 @@ async def stream_multiplexed(
                 try:
                     done, pending = await asyncio.wait(
                         wait_tasks,
-                        timeout=30,
+                        timeout=_SSE_KEEPALIVE_SECONDS,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in pending:
@@ -8652,6 +8679,9 @@ async def stream_multiplexed(
                     break
 
                 if not done:
+                    # A failed pending lookup retries here rather than waiting
+                    # for the next pending-user mutation.
+                    pending_feed.request_retry()
                     yield ": keepalive\n\n"
                     continue
 
@@ -8687,19 +8717,8 @@ async def stream_multiplexed(
                                 exc_info=True,
                             )
                     elif prefix == "navbar:pending":
-                        pending_count, still_admin = await _pending_count_after_change(
-                            ev, username
-                        )
-                        if not still_admin:
-                            # Admin revoked mid-stream: stop listening and force
-                            # one final clear of the badge.
-                            pending_event = None
-                            last_pending = -1
-                        if pending_count != last_pending:
-                            yield (
-                                f"event: navbar:pending-count\ndata: {pending_count}\n\n"
-                            )
-                            last_pending = pending_count
+                        if chunk := await pending_feed.step():
+                            yield chunk
                     else:
                         # Simple notification topics — emit event with topic prefix
                         event_map = {
