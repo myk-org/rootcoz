@@ -1,13 +1,15 @@
 """VAPID key management for Web Push notifications.
 
-VAPID keys are read from environment variables (VAPID_PUBLIC_KEY,
-VAPID_PRIVATE_KEY). When not set, a key pair is auto-generated on
-first use and persisted alongside the database (parent of DB_PATH).
-Falls back to $XDG_DATA_HOME/rootcoz/ or ~/.local/share/rootcoz/ when
-DB_PATH is not set.
+VAPID keys are resolved with the priority **env var > Server Settings DB >
+auto-generated key file**.  When neither env vars nor the Server Settings DB
+provide a private key, a key pair is auto-generated on first use and persisted
+alongside the database (parent of DB_PATH).  Falls back to
+$XDG_DATA_HOME/rootcoz/ or ~/.local/share/rootcoz/ when DB_PATH is not set.
+The public key is derived from the private key whenever only the private key
+is configured, so the served pair always matches.
 
-The claim email defaults to 'mailto:noreply@rootcoz.local' if
-VAPID_CLAIM_EMAIL is not set.
+The claim email defaults to 'mailto:noreply@rootcoz.local' if neither
+VAPID_CLAIM_EMAIL nor the DB setting is set.
 """
 
 import base64
@@ -64,6 +66,37 @@ def _generate_vapid_keys() -> dict[str, str]:
     pub_b64 = base64.urlsafe_b64encode(pub_bytes).rstrip(b"=").decode()
 
     return {"public_key": pub_b64, "private_key": priv_b64}
+
+
+def _setting(name: str) -> str:
+    """Resolve a VAPID setting: environment variable first, then settings DB.
+
+    *name* is the Settings field name; its env var is the upper-case form
+    (``vapid_private_key`` -> ``VAPID_PRIVATE_KEY``).
+    """
+    value = os.environ.get(name.upper(), "").strip()
+    if value:
+        return value
+    # Late import: config.py imports this module at import time.
+    from rootcoz.config import get_db_setting
+
+    return get_db_setting(name).strip()
+
+
+def _derive_public_key(private_key_b64: str) -> str:
+    """Derive the VAPID public key from a raw base64 private key scalar."""
+    padded = private_key_b64 + "=" * (-len(private_key_b64) % 4)
+    priv_bytes = base64.urlsafe_b64decode(padded)
+    if len(priv_bytes) != 32:
+        raise ValueError("VAPID private key must decode to 32 bytes")
+    private_key = ec.derive_private_key(
+        int.from_bytes(priv_bytes, "big"), ec.SECP256R1()
+    )
+    pub_bytes = private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return base64.urlsafe_b64encode(pub_bytes).rstrip(b"=").decode()
 
 
 def _read_key_file_when_ready(
@@ -141,21 +174,34 @@ def _get_or_create_vapid_keys() -> dict[str, Any]:
 def get_vapid_config() -> dict[str, Any]:
     """Return the full VAPID configuration.
 
-    Priority: env vars > auto-generated file.
+    Priority: env vars > Server Settings DB > auto-generated key file.
+    When only a private key is configured, the public key is derived from it.
 
     Returns dict with ``public_key``, ``private_key``, ``claim_email``.
     Returns empty dict if keys cannot be resolved.
     """
-    pub = os.environ.get("VAPID_PUBLIC_KEY", "").strip()
-    priv = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
-    email = os.environ.get("VAPID_CLAIM_EMAIL", "").strip()
+    pub = _setting("vapid_public_key")
+    priv = _setting("vapid_private_key")
+    email = _setting("vapid_claim_email") or DEFAULT_CLAIM_EMAIL
 
     if pub and priv:
-        # Env vars take priority
         return {
             "public_key": pub,
             "private_key": priv,
-            "claim_email": email or DEFAULT_CLAIM_EMAIL,
+            "claim_email": email,
+        }
+
+    if priv:
+        # Private key only — derive the matching public key
+        try:
+            pub = _derive_public_key(priv)
+        except (ValueError, TypeError) as exc:
+            logger.warning("Configured VAPID private key is unusable: %s", exc)
+            return {}
+        return {
+            "public_key": pub,
+            "private_key": priv,
+            "claim_email": email,
         }
 
     # Auto-generate
@@ -164,7 +210,7 @@ def get_vapid_config() -> dict[str, Any]:
         return {
             "public_key": keys["public_key"],
             "private_key": keys["private_key"],
-            "claim_email": email or DEFAULT_CLAIM_EMAIL,
+            "claim_email": email,
         }
     except Exception:  # VAPID resolution must never raise; callers gate on truthy dict
         logger.warning("Failed to resolve VAPID keys", exc_info=True)

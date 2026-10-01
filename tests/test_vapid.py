@@ -4,6 +4,8 @@ import json
 import os
 from unittest.mock import patch
 
+import pytest
+
 from rootcoz.vapid import (
     DEFAULT_CLAIM_EMAIL,
     _generate_vapid_keys,
@@ -180,3 +182,103 @@ class TestGetVapidConfig:
         ):
             cfg = get_vapid_config()
         assert cfg == {}
+
+
+class TestServerSettingsPriority:
+    """Priority: env var > Server Settings DB > generated key file (issue #288)."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_db_cache(self):
+        from rootcoz.config import clear_db_settings_cache
+
+        clear_db_settings_cache()
+        yield
+        clear_db_settings_cache()
+
+    @staticmethod
+    def _set_db(**values: str) -> None:
+        from rootcoz.config import update_db_settings_cache
+
+        update_db_settings_cache(values)
+
+    @staticmethod
+    def _no_env() -> dict[str, str]:
+        return {
+            "VAPID_PUBLIC_KEY": "",
+            "VAPID_PRIVATE_KEY": "",  # pragma: allowlist secret  # gitleaks:allow
+            "VAPID_CLAIM_EMAIL": "",
+        }
+
+    def test_db_settings_used_when_no_env(self):
+        priv = "db-private-key"  # pragma: allowlist secret  # gitleaks:allow
+        self._set_db(vapid_public_key="db-pub", vapid_private_key=priv)
+        with patch.dict(os.environ, self._no_env(), clear=False):
+            cfg = get_vapid_config()
+        assert cfg["public_key"] == "db-pub"
+        assert cfg["private_key"] == priv
+
+    def test_env_wins_over_db(self):
+        env_priv = "env-private-key"  # pragma: allowlist secret  # gitleaks:allow
+        self._set_db(
+            vapid_public_key="db-pub",
+            vapid_private_key="db-private-key",  # pragma: allowlist secret  # gitleaks:allow
+        )
+        env = {
+            "VAPID_PUBLIC_KEY": "env-pub",
+            "VAPID_PRIVATE_KEY": env_priv,
+        }
+        with patch.dict(os.environ, env, clear=False):
+            cfg = get_vapid_config()
+        assert cfg["public_key"] == "env-pub"
+        assert cfg["private_key"] == env_priv
+
+    def test_public_key_derived_from_db_private_key(self):
+        keys = _generate_vapid_keys()
+        self._set_db(vapid_private_key=keys["private_key"])
+        with patch.dict(os.environ, self._no_env(), clear=False):
+            cfg = get_vapid_config()
+        assert cfg["private_key"] == keys["private_key"]
+        assert cfg["public_key"] == keys["public_key"]
+
+    def test_public_key_derived_from_env_private_key(self):
+        keys = _generate_vapid_keys()
+        env = {"VAPID_PRIVATE_KEY": keys["private_key"]}
+        with patch.dict(os.environ, env, clear=False):
+            cfg = get_vapid_config()
+        assert cfg["public_key"] == keys["public_key"]
+
+    def test_claim_email_from_db(self):
+        keys = _generate_vapid_keys()
+        self._set_db(
+            vapid_private_key=keys["private_key"],
+            vapid_claim_email="db@example.com",
+        )
+        with patch.dict(os.environ, self._no_env(), clear=False):
+            cfg = get_vapid_config()
+        assert cfg["claim_email"] == "db@example.com"
+
+    def test_generated_file_used_when_nothing_configured(self, tmp_path):
+        env = self._no_env() | {"XDG_DATA_HOME": str(tmp_path)}
+        with patch.dict(os.environ, env, clear=False):
+            cfg = get_vapid_config()
+        stored = json.loads((tmp_path / "rootcoz" / ".vapid_keys.json").read_text())
+        assert cfg["public_key"] == stored["public_key"]
+        assert cfg["private_key"] == stored["private_key"]
+
+    def test_invalid_db_private_key_returns_empty(self):
+        self._set_db(vapid_private_key="not-a-real-key")  # pragma: allowlist secret
+        with patch.dict(os.environ, self._no_env(), clear=False):
+            cfg = get_vapid_config()
+        assert cfg == {}
+
+    def test_web_push_enabled_with_only_db_private_key(self):
+        from rootcoz.config import get_settings
+
+        keys = _generate_vapid_keys()
+        self._set_db(vapid_private_key=keys["private_key"])
+        env = self._no_env() | {"JENKINS_URL": "https://jenkins.example.com"}
+        with patch.dict(os.environ, env, clear=True):
+            get_settings.cache_clear()
+            settings = get_settings()
+            get_settings.cache_clear()
+            assert settings.web_push_enabled is True

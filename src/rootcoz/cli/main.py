@@ -331,6 +331,22 @@ def _echo_api_key_warning(api_key: str) -> None:
     typer.echo(f"API Key: {api_key}")
 
 
+def _validate_child_scope(child_job_name: str, child_build_number: int) -> None:
+    """Validate the ``--child-job`` / ``--child-build`` pair.
+
+    ``--child-build`` is only meaningful with ``--child-job``: the client drops
+    the build number when no child job is given, so an unpaired ``--child-build``
+    would silently write parent-scoped data.  Every command accepting both
+    flags must call this so the guard cannot drift between commands.
+    """
+    if child_build_number < 0:
+        typer.echo("Error: --child-build must be non-negative.", err=True)
+        raise typer.Exit(1)
+    if child_build_number > 0 and not child_job_name:
+        typer.echo("Error: --child-build requires --child-job.", err=True)
+        raise typer.Exit(1)
+
+
 def _require_api_key(key: str, action: str = "Operation") -> None:
     """Exit with error if API key is missing from response."""
     if not key:
@@ -935,12 +951,7 @@ def set_reviewed_cmd(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Set or clear the reviewed state for a test failure."""
-    if child_build_number < 0:
-        typer.echo("Error: --child-build must be non-negative.", err=True)
-        raise typer.Exit(1)
-    if child_build_number > 0 and not child_job_name:
-        typer.echo("Error: --child-build requires --child-job.", err=True)
-        raise typer.Exit(1)
+    _validate_child_scope(child_job_name, child_build_number)
 
     data = _run_client_command(
         json_output,
@@ -977,6 +988,8 @@ def set_tracked_in_cmd(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Set or clear the tracked-in URL for a test failure."""
+    _validate_child_scope(child_job_name, child_build_number)
+
     data = _run_client_command(
         json_output,
         lambda c: c.set_tracked_in(
@@ -1924,6 +1937,7 @@ def classify(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Classify a test failure."""
+    _validate_child_scope(child_job, child_build)
     _set_json(json_output)
     try:
         client = _get_client()
@@ -2034,6 +2048,7 @@ def comments_add(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Add a comment to a test failure."""
+    _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
     try:
         client = _get_client()
@@ -2415,6 +2430,7 @@ def preview_issue(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Preview generated issue content (GitHub or Jira)."""
+    _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
     normalized_type = _validate_issue_type(issue_type)
     (
@@ -2546,6 +2562,7 @@ def create_issue(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Create a GitHub issue or Jira bug from a failure analysis."""
+    _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
     normalized_type = _validate_issue_type(issue_type)
     (
@@ -2744,6 +2761,7 @@ def override_classification_cmd(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Override the classification of a failure."""
+    _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
     try:
         client = _get_client()
@@ -2778,6 +2796,7 @@ def override_pattern_cmd(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Override the pattern of a failure."""
+    _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
     try:
         client = _get_client()
