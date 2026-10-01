@@ -99,7 +99,10 @@ async def send_mention_notifications(
             )
             return
 
-        report_path = f"/report/{job_id}"
+        # The SPA serves the report at /results/:jobId (frontend/src/App.tsx).
+        # /report/:id is not a registered route, so a tap on the notification
+        # used to land on an unmatched URL.
+        report_path = f"/results/{job_id}"
         url = (
             f"{public_base_url.rstrip('/')}{report_path}"
             if public_base_url

@@ -2,6 +2,7 @@
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -131,7 +132,50 @@ class TestSendMentionNotifications:
             payload = json.loads(call_args.kwargs["data"])
             assert payload["title"] == "Mentioned by @alice"
             assert "test_foo" in payload["body"]
-            assert payload["url"] == "https://rootcoz.example.com/report/job-1"
+            assert payload["url"] == "https://rootcoz.example.com/results/job-1"
+
+    @pytest.mark.asyncio
+    async def test_notification_url_matches_registered_route(self) -> None:
+        """The notification link must use the route the SPA actually registers.
+
+        The report page is served at /results/:jobId (frontend/src/App.tsx);
+        /report/:id is not a registered route, so pointing notifications at
+        it makes every tap land on an unmatched URL.
+        """
+        subscriptions = [
+            {
+                "username": "bob",
+                "endpoint": "https://push.example.com/sub/bob-1",
+                "p256dh_key": "p256dh-bob",  # pragma: allowlist secret  # gitleaks:allow
+                "auth_key": "auth-bob",  # pragma: allowlist secret  # gitleaks:allow
+            },
+        ]
+        with (
+            patch(
+                "rootcoz.notifications.get_push_subscriptions_for_users",
+                new_callable=AsyncMock,
+                return_value=subscriptions,
+            ),
+            patch(
+                "rootcoz.notifications.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_to_thread,
+        ):
+            await send_mention_notifications(
+                mentioned_usernames=["bob"],
+                comment_author="alice",
+                job_id="job-1",
+                test_name="test_foo",
+                vapid_private_key="fake-key",  # pragma: allowlist secret
+                vapid_claim_email="admin@example.com",
+                public_base_url="https://rootcoz.example.com",
+            )
+            payload = json.loads(mock_to_thread.call_args.kwargs["data"])
+            path = urlsplit(payload["url"]).path
+            assert path == "/results/job-1", (
+                f"notification points at {path}, which is not a registered "
+                "SPA route; the report lives at /results/:jobId"
+            )
 
     @pytest.mark.asyncio
     async def test_stale_subscriptions_cleaned_up(self) -> None:
@@ -313,4 +357,4 @@ class TestSendMentionNotifications:
                 public_base_url=None,
             )
             payload = json.loads(mock_to_thread.call_args.kwargs["data"])
-            assert payload["url"] == "/report/job-1"
+            assert payload["url"] == "/results/job-1"
