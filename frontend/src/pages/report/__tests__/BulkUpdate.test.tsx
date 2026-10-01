@@ -371,6 +371,58 @@ describe('bulk failure selection', () => {
     expect(card.queryByText('CODE ISSUE')).toBeNull()
   })
 
+  it('sends only the live scope when a refresh removes a selected test mid-confirmation', async () => {
+    // The refreshed report dropped test-b; test-a and the sig-c group survive.
+    const user = renderHarness({ removedFailures: [FAILURES[0], FAILURES[2], FAILURES[3]] })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
+
+    await user.click(screen.getByRole('button', { name: 'Mark reviewed' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('Apply to 4 tests in 3 failures?')
+
+    // A status-changed refresh lands while the confirmation is open.
+    fireEvent.click(behindDialog('Simulate refresh without removed failures', 'button'))
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('Apply to 3 tests in 2 failures?'))
+    expect(screen.getByText(/3 tests selected in 2 failures/)).toBeInTheDocument()
+
+    // The text is what gets sent: three requests, and never the removed test.
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Mark reviewed' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(3))
+    for (const name of ['test-a', 'test-c1', 'test-c2']) {
+      expect(put).toHaveBeenCalledWith('/results/job-1/reviewed', {
+        test_name: name, reviewed: true, child_job_name: '', child_build_number: 0,
+      })
+    }
+    expect(put).not.toHaveBeenCalledWith('/results/job-1/reviewed', expect.objectContaining({ test_name: 'test-b' }))
+  })
+
+  it('re-derives a widened override scope after a refresh removes a selected test', async () => {
+    // The refreshed report holds test-a and test-c1: test-b is gone and the
+    // sig-c group lost its sibling.
+    const user = renderHarness({ removedFailures: [FAILURES[0], FAILURES[2]] })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
+
+    await user.click(screen.getByRole('combobox', { name: 'Bulk classification' }))
+    await user.click(await screen.findByRole('option', { name: 'PRODUCT BUG' }))
+    expect(await screen.findByRole('dialog')).toHaveTextContent('every test sharing the error signature — 4 tests in 3 failures')
+
+    fireEvent.click(behindDialog('Simulate refresh without removed failures', 'button'))
+    // The widening is re-computed against the refreshed result: sig-c no longer
+    // has a sibling to widen to, so the scope is the two surviving tests.
+    await waitFor(() =>
+      expect(screen.getByRole('dialog')).toHaveTextContent('every test sharing the error signature — 2 tests in 2 failures'),
+    )
+
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Apply' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put).toHaveBeenCalledWith('/results/job-1/override-classification', {
+      test_name: 'test-a', classification: 'PRODUCT BUG', child_job_name: '', child_build_number: 0,
+    })
+    expect(put).toHaveBeenCalledWith('/results/job-1/override-classification', {
+      test_name: 'test-c1', classification: 'PRODUCT BUG', child_job_name: '', child_build_number: 0,
+    })
+  })
+
   it('clears the previous bulk error when the selection is cleared', async () => {
     put.mockImplementation(async (_path: string, body: { test_name: string }) => {
       if (body.test_name === 'test-b') throw new Error('boom')

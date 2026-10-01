@@ -36,6 +36,15 @@ interface PendingAction {
   run: () => Promise<{ failed: SelectedGroup[]; warning?: string }>
 }
 
+/** What the user asked for. The scope it acts on is re-derived from the live
+ *  selection at render time, so a background refresh cannot leave the dialog
+ *  describing a request that would send removed tests. */
+type BulkRequest =
+  | { kind: 'review'; next: boolean }
+  | { kind: 'classification'; classification: string }
+  | { kind: 'pattern'; pattern: string }
+  | { kind: 'trackIn'; url: string }
+
 /** Map failed per-test scopes back to narrowed groups so a retry skips what succeeded. */
 function failedGroups(groups: SelectedGroup[], failed: FailureScope[]): SelectedGroup[] {
   const keys = new Set(failed.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber)))
@@ -44,12 +53,23 @@ function failedGroups(groups: SelectedGroup[], failed: FailureScope[]): Selected
     .filter((g) => g.testNames.length > 0)
 }
 
+/** One request per signature group — the backend propagates an override to every
+ *  test sharing the error signature, so a per-test call would write the same
+ *  rows (and history entries) once per test. */
+function runOverrides(groups: SelectedGroup[], run: (group: SelectedGroup, rep: FailureScope) => Promise<void>) {
+  return runBatched(
+    groups,
+    async (g) => run(g, { testName: g.testNames[0], childJobName: g.childJobName, childBuildNumber: g.childBuildNumber }),
+    BULK_BATCH_SIZE,
+  )
+}
+
 /** Bulk-apply the existing per-failure edits to the selected failure groups. */
 export function BulkUpdateBar() {
   const { result, selection, reviews } = useReportState()
   const dispatch = useReportDispatch()
   const { role } = useAuth()
-  const [pending, setPending] = useState<PendingAction | null>(null)
+  const [pendingRequest, setPendingRequest] = useState<BulkRequest | null>(null)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // A run message that must outlive the bar itself: the selection it applied to is
@@ -70,7 +90,7 @@ export function BulkUpdateBar() {
   // and error so they cannot resurface on the next selection.
   useEffect(() => {
     if (groups.length === 0) {
-      setPending(null)
+      setPendingRequest(null)
       setTrackOpen(false)
       setTrackUrl('')
       setError(null)
@@ -98,6 +118,82 @@ export function BulkUpdateBar() {
   const overrideTargets = widenToSignatureGroups(result, groups)
   const overrideScopes = selectedScopes(overrideTargets)
   const overrideScopeText = `every test sharing the error signature — ${overrideScopes.length} ${overrideScopes.length === 1 ? 'test' : 'tests'} in ${overrideTargets.length} ${overrideTargets.length === 1 ? 'failure' : 'failures'}`
+
+  /** Build the confirmation from the selection as it is *now*. A refresh that
+   *  removes a selected test reconciles the selection, so the dialog text and
+   *  the requests it sends stay in step; nothing is left when the selection is
+   *  empty and the dialog is discarded. */
+  function buildPending(request: BulkRequest): PendingAction | null {
+    if (groups.length === 0) return null
+    switch (request.kind) {
+      case 'review':
+        return {
+          title: request.next ? 'Mark as reviewed' : 'Mark as unreviewed',
+          description: `Apply to ${scopeText}?`,
+          confirmLabel: request.next ? 'Mark reviewed' : 'Unmark reviewed',
+          run: async () => {
+            const failed = await runBatched(scopes, async (scope) => {
+              const res = await putReviewed(jobId, scope, request.next)
+              dispatch({
+                type: 'SET_REVIEW',
+                payload: {
+                  key: reviewKey(scope.testName, scope.childJobName, scope.childBuildNumber),
+                  state: scopedReviewState(request.next, res.reviewed_by),
+                },
+              })
+            }, BULK_BATCH_SIZE)
+            notifyReviewChanged(jobId)
+            return { failed: failedGroups(groups, failed) }
+          },
+        }
+      case 'classification':
+        return {
+          title: `Set classification to ${request.classification}`,
+          description: `The override applies to ${overrideScopeText}?`,
+          confirmLabel: 'Apply',
+          run: async () => ({
+            failed: await runOverrides(overrideTargets, async (g, rep) => {
+              await putOverrideClassification(jobId, rep, request.classification)
+              dispatch({ type: 'OVERRIDE_CLASSIFICATION', payload: { ...rep, testNames: g.testNames, classification: request.classification } })
+            }),
+          }),
+        }
+      case 'pattern':
+        return {
+          title: `Set pattern to ${request.pattern}`,
+          description: `The override applies to ${overrideScopeText}?`,
+          confirmLabel: 'Apply',
+          run: async () => ({
+            failed: await runOverrides(overrideTargets, async (g, rep) => {
+              await putOverridePattern(jobId, rep, request.pattern)
+              dispatch({ type: 'OVERRIDE_PATTERN', payload: { ...rep, testNames: g.testNames, pattern: request.pattern } })
+            }),
+          }),
+        }
+      case 'trackIn':
+        return {
+          title: 'Link to issue',
+          description: `Link ${request.url} to ${scopeText}?`,
+          confirmLabel: 'Link',
+          run: async () => {
+            const failed = await runBatched(scopes, (scope) => putTrackedIn(jobId, scope, request.url, detectTrackerType(request.url)), BULK_BATCH_SIZE)
+            try {
+              const tracked = await getTrackedIn(jobId)
+              dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
+              return { failed: failedGroups(groups, failed) }
+            } catch {
+              // Only the refresh failed. The writes still stand, but a link that was
+              // never written must not be claimed as saved — report both.
+              const notWritten = failedGroups(groups, failed)
+              return notWritten.length > 0
+                ? { failed: notWritten, warning: 'Refreshing the tracked links also failed.' }
+                : { failed: [], warning: 'Links saved, but refreshing the tracked links failed.' }
+            }
+          },
+        }
+    }
+  }
+  const pending = pendingRequest ? buildPending(pendingRequest) : null
 
   /** Keep only what the run did not finish: untried scopes and the failed ones.
    *  Returns true when nothing is left selected. */
@@ -136,102 +232,16 @@ export function BulkUpdateBar() {
       setError('Bulk update failed. Please try again.')
     } finally {
       setRunning(false)
-      setPending(null)
+      setPendingRequest(null)
     }
-  }
-
-  /** One request per signature group — the backend propagates an override to every
-   *  test sharing the error signature, so a per-test call would write the same
-   *  rows (and history entries) once per test. */
-  function overrideGroups(run: (group: SelectedGroup, rep: FailureScope) => Promise<void>) {
-    return runBatched(
-      overrideTargets,
-      async (g) => run(g, { testName: g.testNames[0], childJobName: g.childJobName, childBuildNumber: g.childBuildNumber }),
-      BULK_BATCH_SIZE,
-    )
-  }
-
-  function requestReview(next: boolean) {
-    setPending({
-      title: next ? 'Mark as reviewed' : 'Mark as unreviewed',
-      description: `Apply to ${scopeText}?`,
-      confirmLabel: next ? 'Mark reviewed' : 'Unmark reviewed',
-      run: async () => {
-        const failed = await runBatched(scopes, async (scope) => {
-          const res = await putReviewed(jobId, scope, next)
-          dispatch({
-            type: 'SET_REVIEW',
-            payload: {
-              key: reviewKey(scope.testName, scope.childJobName, scope.childBuildNumber),
-              state: scopedReviewState(next, res.reviewed_by),
-            },
-          })
-        }, BULK_BATCH_SIZE)
-        notifyReviewChanged(jobId)
-        return { failed: failedGroups(groups, failed) }
-      },
-    })
-  }
-
-  function requestClassification(classification: string) {
-    setPending({
-      title: `Set classification to ${classification}`,
-      description: `The override applies to ${overrideScopeText}?`,
-      confirmLabel: 'Apply',
-      run: async () => ({
-        failed: await overrideGroups(async (g, rep) => {
-          await putOverrideClassification(jobId, rep, classification)
-          dispatch({
-            type: 'OVERRIDE_CLASSIFICATION',
-            payload: { ...rep, testNames: g.testNames, classification },
-          })
-        }),
-      }),
-    })
-  }
-
-  function requestPattern(pattern: string) {
-    setPending({
-      title: `Set pattern to ${pattern}`,
-      description: `The override applies to ${overrideScopeText}?`,
-      confirmLabel: 'Apply',
-      run: async () => ({
-        failed: await overrideGroups(async (g, rep) => {
-          await putOverridePattern(jobId, rep, pattern)
-          dispatch({
-            type: 'OVERRIDE_PATTERN',
-            payload: { ...rep, testNames: g.testNames, pattern },
-          })
-        }),
-      }),
-    })
   }
 
   function requestTrackIn() {
     const url = trackUrl.trim()
     if (!url || trackedInUrlError(url)) return
     setTrackOpen(false)
-    setPending({
-      title: 'Link to issue',
-      description: `Link ${url} to ${scopeText}?`,
-      confirmLabel: 'Link',
-      run: async () => {
-        const failed = await runBatched(scopes, (scope) => putTrackedIn(jobId, scope, url, detectTrackerType(url)), BULK_BATCH_SIZE)
-        setTrackUrl('')
-        try {
-          const tracked = await getTrackedIn(jobId)
-          dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
-          return { failed: failedGroups(groups, failed) }
-        } catch {
-          // Only the refresh failed. The writes still stand, but a link that was
-          // never written must not be claimed as saved — report both.
-          const notWritten = failedGroups(groups, failed)
-          return notWritten.length > 0
-            ? { failed: notWritten, warning: 'Refreshing the tracked links also failed.' }
-            : { failed: [], warning: 'Links saved, but refreshing the tracked links failed.' }
-        }
-      },
-    })
+    setTrackUrl('')
+    setPendingRequest({ kind: 'trackIn', url })
   }
 
   const allReviewed = scopes.every(
@@ -246,11 +256,11 @@ export function BulkUpdateBar() {
             {scopes.length} {scopes.length === 1 ? 'test' : 'tests'} selected in {groups.length} {groups.length === 1 ? 'failure' : 'failures'}
           </span>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" disabled={running} onClick={() => requestReview(!allReviewed)}>
+            <Button variant="outline" size="sm" disabled={running} onClick={() => setPendingRequest({ kind: 'review', next: !allReviewed })}>
               <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
               {allReviewed ? 'Unmark reviewed' : 'Mark reviewed'}
             </Button>
-            <Select value="" onValueChange={requestClassification} disabled={running}>
+            <Select value="" onValueChange={(classification) => setPendingRequest({ kind: 'classification', classification })} disabled={running}>
               <SelectTrigger aria-label="Bulk classification" className="h-8 w-40 text-xs">
                 <SelectValue placeholder="Classification..." />
               </SelectTrigger>
@@ -260,7 +270,7 @@ export function BulkUpdateBar() {
                 ))}
               </SelectContent>
             </Select>
-            <Select value="" onValueChange={requestPattern} disabled={running}>
+            <Select value="" onValueChange={(pattern) => setPendingRequest({ kind: 'pattern', pattern })} disabled={running}>
               <SelectTrigger aria-label="Bulk pattern" className="h-8 w-32 text-xs">
                 <SelectValue placeholder="Pattern..." />
               </SelectTrigger>
@@ -295,7 +305,7 @@ export function BulkUpdateBar() {
 
       <ConfirmDialog
         open={pending !== null}
-        onOpenChange={(o) => { if (!o && !running) setPending(null) }}
+        onOpenChange={(o) => { if (!o && !running) setPendingRequest(null) }}
         title={pending?.title ?? ''}
         description={pending?.description ?? ''}
         confirmLabel={pending?.confirmLabel ?? 'Apply'}
