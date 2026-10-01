@@ -8020,3 +8020,74 @@ async def get_report_issues_created(
         "jira_total": jira_total,
         "issues": paginated,
     }
+
+
+# --- Failure signature backfill support -------------------------------------
+# Used by rootcoz.signature_backfill to re-hash stored failures after the
+# normalization rules in engine/core.py change.
+
+
+async def list_all_result_json() -> list[tuple[str, str]]:
+    """Return ``(job_id, result_json)`` for every stored analysis result.
+
+    Read in one query so the signature backfill can recompute hashes without
+    re-opening the database per job. One-shot admin maintenance only — callers
+    should treat the whole result set as in-memory.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT job_id, COALESCE(result_json, '') FROM results "
+            "WHERE result_json IS NOT NULL AND result_json != ''"
+        )
+        return [(row[0], row[1]) for row in await cursor.fetchall()]
+
+
+async def update_denormalized_signatures(
+    updates: dict[tuple[str, str, str, int], str],
+) -> tuple[int, int]:
+    """Update ``error_signature`` on ``failure_history`` and ``comments`` rows.
+
+    Args:
+        updates: ``(job_id, test_name, child_job_name, child_build_number)``
+            mapped to the new signature.
+
+    Returns:
+        ``(history_rows_updated, comment_rows_updated)``.
+    """
+    if not updates:
+        return 0, 0
+    history = 0
+    comments = 0
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            for (
+                job_id,
+                test_name,
+                child_name,
+                child_build,
+            ), signature in updates.items():
+                where = (
+                    "WHERE job_id = ? AND test_name = ? AND child_job_name = ?"
+                    " AND child_build_number = ?"
+                )
+                params: tuple[Any, ...] = (
+                    signature,
+                    job_id,
+                    test_name,
+                    child_name,
+                    child_build,
+                )
+                cursor = await db.execute(
+                    f"UPDATE failure_history SET error_signature = ? {where}", params
+                )
+                history += cursor.rowcount or 0
+                cursor = await db.execute(
+                    f"UPDATE comments SET error_signature = ? {where}", params
+                )
+                comments += cursor.rowcount or 0
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+    return history, comments

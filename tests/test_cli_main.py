@@ -4164,6 +4164,60 @@ class TestAdminComponentVersionsCommand:
         assert parsed["components"] == {"pi": "1.0.0"}
 
 
+class TestAdminBackfillSignaturesCommand:
+    def test_defaults_to_dry_run(self, mock_client):
+        mock_client.admin_backfill_signatures.return_value = {
+            "dry_run": True,
+            "jobs_scanned": 10,
+            "jobs_changed": 2,
+            "failures_scanned": 50,
+            "failures_changed": 7,
+        }
+        result = runner.invoke(app, ["admin", "backfill-signatures"])
+        assert result.exit_code == 0
+        mock_client.admin_backfill_signatures.assert_called_once_with(dry_run=True)
+        assert "7/50" in result.output
+        assert "Re-run with --apply" in result.output
+
+    def test_apply_writes(self, mock_client):
+        mock_client.admin_backfill_signatures.return_value = {
+            "dry_run": False,
+            "jobs_scanned": 10,
+            "jobs_changed": 2,
+            "failures_scanned": 50,
+            "failures_changed": 7,
+            "history_rows_changed": 7,
+            "comment_rows_changed": 3,
+        }
+        result = runner.invoke(
+            app, ["admin", "backfill-signatures", "--apply", "--yes"]
+        )
+        assert result.exit_code == 0
+        mock_client.admin_backfill_signatures.assert_called_once_with(dry_run=False)
+        assert "7 failure_history rows" in result.output
+        assert "3 comment rows" in result.output
+
+    def test_aborts_on_declined_confirmation(self, mock_client):
+        result = runner.invoke(
+            app, ["admin", "backfill-signatures", "--apply"], input="n\n"
+        )
+        assert result.exit_code == 1
+        assert "Aborted" in result.output
+        mock_client.admin_backfill_signatures.assert_not_called()
+
+    def test_json_output(self, mock_client):
+        mock_client.admin_backfill_signatures.return_value = {
+            "dry_run": True,
+            "jobs_scanned": 1,
+            "jobs_changed": 0,
+            "failures_scanned": 0,
+            "failures_changed": 0,
+        }
+        result = runner.invoke(app, ["--json", "admin", "backfill-signatures"])
+        assert result.exit_code == 0
+        assert json.loads(result.output)["dry_run"] is True
+
+
 class TestAdminUsersListCommand:
     def test_admin_users_list(self, mock_client):
         mock_client.admin_list_users.return_value = {
