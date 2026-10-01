@@ -7,7 +7,8 @@ import { ReportProvider } from '../ReportContext'
 import { FailureCard } from '../FailureCard'
 import type { FailureAnalysis, GroupedFailure, PeerDebate, TokenUsageSummary } from '@/types'
 
-vi.mock('@/lib/auth', () => ({ useAuth: () => ({ role: 'viewer', isOperator: false, isAdmin: false, username: 'viewer' }) }))
+const auth = { role: 'reviewer', isOperator: false, isAdmin: false, username: 'tester' }
+vi.mock('@/lib/auth', () => ({ useAuth: () => auth }))
 
 const usage: TokenUsageSummary = {
   total_input_tokens: 1500,
@@ -44,7 +45,7 @@ function showCard(count: number, tokenUsage?: TokenUsageSummary | null, peerDeba
 }
 
 describe('FailureCard primary usage', () => {
-  beforeEach(() => sessionStorage.clear())
+  beforeEach(() => { sessionStorage.clear(); auth.role = 'reviewer' })
   it('shows attributed tokens and cost for a single failure', async () => {
     showCard(1, usage)
     expect(screen.getByText('Primary AI usage')).toBeTruthy()
@@ -85,5 +86,22 @@ describe('FailureCard primary usage', () => {
     showCard(1, { ...usage, total_cost_usd: null })
     expect(screen.getByText(/Unavailable/)).toBeTruthy()
     expect(screen.queryByText(/\$0.00/)).toBeNull()
+  })
+})
+
+describe('FailureCard review controls', () => {
+  beforeEach(() => { sessionStorage.clear(); auth.role = 'reviewer' })
+
+  it('hides every review control from viewers', () => {
+    auth.role = 'viewer'
+    showCard(3)
+    // Header bulk control and the expanded "Review All" button both stay hidden.
+    expect(screen.queryByRole('button', { name: /Review All|Review \d+\/3/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /reviewed/i })).toBeNull()
+  })
+
+  it('shows the bulk review control to reviewers', () => {
+    showCard(3)
+    expect(screen.getByRole('button', { name: /Review All \(0\/3\)/ })).toBeInTheDocument()
   })
 })

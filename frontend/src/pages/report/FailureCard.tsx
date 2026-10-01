@@ -422,7 +422,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 <ClassificationBadge key={cls} classification={cls} />
               ))
             })()}
-            {group.count === 1 ? (
+            {!isViewer && (group.count === 1 ? (
               <ReviewToggle jobId={jobId} testName={rep.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} />
             ) : (
               <Tooltip>
@@ -442,7 +442,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 </TooltipTrigger>
                 <TooltipContent>{allReviewed ? 'All reviewed' : `Review all ${group.count} tests`}</TooltipContent>
               </Tooltip>
-            )}
+            ))}
             {commentCount > 0 && (
               <span className="flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-1 text-[10px] font-mono text-text-tertiary">
                 <MessageSquare className="h-3 w-3" />
@@ -456,7 +456,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
         {expanded && (
           <CardContent className="space-y-4 border-t border-border-muted pt-4">
             {/* Review-all toggle for groups */}
-            {group.count > 1 && (
+            {!isViewer && group.count > 1 && (
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleReviewAll}
@@ -490,7 +490,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                         </Tooltip>
                         <UuidCopyButton uuid={t.id} sectionKey={`uuid-${t.id}`} copiedSection={copiedSection} onCopy={copyToClipboard} />
                       </div>
-                      <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll} />
+                      {!isViewer && <ReviewToggle jobId={jobId} testName={t.test_name} childJobName={scopedChildJobName} childBuildNumber={scopedChildBuildNumber} disabled={reviewingAll} />}
                     </div>
                   ))}
                 </div>

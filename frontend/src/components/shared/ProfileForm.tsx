@@ -27,7 +27,10 @@ interface ProfileFormProps {
 }
 
 export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
-  const { username: authUsername } = useAuth()
+  const { username: authUsername, role } = useAuth()
+  // Tracker tokens are a reviewer capability (server requires reviewer+), so viewers
+  // get neither the fields nor any token save/sync path.
+  const isViewer = role === 'viewer'
   const [initialUsername] = useState(() => readOnlyUsername && authUsername ? authUsername : getUsername())
   const [username, setUsernameValue] = useState(initialUsername)
   const [rotating, setRotating] = useState(false)
@@ -116,6 +119,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
 
     async function commitProfile(trimmedUsername: string) {
       setUsername(trimmedUsername)
+      if (isViewer) return
       // Only persist tokens if user actually entered values
       const gh = githubToken.trim()
       const je = jiraEmail.trim()
@@ -129,7 +133,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
     const needsGithubValidation = githubToken.trim() && (!githubValidation || !githubValidation.valid)
     const needsJiraValidation = jiraToken.trim() && (!jiraValidation || !jiraValidation.valid)
 
-    if (needsGithubValidation || needsJiraValidation) {
+    if (!isViewer && (needsGithubValidation || needsJiraValidation)) {
       const validations = await Promise.allSettled([
         needsGithubValidation ? validateGithub() : Promise.resolve(),
         needsJiraValidation ? validateJira() : Promise.resolve(),
@@ -258,7 +262,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             </>
           )}
 
-          <TrackerTokensFields
+          {!isViewer && <TrackerTokensFields
             githubToken={githubToken}
             onGithubTokenChange={(v) => { setGithubTokenValue(v); setGithubValidation(null) }}
             jiraEmail={jiraEmail}
@@ -267,7 +271,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             onJiraTokenChange={(v) => { setJiraTokenValue(v); setJiraValidation(null) }}
             githubValidation={githubValidation}
             jiraValidation={jiraValidation}
-          />
+          />}
 
           <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || !tokensLoaded}>
             {saving ? 'Saving...' : 'Save'}
