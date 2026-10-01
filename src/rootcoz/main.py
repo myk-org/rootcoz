@@ -11727,11 +11727,16 @@ async def create_feedback(
         )
 
     try:
+        # Attribution is resolved server-side (env > settings DB) — the request
+        # body may carry an edited preview and must never name the AI model.
+        ai_provider, ai_model = _resolve_ai_provider_model(None, None)
         return await create_feedback_from_preview(
             title=body.title,
             body=body.body,
             labels=body.labels,
             github_token=github_token,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code in (401, 403):
