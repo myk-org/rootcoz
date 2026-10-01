@@ -144,6 +144,7 @@ export function UsersPage() {
     try {
       const result = await api.post<RotateKeyResponse>(`/api/admin/users/${encodeURIComponent(rotateTarget)}/rotate-key`)
       setRotatedKey(result)
+      setRotateTarget(null)
     } catch (err) {
       if (err instanceof ApiError) {
         const body = err.body as { detail?: string } | null
@@ -509,8 +510,8 @@ export function UsersPage() {
                   ) : (
                     <div className="flex items-center justify-end gap-1">
                       <TooltipProvider delayDuration={200}>
-                        {/* Rotate key — only for admins (regular users have no API key) */}
-                        {user.username !== currentUser && user.role === 'admin' && (
+                        {/* Rotate key — every user with an API key (admins and delegated users) */}
+                        {user.username !== currentUser && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
@@ -671,39 +672,34 @@ export function UsersPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Rotate Key Dialog */}
-      <Dialog open={rotateTarget !== null} onOpenChange={(open) => { if (!open) closeRotateDialog() }}>
+      {/* Rotate Key Confirmation */}
+      <ConfirmDialog
+        open={rotateTarget !== null && rotatedKey === null}
+        onOpenChange={(open) => { if (!open && !rotating) closeRotateDialog() }}
+        title="Rotate API Key"
+        description={`Generate a new API key for "${rotateTarget}"? The current key is invalidated immediately and cannot be restored.`}
+        confirmLabel="Rotate Key"
+        onConfirm={handleRotateKey}
+        loading={rotating}
+        error={actionError}
+      />
+
+      {/* Rotate Key Result — the new key is shown exactly once */}
+      <Dialog open={rotatedKey !== null} onOpenChange={(open) => { if (!open) closeRotateDialog() }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rotate API Key</DialogTitle>
+            <DialogTitle>New API Key</DialogTitle>
             <DialogDescription>
-              {rotatedKey
-                ? `New API key for ${rotatedKey.username}:`
-                : `Generate a new API key for "${rotateTarget}"? The old key will stop working immediately.`
-              }
+              This is the only time the new key for {rotatedKey?.username} is shown.
             </DialogDescription>
           </DialogHeader>
-          {rotatedKey ? (
+          {rotatedKey && (
             <div className="py-2">
               <CopyableKey label="New API Key" value={rotatedKey.new_api_key} />
             </div>
-          ) : null}
-          {actionError && !rotatedKey && (
-            <p className="text-xs text-signal-red px-1">{actionError}</p>
           )}
           <DialogFooter>
-            {rotatedKey ? (
-              <Button onClick={closeRotateDialog}>Done</Button>
-            ) : (
-              <>
-                <Button variant="ghost" onClick={closeRotateDialog} disabled={rotating}>
-                  Cancel
-                </Button>
-                <Button onClick={handleRotateKey} disabled={rotating}>
-                  {rotating ? 'Rotating...' : 'Rotate Key'}
-                </Button>
-              </>
-            )}
+            <Button onClick={closeRotateDialog}>Done</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
