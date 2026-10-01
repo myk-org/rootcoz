@@ -715,6 +715,43 @@ _HEADER_NAMES = (
     r"|x-b3-[a-z0-9-]+|x-envoy-[a-z0-9-]+|x-forwarded-[a-z0-9-]+"
 )
 
+# Frozen copy of the normalization rules in force before the v2 rules were added
+# (issue #239). Never edit, never reorder, never "fix" -- these hashes are the
+# anchor every stored row is filed under, and recomputing them differently would
+# make historical rows unmatchable (the one thing this design must never do).
+_LEGACY_NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+        ),
+        "<TIMESTAMP>",
+    ),
+    (re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?"), "<TIMESTAMP>"),
+    (
+        re.compile(
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{4}"
+        ),
+        "<DATE>",
+    ),
+    (
+        re.compile(
+            r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}"
+        ),
+        "<DATE>",
+    ),
+    (
+        re.compile(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+        ),
+        "<UUID>",
+    ),
+    (re.compile(r"(?<=[a-zA-Z])-[0-9a-f]{5,10}\b"), "-<SUFFIX>"),
+    (re.compile(r"#\d+"), "#<BUILD>"),
+    (re.compile(r"(?:build|run)[/\-]\d+", re.IGNORECASE), "<BUILD_REF>"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), "<DATE>"),
+]
+
+
 # Pre-compiled patterns for signature normalization.
 # Strips run-specific data so the same underlying failure produces identical hashes.
 _NORMALIZE_PATTERNS: list[
@@ -798,12 +835,24 @@ def normalize_for_signature(text: str) -> str:
     return text
 
 
-def compute_signature(error_message: str, stack_trace: str) -> str:
-    """Hash an error message and stack trace into a failure signature.
+def _hash_normalized(
+    error_message: str, stack_trace: str, patterns: list[tuple[Any, Any]]
+) -> str:
+    """Apply *patterns* to both texts and hash the joined result."""
+    texts = []
+    for text in (error_message, stack_trace):
+        for pattern, replacement in patterns:
+            text = pattern.sub(replacement, text)
+        texts.append(text)
+    return hashlib.sha256(f"{texts[0]}|{texts[1]}".encode()).hexdigest()
 
-    Single source of truth for the signature formula: analysis and the
-    signature backfill (``rootcoz.signature_backfill``) both call this so the
-    two can never drift apart.
+
+def compute_signature(error_message: str, stack_trace: str) -> str:
+    """Hash an error message and stack trace with the current rules.
+
+    This is the v2 hash: stored in ``error_signature_v2`` and used to group
+    failures within a run. It is deliberately NOT the value stored in
+    ``error_signature`` -- see :func:`compute_legacy_signature`.
 
     Args:
         error_message: Error message text.
@@ -812,75 +861,35 @@ def compute_signature(error_message: str, stack_trace: str) -> str:
     Returns:
         SHA-256 hash string representing the failure signature.
     """
-    normalized_error = normalize_for_signature(error_message)
-    normalized_trace = normalize_for_signature(stack_trace)
-    signature_text = f"{normalized_error}|{normalized_trace}"
-    return hashlib.sha256(signature_text.encode()).hexdigest()
+    return _hash_normalized(error_message, stack_trace, _NORMALIZE_PATTERNS)
 
 
-#: Bumped by hand when signature behavior changes in a way the fingerprint in
-#: :func:`normalization_rules_version` cannot observe on its own.
-SIGNATURE_ALGORITHM_VERSION = 1
+def compute_legacy_signature(error_message: str, stack_trace: str) -> str:
+    """Hash an error message and stack trace with the frozen pre-v2 rules.
 
-#: Fixed texts the normalization chain is probed with: one per pattern kind, so
-#: any rule change shows up in the probe output. The fingerprint is behaviour
-#: rather than bytecode because ``co_code`` differs between CPython versions and
-#: ``co_consts`` carries docstrings -- hashing either would re-trigger a full
-#: backfill on an interpreter upgrade or a docstring edit.
-_SIGNATURE_PROBE_TEXTS: tuple[str, ...] = (
-    (
-        "HTTPError 502\nDate: Sun, 31 May 2026 06:50:48 GMT\nContent-Length: 812\n"
-        "X-Request-Id: 9c1f2b7a-1111-2222-3333-444455556666"
-    ),
-    "GET /x\nX-Error-Code: quota-exceeded",
-    "AssertionError: expected 2026-05-31T06:50:48.123Z but got 2026-06-01 07:00:00",
-    (
-        "Timeout in pod virt-launcher-7f8b9c build/123 (#456) commit "
-        "7f3c8a1b2c40deadbeef at 0x7f3c8a1b2c40 (Jan 5 2026 03:04:05)"
-    ),
-)
+    The anchor hash: every row ever written carries this value in
+    ``error_signature``, so history matching and auto-review keep reaching rows
+    stored before the v2 rules existed. Rows are never re-signed, only added to.
 
+    Args:
+        error_message: Error message text.
+        stack_trace: Stack trace text.
 
-def normalization_rules_version() -> str:
-    """Return a stable fingerprint of everything that changes a signature.
-
-    Used as a migration key so the signature backfill runs automatically
-    whenever signature behaviour changes -- no version number for a human to
-    remember bumping. Covers the whole chain, not just the pattern table: every
-    pattern's text and flags, what each rule does to fixed probe texts (so a
-    replacement callable's body counts without hashing its bytecode),
-    ``normalize_for_signature`` itself, the ``compute_signature`` formula, and
-    the explicit :data:`SIGNATURE_ALGORITHM_VERSION` lever. The digest is
-    returned in full -- the migration key column is unrestricted text.
+    Returns:
+        SHA-256 hash string, stable across all future rule changes.
     """
-    parts = [str(SIGNATURE_ALGORITHM_VERSION)]
-    for pattern, replacement in _NORMALIZE_PATTERNS:
-        parts.append(f"{pattern.pattern}\x1f{pattern.flags}")
-        parts.append(
-            "\x1f".join(
-                pattern.sub(replacement, text) for text in _SIGNATURE_PROBE_TEXTS
-            )
-        )
-    parts.append(
-        "\x1f".join(normalize_for_signature(text) for text in _SIGNATURE_PROBE_TEXTS)
-    )
-    probes = _SIGNATURE_PROBE_TEXTS
-    parts.append(
-        "\x1f".join(
-            compute_signature(text, trace)
-            for text, trace in zip(probes, probes[1:] + probes[:1], strict=True)
-        )
-    )
-    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+    return _hash_normalized(error_message, stack_trace, _LEGACY_NORMALIZE_PATTERNS)
 
 
 def get_failure_signature(failure: FailedTest) -> str:
-    """Create a signature for grouping identical failures.
+    """Create the current-rules (v2) signature for grouping identical failures.
 
     Uses the full error message and stack trace to identify failures that
     are essentially the same issue. Text is normalized to strip
     run-specific data (timestamps, UUIDs, pod names, build numbers, HTTP
-    header noise, pointer/hex tokens) before hashing.
+    header noise, pointer/hex tokens) before hashing. This is the grouping
+    key within one analysis; it is stored in ``error_signature_v2`` and is
+    never used as a history-match key on its own.
 
     Args:
         failure: The test failure to create a signature for.
@@ -889,6 +898,22 @@ def get_failure_signature(failure: FailedTest) -> str:
         SHA-256 hash string representing the failure signature.
     """
     return compute_signature(failure.error_message, failure.stack_trace)
+
+
+def get_legacy_signature(failure: FailedTest) -> str:
+    """Create the frozen anchor signature for *failure*.
+
+    Stored in ``error_signature``, which every row written before the v2 rules
+    also carries -- so a row written today still matches its own history from
+    last month. See :func:`compute_legacy_signature`.
+
+    Args:
+        failure: The test failure to create a signature for.
+
+    Returns:
+        SHA-256 hash string representing the failure's anchor signature.
+    """
+    return compute_legacy_signature(failure.error_message, failure.stack_trace)
 
 
 def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
@@ -1868,6 +1893,11 @@ async def run_single_ai_analysis(
     """
     representative = failures[0]
     error_signature = get_failure_signature(representative)
+    # The prompt carries the anchor hash, not the v2 group hash: every stored
+    # row -- including rows written before the v2 rules existed -- is filed
+    # under its anchor, so the mandatory search_error_signature call reaches the
+    # whole history instead of only post-deploy rows.
+    anchor_signature = get_legacy_signature(representative)
 
     (
         agent_gate_section,
@@ -1971,7 +2001,7 @@ async def run_single_ai_analysis(
     prompt = f"""{agent_gate_section}{query_section}
 Analyze this test failure from a CI job.
 {other_groups_section}
-ERROR SIGNATURE: {error_signature}
+ERROR SIGNATURE: {anchor_signature}
 {failure_details_section}
 {console_file_section}
 {artifacts_section}
@@ -2001,7 +2031,10 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         job_id,
     )
     try:
-        with failure_group_usage(job_id, error_signature):
+        # The anchor, not the v2 group hash: ai_token_usage rows are attributed
+        # back to failures by comparing this hash with the failure's
+        # error_signature, which is the anchor.
+        with failure_group_usage(job_id, anchor_signature):
             result = await _call_ai_with_retry(
                 prompt,
                 ai_provider=ai_provider,
@@ -2135,8 +2168,10 @@ async def analyze_failure_group(
     )
 
     # Apply the same analysis to all failures in the group.
-    # All failures share the same signature (that's how they were grouped),
-    # so reuse the already-computed value instead of calling get_failure_signature() again.
+    # All failures share the same v2 signature (that's how they were grouped),
+    # so reuse the already-computed value instead of calling get_failure_signature()
+    # again. The anchor is per failure -- two failures the v2 rules merge can
+    # still differ under the frozen rules -- so each one stores its own.
     return _expand_group_to_analyses(error_signature, failures, parsed)
 
 
@@ -2397,14 +2432,19 @@ def _expand_group_to_analyses(
     failures: list[FailedTest],
     analysis: AnalysisDetail,
 ) -> list[FailureAnalysis]:
-    """Create FailureAnalysis objects for all failures in a group."""
+    """Create FailureAnalysis objects for all failures in a group.
+
+    Dual-writes the group's v2 signature (``error_signature_v2``) and each
+    failure's own frozen anchor (``error_signature``).
+    """
     return [
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
             stack_trace=f.stack_trace,
             analysis=analysis,
-            error_signature=sig,
+            error_signature=get_legacy_signature(f),
+            error_signature_v2=sig,
         )
         for f in failures
     ]
@@ -2503,7 +2543,8 @@ def _failed_group_analyses(
             test_name=f.test_name,
             error=f.error_message,
             stack_trace=f.stack_trace,
-            error_signature=signature,
+            error_signature=get_legacy_signature(f),
+            error_signature_v2=signature,
             analysis=AnalysisDetail(
                 details="Analysis failed; check server logs for details"
             ),

@@ -569,23 +569,35 @@ class FailureAnalysis(BaseModel):
             "it is a signature input. Use :attr:`display_error` for a "
             "human-readable value; a trace-only failure stores an empty "
             "message here, and putting the trace in its place would change the "
-            "signature the backfill recomputes."
+            "signatures computed from it."
         )
     )
     stack_trace: str = Field(
         default="",
         description=(
             "Stack trace text. Persisted alongside 'error' because both feed "
-            "error_signature: without it the signature cannot be recomputed "
-            "(see rootcoz.signature_backfill). 'error' alone is not enough -- "
-            "a signature built with an empty trace differs from one built with "
-            "the real trace."
+            "error_signature: 'error' alone is not enough -- a signature built "
+            "with an empty trace differs from one built with the real trace."
         ),
     )
     analysis: AnalysisDetail = Field(description="Structured AI analysis output")
     error_signature: str = Field(
         default="",
-        description="SHA-256 hash of error + stack trace for deduplication",
+        description=(
+            "Anchor signature: SHA-256 of error + stack trace under the frozen "
+            "pre-v2 normalization rules. Written once and never rewritten, so a "
+            "failure keeps matching its own history from before those rules "
+            "changed."
+        ),
+    )
+    error_signature_v2: str = Field(
+        default="",
+        description=(
+            "Current-rules signature: same inputs, current normalization rules "
+            "(HTTP header noise, pointer/hex tokens). Empty on rows stored "
+            "before the v2 rules existed; resolve with "
+            "rootcoz.storage.resolve_signature rather than comparing it."
+        ),
     )
     peer_debate: PeerDebate | None = Field(
         default=None,

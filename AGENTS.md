@@ -314,7 +314,9 @@ When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Rep
 
 ### Auto-Review
 
-After any completed analysis, each failure is checked against previous analyses of the same `job_name` for the same `test_name`. If the `error_signature` matches exactly **and the previous failure was reviewed by a human** (not auto-reviewed by `rootcoz-ai`), the failure is auto-reviewed (marked reviewed by `rootcoz-ai`). This human-review gate prevents auto-review chains from cascading indefinitely without human validation. The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
+After any completed analysis, each failure is checked against previous analyses of the same `job_name` for the same `test_name`. If the signatures match **and the previous failure was reviewed by a human** (not auto-reviewed by `rootcoz-ai`), the failure is auto-reviewed (marked reviewed by `rootcoz-ai`). This human-review gate prevents auto-review chains from cascading indefinitely without human validation. The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
+
+Signature comparison goes through `storage.signatures_match()`, never a raw column comparison. Failures carry two hashes: `error_signature` is the frozen **anchor** (the pre-v2 normalization rules, written once and never rewritten — every row ever stored carries it), and `error_signature_v2` is the **current-rules** hash used for grouping. Rows written before the v2 rules exist have no v2 hash. Matching is over both columns of both rows, so a failure analysed today still matches its own history from before the rules changed. Changing the rules never requires rewriting stored rows: there is no backfill, and there is no deploy boundary where old and new stop matching. Use `storage.resolve_signature(row)` when a single canonical signature is needed (grouping/dedup keys, labels).
 
 ### Feedback System
 

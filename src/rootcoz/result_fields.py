@@ -58,6 +58,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "result.failures.error",
         "result.failures.stack_trace",
         "result.failures.error_signature",
+        "result.failures.error_signature_v2",
         "result.failures.analysis",
         "result.failures.classification",
         "result.failures.pattern",

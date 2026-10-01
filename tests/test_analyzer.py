@@ -27,6 +27,7 @@ from rootcoz.engine.core import (
     build_resources_section,
     clone_additional_repos,
     copy_builtin_agents_to_workspace,
+    get_legacy_signature,
     parse_json_response,
     prepare_orchestrator_workspace,
     recover_from_details,
@@ -2963,7 +2964,10 @@ async def test_run_orchestrated_analysis_ai_failure(tmp_path: Path) -> None:
         )
     assert len(analyses) == 1
     assert analyses[0].test_name == "test_a"
-    assert analyses[0].error_signature == "sig_1"
+    # The group key is the v2 signature; error_signature holds the frozen anchor,
+    # which is what the row's history will be matched on.
+    assert analyses[0].error_signature_v2 == "sig_1"
+    assert analyses[0].error_signature == get_legacy_signature(f1)
     assert (
         analyses[0].analysis.details == "Analysis failed; check server logs for details"
     )

@@ -26,6 +26,7 @@ from rootcoz.engine.core import (
     build_failure_details_instruction,
     build_other_groups_instruction,
     build_prompt_sections,
+    get_legacy_signature,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
@@ -1095,15 +1096,17 @@ async def analyze_failure_group_with_peers(
                 )
 
     # Apply analysis to all failures in the group.
-    # All failures share the same signature (that's how they were grouped),
-    # so reuse the already-computed value instead of calling get_failure_signature() again.
+    # All failures share the same v2 signature (that's how they were grouped),
+    # so reuse the already-computed value instead of calling get_failure_signature()
+    # again. The anchor is per failure.
     return [
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
             stack_trace=f.stack_trace,
             analysis=parsed_analysis,
-            error_signature=error_signature,
+            error_signature=get_legacy_signature(f),
+            error_signature_v2=error_signature,
             peer_debate=peer_debate,
         )
         for f in failures

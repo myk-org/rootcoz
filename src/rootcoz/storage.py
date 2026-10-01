@@ -10,12 +10,11 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections import defaultdict
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, get_args
+from typing import Any, Literal, get_args
 
 import aiosqlite
 from simple_logger.logger import get_logger
@@ -43,6 +42,101 @@ DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
 ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
 ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
 VALID_ANALYSIS_STATES = frozenset({ANALYSIS_STATE_SUBMITTED, ANALYSIS_STATE_ANALYZED})
+
+
+# --- Failure signatures: anchor + v2 ----------------------------------------
+#
+# Every table that carries ``error_signature`` carries ``error_signature_v2``
+# next to it, and these four functions are the ONLY place either column is
+# interpreted. Adding the v2 rules changed the hash a new analysis produces,
+# so the two columns answer different questions:
+#
+#   error_signature      anchor. SHA-256 under the frozen pre-v2 rules. Written
+#                        once, never rewritten. Every row ever stored carries
+#                        it, which is why a failure analysed today still matches
+#                        its own history from last month.
+#   error_signature_v2   current rules. NULL on rows stored before the rules
+#                        changed; grouping identity for new analyses.
+#
+# Nothing is ever re-signed, so there is no deploy boundary where old and new
+# stop matching.
+
+
+def _signature_field(row: Any, name: str) -> str:
+    """Read a signature column from a dict, a sqlite3/aiosqlite Row or a model.
+
+    Deliberately not ``row.get(...)`` with a getattr fallback: a ``Row`` is not
+    a dict, and silently returning "" for it would make a resolve look like a
+    row with no signature at all.
+    """
+    if isinstance(row, dict):
+        value = row.get(name, "")
+    elif hasattr(row, "keys"):  # sqlite3.Row and aiosqlite.Row
+        try:
+            value = row[name]
+        except IndexError, KeyError:
+            value = ""
+    else:
+        value = getattr(row, name, "")
+    return value if isinstance(value, str) else ""
+
+
+def resolve_signature(row: Any) -> str:
+    """Return the signature identifying *row*: v2 when present, else the anchor.
+
+    The single resolution rule. Use this -- never an ad-hoc
+    ``row["error_signature_v2"] or row["error_signature"]`` -- wherever a row
+    needs one canonical signature (grouping key, dedup key, label, filename).
+    """
+    return _signature_field(row, "error_signature_v2") or _signature_field(
+        row, "error_signature"
+    )
+
+
+def signature_hashes(row: Any) -> list[str]:
+    """Return every hash *row* is filed under, anchor first, empties dropped."""
+    return list(
+        dict.fromkeys(
+            h
+            for h in (
+                _signature_field(row, "error_signature"),
+                _signature_field(row, "error_signature_v2"),
+            )
+            if h
+        )
+    )
+
+
+def signatures_match(left: Any, right: Any) -> bool:
+    """Return whether two rows describe the same failure across rule versions.
+
+    A row written before the v2 rules exists carries only its anchor; a row
+    written after carries both. Comparing the resolved value alone would make a
+    new row stop matching its own history, so the comparison is over the union
+    of both rows' hashes -- a legacy row and a new row for the SAME failure
+    match on the anchor they share.
+    """
+    return bool(set(signature_hashes(left)) & set(signature_hashes(right)))
+
+
+def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
+    """Return a WHERE fragment and its params matching any of *hashes*.
+
+    The SQL twin of :func:`signatures_match`. Both columns are tested because
+    SQLite uses one index per OR branch -- hence the partial index on
+    ``error_signature_v2``. Returns an empty fragment for an empty *hashes*,
+    so a caller can append it unconditionally.
+    """
+    values = [h for h in dict.fromkeys(h for h in hashes if h)]
+    if not values:
+        return "", []
+    placeholders = ",".join("?" for _ in values)
+    prefix = f"{alias}." if alias else ""
+    fragment = (
+        f"({prefix}error_signature IN ({placeholders})"
+        f" OR {prefix}error_signature_v2 IN ({placeholders}))"
+    )
+    return fragment, values + values
 
 
 @asynccontextmanager
@@ -226,6 +320,32 @@ async def _migrate_add_column(
     else:
         logger.debug(f"Migration: {table} already has {column} column")
     return False
+
+
+async def _add_signature_v2_column(
+    db: aiosqlite.Connection, table: str, index: str
+) -> None:
+    """Give *table* its ``error_signature_v2`` column and index, idempotently.
+
+    The column is nullable on purpose: a NULL is exactly what a row written
+    before the v2 rules carries, and the resolution helpers read that as "fall
+    back to the anchor".
+
+    The partial index is needed because ``signature_match()`` tests both columns
+    with an OR and SQLite uses one index per branch -- without it the v2 side of
+    every signature lookup is a table scan. It stays small because it indexes
+    nothing but the rows that have a v2 hash.
+
+    Args:
+        db: Active database connection.
+        table: Table that carries ``error_signature``.
+        index: Name for the new index on ``error_signature_v2``.
+    """
+    await _migrate_add_column(db, table, "error_signature_v2", "TEXT")
+    await db.execute(
+        f"CREATE INDEX IF NOT EXISTS {index} ON {table} (error_signature_v2)"
+        " WHERE error_signature_v2 IS NOT NULL"
+    )
 
 
 async def _ensure_migrations_table(db: aiosqlite.Connection) -> None:
@@ -623,6 +743,13 @@ async def init_db() -> None:
             db, "comments", "error_signature", "TEXT NOT NULL DEFAULT ''"
         )
 
+        # Migration: error_signature_v2 on comments (additive; see the module's
+        # signature notes). NULL on every row written before the v2 rules, so no
+        # stored hash is rewritten.
+        await _add_signature_v2_column(
+            db, "comments", "idx_comments_error_signature_v2"
+        )
+
         # Migration: rebuild failure_reviews with correct 4-column PRIMARY KEY
         # ALTER TABLE cannot change PKs in SQLite, so we need a full rebuild
         cursor = await db.execute("PRAGMA table_info(failure_reviews)")
@@ -809,6 +936,11 @@ async def init_db() -> None:
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_fh_classification ON failure_history (classification)"
+        )
+
+        # Migration: error_signature_v2 on failure_history (see comments above).
+        await _add_signature_v2_column(
+            db, "failure_history", "idx_fh_error_signature_v2"
         )
 
         # Migration: add pattern column to failure_history (two-axis classification)
@@ -1070,6 +1202,9 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "ai_token_usage", "credential_source", "TEXT NOT NULL DEFAULT 'unknown'"
         )
+        # Same anchor/v2 pair as the tables that drive matching; analytics-only
+        # here, but the resolution helper must work on every signature column.
+        await _migrate_add_column(db, "ai_token_usage", "error_signature_v2", "TEXT")
         await _migrate_add_column(
             db, "ai_token_usage", "error_signature", "TEXT NOT NULL DEFAULT ''"
         )
@@ -1507,8 +1642,15 @@ async def add_comment(
     child_build_number: int = 0,
     error_signature: str = "",
     username: str = "",
+    error_signature_v2: str = "",
 ) -> int:
-    """Add a comment to a test failure."""
+    """Add a comment to a test failure.
+
+    Dual-writes the signature pair: the anchor in ``error_signature`` and the
+    current-rules hash in ``error_signature_v2`` (see the module's signature
+    notes). Callers that only have the anchor leave the v2 column NULL, which
+    is also what every pre-existing row looks like.
+    """
     logger.debug(
         f"add_comment: job_id={job_id}, test_name={test_name}, comment_len={len(comment)}"
     )
@@ -1517,8 +1659,8 @@ async def add_comment(
         cursor = await db.execute(
             "INSERT INTO comments"
             " (job_id, test_name, child_job_name, child_build_number,"
-            " comment, error_signature, username)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " comment, error_signature, error_signature_v2, username)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 test_name,
@@ -1526,6 +1668,7 @@ async def add_comment(
                 child_build_number,
                 comment,
                 error_signature,
+                error_signature_v2 or None,
                 username,
             ),
         )
@@ -1570,7 +1713,7 @@ async def get_comments_for_job(job_id: str) -> list[dict[str, Any]]:
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, job_id, test_name, child_job_name,"
-            " child_build_number, comment, error_signature,"
+            " child_build_number, comment, error_signature, error_signature_v2,"
             " username, created_at"
             " FROM comments WHERE job_id = ? ORDER BY created_at ASC",
             (job_id,),
@@ -1675,7 +1818,9 @@ async def get_historical_comments(
 ) -> list[dict[str, Any]]:
     """Get historical comments for similar failures across jobs.
 
-    Matches by test name OR by error signature.
+    Matches by test name OR by any of the signature hashes (both columns, see
+    :func:`signatures_match`), so a comment written before the v2 rules existed
+    is still found by a failure analysed today.
     No arbitrary limit -- returns all matching comments.
     """
     logger.debug(
@@ -1694,9 +1839,10 @@ async def get_historical_comments(
         params.extend(test_names)
 
     if error_signatures:
-        placeholders = ",".join("?" for _ in error_signatures)
-        conditions.append(f"error_signature IN ({placeholders})")
-        params.extend(error_signatures)
+        fragment, match_params = signature_match(error_signatures)
+        if fragment:
+            conditions.append(fragment)
+            params.extend(match_params)
 
     if not conditions:
         return []
@@ -1709,7 +1855,7 @@ async def get_historical_comments(
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, job_id, test_name, child_job_name,"
-            " child_build_number, comment, error_signature,"
+            " child_build_number, comment, error_signature, error_signature_v2,"
             " username, created_at "
             f"FROM comments WHERE {where} ORDER BY created_at DESC",
             params,
@@ -2268,44 +2414,6 @@ async def update_progress_phase(job_id: str, phase: str) -> None:
     await patch_result_json(job_id, _make_progress_phase_patcher(phase))
 
 
-class SignatureUpdate(NamedTuple):
-    """One stored failure whose ``error_signature`` must change.
-
-    ``error_message`` and ``previous_signature`` are the discriminators that
-    keep a row belonging to *this* failure from being rewritten: a job can hold
-    several failures with the same test name and child job, and each one's
-    history/comment rows must receive its own new signature.
-    """
-
-    test_name: str
-    child_job_name: str
-    child_build_number: int
-    error_message: str
-    previous_signature: str
-    new_signature: str
-
-
-class ResultPatch(NamedTuple):
-    """Outcome of :func:`patch_result_json`.
-
-    The denormalized row counts matter only to callers that pass
-    ``denormalized`` updates (the signature backfill); everyone else ignores
-    them. ``in_flight`` says the row was left alone because ``skip_in_flight``
-    was set and its analysis is still running -- a skip the backfill has to
-    revisit, as opposed to a row that was simply already up to date.
-    ``comment_rows_ambiguous`` counts comment rows that were left on their old
-    hash because the failures that could own that hash did not all end on the
-    same hash -- and nothing in the row tells them apart (see
-    :func:`_apply_denormalized_signatures`).
-    """
-
-    written: bool
-    history_rows: int = 0
-    comment_rows: int = 0
-    in_flight: bool = False
-    comment_rows_ambiguous: int = 0
-
-
 def failure_error_text(failure: dict[str, Any]) -> str:
     """Return the text to denormalize into ``failure_history.error_message``.
 
@@ -2323,203 +2431,6 @@ def failure_error_text(failure: dict[str, Any]) -> str:
     return trace if isinstance(trace, str) else ""
 
 
-def _comment_group_key(update: SignatureUpdate) -> tuple[str, str, int, str]:
-    """Return the key whose comment rows this update can reach.
-
-    A ``comments`` row carries no message and no failure id, so the failures it
-    could have been written about are exactly those sharing its test name,
-    child job and *old* hash.
-    """
-    return (
-        update.test_name,
-        update.child_job_name,
-        update.child_build_number,
-        update.previous_signature,
-    )
-
-
-def _unanimous_signature(updates: Sequence[SignatureUpdate]) -> str:
-    """Return the new signature every failure in *updates* agrees on.
-
-    Returns:
-        The shared signature, or "" when the updates disagree -- the
-        caller's cue that the rows they match cannot be told apart.
-
-    """
-    signatures = {update.new_signature for update in updates}
-    return signatures.pop() if len(signatures) == 1 else ""
-
-
-async def _row_ids(
-    db: aiosqlite.Connection,
-    table: str,
-    where: str,
-    params: tuple[Any, ...],
-) -> list[Any]:
-    """Return the ids of the rows of *table* matching *where*, oldest first."""
-    cursor = await db.execute(
-        f"SELECT id FROM {table} WHERE {where} ORDER BY id", params
-    )
-    return [row[0] for row in await cursor.fetchall()]
-
-
-async def _resign_rows(
-    db: aiosqlite.Connection,
-    table: str,
-    where: str,
-    params: tuple[Any, ...],
-    updates: Sequence[SignatureUpdate],
-) -> int:
-    """Point every row of *table* matching *where* at its own failure's hash.
-
-    Rows are claimed one failure at a time, oldest id first, because the match
-    predicate cannot always tell two failures apart: the denormalized tables
-    store no stack trace, so two failures sharing a test name, message and old
-    hash are indistinguishable there while the stored result gives each its own
-    new hash. A plain ``UPDATE ... WHERE <predicate>`` would hand both rows to
-    whichever failure came first and leave the other's row dead.
-
-    When every failure in the group collapses onto one hash -- the common case --
-    the whole group is rewritten in a single statement. ``comments`` only ever
-    arrives in that unanimous case (a ``comments`` row carries no message to
-    keep two same-message failures apart, so a split group there has no correct
-    per-row answer to give and the caller skips it instead); the per-row path is
-    ``failure_history``'s, where every row of a group was written from a
-    distinct stored failure.
-
-    Args:
-        db: Open transaction.
-        table: ``failure_history`` or ``comments``.
-        where: The identity predicate, without the parameters.
-        params: Parameters for *where*; identical for every failure in
-            *updates*, which is what makes them one group.
-        updates: The failures matching *where*.
-
-    Returns:
-        The number of rows rewritten.
-    """
-    row_ids = await _row_ids(db, table, where, params)
-    if not row_ids:
-        return 0
-    unanimous = _unanimous_signature(updates)
-    if unanimous:
-        cursor = await db.execute(
-            f"UPDATE {table} SET error_signature = ? WHERE {where}",
-            (unanimous, *params),
-        )
-        return cursor.rowcount or 0
-    for index, row_id in enumerate(row_ids):
-        await db.execute(
-            f"UPDATE {table} SET error_signature = ? WHERE id = ?",
-            (updates[index % len(updates)].new_signature, row_id),
-        )
-    return len(row_ids)
-
-
-async def _apply_denormalized_signatures(
-    db: aiosqlite.Connection,
-    job_id: str,
-    updates: Sequence[SignatureUpdate],
-    retained: Sequence[SignatureUpdate] = (),
-) -> tuple[int, int, int]:
-    """Re-signature this job's ``failure_history`` and ``comments`` rows.
-
-    Must run inside the same transaction as the ``results`` update, so an
-    interrupted backfill can never leave a re-hashed result pointing at
-    history rows that still carry the old hash.
-
-    Every update is selected by the hash the row currently holds -- the message
-    alone is not an identity: signatures cover the stack trace too, so two
-    failures can share a test name and message and differ only in trace, and
-    matching by message would write one failure's hash onto the other's row.
-    Updates are then applied *per distinct match*, oldest row first, so a match
-    covering two indistinguishable failures hands each its own row instead of
-    both to the first (see :func:`_resign_rows`).
-
-    Comment rows get no such treatment, because a comment carries neither a
-    message nor a failure id: a row's old hash can be owned by several
-    failures, and when they do not all end on the same new hash there is
-    nothing in the row that says which of them it was written against. Such a
-    row keeps the old hash and is counted as ambiguous. Being left on a stale
-    hash costs the comment its signature-based lookups (it is still found by
-    test name); being given the wrong hash files it under a failure nobody
-    wrote it about. Guessing is the one option that destroys information the
-    reader cannot check.
-
-    *retained* carries the failures that keep the hash they already have --
-    already current under the new rules, or too old to recompute. They rewrite
-    no row, but they still own every comment row on their hash, so they join
-    the ambiguity decision for their group: only counting the failures in
-    *updates* would let one changed failure claim the comments of an unchanged
-    or unrecoverable one sharing its old hash.
-
-    Returns:
-        ``(history_rows_updated, comment_rows_updated, comment_rows_ambiguous)``.
-    """
-    identity = (
-        "job_id = ? AND test_name = ? AND child_job_name = ? AND child_build_number = ?"
-    )
-    history_groups: dict[tuple[str, str, int, str, str], list[SignatureUpdate]] = (
-        defaultdict(list)
-    )
-    # comments carry no message column, so a group is keyed without it.
-    comment_groups: dict[tuple[str, str, int, str], list[SignatureUpdate]] = (
-        defaultdict(list)
-    )
-    for update in updates:
-        history_groups[
-            (
-                update.test_name,
-                update.child_job_name,
-                update.child_build_number,
-                update.error_message,
-                update.previous_signature,
-            )
-        ].append(update)
-        comment_groups[_comment_group_key(update)].append(update)
-
-    # Only a hash some changed failure is leaving makes the retained owners
-    # worth a lookup; any other group holds no rows this call can move.
-    rehashable = {_comment_group_key(update) for update in updates}
-    for update in retained:
-        key = _comment_group_key(update)
-        if key in rehashable:
-            comment_groups[key].append(update)
-
-    history = 0
-    for (
-        test_name,
-        child_name,
-        child_build,
-        error_message,
-        previous,
-    ), group in history_groups.items():
-        history += await _resign_rows(
-            db,
-            "failure_history",
-            f"{identity} AND error_message = ? AND error_signature = ?",
-            (
-                job_id,
-                test_name,
-                child_name,
-                child_build,
-                error_message,
-                previous,
-            ),
-            group,
-        )
-
-    comments = ambiguous = 0
-    for (test_name, child_name, child_build, previous), group in comment_groups.items():
-        where = f"{identity} AND error_signature = ?"
-        params = (job_id, test_name, child_name, child_build, previous)
-        if not _unanimous_signature(group):
-            ambiguous += len(await _row_ids(db, "comments", where, params))
-            continue
-        comments += await _resign_rows(db, "comments", where, params, group)
-    return history, comments, ambiguous
-
-
 async def patch_result_json(
     job_id: str,
     patch_fn: Callable[[dict[str, Any]], None],
@@ -2528,60 +2439,40 @@ async def patch_result_json(
     allow_completed: bool = False,
     active_reanalysis_failure_id: str = "",
     require_job_id: str = "",
-    denormalized: Sequence[SignatureUpdate] = (),
-    retained: Sequence[SignatureUpdate] = (),
-    write_if_changed: bool = False,
-    skip_in_flight: bool = False,
-) -> ResultPatch:
+) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
-    The *patch_fn* is called with the parsed ``result`` dict and is expected
-        to mutate it in place.  The read and write happen inside a single
+        The *patch_fn* is called with the parsed ``result`` dict and is expected
+    to mutate it in place.  The read and write happen inside a single
         ``BEGIN IMMEDIATE`` transaction so concurrent patches are serialized
-        by SQLite's write lock.  *denormalized* signature updates are applied in
-        that same transaction, keeping ``results`` and ``failure_history`` /
-        ``comments`` in agreement even if the process dies mid-run.  *retained*
-        lists the failures that keep the hash they already carry; no row is
-        rewritten for them, but they decide which ``comments`` rows are safe to
-        move (see :func:`_apply_denormalized_signatures`).
+        by SQLite's write lock.
 
-            After *patch_fn* returns, denormalized identity columns (``job_name``,
-            ``build_number``, ``build_id``) are synced from the patched dict using
-            key-presence semantics: only keys present in the result update their
-            columns — missing keys leave existing column values unchanged.
+                After *patch_fn* returns, denormalized identity columns (``job_name``,
+                ``build_number``, ``build_id``) are synced from the patched dict using
+                key-presence semantics: only keys present in the result update their
+                columns — missing keys leave existing column values unchanged.
 
-            If the row does not exist or ``result_json`` is empty, this is a no-op.
-            ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
-            permits completed jobs when a reanalysis updates clone progress. Identified
-            re-analysis updates require a running failure regardless of parent status.
+    If the row does not exist or ``result_json`` is empty, this is a no-op.
+        ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
+        permits completed jobs when a reanalysis updates clone progress. Identified
+        re-analysis updates require a running failure regardless of parent status.
         ``require_job_id`` makes the patch conditional: when set and that job row no
-            longer exists, the patch is skipped, so a link can never be created for an
-            already-deleted result.  ``write_if_changed`` skips the write when
-            *patch_fn* changed nothing.  ``skip_in_flight`` leaves jobs whose analysis is
-            still running (:data:`ACTIVE_STATUSES`) to that analysis, which writes
-            current-rule signatures when it saves; used by the signature backfill, whose
-            read of the stored result would otherwise be stale by the time it commits.
-            Such a skip is reported as ``ResultPatch.in_flight`` so the backfill knows
-            the job still owes it a rewrite.
-
-            Returns:
-                The patch outcome (see :class:`ResultPatch`).
+        longer exists, the patch is skipped, so a link can never be created for an
+        already-deleted result.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         try:
             if require_job_id and not await _row_exists(db, require_job_id):
                 await db.execute("ROLLBACK")
-                return ResultPatch(False)
+                return
             cursor = await db.execute(
                 "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
             )
             row = await cursor.fetchone()
-            in_flight = bool(skip_in_flight and row and analysis_in_flight(row[1]))
             if (
                 not row
                 or not row[0]
-                or in_flight
                 or (
                     skip_terminal
                     and (
@@ -2594,11 +2485,11 @@ async def patch_result_json(
                 )
             ):
                 await db.execute("ROLLBACK")
-                return ResultPatch(False, in_flight=in_flight)
+                return
             result_data = parse_result_json(row[0], job_id=job_id)
             if result_data is None:
                 await db.execute("ROLLBACK")
-                return ResultPatch(False)
+                return
             if active_reanalysis_failure_id:
                 failure = _find_failure_by_uuid_in_failures(
                     result_data.get("failures", []), active_reanalysis_failure_id
@@ -2610,12 +2501,8 @@ async def patch_result_json(
                     )
                 if not failure or failure.get("reanalysis_status") != "running":
                     await db.execute("ROLLBACK")
-                    return ResultPatch(False)
-            before = json.dumps(result_data, sort_keys=True) if write_if_changed else ""
+                    return
             patch_fn(result_data)
-            if write_if_changed and json.dumps(result_data, sort_keys=True) == before:
-                await db.execute("ROLLBACK")
-                return ResultPatch(False)
             set_parts = ["result_json = ?"]
             params: list[Any] = [json.dumps(result_data)]
             _append_denormalized_set_parts(result_data, set_parts, params)
@@ -2624,22 +2511,7 @@ async def patch_result_json(
                 f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
                 params,
             )
-            history_rows = comment_rows = comment_rows_ambiguous = 0
-            if denormalized or retained:
-                (
-                    history_rows,
-                    comment_rows,
-                    comment_rows_ambiguous,
-                ) = await _apply_denormalized_signatures(
-                    db, job_id, denormalized, retained
-                )
             await db.commit()
-            return ResultPatch(
-                True,
-                history_rows,
-                comment_rows,
-                comment_rows_ambiguous=comment_rows_ambiguous,
-            )
         except Exception:
             await db.execute("ROLLBACK")
             raise
@@ -2718,13 +2590,21 @@ def _analysis_identity_key(item: dict[str, Any], *fields: str) -> tuple[Any, ...
 
 
 def _copy_failure_ids(prior: list[Any], current: list[Any]) -> None:
+    """Carry failure UUIDs over to the failure they still describe.
+
+    Identity is the test name plus a signature match (see
+    :func:`signatures_match`), not a single hash: the prior result may have
+    been stored before the v2 rules existed and carry only its anchor, and a
+    resolved-value comparison would drop the id and churn the report.
+    """
     unused = [p for p in prior if isinstance(p, dict)]
     for new in current:
         if not isinstance(new, dict):
             continue
-        key = _analysis_identity_key(new, "test_name", "error_signature")
         for index, old in enumerate(unused):
-            if _analysis_identity_key(old, "test_name", "error_signature") != key:
+            if old.get("test_name") != new.get("test_name"):
+                continue
+            if not signatures_match(old, new):
                 continue
             if old.get("id"):
                 new["id"] = old["id"]
@@ -3075,6 +2955,7 @@ def _failure_to_history_row(
         failure.get("test_name", ""),
         failure_error_text(failure),
         failure.get("error_signature", ""),
+        failure.get("error_signature_v2") or None,
         classification,
         pattern,
         child_job_name,
@@ -3108,7 +2989,8 @@ def _extract_failures_for_history(
     Returns:
         List of tuples ready for INSERT:
         (job_id, job_name, build_number, build_id, test_name, error_message,
-         error_signature, classification, child_job_name, child_build_number, analyzed_at)
+         error_signature, error_signature_v2, classification,
+         child_job_name, child_build_number, analyzed_at)
     """
     rows: list[tuple[Any, ...]] = []
 
@@ -3215,7 +3097,8 @@ async def find_matching_previous_analysis(
     Returns:
         Dict with previous failure_history row data if found, None otherwise.
         Includes keys: job_id, build_number, build_id, error_signature,
-        classification, pattern, analyzed_at.
+        error_signature_v2, classification, pattern, analyzed_at. Compare the
+        pair with :func:`signatures_match`, never field by field.
     """
     async with _connect_db() as db:
         # Find the most recent failure_history row for the same job+test
@@ -3229,6 +3112,7 @@ async def find_matching_previous_analysis(
         # the API model where child_build_number=0 means "not specified".
         cursor = await db.execute(
             "SELECT fh.job_id, fh.build_number, fh.build_id, fh.error_signature, "
+            "fh.error_signature_v2, "
             "fh.classification, fh.pattern, fh.analyzed_at "
             "FROM failure_history fh "
             "WHERE fh.job_name = ? AND fh.test_name = ? AND fh.job_id != ? "
@@ -3294,9 +3178,9 @@ async def populate_failure_history(
                 """
                 INSERT INTO failure_history
                     (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, classification, pattern,
+                     error_signature, error_signature_v2, classification, pattern,
                      child_job_name, child_build_number, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -3305,9 +3189,9 @@ async def populate_failure_history(
                 """
                 INSERT INTO failure_history
                     (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, classification, pattern,
+                     error_signature, error_signature_v2, classification, pattern,
                      child_job_name, child_build_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 # Strip the analyzed_at field (last element) when not backfilling
                 [row[:-1] for row in rows],
@@ -3732,15 +3616,16 @@ async def _get_related_comments(
     Args:
         db: Open aiosqlite connection with row_factory set.
         test_name: Full test name to look up.
-        signatures: Set of error_signature hashes from recent runs.
+        signatures: Every signature hash from recent runs (both columns, see
+            :func:`signature_hashes`).
         exclude_job_id: Exclude comments from this job ID.
     """
     comment_conditions = ["test_name = ?"]
     comment_params: list[Any] = [test_name]
-    if signatures:
-        placeholders = ",".join("?" for _ in signatures)
-        comment_conditions.append(f"error_signature IN ({placeholders})")
-        comment_params.extend(signatures)
+    fragment, match_params = signature_match(signatures)
+    if fragment:
+        comment_conditions.append(fragment)
+        comment_params.extend(match_params)
 
     comment_where = " OR ".join(comment_conditions)
     if exclude_job_id:
@@ -3812,7 +3697,7 @@ async def get_test_history(
         # Recent runs (failures only, since we only track failures)
         cursor = await db.execute(
             f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.error_message,
-                       fh.error_signature,
+                       fh.error_signature, fh.error_signature_v2,
                        COALESCE(tc_latest.classification, fh.classification) AS classification,
                        fh.child_job_name, fh.child_build_number, fh.analyzed_at,
                        (SELECT GROUP_CONCAT(til.url, ', ') FROM tracked_in_links til
@@ -3867,10 +3752,10 @@ async def get_test_history(
             passes = None
             failure_rate = None
 
-        # Collect error signatures for comment lookup
-        signatures = {
-            r["error_signature"] for r in recent_runs if r.get("error_signature")
-        }
+        # Collect every signature hash for comment lookup -- both columns, so a
+        # comment filed under the anchor of a pre-v2 run is still found by a
+        # recent run that only carries the v2 hash.
+        signatures = {h for row in recent_runs for h in signature_hashes(row)}
 
         comments = await _get_related_comments(
             db, test_name, signatures, exclude_job_id
@@ -3906,6 +3791,12 @@ async def search_by_signature(
 ) -> dict[str, Any]:
     """Find all tests that failed with the same error signature.
 
+    The hash is matched against both signature columns (see
+    :func:`signature_match`), so an anchor hash reaches every row and a v2 hash
+    reaches every row written under the current rules. Searching by the anchor
+    -- the value the report and the AI prompt show -- is the only query that
+    spans the whole history, because pre-v2 rows carry no other hash.
+
     Args:
         signature: Error signature hash to search for.
         exclude_job_id: Exclude results from this job ID.
@@ -3917,17 +3808,18 @@ async def search_by_signature(
     logger.debug(
         f"search_by_signature: signature={signature}, exclude_job_id={exclude_job_id}"
     )
+    sig_where, sig_params = signature_match([signature])
     async with _connect_db() as db:
         # Build optional exclude filter
         exclude_filter = ""
-        base_params: list[Any] = [signature]
+        base_params: list[Any] = list(sig_params)
         if exclude_job_id:
             exclude_filter = " AND job_id != ?"
             base_params.append(exclude_job_id)
 
         # Total occurrences
         cursor = await db.execute(
-            f"SELECT COUNT(*) FROM failure_history WHERE error_signature = ?{exclude_filter}",
+            f"SELECT COUNT(*) FROM failure_history WHERE {sig_where}{exclude_filter}",
             base_params,
         )
         total_occurrences = (await cursor.fetchone())[0]
@@ -3945,7 +3837,7 @@ async def search_by_signature(
         # Tests with this signature and their occurrence counts
         cursor = await db.execute(
             f"SELECT test_name, COUNT(*) as occurrences FROM failure_history "
-            f"WHERE error_signature = ?{exclude_filter} GROUP BY test_name ORDER BY occurrences DESC",
+            f"WHERE {sig_where}{exclude_filter} GROUP BY test_name ORDER BY occurrences DESC",
             base_params,
         )
         tests = [dict(row) for row in await cursor.fetchall()]
@@ -3954,17 +3846,17 @@ async def search_by_signature(
         # Last classification
         cursor = await db.execute(
             f"SELECT classification FROM failure_history "
-            f"WHERE error_signature = ?{exclude_filter} ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+            f"WHERE {sig_where}{exclude_filter} ORDER BY analyzed_at DESC, id DESC LIMIT 1",
             base_params,
         )
         last_classification = (await cursor.fetchone())[0] or ""
 
         # Comments related to this signature
+        comments_where, comments_sig_params = signature_match([signature])
+        comments_params: list[str] = list(comments_sig_params)
         comments_query = (
-            "SELECT comment, username, created_at FROM comments "
-            "WHERE error_signature = ?"
+            f"SELECT comment, username, created_at FROM comments WHERE {comments_where}"
         )
-        comments_params: list[str] = [signature]
         if exclude_job_id:
             comments_query += " AND job_id != ?"
             comments_params.append(exclude_job_id)
@@ -4091,17 +3983,6 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict[str, An
 
 
 ACTIVE_STATUSES = ("running", "pending", "waiting")
-
-
-def analysis_in_flight(status: str) -> bool:
-    """Return whether a job in *status* still has an analysis writing to it.
-
-    One definition of "still running", shared by :func:`patch_result_json`'s
-    ``skip_in_flight`` and the backfill's dry run, so a preview cannot count a
-    rewrite the apply path would then refuse to write.
-    """
-    return status in ACTIVE_STATUSES
-
 
 # Statuses whose background task is irrecoverably lost after a restart.
 # These are a subset of ACTIVE_STATUSES — "waiting" is excluded because
@@ -4618,7 +4499,7 @@ async def get_all_failures(
         # Get paginated results
         cursor = await db.execute(
             f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.test_name, "
-            f"fh.error_message, fh.error_signature, "
+            f"fh.error_message, fh.error_signature, fh.error_signature_v2, "
             f"COALESCE(tc_latest.classification, fh.classification) AS classification, "
             f"fh.child_job_name, fh.child_build_number, fh.analyzed_at "
             f"FROM failure_history fh"
@@ -4855,10 +4736,14 @@ async def _override_failure_field(
 ) -> list[str]:
     """Shared logic for overriding classification or pattern in failure_history.
 
-    1. Look up the error_signature for the test (scoped by child context).
+    1. Look up the resolved signature for the test (scoped by child context).
     2. Read the current value of *field* before mutating (for original_* tracking).
     3. UPDATE all failure_history rows sharing the same signature.
     4. INSERT a test_classifications row for every test in the group.
+
+    The group is keyed by the resolved signature (:func:`resolve_signature`),
+    so failures the v2 rules merged into one group are overridden together even
+    when their frozen anchors differ.
 
     Args:
         job_id: The analysis job ID.
@@ -4877,9 +4762,9 @@ async def _override_failure_field(
     child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
     is_wildcard = bool(child_job_name and child_build_number == 0)
     async with _connect_db() as db:
-        # Look up error_signature so we can update all grouped failures.
+        # Look up the signature so we can update all grouped failures.
         sig_query = (
-            "SELECT error_signature FROM failure_history "
+            "SELECT error_signature, error_signature_v2 FROM failure_history "
             "WHERE job_id = ? AND test_name = ?"
         )
         sig_params: list[Any] = [job_id, test_name, *child_params]
@@ -4887,15 +4772,16 @@ async def _override_failure_field(
 
         cursor = await db.execute(sig_query, sig_params)
         row = await cursor.fetchone()
-        error_signature = row[0] if row and row[0] else ""
+        error_signature = resolve_signature(row) if row else ""
 
         # Collect all test_names in the signature group BEFORE
         # the UPDATE so we can read per-test original values.
-        if error_signature:
+        group_where, group_sig_params = signature_match([error_signature])
+        if error_signature and group_where:
             group_cursor = await db.execute(
                 "SELECT DISTINCT test_name FROM failure_history "
-                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
-                (job_id, error_signature, *child_params),
+                f"WHERE job_id = ? AND {group_where}{child_sql}",
+                (job_id, *group_sig_params, *child_params),
             )
             group_tests = [r[0] for r in await group_cursor.fetchall()]
         else:
@@ -4914,12 +4800,12 @@ async def _override_failure_field(
             orig_values[t] = orig_row[0] if orig_row and orig_row[0] else ""
 
         # UPDATE failure_history rows.
-        if error_signature:
+        if group_where:
             await db.execute(
                 f"""UPDATE failure_history
                    SET {field} = ?
-                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
-                (value, job_id, error_signature, *child_params),
+                   WHERE job_id = ? AND {group_where}{child_sql}""",
+                (value, job_id, *group_sig_params, *child_params),
             )
         else:
             await db.execute(
@@ -4932,11 +4818,11 @@ async def _override_failure_field(
         # Resolve build numbers for test_classifications INSERT.
         # Wildcard overrides must fan out to each actual build number
         # so reports JOINs on exact child_build_number still match.
-        if is_wildcard and error_signature:
+        if is_wildcard and group_where:
             builds_cursor = await db.execute(
                 "SELECT DISTINCT child_build_number FROM failure_history "
-                "WHERE job_id = ? AND error_signature = ? AND child_job_name = ?",
-                (job_id, error_signature, child_job_name),
+                f"WHERE job_id = ? AND {group_where} AND child_job_name = ?",
+                (job_id, *group_sig_params, child_job_name),
             )
             build_numbers = [r[0] for r in await builds_cursor.fetchall()]
         elif is_wildcard:
@@ -8323,134 +8209,3 @@ async def get_report_issues_created(
         "jira_total": jira_total,
         "issues": paginated,
     }
-
-
-# --- Failure signature backfill support -------------------------------------
-# Used by rootcoz.signature_backfill to re-hash stored failures after the
-# normalization rules in engine/core.py change.
-
-
-#: Rows read per batch by :func:`iter_result_json_batches`. Bounds the memory
-#: a full-table scan of ``results.result_json`` can hold at once.
-RESULT_JSON_BATCH_SIZE = 200
-
-
-async def iter_result_json_batches(
-    batch_size: int = RESULT_JSON_BATCH_SIZE,
-) -> AsyncIterator[list[tuple[str, str, str]]]:
-    """Yield ``(job_id, result_json, status)`` batches ordered by ``job_id``.
-
-    Keyset pagination on the primary key instead of ``fetchall``: only one
-    batch of result blobs is resident at a time, so a database far larger than
-    server memory still scans to completion. It is also resumable -- a caller
-    that stops part way can restart after the last ``job_id`` it processed.
-    ``status`` rides along because it decides whether a row may be written at
-    all (:func:`analysis_in_flight`); reading it here costs the backfill no
-    extra query per job.
-    """
-    after = ""
-    while True:
-        async with _connect_db() as db:
-            cursor = await db.execute(
-                "SELECT job_id, COALESCE(result_json, ''), COALESCE(status, '') "
-                "FROM results "
-                "WHERE result_json IS NOT NULL AND result_json != '' "
-                "AND job_id > ? ORDER BY job_id LIMIT ?",
-                (after, batch_size),
-            )
-            rows = [(row[0], row[1], row[2]) for row in await cursor.fetchall()]
-        if not rows:
-            return
-        yield rows
-        after = rows[-1][0]
-
-
-async def _ensure_signature_version_table(db: aiosqlite.Connection) -> None:
-    """Create the single-row signature version table if it does not exist.
-
-    Separate from ``_migrations_applied``: that table is an append-only history
-    of completed migrations, which cannot say what the database *currently*
-    holds (an old version's key survives every later backfill).
-    """
-    await db.execute(
-        "CREATE TABLE IF NOT EXISTS signature_version ("
-        " id INTEGER PRIMARY KEY CHECK (id = 1),"
-        " applied_version TEXT NOT NULL DEFAULT '',"
-        " target_version TEXT NOT NULL DEFAULT '')"
-    )
-    await db.execute("INSERT OR IGNORE INTO signature_version (id) VALUES (1)")
-
-
-async def get_signature_versions() -> tuple[str, str]:
-    """Return ``(applied_version, target_version)`` for stored signatures.
-
-    ``applied_version`` is what stored rows currently hold; ``target_version``
-    is the version a running process has claimed the migration for.
-    """
-    async with _connect_db() as db:
-        await _ensure_signature_version_table(db)
-        await db.commit()
-        cursor = await db.execute(
-            "SELECT applied_version, target_version FROM signature_version WHERE id = 1"
-        )
-        row = await cursor.fetchone()
-    return (row[0], row[1]) if row else ("", "")
-
-
-async def claim_signature_migration(version: str) -> None:
-    """Claim the signature migration for *version*.
-
-    Last claim wins, so a newly deployed process takes the migration over from
-    an older one; the older process notices at its next ownership check and
-    stops writing.
-    """
-    async with _connect_db() as db:
-        await _ensure_signature_version_table(db)
-        await db.execute(
-            "UPDATE signature_version SET target_version = ? WHERE id = 1", (version,)
-        )
-        await db.commit()
-
-
-async def owns_signature_migration(version: str) -> bool:
-    """Return True while *version* still owns the signature migration."""
-    return (await get_signature_versions())[1] == version
-
-
-async def complete_signature_migration(version: str) -> bool:
-    """Record *version* as applied and release the claim.
-
-    Returns:
-        False when another version took the claim over mid-run, in which case
-        this process must not record its version as the applied one.
-    """
-    async with _connect_db() as db:
-        await _ensure_signature_version_table(db)
-        await db.execute(
-            "UPDATE signature_version SET applied_version = ?, target_version = '' "
-            "WHERE id = 1 AND target_version = ?",
-            (version, version),
-        )
-        await db.commit()
-        cursor = await db.execute(
-            "SELECT applied_version FROM signature_version WHERE id = 1"
-        )
-        row = await cursor.fetchone()
-    return bool(row) and row[0] == version
-
-
-async def migration_applied(key: str) -> bool:
-    """Return True if the migration *key* has already been applied.
-
-    Connection-opening counterpart of the internal ``_migration_applied``,
-    for callers outside this module (e.g. the signature backfill gate).
-    """
-    async with _connect_db() as db:
-        return await _migration_applied(db, key)
-
-
-async def mark_migration_applied(key: str) -> None:
-    """Record that migration *key* has been applied. Idempotent."""
-    async with _connect_db() as db:
-        await _mark_migration_applied(db, key)
-        await db.commit()

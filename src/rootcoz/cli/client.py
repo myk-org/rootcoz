@@ -300,18 +300,6 @@ class RootCozClient:
         """
         return self._request("GET", "/api/admin/component-versions")
 
-    def admin_backfill_signatures(self, *, dry_run: bool = True) -> dict[str, Any]:
-        """Recompute stored failure signatures with current normalization rules.
-        POST /api/admin/backfill-signatures
-
-        Admin only. Run after deploying new normalization rules, otherwise new
-        and stored signatures will not share a hash space.
-        """
-        return self._request(
-            "POST",
-            f"/api/admin/backfill-signatures?dry_run={'true' if dry_run else 'false'}",
-        )
-
     # -- Health ---------------------------------------------------------------
 
     def health(self) -> dict[str, Any]:

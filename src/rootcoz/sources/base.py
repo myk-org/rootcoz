@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from git.exc import GitCommandError
 
-from rootcoz.engine.core import get_failure_signature
+from rootcoz.engine.core import get_failure_signature, get_legacy_signature
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
@@ -168,7 +168,8 @@ class CISourceResult:
                 error=failure.error_message,
                 stack_trace=failure.stack_trace,
                 analysis=AnalysisDetail(),
-                error_signature=get_failure_signature(failure),
+                error_signature=get_legacy_signature(failure),
+                error_signature_v2=get_failure_signature(failure),
             )
             for failure in self.failures
         ]
