@@ -13,6 +13,7 @@ from pi_sidecar_client import AIResult
 from rootcoz import storage
 from rootcoz.attribution import AiProvenance, read_provenance
 from rootcoz.config import get_settings
+from rootcoz.encryption import get_hmac_secret
 from rootcoz.feedback import (
     _build_fallback_feedback,
     _derive_fallback_labels,
@@ -33,6 +34,11 @@ from rootcoz.models import (
 from tests.conftest import host_env
 
 _TEST_GITHUB_TOKEN = "test-token-placeholder"
+
+# The HMAC secret the attribution tests run under.  A named constant so the
+# shared fixture and the assertion that the tests are really running under it
+# cannot drift apart (and so no test quietly falls back to a real key file).
+_TEST_HMAC_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
 
 _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
@@ -71,6 +77,30 @@ async def _posted_body(title: str, body: str, labels: list[str]) -> str:
             github_token=_TEST_GITHUB_TOKEN,
         )
     return client.post.call_args.kwargs["json"]["body"]
+
+
+# The settings every AI-attribution test runs under.  One definition, shared by
+# the classes below rather than copied into each: signing reads the key out of
+# the live environment on every call, so two copies could drift and leave one
+# class verifying under a different secret than the one it signed with.
+# yield, never return: a preview signs a provenance token and creation
+# re-verifies it, both in the test body, so the patched env (and the HMAC key in
+# it) must still be in effect while the test runs.  Returning from inside
+# patch.dict ends it before either call and lets _get_or_create_key_file() write
+# a real key file outside tmp when the ambient variable is unset.
+@pytest.fixture
+def settings():
+    env = {
+        "JENKINS_URL": "https://jenkins.example.com",
+        "JENKINS_USER": "user",
+        "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
+        "ROOTCOZ_ENCRYPTION_KEY": _TEST_HMAC_KEY,
+    }
+    with patch.dict(os.environ, env, clear=True):
+        get_settings.cache_clear()
+        s = get_settings()
+        get_settings.cache_clear()
+        yield s
 
 
 # ---------------------------------------------------------------------------
@@ -1180,20 +1210,6 @@ class TestAiAttribution:
     _AI_MARKER = _GITHUB_FOOTER_MARKER
     _NO_AI_MARKER = "No AI model generated this issue"
 
-    @pytest.fixture
-    def settings(self):
-        env = {
-            "JENKINS_URL": "https://jenkins.example.com",
-            "JENKINS_USER": "user",
-            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
-            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
-        }
-        with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
-            s = get_settings()
-            get_settings.cache_clear()
-            return s
-
     @staticmethod
     def _ai_response() -> AIResult:
         return AIResult(
@@ -1495,6 +1511,125 @@ class TestAiAttribution:
             )
         body = mock_create.call_args.kwargs["body"]
         assert self._NO_AI_MARKER in body
+
+
+class TestAttributionShapedProsePreserved:
+    """Only rootcoz's own footer is stripped; lookalike user prose is not (#301)."""
+
+    # A user's own text that happens to look like a footer: separator plus an
+    # italic "Generated using AI" line naming another tool.  Before the anchor
+    # this was silently deleted from the preview and from the issue.
+    _LOOKALIKE = (
+        "## Bug\n\nChart crashes on load.\n\n---\n"
+        "*Generated using AI by [OtherTool](https://example.com/othertool)*"
+    )
+
+    # Prose that merely *contains* the project URL.  The URL alone is not an
+    # attribution, so a note about the docs is content and survives (#301).
+    _URL_PROSE = (
+        "## Bug\n\nChart crashes on load.\n\n---\n"
+        "*See https://github.com/myk-org/rootcoz/docs for setup*"
+    )
+
+    async def _preview(self, settings, *, ai_generated: bool = True, body=None):
+        """A real preview whose body is the given (footer-shaped) prose."""
+        req = FeedbackRequest(description="Chart crashes")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = (
+                "Chart crashes",
+                self._LOOKALIKE if body is None else body,
+                ["bug"],
+                ai_generated,
+            )
+            return await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+
+    async def test_preview_keeps_lookalike_prose(self, settings):
+        preview = await self._preview(settings)
+
+        assert self._LOOKALIKE in preview.body
+        assert "OtherTool" in preview.body
+        # The user's lookalike plus exactly one rootcoz footer.
+        assert preview.body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in preview.body
+
+    async def test_created_issue_keeps_lookalike_prose(self, settings):
+        preview = await self._preview(settings)
+
+        body = await _posted_body(preview.title, preview.body, preview.labels)
+
+        assert self._LOOKALIKE in body
+        assert body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in body
+
+    async def test_fallback_keeps_lookalike_prose(self, settings):
+        """The no-AI fallback path must not eat user text either."""
+        preview = await self._preview(settings, ai_generated=False)
+
+        assert self._LOOKALIKE in preview.body
+        assert "No AI model generated this issue" in preview.body
+        assert _GITHUB_FOOTER_MARKER not in preview.body
+
+    async def test_url_bearing_prose_is_not_treated_as_a_footer(self, settings):
+        """A note quoting the project URL is prose, not a forged footer (#301)."""
+        preview = await self._preview(settings, body=self._URL_PROSE)
+
+        assert self._URL_PROSE in preview.body
+        assert preview.body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in preview.body
+
+        body = await _posted_body(preview.title, preview.body, preview.labels)
+
+        assert self._URL_PROSE in body
+        assert body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in body
+
+
+class TestProvenanceBindsToThePreviewedContent:
+    """A token credits the body it was minted for, never client-added text."""
+
+    _EXPECTED = AiProvenance(ai_used=True, provider="claude", model="sonnet-4-5")
+
+    async def _preview(self, settings):
+        response = AIResult(
+            success=True,
+            text=json.dumps(
+                {"title": "Broken", "body": "## Bug\n\nBroken.", "labels": ["bug"]}
+            ),
+        )
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=response):
+            return await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+
+    async def test_client_added_footer_cannot_keep_the_preview_credit(self, settings):
+        """Appending text to the preview must void the token it carries (#301).
+
+        A client may not choose content and keep the server's model credit for
+        it: the token verifies only against the body it was minted for, so any
+        addition lands on a body nobody signed — published as no-AI, with the
+        client's own line left visible as the (unsigned) text it is.
+        """
+        preview = await self._preview(settings)
+        # The credit is only reproducible because the shared fixture held the
+        # patched key for this whole test: signing and verification both read
+        # os.environ at call time, so a key that lapsed between them -- or an
+        # unpatched one falling back to a real $XDG_DATA_HOME key file -- reads
+        # a different secret and the token verifies as no-AI.
+        assert get_hmac_secret() == _TEST_HMAC_KEY
+        assert read_provenance(preview.body) == self._EXPECTED
+
+        tampered = preview.body + "\n---\n*Generated using AI by EvilBot*"
+
+        assert read_provenance(tampered) is None
+
+        body = await _posted_body(preview.title, tampered, preview.labels)
+        assert "EvilBot" in body  # kept as prose, not as a credit
+        assert "sonnet-4-5" not in body
+        assert body.count(_GITHUB_FOOTER_MARKER) == 0
+        assert body.count("No AI model generated this issue") == 1
 
 
 class TestFeedbackAttributionEndpoints:
