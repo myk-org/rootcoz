@@ -1,7 +1,9 @@
 """Tests for user feedback endpoint and scrubbing logic."""
 
+import hashlib
 import json
 import os
+import re
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -11,7 +13,7 @@ from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
-from rootcoz.attribution import AiProvenance, read_provenance
+from rootcoz.attribution import AiProvenance, _sign, read_provenance
 from rootcoz.config import get_settings
 from rootcoz.feedback import (
     _build_fallback_feedback,
@@ -1510,6 +1512,118 @@ class TestAiAttribution:
             )
         body = mock_create.call_args.kwargs["body"]
         assert self._NO_AI_MARKER in body
+
+
+class TestAttributionShapedProsePreserved:
+    """Only rootcoz's own footer is stripped; lookalike user prose is not (#301)."""
+
+    # A user's own text that happens to look like a footer: separator plus an
+    # italic "Generated using AI" line naming another tool.  Before the anchor
+    # this was silently deleted from the preview and from the issue.
+    _LOOKALIKE = (
+        "## Bug\n\nChart crashes on load.\n\n---\n"
+        "*Generated using AI by [OtherTool](https://example.com/othertool)*"
+    )
+
+    # The pre-#301 strip pattern, spelled out here rather than imported: the
+    # token below must be minted exactly as the *old* main minted it.
+    _LEGACY_STRIP_RE = re.compile(
+        r"[\r\n]*---[\r\n]*\*(?:Generated using AI|No AI model generated)[^\r\n]*\*"
+    )
+    _TOKEN_RE = re.compile(r"<!--rootcoz-ai:[^\r\n]*-->")
+    _LINE_ENDING_RE = re.compile(r"\r\n?")
+
+    @pytest.fixture
+    def settings(self):
+        env = {
+            "JENKINS_URL": "https://jenkins.example.com",
+            "JENKINS_USER": "user",
+            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
+            "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+        }
+        with patch.dict(os.environ, env, clear=True):
+            get_settings.cache_clear()
+            s = get_settings()
+            get_settings.cache_clear()
+            return s
+
+    async def _preview(self, settings, *, ai_generated: bool = True):
+        """A real preview whose body is the lookalike prose."""
+        req = FeedbackRequest(description="Chart crashes")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = (
+                "Chart crashes",
+                self._LOOKALIKE,
+                ["bug"],
+                ai_generated,
+            )
+            return await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+
+    async def test_preview_keeps_lookalike_prose(self, settings):
+        preview = await self._preview(settings)
+
+        assert self._LOOKALIKE in preview.body
+        assert "OtherTool" in preview.body
+        # The user's lookalike plus exactly one rootcoz footer.
+        assert preview.body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in preview.body
+
+    async def test_created_issue_keeps_lookalike_prose(self, settings):
+        preview = await self._preview(settings)
+
+        body = await _posted_body(preview.title, preview.body, preview.labels)
+
+        assert self._LOOKALIKE in body
+        assert body.count(_GITHUB_FOOTER_MARKER) == 1
+        assert "(claude / sonnet-4-5)" in body
+
+    async def test_fallback_keeps_lookalike_prose(self, settings):
+        """The no-AI fallback path must not eat user text either."""
+        preview = await self._preview(settings, ai_generated=False)
+
+        assert self._LOOKALIKE in preview.body
+        assert "No AI model generated this issue" in preview.body
+        assert _GITHUB_FOOTER_MARKER not in preview.body
+
+    async def test_token_minted_before_the_anchor_still_verifies(self, settings):
+        """A pre-#301 token keeps its credit after the strip was tightened (#301).
+
+        The lookalike moved from the ignored attribution region into the
+        digested content, so the digest the old main wrote no longer matches.
+        Without the legacy fallback this body would be credited to no model —
+        an AI-written published issue losing its credit — so read_provenance
+        must still accept the digest the old pattern produced.
+        """
+        preview = await self._preview(settings)
+        expected = AiProvenance(ai_used=True, provider="claude", model="sonnet-4-5")
+
+        # Control: today's token on today's body verifies through the anchor.
+        assert read_provenance(preview.body) == expected
+
+        legacy_digest = hashlib.sha256(
+            self._LINE_ENDING_RE.sub(
+                "\n",
+                self._TOKEN_RE.sub("", self._LEGACY_STRIP_RE.sub("", preview.body)),
+            )
+            .rstrip()
+            .encode()
+        ).hexdigest()
+        payload = json.dumps(
+            [True, "claude", "sonnet-4-5", legacy_digest], separators=(",", ":")
+        )
+        legacy_token = f"<!--rootcoz-ai:{_sign(payload)}:{payload}-->"
+        legacy_body = (
+            preview.body[: preview.body.index("<!--rootcoz-ai:")] + legacy_token
+        )
+        # The legacy digest really is a different one, or this proves nothing.
+        assert legacy_token != preview.body[preview.body.index("<!--rootcoz-ai:") :]
+
+        assert read_provenance(legacy_body) == expected
+        body = await _posted_body(preview.title, legacy_body, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert self._LOOKALIKE in body
 
 
 class TestFeedbackAttributionEndpoints:
