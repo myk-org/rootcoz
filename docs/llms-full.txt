@@ -1757,7 +1757,7 @@ The registration key is the only credential that signs you in; the tracker token
    | --- | --- |
    | `Mentions` page | Lists every comment that mentions you, newest first, with an unread count and `Mark all as read`. Opening a mention marks it read and jumps to the exact comment on the report. |
    | Sidebar badge | Live unread count, pushed over the `/api/navbar/stream` SSE channel. |
-   | `Push Notifications` toggle | Browser notifications titled `Mentioned by @author`. Note that the notification link is currently built as `/report/{job_id}` while the app serves the report at `/results/:jobId`, so a tap lands on a route the SPA does not register. Use the `Mentions` page or the sidebar badge until that is corrected. |
+   | `Push Notifications` toggle | Browser notifications titled `Mentioned by @author`. The notification link is built as `/results/{job_id}`, so a tap opens the report for that job. Use the `Mentions` page or the sidebar badge until that is corrected. |
 
    Enabling push notifications asks the browser for permission and registers the device with the server. Delivery is best effort: a subscription the push service reports as gone is deleted automatically, and at most 10 subscriptions are kept per user.
 
@@ -1959,7 +1959,9 @@ That creates an active operator who can submit analyses, and one server setting 
    | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
    | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
 
-   Everything else applies to the running server as soon as you save. The exceptions are `enable_auto_review` and `auto_push_exporters`: both are server-only settings, so saving them through this page is rejected with `400 Server-only settings (env var only)` and they must be set in the deployment environment instead.
+   Most of those are also server-only, so the restart is not the operative constraint — the save is rejected outright. `vapid_private_key` is the only one here that this page can actually store; the rest must be set in the environment.
+
+   Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: `PUT /api/admin/settings` rejects every one of them with `400 Server-only settings (env var only)`, so they must be set in the deployment environment instead. They are `admin_wait_approve_msg`, `allowed_users`, `auto_push_exporters`, `db_path`, `debug`, `default_user_role`, `enable_auto_review`, `enable_github_issues`, `enable_reportportal`, `log_level`, `metadata_rules_file`, `public_base_url`, `require_approval`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links`, `secure_cookies`, `trust_proxy_headers`, `vapid_claim_email`, and `vapid_public_key`. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.
 
    > **Warning:** Saving an empty value is a reset, not a blank value. The database override is deleted and resolution falls back to the environment variable, then the default.
 
@@ -2485,7 +2487,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--additional-repos` | Extra context repos as `"name:url,name:url"`. |
 | `--wait` / `--no-wait`, `--poll-interval`, `--max-wait` | Wait for a still-running Jenkins build. |
 | `--max-concurrent` | Cap concurrent AI calls. `0` keeps the config or server default. |
-| `--passed-tests`, `--skipped-tests` | JSON arrays of extra test entries. |
+| `--passed-tests`, `--skipped-tests` | JSON arrays of extra test entries. The request model accepts these only for `type=raw`, and `analyze --source` offers only `jenkins`, `file`, or `prow` — so on this command they are always rejected with a validation error. Tracked in [#298](https://github.com/myk-org/rootcoz/issues/298). |
 | `--tag` | Categorization tag. Repeatable. |
 | `--label`, `-l` | Job metadata label merged on analyze. Repeatable, and distinct from `--tag`. |
 
@@ -2799,10 +2801,15 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
 
    ```bash
    for _ in $(seq 1 80); do
-     [ "$(rootcoz --json status "$JOB_ID" | jq -r .status)" = "completed" ] && break
+     case "$(rootcoz --json status "$JOB_ID" | jq -r .status)" in
+       completed) break ;;
+       failed|aborted) echo "analysis did not complete"; exit 1 ;;
+     esac
      sleep 15
    done
    ```
+
+   Handle the terminal status explicitly: a loop that only breaks on `completed` will fall through to the result-fetch step for a job that failed, was aborted, or is still running once the iterations run out, and the script will read as though the analysis succeeded. Check the status after the loop and treat `failed` and `aborted` as errors.
 
    `rootcoz abort JOB_ID` cancels a run you no longer want.
 

@@ -99,7 +99,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--additional-repos` | Extra context repos as `"name:url,name:url"`. |
 | `--wait` / `--no-wait`, `--poll-interval`, `--max-wait` | Wait for a still-running Jenkins build. |
 | `--max-concurrent` | Cap concurrent AI calls. `0` keeps the config or server default. |
-| `--passed-tests`, `--skipped-tests` | JSON arrays of extra test entries. |
+| `--passed-tests`, `--skipped-tests` | JSON arrays of extra test entries. The request model accepts these only for `type=raw`, and `analyze --source` offers only `jenkins`, `file`, or `prow` — so on this command they are always rejected with a validation error. Tracked in [#298](https://github.com/myk-org/rootcoz/issues/298). |
 | `--tag` | Categorization tag. Repeatable. |
 | `--label`, `-l` | Job metadata label merged on analyze. Repeatable, and distinct from `--tag`. |
 

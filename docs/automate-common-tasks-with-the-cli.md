@@ -116,10 +116,15 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
 
    ```bash
    for _ in $(seq 1 80); do
-     [ "$(rootcoz --json status "$JOB_ID" | jq -r .status)" = "completed" ] && break
+     case "$(rootcoz --json status "$JOB_ID" | jq -r .status)" in
+       completed) break ;;
+       failed|aborted) echo "analysis did not complete"; exit 1 ;;
+     esac
      sleep 15
    done
    ```
+
+   Handle the terminal status explicitly: a loop that only breaks on `completed` will fall through to the result-fetch step for a job that failed, was aborted, or is still running once the iterations run out, and the script will read as though the analysis succeeded. Check the status after the loop and treat `failed` and `aborted` as errors.
 
    `rootcoz abort JOB_ID` cancels a run you no longer want.
 

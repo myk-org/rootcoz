@@ -104,7 +104,7 @@ The registration key is the only credential that signs you in; the tracker token
    | --- | --- |
    | `Mentions` page | Lists every comment that mentions you, newest first, with an unread count and `Mark all as read`. Opening a mention marks it read and jumps to the exact comment on the report. |
    | Sidebar badge | Live unread count, pushed over the `/api/navbar/stream` SSE channel. |
-   | `Push Notifications` toggle | Browser notifications titled `Mentioned by @author`. Note that the notification link is currently built as `/report/{job_id}` while the app serves the report at `/results/:jobId`, so a tap lands on a route the SPA does not register. Use the `Mentions` page or the sidebar badge until that is corrected. |
+   | `Push Notifications` toggle | Browser notifications titled `Mentioned by @author`. The notification link is built as `/results/{job_id}`, so a tap opens the report for that job. Use the `Mentions` page or the sidebar badge until that is corrected. |
 
    Enabling push notifications asks the browser for permission and registers the device with the server. Delivery is best effort: a subscription the push service reports as gone is deleted automatically, and at most 10 subscriptions are kept per user.
 

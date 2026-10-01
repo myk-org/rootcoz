@@ -503,7 +503,7 @@
 </tr>
 <tr>
 <td><code>--passed-tests</code>, <code>--skipped-tests</code></td>
-<td>JSON arrays of extra test entries.</td>
+<td>JSON arrays of extra test entries. The request model accepts these only for <code>type=raw</code>, and <code>analyze --source</code> offers only <code>jenkins</code>, <code>file</code>, or <code>prow</code> — so on this command they are always rejected with a validation error. Tracked in <a href="https://github.com/myk-org/rootcoz/issues/298">#298</a>.</td>
 </tr>
 <tr>
 <td><code>--tag</code></td>

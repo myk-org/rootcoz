@@ -331,9 +331,13 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
 <p>Cap the loop in real automation so a stuck job does not spin forever:</p>
 <p><code>bash
    for _ in $(seq 1 80); do
-     [ "$(rootcoz --json status "$JOB_ID" | jq -r .status)" = "completed" ] &amp;&amp; break
+     case "$(rootcoz --json status "$JOB_ID" | jq -r .status)" in
+       completed) break ;;
+       failed|aborted) echo "analysis did not complete"; exit 1 ;;
+     esac
      sleep 15
    done</code></p>
+<p>Handle the terminal status explicitly: a loop that only breaks on <code>completed</code> will fall through to the result-fetch step for a job that failed, was aborted, or is still running once the iterations run out, and the script will read as though the analysis succeeded. Check the status after the loop and treat <code>failed</code> and <code>aborted</code> as errors.</p>
 <p><code>rootcoz abort JOB_ID</code> cancels a run you no longer want.</p>
 <ol>
 <li><strong>Fetch the result.</strong></li>
