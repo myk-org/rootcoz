@@ -389,7 +389,7 @@ curl<span class="w"> </span>http://localhost:8000/health
 <li>If registration succeeds but RootCoz says your account is awaiting approval, either disable approval for the local quickstart with <code>REQUIRE_APPROVAL=false</code> or have an admin approve the account.</li>
 <li>If a Jenkins submission fails immediately, verify <code>JENKINS_URL</code>, <code>JENKINS_USER</code>, and <code>JENKINS_PASSWORD</code>, or enter them directly on the form for that run.</li>
 <li>If a Prow submission fails immediately, provide <code>Prow URL</code> and <code>GCS Bucket</code> in the form or set <code>PROW_URL</code> and <code>GCS_BUCKET</code> in <code>.env</code> before restarting.</li>
-<li>If XML submission finishes with no useful report, make sure you pasted or uploaded real JUnit XML, not console output or HTML. RootCoz only analyzes failures and errors from the XML.</li>
+<li>If an XML submission ends as <code>failed</code> with a parse error, you pasted or uploaded something that is not JUnit XML — console output or an HTML error page will not parse. If instead it completes with nothing to analyze, the XML was valid but contained no failing tests. RootCoz only analyzes failures and errors from the XML.</li>
 </ul>
 <h2 id="related-pages">Related Pages</h2>
 <ul>

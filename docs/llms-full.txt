@@ -123,7 +123,7 @@ XML submissions open the result directly. Jenkins and Prow submissions open a li
 - If registration succeeds but RootCoz says your account is awaiting approval, either disable approval for the local quickstart with `REQUIRE_APPROVAL=false` or have an admin approve the account.
 - If a Jenkins submission fails immediately, verify `JENKINS_URL`, `JENKINS_USER`, and `JENKINS_PASSWORD`, or enter them directly on the form for that run.
 - If a Prow submission fails immediately, provide `Prow URL` and `GCS Bucket` in the form or set `PROW_URL` and `GCS_BUCKET` in `.env` before restarting.
-- If XML submission finishes with no useful report, make sure you pasted or uploaded real JUnit XML, not console output or HTML. RootCoz only analyzes failures and errors from the XML.
+- If an XML submission ends as `failed` with a parse error, you pasted or uploaded something that is not JUnit XML — console output or an HTML error page will not parse. If instead it completes with nothing to analyze, the XML was valid but contained no failing tests. RootCoz only analyzes failures and errors from the XML.
 
 ## Related Pages
 
@@ -732,7 +732,7 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
    | `Upload File` | `file` | a `.xml` file | Report opens directly |
    | `Paste XML` | `file` | `JUnit XML Content` | Report opens directly |
 
-   `Paste XML` and `Upload File` only accept JUnit XML. Console output, log files, and HTML error pages produce a report with nothing to analyze.
+   `Paste XML` and `Upload File` only accept JUnit XML. Console output, log files, and HTML error pages are not parsed as an empty report — they fail the XML parse, and the job ends as `failed` with a parse error. A job reaches the empty-report path only when the XML is well-formed and contains no failing tests.
 
 3. **Fill in only what the mode needs.**
 
@@ -2502,7 +2502,7 @@ Related lifecycle commands:
 
 | Command | Flags | Purpose |
 | --- | --- | --- |
-| `list` | `--limit`/`-l` (50), `--analysis-state` | Recent analyzed jobs. |
+| `list` | `--limit`/`-l` (50), `--analysis-state` | Recent jobs. Without `--analysis-state`, both `submitted` and `analyzed` jobs are returned; pass `--analysis-state analyzed` to restrict it. |
 | `dashboard` | `--label`/`-l` (repeatable), `--exclude-tag` (repeatable), `--search`/`-s`, `--review-status` (`all`, `reviewed`, `not_reviewed`), `--analysis-state`, `--limit` (500) | Jobs with failure counts and review progress. |
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |

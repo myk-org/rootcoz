@@ -116,7 +116,7 @@ Related lifecycle commands:
 
 | Command | Flags | Purpose |
 | --- | --- | --- |
-| `list` | `--limit`/`-l` (50), `--analysis-state` | Recent analyzed jobs. |
+| `list` | `--limit`/`-l` (50), `--analysis-state` | Recent jobs. Without `--analysis-state`, both `submitted` and `analyzed` jobs are returned; pass `--analysis-state analyzed` to restrict it. |
 | `dashboard` | `--label`/`-l` (repeatable), `--exclude-tag` (repeatable), `--search`/`-s`, `--review-status` (`all`, `reviewed`, `not_reviewed`), `--analysis-state`, `--limit` (500) | Jobs with failure counts and review progress. |
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |

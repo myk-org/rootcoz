@@ -277,7 +277,7 @@
 </tr>
 </tbody>
 </table></div>
-<p><code>Paste XML</code> and <code>Upload File</code> only accept JUnit XML. Console output, log files, and HTML error pages produce a report with nothing to analyze.</p>
+<p><code>Paste XML</code> and <code>Upload File</code> only accept JUnit XML. Console output, log files, and HTML error pages are not parsed as an empty report — they fail the XML parse, and the job ends as <code>failed</code> with a parse error. A job reaches the empty-report path only when the XML is well-formed and contains no failing tests.</p>
 <ol>
 <li><strong>Fill in only what the mode needs.</strong></li>
 </ol>

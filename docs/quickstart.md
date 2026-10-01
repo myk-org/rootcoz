@@ -115,7 +115,7 @@ XML submissions open the result directly. Jenkins and Prow submissions open a li
 - If registration succeeds but RootCoz says your account is awaiting approval, either disable approval for the local quickstart with `REQUIRE_APPROVAL=false` or have an admin approve the account.
 - If a Jenkins submission fails immediately, verify `JENKINS_URL`, `JENKINS_USER`, and `JENKINS_PASSWORD`, or enter them directly on the form for that run.
 - If a Prow submission fails immediately, provide `Prow URL` and `GCS Bucket` in the form or set `PROW_URL` and `GCS_BUCKET` in `.env` before restarting.
-- If XML submission finishes with no useful report, make sure you pasted or uploaded real JUnit XML, not console output or HTML. RootCoz only analyzes failures and errors from the XML.
+- If an XML submission ends as `failed` with a parse error, you pasted or uploaded something that is not JUnit XML — console output or an HTML error page will not parse. If instead it completes with nothing to analyze, the XML was valid but contained no failing tests. RootCoz only analyzes failures and errors from the XML.
 
 ## Related Pages
 

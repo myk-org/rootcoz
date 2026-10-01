@@ -33,7 +33,7 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
    | `Upload File` | `file` | a `.xml` file | Report opens directly |
    | `Paste XML` | `file` | `JUnit XML Content` | Report opens directly |
 
-   `Paste XML` and `Upload File` only accept JUnit XML. Console output, log files, and HTML error pages produce a report with nothing to analyze.
+   `Paste XML` and `Upload File` only accept JUnit XML. Console output, log files, and HTML error pages are not parsed as an empty report — they fail the XML parse, and the job ends as `failed` with a parse error. A job reaches the empty-report path only when the XML is well-formed and contains no failing tests.
 
 3. **Fill in only what the mode needs.**
 
