@@ -27,6 +27,14 @@ published issue, attached to unrelated text — fails the digest check and is
 credited to no model.  The price is deliberate: edits *outside* the attribution
 region change the content and therefore lose the model credit, because nothing
 the server can verify still says who wrote them.
+
+**Line endings never decide anything.**  A client posts text from a browser, a
+CLI on Windows or a pasted file, so the same content arrives with LF, CRLF or
+lone-CR separators.  Stripping therefore matches any line break
+(:data:`ATTRIBUTION_RE` / :data:`_PROVENANCE_RE`), and the digest normalizes
+line breaks to LF before hashing (:func:`_content_digest`) so a preview
+round-trips through a CRLF round-trip unchanged while a *changed* body still
+fails the digest check.
 """
 
 import hashlib
@@ -53,12 +61,16 @@ AI_ATTRIBUTION_PREFIX = (
 
 # Matches a rootcoz attribution line wherever it appears in a body (not only a
 # trailing one), so a client-supplied fake footer cannot survive creation.
+# The separator/line breaks are any run of CR/LF, never a bare LF: a CRLF (or
+# lone-CR) footer must not slip past an LF-shaped pattern and get published.
 ATTRIBUTION_RE = re.compile(
-    r"\n*---\n\*(?:Generated using AI|No AI model generated)[^\n]*\*"
+    r"[\r\n]*---[\r\n]*\*(?:Generated using AI|No AI model generated)[^\r\n]*\*"
 )
 
 _PROVENANCE_PREFIX = "<!--rootcoz-ai:"
-_PROVENANCE_RE = re.compile(r"<!--rootcoz-ai:[^\n]*-->")
+# One line only, under either line-ending style, so a CRLF-embedded token is
+# stripped exactly like an LF one.
+_PROVENANCE_RE = re.compile(r"<!--rootcoz-ai:[^\r\n]*-->")
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,8 +111,15 @@ def _strip_attribution(body: str) -> str:
 
 
 def _content_digest(body: str) -> str:
-    """Digest the content a token describes: *body* minus its attribution."""
-    return hashlib.sha256(_strip_attribution(body).encode()).hexdigest()
+    """Digest the content a token describes: *body* minus its attribution.
+
+    Line breaks are normalized to LF first, so the digest depends on the text
+    and not on the client's line-ending style — a CRLF round-trip of the same
+    body still verifies, a changed body still does not.
+    """
+    return hashlib.sha256(
+        "\n".join(_strip_attribution(body).splitlines()).encode()
+    ).hexdigest()
 
 
 def _encode(body: str, provenance: AiProvenance) -> str:

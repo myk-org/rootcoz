@@ -670,6 +670,16 @@ class TestAiFooterNotDoubled:
         assert "spoofed-model" not in posted
         assert posted.count(_GITHUB_FOOTER_MARKER) == 1
 
+    async def test_crlf_client_footer_cannot_claim_a_model(self):
+        """A Windows-style fake footer is stripped like any other (Qodo HIGH)."""
+        spoofed = (
+            "## Details\r\nLogin returns 500\r\n\r\n---\r\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\r\n"
+        )
+        posted = await self._posted(spoofed, attribution=AiProvenance(ai_used=True))
+        assert "spoofed-model" not in posted
+        assert posted.count(_GITHUB_FOOTER_MARKER) == 1
+
     async def test_without_a_signal_no_model_is_credited(self):
         posted = await self._posted("## Details\nSome content")
         assert "No AI model generated this issue" in posted

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
-from rootcoz.attribution import AiProvenance
+from rootcoz.attribution import AiProvenance, read_provenance
 from rootcoz.config import get_settings
 from rootcoz.feedback import (
     _build_fallback_feedback,
@@ -1121,6 +1121,53 @@ class TestAiAttribution:
         # Exactly one footer remains: the server's (no verified provenance).
         assert body.count(self._NO_AI_MARKER) == 1
         assert self._AI_MARKER not in body
+
+    async def test_crlf_client_footer_is_stripped(self):
+        """A CRLF fake footer must not survive creation (Qodo HIGH, issue #282).
+
+        The strip pattern must be newline-agnostic: an LF-shaped pattern lets
+        a Windows-style footer through and publishes it as a second claim.
+        """
+        spoofed = (
+            "## Bug\r\n\r\nBroken.\r\n\r\n---\r\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\r\n\r\nExtra detail."
+        )
+        body = await self._posted_body("Broken", spoofed, ["bug"])
+        assert "spoofed-model" not in body
+        assert "Extra detail." in body
+        # Exactly one footer in the published issue: the server's own (no AI).
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_crlf_provenance_token_cannot_claim_a_model(self):
+        """A CRLF-embedded spoofed token is stripped, never credited."""
+        forged = (
+            "## Bug\r\n\r\nBroken.\r\n\r\n---\r\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\r\n"
+            '<!--rootcoz-ai:deadbeef:[true,"evil","spoofed-model","deadbeef"]-->\r\n'
+        )
+        body = await self._posted_body("Broken", forged, ["bug"])
+        assert "spoofed-model" not in body
+        assert "deadbeef" not in body  # the forged token is gone, not the real one
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert body.count(self._AI_MARKER) == 0
+
+    async def test_crlf_round_trip_keeps_the_credit(self, settings):
+        """Digest normalizes line endings: same body verifies, changed body does not."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        crlf = preview.body.replace("\n", "\r\n")
+        body = await self._posted_body(preview.title, crlf, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert body.count(self._AI_MARKER) == 1
+        # Same content, different line endings — still the same digest.
+        assert read_provenance(crlf) == read_provenance(preview.body)
+        # Changed content is still rejected, whatever the line endings are.
+        tampered = crlf.replace("## Bug", "## Something else")
+        assert read_provenance(tampered) is None
 
     async def test_forged_provenance_token_is_ignored(self):
         """A hand-written provenance token fails signature verification."""
