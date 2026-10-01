@@ -238,6 +238,18 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
 </code></pre></div>
 
 <p>That submits a Jenkins analysis, waits for it to finish, and prints a two-field summary — the whole submit-poll-read loop in six lines.</p>
+<blockquote>
+<p><strong>Warning:</strong> The <code>until</code> loop above exits only on <code>completed</code>. A job that ends as <code>failed</code> or <code>aborted</code> never satisfies the condition, so the script polls forever instead of reporting the problem. In automation, branch on the terminal statuses and exit non-zero:</p>
+</blockquote>
+<div class="highlight"><pre><span></span><code><span class="nv">STATUS</span><span class="o">=</span><span class="k">$(</span>rootcoz<span class="w"> </span>--json<span class="w"> </span>status<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span>.status<span class="k">)</span>
+<span class="k">case</span><span class="w"> </span><span class="s2">"</span><span class="nv">$STATUS</span><span class="s2">"</span><span class="w"> </span><span class="k">in</span>
+<span class="w">  </span>completed<span class="o">)</span><span class="w"> </span>rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class="w"> </span>show<span class="w"> </span><span class="s2">"</span><span class="nv">$JOB_ID</span><span class="s2">"</span><span class="w"> </span>--fields<span class="w"> </span>result.summary,result.failed_count<span class="w"> </span><span class="p">;;</span>
+<span class="w">  </span>failed<span class="p">|</span>aborted<span class="p">|</span>error<span class="o">)</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"analysis </span><span class="nv">$JOB_ID</span><span class="s2"> ended as </span><span class="nv">$STATUS</span><span class="s2">"</span><span class="w"> </span>&gt;<span class="p">&amp;</span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="p">;;</span>
+<span class="w">  </span>*<span class="o">)</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">"unexpected status </span><span class="nv">$STATUS</span><span class="s2">"</span><span class="w"> </span>&gt;<span class="p">&amp;</span><span class="m">2</span><span class="p">;</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span><span class="w"> </span><span class="p">;;</span>
+<span class="k">esac</span>
+</code></pre></div>
+
+<p>Bound the wait as well (for example <code>for i in $(seq 1 240)</code>) so a job stuck in <code>pending</code> or <code>running</code> cannot hang the pipeline. See <a href="track-analysis-progress.html">Tracking Analysis Progress</a> for every status value.</p>
 <h2 id="step-by-step">Step-by-Step</h2>
 <ol>
 <li><strong>Authenticate without any interactive prompt.</strong></li>
@@ -433,7 +445,7 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
 <ul>
 <li>Pass <code>--api-key</code> from a CI secret and <code>--server</code> from a variable to run the same script against dev, staging, and prod without editing it.</li>
 <li>Use <code>rootcoz analyze --source file -f results.xml</code> to analyze artifacts downloaded after the fact, which is the easiest way to backfill historical CI runs.</li>
-<li><code>rootcoz results delete --all --confirm</code> clears every job on the server. The <code>--confirm</code> requirement exists so an accidental flag cannot wipe it.</li>
+<li><code>rootcoz results delete --all --confirm</code> deletes jobs in bulk. The <code>--confirm</code> requirement exists so an accidental flag cannot wipe the server. The command collects job IDs from a single unpaginated <code>/api/dashboard</code> request, so on a server with more than 500 jobs it only sees the first page and leaves the rest in place. For a full cleanup, delete the remainder by explicit <code>JOB_ID</code> values from <code>rootcoz --json results list</code>.</li>
 <li><code>rootcoz re-analyze JOB_ID</code> re-runs a finished analysis with its original settings, which is faster than resubmitting when you only changed the model on the server side.</li>
 <li><code>rootcoz history search --signature HASH</code> finds every other test that failed with the same error signature, useful for deciding whether a new failure is really a new problem.</li>
 <li><code>rootcoz --json admin-chat send "Which jobs regressed this week?"</code> is the fastest way to get a cross-job answer in a pipeline log.</li>

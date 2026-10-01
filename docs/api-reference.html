@@ -324,11 +324,6 @@
 </tr>
 <tr>
 <td>GET</td>
-<td><code>/api/version</code></td>
-<td>Running version</td>
-</tr>
-<tr>
-<td>GET</td>
 <td><code>/metrics</code></td>
 <td>Prometheus metrics</td>
 </tr>
@@ -376,6 +371,12 @@
 </thead>
 <tbody>
 <tr>
+<td>GET</td>
+<td><code>/api/version</code></td>
+<td>viewer</td>
+<td>Running version</td>
+</tr>
+<tr>
 <td>POST</td>
 <td><code>/api/auth/logout</code></td>
 <td>authenticated</td>
@@ -403,7 +404,7 @@
 <td>PUT</td>
 <td><code>/api/user/ai-credentials/{provider}</code></td>
 <td>reviewer</td>
-<td>Store a personal key for <code>claude</code>, <code>gemini</code>, or <code>cursor</code></td>
+<td>Store a personal key. <code>{provider}</code> is an exact provider ID from <code>GET /api/user/ai-credentials</code> (for example <code>anthropic</code> or <code>google</code>), not the <code>claude</code>/<code>gemini</code>/<code>cursor</code> names used for analysis settings. Unknown IDs are rejected with 400</td>
 </tr>
 <tr>
 <td>DELETE</td>
@@ -674,7 +675,7 @@
 <td>none; deletes your own job, admins delete any</td>
 </tr>
 <tr>
-<td>POST</td>
+<td>DELETE</td>
 <td><code>/api/results/bulk</code></td>
 <td>operator</td>
 <td><code>job_ids</code></td>

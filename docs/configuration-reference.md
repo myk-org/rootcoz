@@ -91,7 +91,7 @@ Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails
    | `JIRA_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JIRA_MAX_RESULTS` | `5` | integer > 0 | no | no | yes |
    | `ENABLE_JIRA` | unset | boolean | no | no | yes |
-   | `ENABLE_JIRA_ISSUES` | unset | boolean | no | no | **no** |
+   | `ENABLE_JIRA_ISSUES` | unset | boolean | no | no | yes |
 
    `JIRA_EMAIL` decides the auth mode. With an email, RootCoz uses Jira Cloud Basic auth and prefers `JIRA_API_TOKEN`, falling back to `JIRA_PAT`. Without an email it treats the server as Server/DC, prefers `JIRA_PAT`, and falls back to `JIRA_API_TOKEN`. Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a URL, credentials, or project key logs a warning and stays off.
 

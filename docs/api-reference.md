@@ -60,7 +60,6 @@ That single authenticated GET returns the stored analysis for one job, including
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
 | GET | `/api/health` | Detailed health including database and AI sidecar |
-| GET | `/api/version` | Running version |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
@@ -73,11 +72,12 @@ That single authenticated GET returns the stored analysis for one job, including
 
 | Method | Path | Min role | Notes |
 | --- | --- | --- | --- |
+| GET | `/api/version` | viewer | Running version |
 | POST | `/api/auth/logout` | authenticated | Clears the session cookie |
 | GET | `/api/auth/me` | viewer | Username, role, `can_view_reports`, `can_use_server_providers` |
 | POST | `/api/auth/rotate-key` | viewer | Rotates your own API key; the old key stops working |
 | GET | `/api/user/ai-credentials` | viewer | Personal provider credentials, secrets masked |
-| PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key for `claude`, `gemini`, or `cursor` |
+| PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
 | PUT | `/api/user/tokens` | viewer | Save Jira and GitHub tracker tokens |
@@ -146,7 +146,7 @@ The shared body accepts the server defaults as per-request overrides:
 | PUT | `/results/{job_id}/override-pattern` | reviewer | `test_name`, `pattern` |
 | PUT | `/results/{job_id}/tags` | reviewer | name and tag fields |
 | DELETE | `/results/{job_id}` | operator | none; deletes your own job, admins delete any |
-| POST | `/api/results/bulk` | operator | `job_ids` |
+| DELETE | `/api/results/bulk` | operator | `job_ids` |
 
 Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITENT`, `KNOWN BUG`, and `PERSISTENT`. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 

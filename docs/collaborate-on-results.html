@@ -248,7 +248,7 @@ rootcoz<span class="w"> </span>comments<span class="w"> </span>add<span class="w
 <ol>
 <li>Check what the assistant can reach before you ask.</li>
 </ol>
-<p>The welcome message at the top of a new session lists the resources available for that job, and the assistant is strictly limited to this one job's failures. It has read-only filesystem tools (<code>read</code>, <code>ls</code>, <code>find</code>, <code>grep</code>, <code>subagent</code>) plus authenticated HTTP tools:</p>
+<p>The welcome message at the top of a new session lists the resources available for that job, and the assistant's working context is this one job's result and comments. Its history tools are the exception: <code>get_failure_history</code> and <code>get_classification_history</code> query by test name across the server and exclude only the current job, so the assistant can pull how a test has failed in <em>other</em> jobs. It has read-only filesystem tools (<code>read</code>, <code>ls</code>, <code>find</code>, <code>grep</code>, <code>subagent</code>) plus authenticated HTTP tools:</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>

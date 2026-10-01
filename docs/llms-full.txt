@@ -489,7 +489,7 @@ Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails
    | `JIRA_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JIRA_MAX_RESULTS` | `5` | integer > 0 | no | no | yes |
    | `ENABLE_JIRA` | unset | boolean | no | no | yes |
-   | `ENABLE_JIRA_ISSUES` | unset | boolean | no | no | **no** |
+   | `ENABLE_JIRA_ISSUES` | unset | boolean | no | no | yes |
 
    `JIRA_EMAIL` decides the auth mode. With an email, RootCoz uses Jira Cloud Basic auth and prefers `JIRA_API_TOKEN`, falling back to `JIRA_PAT`. Without an email it treats the server as Server/DC, prefers `JIRA_PAT`, and falls back to `JIRA_API_TOKEN`. Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a URL, credentials, or project key logs a warning and stays off.
 
@@ -917,7 +917,7 @@ This prints just the three fields a status check needs, instead of the full resu
 
   See [CLI Command Reference](cli-reference.html) and [Automating Common Tasks with the CLI](automate-common-tasks-with-the-cli.html).
 
-- **Poll the API directly.** `GET /results/{job_id}` returns the status, the result payload, and the full metadata you need to script your own checks. The same `fields` query parameter is available there. A browser hitting that URL is redirected to the status page whenever the job is in progress, failed, or aborted, and to the report once it completes.
+- **Poll the API directly.** `GET /results/{job_id}` returns the status, the result payload, and the full metadata you need to script your own checks. The same `fields` query parameter is available there. A browser hitting that URL is redirected to the status page only while the job is in progress (`pending`, `running`, or `waiting`). Once the job reaches a terminal state — including `failed` and `aborted` — the browser stays at `/results/{job_id}` and the report application renders there.
 
 - **Watch a running job for nothing else.** To answer "did anything change on this job right now", subscribe to the `results:{job_id}` stream and listen for `status-changed`. The browser app uses this, but it is the same mechanism an external tool can use.
 
@@ -1102,7 +1102,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 2. Check what the assistant can reach before you ask.
 
-   The welcome message at the top of a new session lists the resources available for that job, and the assistant is strictly limited to this one job's failures. It has read-only filesystem tools (`read`, `ls`, `find`, `grep`, `subagent`) plus authenticated HTTP tools:
+   The welcome message at the top of a new session lists the resources available for that job, and the assistant's working context is this one job's result and comments. Its history tools are the exception: `get_failure_history` and `get_classification_history` query by test name across the server and exclude only the current job, so the assistant can pull how a test has failed in *other* jobs. It has read-only filesystem tools (`read`, `ls`, `find`, `grep`, `subagent`) plus authenticated HTTP tools:
 
    | Tool | What it returns |
    | --- | --- |
@@ -1265,7 +1265,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    In the preview step, pick or type the `Jira Project` (the server searches your projects as you type), choose an `Issue Type` from `Bug`, `Task`, `Story`, `Epic`, `Sub-task`, or `Custom...`, and optionally pick a `Security Level`. A project key must be available on the server or in the request, otherwise ticket creation fails.
 
-   GitHub issues need a repository: the job's tests repository by default, or another repository from the job's configured repositories when more than one is available.
+   GitHub issues need a repository: RootCoz always uses the deployment's `TESTS_REPO_URL`. It deliberately ignores the job's additional repositories, so you cannot retarget issue creation at another repo — a job's `request_params` are never consulted for this. To file against a different repository, change `TESTS_REPO_URL` on the server (or the `GITHUB` category in Server Settings) first.
 
 4. Create the issue and let RootCoz record the link.
 
@@ -2060,7 +2060,6 @@ That single authenticated GET returns the stored analysis for one job, including
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
 | GET | `/api/health` | Detailed health including database and AI sidecar |
-| GET | `/api/version` | Running version |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
@@ -2073,11 +2072,12 @@ That single authenticated GET returns the stored analysis for one job, including
 
 | Method | Path | Min role | Notes |
 | --- | --- | --- | --- |
+| GET | `/api/version` | viewer | Running version |
 | POST | `/api/auth/logout` | authenticated | Clears the session cookie |
 | GET | `/api/auth/me` | viewer | Username, role, `can_view_reports`, `can_use_server_providers` |
 | POST | `/api/auth/rotate-key` | viewer | Rotates your own API key; the old key stops working |
 | GET | `/api/user/ai-credentials` | viewer | Personal provider credentials, secrets masked |
-| PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key for `claude`, `gemini`, or `cursor` |
+| PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
 | PUT | `/api/user/tokens` | viewer | Save Jira and GitHub tracker tokens |
@@ -2146,7 +2146,7 @@ The shared body accepts the server defaults as per-request overrides:
 | PUT | `/results/{job_id}/override-pattern` | reviewer | `test_name`, `pattern` |
 | PUT | `/results/{job_id}/tags` | reviewer | name and tag fields |
 | DELETE | `/results/{job_id}` | operator | none; deletes your own job, admins delete any |
-| POST | `/api/results/bulk` | operator | `job_ids` |
+| DELETE | `/api/results/bulk` | operator | `job_ids` |
 
 Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITENT`, `KNOWN BUG`, and `PERSISTENT`. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 
@@ -2671,6 +2671,19 @@ The `rootcoz` CLI is the scripting surface for RootCoz. This page walks the work
 
 That submits a Jenkins analysis, waits for it to finish, and prints a two-field summary — the whole submit-poll-read loop in six lines.
 
+> **Warning:** The `until` loop above exits only on `completed`. A job that ends as `failed` or `aborted` never satisfies the condition, so the script polls forever instead of reporting the problem. In automation, branch on the terminal statuses and exit non-zero:
+
+```bash
+    STATUS=$(rootcoz --json status "$JOB_ID" | jq -r .status)
+    case "$STATUS" in
+      completed) rootcoz --json results show "$JOB_ID" --fields result.summary,result.failed_count ;;
+      failed|aborted|error) echo "analysis $JOB_ID ended as $STATUS" >&2; exit 1 ;;
+      *) echo "unexpected status $STATUS" >&2; exit 1 ;;
+    esac
+```
+
+Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `pending` or `running` cannot hang the pipeline. See [Tracking Analysis Progress](track-analysis-progress.html) for every status value.
+
 ## Step-by-Step
 
 1. **Authenticate without any interactive prompt.**
@@ -2898,7 +2911,7 @@ That submits a Jenkins analysis, waits for it to finish, and prints a two-field 
 
 - Pass `--api-key` from a CI secret and `--server` from a variable to run the same script against dev, staging, and prod without editing it.
 - Use `rootcoz analyze --source file -f results.xml` to analyze artifacts downloaded after the fact, which is the easiest way to backfill historical CI runs.
-- `rootcoz results delete --all --confirm` clears every job on the server. The `--confirm` requirement exists so an accidental flag cannot wipe it.
+- `rootcoz results delete --all --confirm` deletes jobs in bulk. The `--confirm` requirement exists so an accidental flag cannot wipe the server. The command collects job IDs from a single unpaginated `/api/dashboard` request, so on a server with more than 500 jobs it only sees the first page and leaves the rest in place. For a full cleanup, delete the remainder by explicit `JOB_ID` values from `rootcoz --json results list`.
 - `rootcoz re-analyze JOB_ID` re-runs a finished analysis with its original settings, which is faster than resubmitting when you only changed the model on the server side.
 - `rootcoz history search --signature HASH` finds every other test that failed with the same error signature, useful for deciding whether a new failure is really a new problem.
 - `rootcoz --json admin-chat send "Which jobs regressed this week?"` is the fastest way to get a cross-job answer in a pipeline log.

@@ -24,6 +24,19 @@ rootcoz --json results show "$JOB_ID" --fields result.summary,result.failed_coun
 
 That submits a Jenkins analysis, waits for it to finish, and prints a two-field summary — the whole submit-poll-read loop in six lines.
 
+> **Warning:** The `until` loop above exits only on `completed`. A job that ends as `failed` or `aborted` never satisfies the condition, so the script polls forever instead of reporting the problem. In automation, branch on the terminal statuses and exit non-zero:
+
+```bash
+STATUS=$(rootcoz --json status "$JOB_ID" | jq -r .status)
+case "$STATUS" in
+  completed) rootcoz --json results show "$JOB_ID" --fields result.summary,result.failed_count ;;
+  failed|aborted|error) echo "analysis $JOB_ID ended as $STATUS" >&2; exit 1 ;;
+  *) echo "unexpected status $STATUS" >&2; exit 1 ;;
+esac
+```
+
+Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `pending` or `running` cannot hang the pipeline. See [Tracking Analysis Progress](track-analysis-progress.html) for every status value.
+
 ## Step-by-Step
 
 1. **Authenticate without any interactive prompt.**
@@ -251,7 +264,7 @@ That submits a Jenkins analysis, waits for it to finish, and prints a two-field 
 
 - Pass `--api-key` from a CI secret and `--server` from a variable to run the same script against dev, staging, and prod without editing it.
 - Use `rootcoz analyze --source file -f results.xml` to analyze artifacts downloaded after the fact, which is the easiest way to backfill historical CI runs.
-- `rootcoz results delete --all --confirm` clears every job on the server. The `--confirm` requirement exists so an accidental flag cannot wipe it.
+- `rootcoz results delete --all --confirm` deletes jobs in bulk. The `--confirm` requirement exists so an accidental flag cannot wipe the server. The command collects job IDs from a single unpaginated `/api/dashboard` request, so on a server with more than 500 jobs it only sees the first page and leaves the rest in place. For a full cleanup, delete the remainder by explicit `JOB_ID` values from `rootcoz --json results list`.
 - `rootcoz re-analyze JOB_ID` re-runs a finished analysis with its original settings, which is faster than resubmitting when you only changed the model on the server side.
 - `rootcoz history search --signature HASH` finds every other test that failed with the same error signature, useful for deciding whether a new failure is really a new problem.
 - `rootcoz --json admin-chat send "Which jobs regressed this week?"` is the fastest way to get a cross-job answer in a pipeline log.

@@ -33,7 +33,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 2. Check what the assistant can reach before you ask.
 
-   The welcome message at the top of a new session lists the resources available for that job, and the assistant is strictly limited to this one job's failures. It has read-only filesystem tools (`read`, `ls`, `find`, `grep`, `subagent`) plus authenticated HTTP tools:
+   The welcome message at the top of a new session lists the resources available for that job, and the assistant's working context is this one job's result and comments. Its history tools are the exception: `get_failure_history` and `get_classification_history` query by test name across the server and exclude only the current job, so the assistant can pull how a test has failed in *other* jobs. It has read-only filesystem tools (`read`, `ls`, `find`, `grep`, `subagent`) plus authenticated HTTP tools:
 
    | Tool | What it returns |
    | --- | --- |

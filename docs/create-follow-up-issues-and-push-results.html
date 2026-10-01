@@ -255,7 +255,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 <li>Set the Jira specifics when you file a Jira ticket.</li>
 </ol>
 <p>In the preview step, pick or type the <code>Jira Project</code> (the server searches your projects as you type), choose an <code>Issue Type</code> from <code>Bug</code>, <code>Task</code>, <code>Story</code>, <code>Epic</code>, <code>Sub-task</code>, or <code>Custom...</code>, and optionally pick a <code>Security Level</code>. A project key must be available on the server or in the request, otherwise ticket creation fails.</p>
-<p>GitHub issues need a repository: the job's tests repository by default, or another repository from the job's configured repositories when more than one is available.</p>
+<p>GitHub issues need a repository: RootCoz always uses the deployment's <code>TESTS_REPO_URL</code>. It deliberately ignores the job's additional repositories, so you cannot retarget issue creation at another repo — a job's <code>request_params</code> are never consulted for this. To file against a different repository, change <code>TESTS_REPO_URL</code> on the server (or the <code>GITHUB</code> category in Server Settings) first.</p>
 <ol>
 <li>Create the issue and let RootCoz record the link.</li>
 </ol>

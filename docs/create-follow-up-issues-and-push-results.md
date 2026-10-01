@@ -43,7 +43,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    In the preview step, pick or type the `Jira Project` (the server searches your projects as you type), choose an `Issue Type` from `Bug`, `Task`, `Story`, `Epic`, `Sub-task`, or `Custom...`, and optionally pick a `Security Level`. A project key must be available on the server or in the request, otherwise ticket creation fails.
 
-   GitHub issues need a repository: the job's tests repository by default, or another repository from the job's configured repositories when more than one is available.
+   GitHub issues need a repository: RootCoz always uses the deployment's `TESTS_REPO_URL`. It deliberately ignores the job's additional repositories, so you cannot retarget issue creation at another repo — a job's `request_params` are never consulted for this. To file against a different repository, change `TESTS_REPO_URL` on the server (or the `GITHUB` category in Server Settings) first.
 
 4. Create the issue and let RootCoz record the link.
 
