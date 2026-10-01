@@ -132,7 +132,7 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/api/failures/{failure_uuid}` | viewer | none |
 | GET | `/results/{job_id}/review-status` | viewer | none |
 | GET | `/api/dashboard` | viewer | `limit`, `offset` |
-| GET | `/api/dashboard/filtered` | viewer | `search`, `status`, `date_from`, `date_to`, `review_status`, `analysis_state`, `limit`, `offset` |
+| GET | `/api/dashboard/filtered` | viewer | `search`, `status`, `date_from`, `date_to`, `review_status`, `analysis_state`, `limit`, `offset`, plus metadata filters `team`, `tier`, `version`, `label`, `exclude_label` (each repeatable) |
 | GET | `/api/dashboard/active-count` | viewer | none |
 
 `fields` returns full values for allowlisted paths only and is never truncated. Unknown paths return `400`, so fetch `/api/results/fields` first when you build against it.
