@@ -1,12 +1,16 @@
 """VAPID key management for Web Push notifications.
 
-VAPID keys are resolved with the priority **env var > Server Settings DB >
-auto-generated key file**.  When neither env vars nor the Server Settings DB
-provide a private key, a key pair is auto-generated on first use and persisted
-alongside the database (parent of DB_PATH).  Falls back to
-$XDG_DATA_HOME/rootcoz/ or ~/.local/share/rootcoz/ when DB_PATH is not set.
-The public key is derived from the private key whenever only the private key
-is configured, so the served pair always matches.
+VAPID keys are resolved with the priority **Server Settings DB > env var >
+auto-generated key file** — the same single precedence rule every other Server
+Settings field uses, so an admin's key edit is not silently ignored by an env
+var.  When neither the DB nor the env var provide a private key, a key pair is
+auto-generated on first use and persisted alongside the database (parent of
+DB_PATH).  Falls back to $XDG_DATA_HOME/rootcoz/ or ~/.local/share/rootcoz/
+when DB_PATH is not set.
+
+The public key is taken from the *same* source as the private key and is
+always derived from that private key when the configured public key does not
+match it, so the served pair is always self-consistent.
 
 The claim email defaults to 'mailto:noreply@rootcoz.local' if neither
 VAPID_CLAIM_EMAIL nor the DB setting is set.
@@ -68,19 +72,30 @@ def _generate_vapid_keys() -> dict[str, str]:
     return {"public_key": pub_b64, "private_key": priv_b64}
 
 
-def _setting(name: str) -> str:
-    """Resolve a VAPID setting: environment variable first, then settings DB.
+def _setting(name: str, source: str = "") -> tuple[str, str]:
+    """Resolve a VAPID setting as ``(value, source)``.
 
-    *name* is the Settings field name; its env var is the upper-case form
-    (``vapid_private_key`` -> ``VAPID_PRIVATE_KEY``).
+    Server Settings DB overrides env — the one precedence rule used by every
+    other setting, resolved through ``get_settings()`` so admin edits in
+    Server Settings actually take effect.  ``source`` is ``"settings"`` (DB
+    override) or ``"env"``.
+
+    Passing *source* ("env"/"settings") pins the lookup to that single layer,
+    so a public key is never taken from a different layer than its private key
+    (which would hand the browser a key that does not match the signer).
     """
-    value = os.environ.get(name.upper(), "").strip()
-    if value:
-        return value
     # Late import: config.py imports this module at import time.
-    from rootcoz.config import get_db_setting
+    from rootcoz.config import get_db_setting, get_settings
 
-    return get_db_setting(name).strip()
+    db_value = get_db_setting(name).strip()
+    if source == "env":
+        return os.environ.get(name.upper(), "").strip(), "env"
+    if db_value:
+        return db_value, "settings"
+    if source == "settings":
+        return "", "settings"
+    # No DB override for this key: get_settings() yields the env value.
+    return str(getattr(get_settings(), name, "") or "").strip(), "env"
 
 
 def _derive_public_key(private_key_b64: str) -> str:
@@ -174,32 +189,33 @@ def _get_or_create_vapid_keys() -> dict[str, Any]:
 def get_vapid_config() -> dict[str, Any]:
     """Return the full VAPID configuration.
 
-    Priority: env vars > Server Settings DB > auto-generated key file.
-    When only a private key is configured, the public key is derived from it.
+    Priority: Server Settings DB > env vars > auto-generated key file.  The
+    public key is read from the same source as the private key and is derived
+    from that private key whenever the configured public key is absent or does
+    not match it, so the pair the browser gets always signs-verify.
 
     Returns dict with ``public_key``, ``private_key``, ``claim_email``.
     Returns empty dict if keys cannot be resolved.
     """
-    pub = _setting("vapid_public_key")
-    priv = _setting("vapid_private_key")
-    email = _setting("vapid_claim_email") or DEFAULT_CLAIM_EMAIL
-
-    if pub and priv:
-        return {
-            "public_key": pub,
-            "private_key": priv,
-            "claim_email": email,
-        }
+    priv, priv_source = _setting("vapid_private_key")
+    email = _setting("vapid_claim_email")[0] or DEFAULT_CLAIM_EMAIL
 
     if priv:
-        # Private key only — derive the matching public key
+        # Private key resolved — always publish the public key that matches it.
         try:
-            pub = _derive_public_key(priv)
+            derived = _derive_public_key(priv)
         except (ValueError, TypeError) as exc:
             logger.warning("Configured VAPID private key is unusable: %s", exc)
             return {}
+        pub, _ = _setting("vapid_public_key", source=priv_source)
+        if pub and pub != derived:
+            logger.warning(
+                "Configured VAPID public key does not match the %s private key; "
+                "using the derived public key",
+                priv_source,
+            )
         return {
-            "public_key": pub,
+            "public_key": derived,
             "private_key": priv,
             "claim_email": email,
         }
