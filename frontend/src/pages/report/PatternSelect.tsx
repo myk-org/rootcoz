@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { api } from '@/lib/api'
 import { useReportDispatch } from './ReportContext'
+import { putOverridePattern } from './failureUpdates'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PATTERNS } from '@/constants/classifications'
 
@@ -32,12 +32,7 @@ export function PatternSelect({
     try {
       // Single API call for the representative test — the backend propagates
       // to all tests in the same error signature group automatically.
-      await api.put(`/results/${jobId}/override-pattern`, {
-        test_name: testName,
-        pattern: value,
-        child_job_name: childJobName ?? '',
-        child_build_number: childBuildNumber ?? 0,
-      })
+      await putOverridePattern(jobId, { testName, childJobName, childBuildNumber }, value)
       dispatch({
         type: 'OVERRIDE_PATTERN',
         payload: { testName, testNames, pattern: value, childJobName, childBuildNumber },

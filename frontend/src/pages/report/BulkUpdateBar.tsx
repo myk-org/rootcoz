@@ -1,0 +1,373 @@
+import { useEffect, useRef, useState } from 'react'
+import { useAuth } from '@/lib/auth'
+import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import {
+  type FailureScope,
+  type SelectedGroup,
+  getTrackedIn,
+  notifyReviewChanged,
+  putOverrideClassification,
+  putOverridePattern,
+  putReviewed,
+  putTrackedIn,
+  runBatched,
+  scopedReviewState,
+  selectedScopes,
+  trackedInUrlError,
+  widenToSignatureGroups,
+} from './failureUpdates'
+import { detectTrackerType } from './TrackedInBadge'
+import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { OVERRIDE_CLASSIFICATIONS, PATTERNS } from '@/constants/classifications'
+import { CheckCircle2, Link2 } from 'lucide-react'
+
+const BULK_BATCH_SIZE = 5
+
+interface PendingAction {
+  title: string
+  description: string
+  confirmLabel: string
+  /** The scopes this action actually sends — the widened ones for an override, the
+   *  raw selection for review/link. `keepSelectionAfterRun` clears exactly these, so
+   *  a test no request covered stays selected instead of vanishing. */
+  covered: FailureScope[]
+  /** Runs the bulk mutation; resolves with the selection groups that still need
+   *  work plus an optional warning about a post-write step that did not land. */
+  run: () => Promise<{ failed: SelectedGroup[]; warning?: string }>
+}
+
+/** What the user asked for. The scope it acts on is re-derived from the live
+ *  selection at render time, so a background refresh cannot leave the dialog
+ *  describing a request that would send removed tests. */
+type BulkRequest =
+  | { kind: 'review'; next: boolean }
+  | { kind: 'classification'; classification: string }
+  | { kind: 'pattern'; pattern: string }
+  | { kind: 'trackIn'; url: string }
+
+/** Map failed per-test scopes back to narrowed groups so a retry skips what succeeded.
+ *  This is the ONLY place `narrowed` is set, and that is what makes the retry stick:
+ *  a selected group re-widens to its current members only when the user has not
+ *  narrowed it; a selection narrowed by a partial-failure retry stays narrowed
+ *  across refreshes until that run completes. */
+function failedGroups(groups: SelectedGroup[], failed: FailureScope[]): SelectedGroup[] {
+  const keys = new Set(failed.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber)))
+  return groups
+    .map((g) => {
+      const testNames = g.testNames.filter((n) => keys.has(reviewKey(n, g.childJobName, g.childBuildNumber)))
+      return { ...g, testNames, narrowed: g.narrowed || testNames.length !== g.testNames.length }
+    })
+    .filter((g) => g.testNames.length > 0)
+}
+
+/** One request per signature group — the backend propagates an override to every
+ *  test sharing the error signature, so a per-test call would write the same
+ *  rows (and history entries) once per test. */
+function runOverrides(groups: SelectedGroup[], run: (group: SelectedGroup, rep: FailureScope) => Promise<void>) {
+  return runBatched(
+    groups,
+    async (g) => run(g, { testName: g.testNames[0], childJobName: g.childJobName, childBuildNumber: g.childBuildNumber }),
+    BULK_BATCH_SIZE,
+  )
+}
+
+/** Bulk-apply the existing per-failure edits to the selected failure groups. */
+export function BulkUpdateBar() {
+  const { result, selection, reviews } = useReportState()
+  const dispatch = useReportDispatch()
+  const { role } = useAuth()
+  const [pendingRequest, setPendingRequest] = useState<BulkRequest | null>(null)
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  // A run message that must outlive the bar itself: the selection it applied to is
+  // gone, but the user still has to read what did not land.
+  const [standaloneError, setStandaloneError] = useState<string | null>(null)
+  const [trackOpen, setTrackOpen] = useState(false)
+  const [trackUrl, setTrackUrl] = useState('')
+
+  const groups = Object.values(selection)
+  // Viewers may read the report but every edit endpoint rejects them.
+  const isViewer = role === 'viewer'
+  // Latest selection, so a run only clears the scopes it covered — anything the
+  // user picked while the requests were in flight survives.
+  const selectionRef = useRef(selection)
+  selectionRef.current = selection
+
+  // An empty selection means nothing to act on: drop any dialog, stale run scope
+  // and error so they cannot resurface on the next selection.
+  useEffect(() => {
+    if (groups.length === 0) {
+      setPendingRequest(null)
+      setTrackOpen(false)
+      setTrackUrl('')
+      setError(null)
+    } else {
+      setStandaloneError(null)
+    }
+  }, [groups.length])
+
+  if (isViewer) return null
+  if (groups.length === 0) {
+    return standaloneError ? (
+      <div className="pointer-events-none fixed bottom-0 left-0 right-0 z-50 flex justify-center px-6 py-3">
+        <span role="alert" className="rounded-md bg-surface-card px-3 py-1.5 text-xs text-signal-red shadow">
+          {standaloneError}
+        </span>
+      </div>
+    ) : null
+  }
+  const jobId = result?.job_id ?? ''
+  const scopes = selectedScopes(groups)
+  const scopeText = `${scopes.length} ${scopes.length === 1 ? 'test' : 'tests'} in ${groups.length} ${groups.length === 1 ? 'failure' : 'failures'}`
+  // An override is applied to the whole error-signature group by the backend, so
+  // the scope the user is asked to confirm — and the optimistic patch — must be
+  // the full group, not a selection narrowed by an earlier failure.
+  const overrideTargets = widenToSignatureGroups(result, groups)
+  const overrideScopes = selectedScopes(overrideTargets)
+  const overrideScopeText = `every test sharing the error signature — ${overrideScopes.length} ${overrideScopes.length === 1 ? 'test' : 'tests'} in ${overrideTargets.length} ${overrideTargets.length === 1 ? 'failure' : 'failures'}`
+
+  /** Build the confirmation from the selection as it is *now*. A refresh that
+   *  removes a selected test reconciles the selection, so the dialog text and
+   *  the requests it sends stay in step; nothing is left when the selection is
+   *  empty and the dialog is discarded. */
+  function buildPending(request: BulkRequest): PendingAction | null {
+    if (groups.length === 0) return null
+    switch (request.kind) {
+      case 'review':
+        return {
+          title: request.next ? 'Mark as reviewed' : 'Mark as unreviewed',
+          description: `Apply to ${scopeText}?`,
+          confirmLabel: request.next ? 'Mark reviewed' : 'Unmark reviewed',
+          covered: scopes,
+          run: async () => {
+            const failed = await runBatched(scopes, async (scope) => {
+              const res = await putReviewed(jobId, scope, request.next)
+              dispatch({
+                type: 'SET_REVIEW',
+                payload: {
+                  key: reviewKey(scope.testName, scope.childJobName, scope.childBuildNumber),
+                  state: scopedReviewState(request.next, res.reviewed_by),
+                },
+              })
+            }, BULK_BATCH_SIZE)
+            notifyReviewChanged(jobId)
+            return { failed: failedGroups(groups, failed) }
+          },
+        }
+      case 'classification':
+        return {
+          title: `Set classification to ${request.classification}`,
+          description: `The override applies to ${overrideScopeText}?`,
+          confirmLabel: 'Apply',
+          covered: overrideScopes,
+          run: async () => ({
+            failed: await runOverrides(overrideTargets, async (g, rep) => {
+              await putOverrideClassification(jobId, rep, request.classification)
+              dispatch({ type: 'OVERRIDE_CLASSIFICATION', payload: { ...rep, testNames: g.testNames, classification: request.classification } })
+            }),
+          }),
+        }
+      case 'pattern':
+        return {
+          title: `Set pattern to ${request.pattern}`,
+          description: `The override applies to ${overrideScopeText}?`,
+          confirmLabel: 'Apply',
+          covered: overrideScopes,
+          run: async () => ({
+            failed: await runOverrides(overrideTargets, async (g, rep) => {
+              await putOverridePattern(jobId, rep, request.pattern)
+              dispatch({ type: 'OVERRIDE_PATTERN', payload: { ...rep, testNames: g.testNames, pattern: request.pattern } })
+            }),
+          }),
+        }
+      case 'trackIn':
+        return {
+          title: 'Link to issue',
+          description: `Link ${request.url} to ${scopeText}?`,
+          confirmLabel: 'Link',
+          covered: scopes,
+          run: async () => {
+            const failed = await runBatched(scopes, (scope) => putTrackedIn(jobId, scope, request.url, detectTrackerType(request.url)), BULK_BATCH_SIZE)
+            try {
+              const tracked = await getTrackedIn(jobId)
+              dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
+              return { failed: failedGroups(groups, failed) }
+            } catch {
+              // Only the refresh failed. The writes still stand, but a link that was
+              // never written must not be claimed as saved — report both.
+              const notWritten = failedGroups(groups, failed)
+              return notWritten.length > 0
+                ? { failed: notWritten, warning: 'Refreshing the tracked links also failed.' }
+                : { failed: [], warning: 'Links saved, but refreshing the tracked links failed.' }
+            }
+          },
+        }
+    }
+  }
+  const pending = pendingRequest ? buildPending(pendingRequest) : null
+
+  /** Keep only what the run did not finish: untried scopes and the failed ones.
+   *  Returns true when nothing is left selected. */
+  function keepSelectionAfterRun(covered: FailureScope[], failed: SelectedGroup[]) {
+    const coveredKeys = new Set(covered.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber)))
+    const failedKeys = new Set(failed.flatMap((g) => g.testNames.map((n) => reviewKey(n, g.childJobName, g.childBuildNumber))))
+    const next: Record<string, SelectedGroup> = {}
+    for (const [id, g] of Object.entries(selectionRef.current)) {
+      const kept = g.testNames.filter((n) => {
+        const k = reviewKey(n, g.childJobName, g.childBuildNumber)
+        return !coveredKeys.has(k) || failedKeys.has(k)
+      })
+      // The rebuilt entry is the retry leftover, so it carries the same `narrowed`
+      // flag `failedGroups` set: a refresh after this point must not re-widen it.
+      if (kept.length > 0) next[id] = { ...g, testNames: kept, narrowed: g.narrowed || kept.length !== g.testNames.length }
+    }
+    if (Object.keys(next).length === 0) {
+      dispatch({ type: 'CLEAR_SELECTION' })
+      return true
+    }
+    dispatch({ type: 'REPLACE_SELECTION', payload: next })
+    return false
+  }
+
+  async function apply(action: PendingAction) {
+    setRunning(true)
+    setError(null)
+    try {
+      const { failed, warning } = await action.run()
+      const emptied = keepSelectionAfterRun(action.covered, failed)
+      // Both can happen at once: some writes failed and a post-write step did not land.
+      const names = failed.flatMap((g) => g.testNames)
+      const failureText = names.length > 0 ? `Failed to update ${names.length} of ${action.covered.length}: ${names.join(', ')}. ` : ''
+      const message = `${failureText}${warning ?? ''}`.trim()
+      if (emptied) setStandaloneError(message || null)
+      else setError(message || null)
+    } catch {
+      setError('Bulk update failed. Please try again.')
+    } finally {
+      setRunning(false)
+      setPendingRequest(null)
+    }
+  }
+
+  function requestTrackIn() {
+    const url = trackUrl.trim()
+    if (!url || trackedInUrlError(url)) return
+    setTrackOpen(false)
+    setTrackUrl('')
+    setPendingRequest({ kind: 'trackIn', url })
+  }
+
+  const allReviewed = scopes.every(
+    (s) => reviews[reviewKey(s.testName, s.childJobName, s.childBuildNumber)]?.reviewed,
+  )
+
+  return (
+    <>
+      <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-border-muted bg-surface-card/95 backdrop-blur-sm px-6 py-3 animate-slide-up">
+        <div className="mx-auto flex max-w-screen-xl flex-wrap items-center gap-3">
+          <span className="text-sm text-text-secondary">
+            {scopes.length} {scopes.length === 1 ? 'test' : 'tests'} selected in {groups.length} {groups.length === 1 ? 'failure' : 'failures'}
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" disabled={running} onClick={() => setPendingRequest({ kind: 'review', next: !allReviewed })}>
+              <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+              {allReviewed ? 'Unmark reviewed' : 'Mark reviewed'}
+            </Button>
+            <Select value="" onValueChange={(classification) => setPendingRequest({ kind: 'classification', classification })} disabled={running}>
+              <SelectTrigger aria-label="Bulk classification" className="h-8 w-40 text-xs">
+                <SelectValue placeholder="Classification..." />
+              </SelectTrigger>
+              <SelectContent>
+                {OVERRIDE_CLASSIFICATIONS.map((c) => (
+                  <SelectItem key={c} value={c}>{c}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value="" onValueChange={(pattern) => setPendingRequest({ kind: 'pattern', pattern })} disabled={running}>
+              <SelectTrigger aria-label="Bulk pattern" className="h-8 w-32 text-xs">
+                <SelectValue placeholder="Pattern..." />
+              </SelectTrigger>
+              <SelectContent>
+                {PATTERNS.map((p) => (
+                  <SelectItem key={p} value={p}>{p}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="sm" disabled={running} onClick={() => { setError(null); setTrackUrl(''); setTrackOpen(true) }}>
+              <Link2 className="h-3.5 w-3.5 mr-1" />
+              Track in...
+            </Button>
+          </div>
+          <div className="ml-auto flex items-center gap-3">
+            {error && <span role="alert" className="text-xs text-signal-red">{error}</span>}
+            <Button variant="ghost" size="sm" disabled={running} onClick={() => dispatch({ type: 'CLEAR_SELECTION' })}>
+              Clear
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <BulkTrackInDialog
+        open={trackOpen}
+        onOpenChange={setTrackOpen}
+        scopeText={scopeText}
+        url={trackUrl}
+        onUrlChange={setTrackUrl}
+        onSubmit={requestTrackIn}
+      />
+
+      <ConfirmDialog
+        open={pending !== null}
+        onOpenChange={(o) => { if (!o && !running) setPendingRequest(null) }}
+        title={pending?.title ?? ''}
+        description={pending?.description ?? ''}
+        confirmLabel={pending?.confirmLabel ?? 'Apply'}
+        onConfirm={() => { if (pending) void apply(pending) }}
+        loading={running}
+      />
+    </>
+  )
+}
+
+/** URL prompt for linking the whole selection to an existing issue. */
+function BulkTrackInDialog({ open, onOpenChange, scopeText, url, onUrlChange, onSubmit }: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  scopeText: string
+  url: string
+  onUrlChange: (url: string) => void
+  onSubmit: () => void
+}) {
+  const urlError = trackedInUrlError(url)
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Link to issue</DialogTitle>
+          <DialogDescription>
+            The issue will be linked to every test in {scopeText}.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1.5">
+          <label htmlFor="bulk-tracked-in-url" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Issue URL</label>
+          <Input
+            id="bulk-tracked-in-url"
+            value={url}
+            onChange={(e) => onUrlChange(e.target.value)}
+            placeholder="https://jira.example.com/browse/PROJ-123"
+            className="text-sm"
+          />
+          {urlError && <p className="text-xs text-signal-red">{urlError}</p>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={onSubmit} disabled={!url.trim() || !!urlError}>Continue</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}

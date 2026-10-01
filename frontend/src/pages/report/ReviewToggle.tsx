@@ -1,7 +1,6 @@
 import { useState } from 'react'
-import { api } from '@/lib/api'
-import { getUsername } from '@/lib/cookies'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { putReviewed, notifyReviewChanged, scopedReviewState } from './failureUpdates'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { CheckCircle2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -29,25 +28,13 @@ export function ReviewToggle({ jobId, testName, childJobName, childBuildNumber, 
     setLoading(true)
     setError(null)
     try {
-      const res = await api.put<{ status: string; reviewed_by: string }>(`/results/${jobId}/reviewed`, {
-        test_name: testName,
-        reviewed: !reviewed,
-        child_job_name: childJobName ?? '',
-        child_build_number: childBuildNumber ?? 0,
-      })
-      const username = res.reviewed_by ?? getUsername()
+      const res = await putReviewed(jobId, { testName, childJobName, childBuildNumber }, !reviewed)
       dispatch({
         type: 'SET_REVIEW',
-        payload: { key, state: { reviewed: !reviewed, username, updated_at: new Date().toISOString() } },
+        payload: { key, state: scopedReviewState(!reviewed, res.reviewed_by) },
       })
       // Notify AllReviewedPrompt to check if all failures are now reviewed.
-      // Using a custom event avoids useEffect timing issues entirely.
-      if (!reviewed) {
-        // We just marked as reviewed — schedule check after React processes the dispatch
-        setTimeout(() => {
-          window.dispatchEvent(new CustomEvent('rootcoz:review-changed', { detail: { jobId } }))
-        }, 100)
-      }
+      if (!reviewed) notifyReviewChanged(jobId)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to toggle review status')
     } finally {
