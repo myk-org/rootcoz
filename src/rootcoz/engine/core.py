@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import threading
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -700,13 +701,19 @@ def _canonical_header(match: re.Match[str]) -> str:
     return f"{match.group(1).lower()}: <HEADER>"
 
 
-# Per-request HTTP response headers, plus any x-* custom header, so header
-# churn (ids, lengths, encodings, routing) never splits a signature.
+# Allowlist of HTTP response headers whose *values* are per-request noise, so
+# header churn (ids, lengths, encodings, routing, trace propagation) never
+# splits a signature. Deliberately not a blanket ``x-*``: custom headers such as
+# ``X-Error-Code`` describe the failure itself, and discarding their values would
+# merge distinct failures into one signature.
 _HEADER_NAMES = (
-    r"x-[a-z0-9-]+"
-    r"|date|content-length|content-encoding|content-range|transfer-encoding"
+    r"date|content-length|content-encoding|content-range|transfer-encoding"
     r"|connection|keep-alive|vary|etag|last-modified|age|expires|cache-control"
     r"|retry-after|via|request-id|cf-ray|traceparent|tracestate"
+    r"|x-request-id|x-amzn-request-id|x-amzn-trace-id|x-correlation-id"
+    r"|x-trace-id|x-github-request-id|x-cache|x-served-by|x-timer"
+    r"|x-oauth-scopes|x-ratelimit-[a-z0-9-]+"
+    r"|x-b3-[a-z0-9-]+|x-envoy-[a-z0-9-]+|x-forwarded-[a-z0-9-]+"
 )
 
 # Pre-compiled patterns for signature normalization.
@@ -812,22 +819,64 @@ def compute_signature(error_message: str, stack_trace: str) -> str:
     return hashlib.sha256(signature_text.encode()).hexdigest()
 
 
+#: Bumped by hand when signature behavior changes in a way the fingerprint in
+#: :func:`normalization_rules_version` cannot observe on its own.
+SIGNATURE_ALGORITHM_VERSION = 1
+
+
+def _code_fingerprint(code: types.CodeType) -> str:
+    """Return a stable fingerprint of a code object and its nested constants.
+
+    ``repr(code)`` embeds the object's memory address, so nested code objects
+    (closures, comprehensions, lambdas) are recursed into rather than formatted.
+    """
+    return "\x1f".join(
+        [
+            repr(code.co_code),
+            repr(code.co_names),
+            repr(
+                [
+                    _code_fingerprint(c) if isinstance(c, types.CodeType) else repr(c)
+                    for c in code.co_consts
+                ]
+            ),
+        ]
+    )
+
+
+def _callable_fingerprint(func: Callable[..., Any]) -> str:
+    """Fingerprint a callable by what its implementation does.
+
+    A callable's qualified name says nothing about its behaviour, so two
+    implementations sharing a name must not share a migration fingerprint.
+    """
+    code = getattr(func, "__code__", None)
+    if isinstance(code, types.CodeType):
+        return _code_fingerprint(code)
+    return repr(func)
+
+
 def normalization_rules_version() -> str:
-    """Return a stable fingerprint of the current normalization rules.
+    """Return a stable fingerprint of everything that changes a signature.
 
     Used as a migration key so the signature backfill runs automatically
-    whenever the rules change -- no version number for a human to remember
-    bumping. Any edit to ``_NORMALIZE_PATTERNS`` (pattern, flags or
-    replacement) yields a new fingerprint and triggers a backfill.
+    whenever signature behaviour changes -- no version number for a human to
+    remember bumping. Covers the whole chain, not just the pattern table: every
+    pattern's text and flags, each replacement callable's *implementation*,
+    ``normalize_for_signature`` itself, the ``compute_signature`` formula, and
+    the explicit :data:`SIGNATURE_ALGORITHM_VERSION` lever. The digest is
+    returned in full -- the migration key column is unrestricted text.
     """
-    parts = []
+    parts = [str(SIGNATURE_ALGORITHM_VERSION)]
     for pattern, replacement in _NORMALIZE_PATTERNS:
         if callable(replacement):
-            replacement_text = getattr(replacement, "__qualname__", repr(replacement))
+            replacement_text = _callable_fingerprint(replacement)
         else:
             replacement_text = str(replacement)
         parts.append(f"{pattern.pattern}\x1f{pattern.flags}\x1f{replacement_text}")
-    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+    parts.append(_callable_fingerprint(normalize_for_signature))
+    parts.append(_callable_fingerprint(compute_signature))
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
 def get_failure_signature(failure: FailedTest) -> str:
@@ -2358,6 +2407,7 @@ def _expand_group_to_analyses(
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
+            stack_trace=f.stack_trace,
             analysis=analysis,
             error_signature=sig,
         )
@@ -2457,6 +2507,7 @@ def _failed_group_analyses(
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
+            stack_trace=f.stack_trace,
             error_signature=signature,
             analysis=AnalysisDetail(
                 details="Analysis failed; check server logs for details"
