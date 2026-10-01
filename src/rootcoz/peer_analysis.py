@@ -1101,6 +1101,7 @@ async def analyze_failure_group_with_peers(
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
+            stack_trace=f.stack_trace,
             analysis=parsed_analysis,
             error_signature=error_signature,
             peer_debate=peer_debate,

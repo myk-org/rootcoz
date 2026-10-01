@@ -564,6 +564,16 @@ class FailureAnalysis(BaseModel):
     )
     test_name: str = Field(description="Name of the failed test")
     error: str = Field(description="Error message or exception")
+    stack_trace: str = Field(
+        default="",
+        description=(
+            "Stack trace text. Persisted alongside 'error' because both feed "
+            "error_signature: without it the signature cannot be recomputed "
+            "(see rootcoz.signature_backfill). 'error' alone is not enough -- "
+            "a signature built with an empty trace differs from one built with "
+            "the real trace."
+        ),
+    )
     analysis: AnalysisDetail = Field(description="Structured AI analysis output")
     error_signature: str = Field(
         default="",

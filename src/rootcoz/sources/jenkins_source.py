@@ -1321,6 +1321,7 @@ async def _analyze_grouped_failures(
                     FailureAnalysis(
                         test_name=tf.test_name,
                         error=tf.error_message,
+                        stack_trace=tf.stack_trace,
                         error_signature=get_failure_signature(tf),
                         analysis=AnalysisDetail(
                             details="Analysis failed; check server logs for details"

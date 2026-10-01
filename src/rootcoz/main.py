@@ -1382,7 +1382,9 @@ async def _backfill_signatures_if_stale() -> None:
 
     Thin ``None``-returning wrapper so the task matches the other startup
     background tasks; ``ensure_signatures_current`` returns its stats for the
-    admin dry-run path.
+    admin dry-run path. The backfill writes in bounded per-job transactions and
+    yields between batches, so live requests interleave instead of queueing
+    behind it.
     """
     try:
         await ensure_signatures_current()
@@ -9419,6 +9421,10 @@ async def admin_backfill_signatures(
 
     ``ai_token_usage.error_signature`` is intentionally left untouched: it is
     analytics grouping only and does not affect correctness.
+
+    Safe to re-run: each job is re-hashed from its own current contents, in
+    bounded batches, so an interrupted apply resumes without a full scan having
+    to finish first.
     """
     _require_admin(request)
     return await backfill_signatures(dry_run=dry_run)

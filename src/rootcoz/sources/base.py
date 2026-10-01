@@ -160,6 +160,7 @@ class CISourceResult:
             FailureAnalysis(
                 test_name=failure.test_name,
                 error=failure.error_message or failure.stack_trace,
+                stack_trace=failure.stack_trace,
                 analysis=AnalysisDetail(),
                 error_signature=get_failure_signature(failure),
             )
