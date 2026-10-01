@@ -1,5 +1,7 @@
 # rootcoz
 
+> AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML
+
 ## Getting Started
 
 - [Quickstart](quickstart.md)
