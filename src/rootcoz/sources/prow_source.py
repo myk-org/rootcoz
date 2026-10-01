@@ -178,14 +178,14 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
                     if isinstance(p, dict)
                 ]
 
-    # spec.podspec / spec.extra_containers — container names double as the
+    # spec.pod_spec / spec.extra_containers — container names double as the
     # top-level artifact directory names under artifacts/.
     # ponytail: containers only; add spec.context / spec.extra_refs if a job
     # ever reports steps that appear in neither list.
     containers: list[Any] = []
-    podspec = spec.get("podspec")
-    if isinstance(podspec, dict) and isinstance(podspec.get("containers"), list):
-        containers = list(podspec["containers"])
+    pod_spec = spec.get("pod_spec")
+    if isinstance(pod_spec, dict) and isinstance(pod_spec.get("containers"), list):
+        containers = list(pod_spec["containers"])
     if isinstance(spec.get("extra_containers"), list):
         containers.extend(spec["extra_containers"])
     step_names = [
@@ -1811,25 +1811,38 @@ class ProwSource(CISource):
             self.gcs_bucket,
             artifacts_prefix,
             filter_fn=_is_junit,
-            max_objects=_MAX_JUNIT_FILES,
+            # Discovery budget = attempt budget, so reports after the first
+            # _MAX_JUNIT_FILES are still found when earlier ones 404.
+            # _MAX_JUNIT_FILES remains the cap on successful downloads.
+            max_objects=_MAX_JUNIT_FETCH_ATTEMPTS,
             warnings=access_warnings,
         )
-        non_junit_objects = await _list_artifacts(
-            client,
-            self.gcs_bucket,
-            artifacts_prefix,
-            filter_fn=lambda obj: not _is_junit(obj),
-            max_objects=self._max_list_objects,
-            warnings=access_warnings,
+        # No listing at all when downloads are disabled — the list would go unused.
+        non_junit_objects = (
+            await _list_artifacts(
+                client,
+                self.gcs_bucket,
+                artifacts_prefix,
+                filter_fn=lambda obj: not _is_junit(obj),
+                max_objects=self._max_list_objects,
+                warnings=access_warnings,
+            )
+            if self.get_job_artifacts
+            else []
         )
 
         junit_files = [obj["name"] for obj in junit_objects]
         # Step names come from prowjob.json: only a directory the job declares
-        # as a step may be ranked as failing.  Shared report directories
-        # (e.g. artifacts/junit/) are not steps, and unknown ones stay unknown.
+        # as a step may be ranked as failing, so shared report directories
+        # (e.g. artifacts/junit/) are never misranked.  Without metadata, fall
+        # back to directories holding their own artifacts — step-local ones.
         step_names = (
             set(self._prowjob_metadata.steps or ()) if self._prowjob_metadata else set()
         )
+        rankable_steps = step_names or {
+            _artifact_step(obj.get("name", ""), artifacts_prefix)
+            for obj in non_junit_objects
+        }
 
         logger.info(
             "Found %d JUnit XML file(s) and %d other artifact(s) for %s/%s",
@@ -1897,7 +1910,7 @@ class ProwSource(CISource):
                 all_skipped.extend(extraction.skipped)
                 if extraction.failures:
                     step = _artifact_step(junit_path, artifacts_prefix)
-                    if step in step_names:
+                    if step in rankable_steps:
                         failed_steps.add(step)
 
         logger.info(
