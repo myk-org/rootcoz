@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import type { GroupedFailure } from '@/types'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
+import { useAuth } from '@/lib/auth'
 import { useReportDispatch, useReportState } from './ReportContext'
 
 /** Build the selection payloads for every group of a listed section. */
@@ -26,6 +27,7 @@ interface GroupSelectAllProps {
 export function GroupSelectAll({ groups, scopeLabel, childJobName, childBuildNumber }: GroupSelectAllProps) {
   const { selection } = useReportState()
   const dispatch = useReportDispatch()
+  const { role } = useAuth()
   const ref = useRef<HTMLInputElement>(null)
 
   const selected = groups.filter((g) => selection[g.id]).length
@@ -33,6 +35,9 @@ export function GroupSelectAll({ groups, scopeLabel, childJobName, childBuildNum
   useEffect(() => {
     if (ref.current) ref.current.indeterminate = selected > 0 && !allSelected
   }, [selected, allSelected])
+
+  // Viewers can read the report but the bulk edit endpoints reject them.
+  if (role === 'viewer') return null
 
   return (
     <label className="flex items-center gap-1.5 text-xs text-text-tertiary cursor-pointer">

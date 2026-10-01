@@ -56,6 +56,7 @@ type ReportAction =
   | { type: 'TOGGLE_GROUP_SELECTION'; payload: SelectedGroup }
   | { type: 'SET_GROUP_SELECTION'; payload: { groups: SelectedGroup[]; selected: boolean } }
   | { type: 'CLEAR_SELECTION' }
+  | { type: 'REPLACE_SELECTION'; payload: Record<string, SelectedGroup> }
   | { type: 'SET_CLASSIFICATIONS'; payload: Record<string, string> }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload: string }
@@ -143,8 +144,11 @@ function applyOverrideToResult(
 function reportReducer(state: ReportState, action: ReportAction): ReportState {
   switch (action.type) {
     case 'SET_RESULT':
-      // A new result replaces the failure tree, so the old selection is stale.
-      return { ...state, result: action.payload.result, selection: {}, graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', loading: false, error: '' }
+      // The selection is kept: background SSE refreshes re-dispatch SET_RESULT
+      // (progress, usage, abort) and must not discard what the user picked.
+      // ponytail: a re-analysis can leave ids of failures that no longer exist;
+      // drop them there if a user ever reports phantom bulk entries.
+      return { ...state, result: action.payload.result, graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', loading: false, error: '' }
     case 'SET_COMMENTS_AND_REVIEWS':
       return { ...state, comments: action.payload.comments, reviews: action.payload.reviews }
     case 'ADD_COMMENT':
@@ -190,6 +194,8 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
     }
     case 'CLEAR_SELECTION':
       return { ...state, selection: {} }
+    case 'REPLACE_SELECTION':
+      return { ...state, selection: action.payload }
     case 'SET_CLASSIFICATIONS':
       return { ...state, classifications: { ...action.payload, ...state.classifications } }
     case 'SET_LOADING':

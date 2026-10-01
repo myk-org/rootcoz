@@ -510,8 +510,8 @@ export function UsersPage() {
                   ) : (
                     <div className="flex items-center justify-end gap-1">
                       <TooltipProvider delayDuration={200}>
-                        {/* Rotate key — every user with an API key (admins and delegated users) */}
-                        {user.username !== currentUser && (
+                        {/* Rotate key — every active user with an API key (admins and delegated users) */}
+                        {user.username !== currentUser && user.status === 'active' && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button

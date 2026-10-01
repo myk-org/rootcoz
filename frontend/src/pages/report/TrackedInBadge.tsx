@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/dialog'
 import { isSafeHref } from '@/lib/autoLink'
 import { useReportDispatch } from './ReportContext'
-import { putTrackedIn, getTrackedIn } from './failureUpdates'
+import { putTrackedIn, getTrackedIn, trackedInUrlError } from './failureUpdates'
 import { ExternalLink, Link2 } from 'lucide-react'
 
 /** Detect tracker type from URL string patterns (no HTTP requests). */
@@ -101,15 +101,9 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName, childJobNam
   async function handleSave() {
     const trimmed = url.trim()
     if (!trimmed) return
-    // Client-side URL validation
-    try {
-      const parsed = new URL(trimmed)
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        setError('URL must start with http:// or https://')
-        return
-      }
-    } catch {
-      setError('Please enter a valid URL (e.g., https://github.com/org/repo/issues/123)')
+    const urlError = trackedInUrlError(trimmed)
+    if (urlError) {
+      setError(urlError)
       return
     }
     setSaving(true)

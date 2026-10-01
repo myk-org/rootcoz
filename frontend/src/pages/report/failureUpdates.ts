@@ -61,6 +61,23 @@ export function getTrackedIn(jobId: string) {
   return api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
 }
 
+/** Validate an issue URL before saving a tracked-in link.
+ *  Empty input is not an error (callers handle "nothing typed"); returns the
+ *  message to show, or null when the URL is usable as a link. */
+export function trackedInUrlError(url: string): string | null {
+  const trimmed = url.trim()
+  if (!trimmed) return null
+  try {
+    const parsed = new URL(trimmed)
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return 'URL must start with http:// or https://'
+    }
+    return null
+  } catch {
+    return 'Please enter a valid URL (e.g., https://github.com/org/repo/issues/123)'
+  }
+}
+
 /** Notify AllReviewedPrompt that review state changed. */
 export function notifyReviewChanged(jobId: string) {
   setTimeout(() => window.dispatchEvent(new CustomEvent('rootcoz:review-changed', { detail: { jobId } })), 100)

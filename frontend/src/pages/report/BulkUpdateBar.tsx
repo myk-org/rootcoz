@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useAuth } from '@/lib/auth'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
 import {
   type FailureScope,
+  type SelectedGroup,
   getTrackedIn,
   notifyReviewChanged,
   putOverrideClassification,
@@ -11,6 +13,7 @@ import {
   runBatched,
   scopedReviewState,
   selectedScopes,
+  trackedInUrlError,
 } from './failureUpdates'
 import { detectTrackerType } from './TrackedInBadge'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -27,14 +30,24 @@ interface PendingAction {
   title: string
   description: string
   confirmLabel: string
-  /** Runs the bulk mutation; resolves with the scopes that failed. */
-  run: () => Promise<FailureScope[]>
+  /** Runs the bulk mutation; resolves with the selection groups that still need
+   *  work plus an optional warning about a post-write step that did not land. */
+  run: () => Promise<{ failed: SelectedGroup[]; warning?: string }>
+}
+
+/** Map failed per-test scopes back to narrowed groups so a retry skips what succeeded. */
+function failedGroups(groups: SelectedGroup[], failed: FailureScope[]): SelectedGroup[] {
+  const keys = new Set(failed.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber)))
+  return groups
+    .map((g) => ({ ...g, testNames: g.testNames.filter((n) => keys.has(reviewKey(n, g.childJobName, g.childBuildNumber))) }))
+    .filter((g) => g.testNames.length > 0)
 }
 
 /** Bulk-apply the existing per-failure edits to the selected failure groups. */
 export function BulkUpdateBar() {
   const { result, selection, reviews } = useReportState()
   const dispatch = useReportDispatch()
+  const { role } = useAuth()
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -42,20 +55,55 @@ export function BulkUpdateBar() {
   const [trackUrl, setTrackUrl] = useState('')
 
   const groups = Object.values(selection)
-  if (groups.length === 0) return null
+  // Viewers may read the report but every edit endpoint rejects them.
+  const isViewer = role === 'viewer'
+  // Latest selection, so a run only clears the scopes it covered — anything the
+  // user picked while the requests were in flight survives.
+  const selectionRef = useRef(selection)
+  selectionRef.current = selection
+
+  // An empty selection means nothing to act on: drop any dialog, stale run scope
+  // and error so they cannot resurface on the next selection.
+  useEffect(() => {
+    if (groups.length === 0) {
+      setPending(null)
+      setTrackOpen(false)
+      setTrackUrl('')
+      setError(null)
+    }
+  }, [groups.length])
+
+  if (isViewer || groups.length === 0) return null
   const jobId = result?.job_id ?? ''
   const scopes = selectedScopes(groups)
   const scopeText = `${scopes.length} ${scopes.length === 1 ? 'test' : 'tests'} in ${groups.length} ${groups.length === 1 ? 'failure' : 'failures'}`
+
+  /** Keep only what the run did not finish: untried scopes and the failed ones. */
+  function keepSelectionAfterRun(covered: FailureScope[], failed: SelectedGroup[]) {
+    const coveredKeys = new Set(covered.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber)))
+    const failedKeys = new Set(failed.flatMap((g) => g.testNames.map((n) => reviewKey(n, g.childJobName, g.childBuildNumber))))
+    const next: Record<string, SelectedGroup> = {}
+    for (const [id, g] of Object.entries(selectionRef.current)) {
+      const kept = g.testNames.filter((n) => {
+        const k = reviewKey(n, g.childJobName, g.childBuildNumber)
+        return !coveredKeys.has(k) || failedKeys.has(k)
+      })
+      if (kept.length > 0) next[id] = { ...g, testNames: kept }
+    }
+    if (Object.keys(next).length === 0) dispatch({ type: 'CLEAR_SELECTION' })
+    else dispatch({ type: 'REPLACE_SELECTION', payload: next })
+  }
 
   async function apply(action: PendingAction) {
     setRunning(true)
     setError(null)
     try {
-      const failed = await action.run()
-      if (failed.length === 0) {
-        dispatch({ type: 'CLEAR_SELECTION' })
-      } else {
-        setError(`Failed to update ${failed.length} of ${scopes.length}: ${failed.map((s) => s.testName).join(', ')}`)
+      const { failed, warning } = await action.run()
+      keepSelectionAfterRun(scopes, failed)
+      if (warning) setError(warning)
+      else if (failed.length > 0) {
+        const names = failed.flatMap((g) => g.testNames)
+        setError(`Failed to update ${names.length} of ${scopes.length}: ${names.join(', ')}`)
       }
     } catch {
       setError('Bulk update failed. Please try again.')
@@ -63,6 +111,17 @@ export function BulkUpdateBar() {
       setRunning(false)
       setPending(null)
     }
+  }
+
+  /** One request per selected group — the backend propagates an override to every
+   *  test sharing the error signature, so a per-test call would write the same
+   *  rows (and history entries) once per test. */
+  function overrideGroups(run: (group: SelectedGroup, rep: FailureScope) => Promise<void>) {
+    return runBatched(
+      groups,
+      async (g) => run(g, { testName: g.testNames[0], childJobName: g.childJobName, childBuildNumber: g.childBuildNumber }),
+      BULK_BATCH_SIZE,
+    )
   }
 
   function requestReview(next: boolean) {
@@ -82,7 +141,7 @@ export function BulkUpdateBar() {
           })
         }, BULK_BATCH_SIZE)
         notifyReviewChanged(jobId)
-        return failed
+        return { failed: failedGroups(groups, failed) }
       },
     })
   }
@@ -92,16 +151,15 @@ export function BulkUpdateBar() {
       title: `Set classification to ${classification}`,
       description: `Apply to ${scopeText}?`,
       confirmLabel: 'Apply',
-      run: async () => {
-        const failed = await runBatched(scopes, async (scope) => {
-          await putOverrideClassification(jobId, scope, classification)
+      run: async () => ({
+        failed: await overrideGroups(async (g, rep) => {
+          await putOverrideClassification(jobId, rep, classification)
           dispatch({
             type: 'OVERRIDE_CLASSIFICATION',
-            payload: { testName: scope.testName, classification, childJobName: scope.childJobName, childBuildNumber: scope.childBuildNumber },
+            payload: { ...rep, testNames: g.testNames, classification },
           })
-        }, BULK_BATCH_SIZE)
-        return failed
-      },
+        }),
+      }),
     })
   }
 
@@ -110,22 +168,21 @@ export function BulkUpdateBar() {
       title: `Set pattern to ${pattern}`,
       description: `Apply to ${scopeText}?`,
       confirmLabel: 'Apply',
-      run: async () => {
-        const failed = await runBatched(scopes, async (scope) => {
-          await putOverridePattern(jobId, scope, pattern)
+      run: async () => ({
+        failed: await overrideGroups(async (g, rep) => {
+          await putOverridePattern(jobId, rep, pattern)
           dispatch({
             type: 'OVERRIDE_PATTERN',
-            payload: { testName: scope.testName, pattern, childJobName: scope.childJobName, childBuildNumber: scope.childBuildNumber },
+            payload: { ...rep, testNames: g.testNames, pattern },
           })
-        }, BULK_BATCH_SIZE)
-        return failed
-      },
+        }),
+      }),
     })
   }
 
   function requestTrackIn() {
     const url = trackUrl.trim()
-    if (!url) return
+    if (!url || trackedInUrlError(url)) return
     setTrackOpen(false)
     setPending({
       title: 'Link to issue',
@@ -133,10 +190,16 @@ export function BulkUpdateBar() {
       confirmLabel: 'Link',
       run: async () => {
         const failed = await runBatched(scopes, (scope) => putTrackedIn(jobId, scope, url, detectTrackerType(url)), BULK_BATCH_SIZE)
-        const tracked = await getTrackedIn(jobId)
-        dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
         setTrackUrl('')
-        return failed
+        try {
+          const tracked = await getTrackedIn(jobId)
+          dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
+          return { failed: failedGroups(groups, failed) }
+        } catch {
+          // The links were written — only the refresh failed, so keep the
+          // selection and report the refresh instead of failing the whole action.
+          return { failed: groups, warning: 'Links saved, but refreshing the tracked links failed.' }
+        }
       },
     })
   }
@@ -222,6 +285,7 @@ function BulkTrackInDialog({ open, onOpenChange, scopeText, url, onUrlChange, on
   onUrlChange: (url: string) => void
   onSubmit: () => void
 }) {
+  const urlError = trackedInUrlError(url)
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
@@ -240,10 +304,11 @@ function BulkTrackInDialog({ open, onOpenChange, scopeText, url, onUrlChange, on
             placeholder="https://jira.example.com/browse/PROJ-123"
             className="text-sm"
           />
+          {urlError && <p className="text-xs text-signal-red">{urlError}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={onSubmit} disabled={!url.trim()}>Continue</Button>
+          <Button onClick={onSubmit} disabled={!url.trim() || !!urlError}>Continue</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

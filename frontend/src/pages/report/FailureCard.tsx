@@ -316,14 +316,16 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
       >
         {/* Header */}
         <div className="flex w-full items-center gap-3 p-4">
-          <input
-            type="checkbox"
-            checked={isSelected}
-            onChange={() => dispatch({ type: 'TOGGLE_GROUP_SELECTION', payload: { id: group.id, testNames: groupTestNames, childJobName: scopedChildJobName, childBuildNumber: scopedChildBuildNumber } })}
-            onClick={(e) => e.stopPropagation()}
-            className={`${BULK_SELECT_CHECKBOX_CLASS} shrink-0`}
-            aria-label={`Select ${rep.test_name}`}
-          />
+          {!isViewer && (
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={() => dispatch({ type: 'TOGGLE_GROUP_SELECTION', payload: { id: group.id, testNames: groupTestNames, childJobName: scopedChildJobName, childBuildNumber: scopedChildBuildNumber } })}
+              onClick={(e) => e.stopPropagation()}
+              className={`${BULK_SELECT_CHECKBOX_CLASS} shrink-0`}
+              aria-label={`Select ${rep.test_name}`}
+            />
+          )}
           <button
             className="flex min-w-0 flex-1 items-center gap-3 text-left"
             onClick={() => setExpanded(!expanded)}

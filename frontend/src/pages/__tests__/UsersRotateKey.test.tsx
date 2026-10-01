@@ -21,6 +21,7 @@ vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'admin2', refreshAuth
 
 const users = [
   { username: 'alice', role: 'reviewer', status: 'active', can_use_server_providers: false, can_view_reports: false, created_at: '', last_seen: null },
+  { username: 'mallory', role: 'reviewer', status: 'rejected', can_use_server_providers: false, can_view_reports: false, created_at: '', last_seen: null },
   { username: 'admin2', role: 'admin', status: 'active', can_use_server_providers: false, can_view_reports: false, created_at: '', last_seen: null },
 ]
 
@@ -62,6 +63,16 @@ describe('admin API key rotation', () => {
     // Closing discards the key for good.
     await user.click(within(resultDialog).getByRole('button', { name: 'Done' }))
     expect(screen.queryByText('rk_new_secret')).not.toBeInTheDocument()
+  })
+
+  it('offers no rotate action for a rejected user', async () => {
+    get.mockResolvedValue({ users })
+    render(<UsersPage />)
+
+    expect(await screen.findByText('mallory')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate key for mallory' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Rotate key for alice' })).toBeInTheDocument()
+    expect(post).not.toHaveBeenCalled()
   })
 
   it('keeps the confirmation open and shows the error when rotation fails', async () => {
