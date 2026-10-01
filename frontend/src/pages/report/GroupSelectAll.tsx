@@ -3,6 +3,7 @@ import type { GroupedFailure } from '@/types'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
 import { useAuth } from '@/lib/auth'
 import { useReportDispatch, useReportState } from './ReportContext'
+import { scopeKey } from './failureUpdates'
 
 /** Build the selection payloads for every group of a listed section. */
 function toSelection(groups: GroupedFailure[], childJobName?: string, childBuildNumber?: number) {
@@ -30,7 +31,7 @@ export function GroupSelectAll({ groups, scopeLabel, childJobName, childBuildNum
   const { role } = useAuth()
   const ref = useRef<HTMLInputElement>(null)
 
-  const selected = groups.filter((g) => selection[g.id]).length
+  const selected = groups.filter((g) => selection[scopeKey({ childJobName, childBuildNumber }, g.id)]).length
   const allSelected = groups.length > 0 && selected === groups.length
   useEffect(() => {
     if (ref.current) ref.current.indeterminate = selected > 0 && !allSelected

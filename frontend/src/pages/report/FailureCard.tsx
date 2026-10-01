@@ -10,7 +10,7 @@ import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/utils'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
-import { getTrackedIn, notifyReviewChanged, putReviewed, runBatched, scopedReviewState } from './failureUpdates'
+import { getTrackedIn, notifyReviewChanged, putReviewed, runBatched, scopeKey, scopedReviewState } from './failureUpdates'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -281,7 +281,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     const key = scopedReviewKey(t.test_name)
     return reviews[key]?.reviewed
   }).length
-  const isSelected = !!selection[group.id]
+  const isSelected = !!selection[scopeKey({ childJobName: scopedChildJobName, childBuildNumber: scopedChildBuildNumber }, group.id)]
   const allReviewed = reviewedCount === group.tests.length
 
   async function handleReviewAll() {

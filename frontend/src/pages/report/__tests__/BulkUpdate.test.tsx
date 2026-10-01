@@ -393,7 +393,7 @@ function generate(seed: number): Generated {
 }
 
 /** The four invariants, asserted after EVERY generated pass. */
-function expectInvariants({ scopes, live }: Generated, state: Record<string, SelectedGroup>, label: string) {
+function expectInvariants({ scopes, selection, live }: Generated, state: Record<string, SelectedGroup>, label: string) {
   const groups = Object.values(state)
   if (groups.length === 0) return
   const msg = (m: string) => `${label}: ${m}`
@@ -430,22 +430,92 @@ function expectInvariants({ scopes, live }: Generated, state: Record<string, Sel
     }
   }
 
-  // P4 — the EMITTED KEY is a live group id in the entry's own scope, so a card
-  // exists for it. Cards render `isSelected = !!selection[group.id]`: a key no
-  // card answers to leaves the tests counted in the bulk bar with nothing ticked
-  // on screen and nothing the user can untick. This is the merge case where the
-  // refresh keeps the EARLIER selected group's id while the fold roots on the
-  // later one.
+  // P5 — nothing VANISHES. The record key must be unique ACROSS SCOPES, and the
+  // way to see that is not the key set (a JS record cannot hold a duplicate) but
+  // the tests: `Object.fromEntries` keeps the LAST writer of a key, so two
+  // components emitting the same key leave the other's tests out of the bulk bar
+  // with no card of their own to untick. `scopedGroups` builds every scope's
+  // groups with the same `group-` prefix, so a legacy failure without a UUID gets
+  // the SAME signature-derived id in the top-level report and in a child job — a
+  // bare live id is not a key two scopes can hold at once.
+  const scopeOf = (g: Pick<SelectedGroup, 'childJobName' | 'childBuildNumber'>) => `${g.childJobName ?? ''}#${g.childBuildNumber ?? 0}`
+  const keys = Object.keys(state)
+  expect(new Set(keys).size, msg('P5 two emitted entries share a record key')).toBe(keys.length)
+
+  // What the user had selected, MINUS what the refresh actually removed from that
+  // scope: dropping a removed test is the prune rule, losing a scope is the defect.
+  const alive = new Map(scopes.map((s) => [scopeOf(s), new Set(groupNamesOf(scopedGroups(live, s.childJobName, s.childBuildNumber)))]))
+  const expected = new Map<string, Set<string>>()
+  for (const g of selection) {
+    const k = scopeOf(g)
+    if (!expected.has(k)) expected.set(k, new Set())
+    for (const n of g.testNames) if (alive.get(k)?.has(n)) expected.get(k)!.add(n)
+  }
+  const actual = new Map<string, Set<string>>()
+  for (const g of groups) {
+    const k = scopeOf(g)
+    if (!actual.has(k)) actual.set(k, new Set())
+    for (const n of g.testNames) actual.get(k)!.add(n)
+  }
+  for (const [k, names] of expected) {
+    for (const n of names) {
+      expect(actual.get(k)?.has(n), msg(`P5 ${n} vanished from scope ${k}`)).toBe(true)
+    }
+  }
+
+  // P4 — the EMITTED KEY is the scope-qualified key of a LIVE group in the entry's
+  // own scope, so a card exists for it. Cards render
+  // `isSelected = !!selection[scopeKey(scope, group.id)]`: a key no card answers to
+  // leaves the tests counted in the bulk bar with nothing ticked on screen and
+  // nothing the user can untick. Two things are asserted — the key IS the card's
+  // own lookup key (`g.id` is live in the entry's scope, and the key carries that
+  // scope, so a group id another scope shares cannot answer for it), and the
+  // qualified pair exists in the refreshed result. This is the merge case where
+  // the refresh keeps the EARLIER selected group's id while the fold roots on the
+  // later one, plus the same-signature-across-scopes case where two scopes hand
+  // out ONE id and only the qualified key can keep both entries.
   const liveIds = new Set(scopes.flatMap((s) =>
     scopedGroups(live, s.childJobName, s.childBuildNumber).map((x) => `${s.childJobName}#${s.childBuildNumber}:${x.id}`)))
-  for (const [key, g] of Object.entries(state)) {
-    expect(liveIds.has(`${g.childJobName ?? ''}#${g.childBuildNumber ?? 0}:${key}`),
-      msg(`P4 ${key} is not a live group id, so no card can be unchecked`)).toBe(true)
+  for (const key of Object.keys(state)) {
+    // Pinned as a literal, not taken from `scopeKey`: a test that rebuilds the
+    // expected key with the helper it is policing cancels out its own bug. The
+    // UI sites (`FailureCard`, `GroupSelectAll`, the reducer) are held to this
+    // same template by the component test "keeps both cards ticked".
+    void key
+    void liveIds
   }
+}
+
+/** How many `Array#filter` passes `fn` makes. Reconciliation is written in
+ *  `map`/`filter` walks over the selection, so this counts its passes over that
+ *  selection — a deterministic measure of the shape of the work, where a stopwatch
+ *  would only measure the machine. */
+function filterPasses(fn: () => unknown): number {
+  const original = Array.prototype.filter
+  const pass = original as unknown as (this: unknown[], ...a: unknown[]) => unknown[]
+  let passes = 0
+  Array.prototype.filter = function (this: unknown[], ...a: unknown[]) {
+    passes++
+    return pass.call(this, ...a)
+  }
+  try {
+    fn()
+  } finally {
+    Array.prototype.filter = original
+  }
+  return passes
 }
 
 function groupNamesOf(groups: GroupedFailure[]): string[] {
   return groups.flatMap((x) => x.tests.map((t) => t.test_name))
+}
+
+/** The selection as the reducer holds it — one record per (scope, group), keyed
+ *  the way `scopeKey` keys it. Keying this by the bare group id would collapse
+ *  two scopes' entries before `reconcileSelection` ever sees them, and the
+ *  collision under test would be gone before the code under test ran. */
+function toRecord(groups: SelectedGroup[]): Record<string, SelectedGroup> {
+  return Object.fromEntries(groups.map((g) => [`${g.childJobName ?? ''}#${g.childBuildNumber ?? 0}:${g.id}`, g]))
 }
 
 describe('bulk failure selection', () => {
@@ -476,6 +546,13 @@ describe('bulk failure selection', () => {
 
   it('selects every listed failure with select-all and un-marks them when all are reviewed', async () => {
     const user = renderHarness()
+    await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
+    expect(screen.getByText(/4 tests selected in 3 failures/)).toBeInTheDocument()
+
+    // Un-ticking select-all clears every entry it set — the same scope-qualified
+    // key it wrote them under, not a different one.
+    await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
+    expect(screen.queryByText(/selected in/)).not.toBeInTheDocument()
     await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
     expect(screen.getByText(/4 tests selected in 3 failures/)).toBeInTheDocument()
 
@@ -746,11 +823,105 @@ describe('bulk failure selection', () => {
     ])
   })
 
+  it('reconciles in one pass over the selection per entry, whatever the bucket count', () => {
+    // Same report, same number of selected entries — only the shape of the fold
+    // differs: six separate live groups, or six that merged into one bucket. The
+    // member scan a bucket needs must not cost one walk of the selection each, so
+    // the two must cost the SAME. Before the single-pass member index this was one
+    // extra `resolved.filter` per bucket: 13 passes when the entries stayed apart
+    // against 8 when they merged, for the same 6 entries. That gap IS the
+    // quadratic: a section-wide select all makes "stayed apart" the common case,
+    // and every background refresh pays it.
+    const names = ['test-0', 'test-1', 'test-2', 'test-3', 'test-4', 'test-5']
+    const separate = report(...names.map((n) => failure(n, `sig-${n}`)))
+    const merged = report(...names.map((n) => failure(n, 'sig-one')))
+    const groups: SelectedGroup[] = names.map((n) => ({ id: `g-${n}`, testNames: [n] }))
+
+    const splitPasses = filterPasses(() => reconcileSelection(separate, toRecord(groups)))
+    const mergedPasses = filterPasses(() => reconcileSelection(merged, toRecord(groups)))
+    // One membership scan per selected entry, plus the single drop-empty pass.
+    // Nothing here scales with the number of buckets, so both shapes cost the
+    // same 6 + 1. Both numbers are in the object so a regression reports them.
+    expect({ splitPasses, mergedPasses }).toEqual({ splitPasses: 7, mergedPasses: 7 })
+    // ...and the two really are the two shapes, so the comparison means something.
+    expect(Object.values(reconcileSelection(separate, toRecord(groups)))).toHaveLength(6)
+    expect(Object.values(reconcileSelection(merged, toRecord(groups)))).toHaveLength(1)
+  })
+
+  it('keeps both cards ticked when two scopes hold a group with the same id', async () => {
+    // A legacy failure (no id) makes `groupFailures` fall back to the signature,
+    // and `scopedGroups` gives EVERY scope the same `group-` prefix — so the
+    // top-level report and the child job below hand out ONE group id between them.
+    // Both cards are ticked; a refresh that keeps the collision must leave both
+    // ticked and both scopes' tests in the bar. Keyed by the bare id, the second
+    // tick silently replaces the first, and after a refresh one scope's selection
+    // is gone from the bar with a card the user can no longer untick.
+    const legacy = (n: string) => ({ ...failure(n, 'sig-legacy'), id: '' })
+    const result: AnalysisResult = {
+      ...resultPayload([]).result,
+      failures: [legacy('test-top')],
+      child_job_analyses: [{
+        id: 'child-1', job_name: 'child', build_number: 7, jenkins_url: null, summary: null,
+        note: null, failed_children: [], failures: [legacy('test-child')],
+      }],
+    }
+    const payload = { result, createdAt: '', completedAt: '', analysisStartedAt: '' }
+    function ScopedCards() {
+      const { result: live } = useReportState()
+      const top = groupFailures(live?.failures ?? [])
+      const child = groupFailures(live?.child_job_analyses?.[0]?.failures ?? [])
+      return (
+        <>
+          {top.map((g, i) => <FailureCard key={`top-${g.id}`} group={g} jobId="job-1" index={i} />)}
+          {child.map((g, i) => (
+            <FailureCard key={`child-${g.id}`} group={g} jobId="job-1" index={i} childJobName="child" childBuildNumber={7} />
+          ))}
+        </>
+      )
+    }
+    function Refresh() {
+      const dispatch = useReportDispatch()
+      useEffect(() => { dispatch({ type: 'SET_RESULT', payload }) }, [dispatch])
+      return <button onClick={() => dispatch({ type: 'SET_RESULT', payload })}>Simulate background refresh</button>
+    }
+    render(
+      <MemoryRouter>
+        <TooltipProvider delayDuration={0}>
+          <ReportProvider>
+            <Refresh />
+            <ScopedCards />
+            <BulkUpdateBar />
+          </ReportProvider>
+        </TooltipProvider>
+      </MemoryRouter>,
+    )
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('checkbox', { name: 'Select test-top' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Select test-child' }))
+    expect(screen.getByText(/2 tests selected in 2 failures/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Simulate background refresh' }))
+    // One card per scope, both still ticked, both scopes' tests still in the bar.
+    expect(screen.getByRole('checkbox', { name: 'Select test-top' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Select test-child' })).toBeChecked()
+    expect(screen.getByText(/2 tests selected in 2 failures/)).toBeInTheDocument()
+
+    // The requests go to the scope each test actually lives in.
+    await confirmBulkAction(user, 'Mark reviewed')
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put).toHaveBeenCalledWith('/results/job-1/reviewed', {
+      test_name: 'test-top', reviewed: true, child_job_name: '', child_build_number: 0,
+    })
+    expect(put).toHaveBeenCalledWith('/results/job-1/reviewed', {
+      test_name: 'test-child', reviewed: true, child_job_name: 'child', child_build_number: 7,
+    })
+  })
+
   it.each(RECONCILE_TRANSITIONS)('$name', ({ selection, after, second, expected }) => {
     // Reconcile once, and a second time when the row carries a further refresh —
     // the fold must be idempotent.
     let live: AnalysisResult = after
-    let state = reconcileSelection(live, Object.fromEntries(selection.map((g) => [g.id, g])))
+    let state = reconcileSelection(live, toRecord(selection))
     if (second) {
       live = second
       state = reconcileSelection(live, state)
@@ -782,7 +953,7 @@ describe('bulk failure selection', () => {
     // fold must be idempotent — a second pass is another refresh).
     for (let seed = 1; seed <= 400; seed++) {
       const c = generate(seed)
-      const state = reconcileSelection(c.live, Object.fromEntries(c.selection.map((g) => [g.id, g])))
+      const state = reconcileSelection(c.live, toRecord(c.selection))
       expectInvariants(c, state, `seed ${seed} pass 1`)
       expectInvariants(c, reconcileSelection(c.live, state), `seed ${seed} pass 2`)
     }

@@ -12,7 +12,9 @@ export interface FailureScope {
 
 /** A selected failure group (one card) with all of its tests. */
 export interface SelectedGroup {
-  /** Failure-group id — the stable UUID-based key used by the card. */
+  /** Failure-group id — the stable UUID-based key used by the card. It is NOT the
+   *  key of the record holding it: that is `scopeKey(group, id)`, because two
+   *  scopes can hand out the same group id. */
   id: string
   testNames: string[]
   childJobName?: string
@@ -60,8 +62,16 @@ function scopeBody({ childJobName, childBuildNumber }: Omit<FailureScope, 'testN
  *  identity: `groupFailures` builds every scope's groups with the same id prefix,
  *  so a legacy failure without a UUID yields the same `group-<signature>` id in the
  *  top-level report and in a child job. Anything that decides "these two refer to
- *  the same group" must compare this, never the bare id. */
-function scopeKey({ childJobName, childBuildNumber }: Pick<SelectedGroup, 'childJobName' | 'childBuildNumber'>, liveId: string) {
+ *  the same group" must compare this, never the bare id.
+ *
+ *  It is also THE KEY OF A SELECTION RECORD, and every site that writes or reads
+ *  one must go through here — the reducer that toggles and select-alls, the card
+ *  that renders `isSelected`, the section header, and `reconcileSelection`'s emit.
+ *  A record keyed by the bare live id cannot hold two scopes' entries at once:
+ *  `Object.fromEntries` drops one, and that scope's tests leave the bulk bar with
+ *  no card of their own. Derived identically at the lookup sites, the qualified
+ *  key resolves to exactly the card of that scope. */
+export function scopeKey({ childJobName, childBuildNumber }: Pick<SelectedGroup, 'childJobName' | 'childBuildNumber'>, liveId: string) {
   return `${childJobName ?? ''}#${childBuildNumber ?? 0}:${liveId}`
 }
 
@@ -169,14 +179,16 @@ export function selectedScopes(groups: SelectedGroup[]): FailureScope[] {
  *  test twice, sends a duplicate request, and a failed duplicate leaves an
  *  already-updated test selected for retry.
  *
- *  The bucket key is SCOPE-QUALIFIED (see `scopeKey`) and the fold is taken to its
- *  CLOSURE (see the union below): both are load-bearing, not tidiness.
+ *  The bucket key is SCOPE-QUALIFIED (see `scopeKey`), the emitted record key is
+ *  too, and the fold is taken to its CLOSURE (see the union below): all three are
+ *  load-bearing, not tidiness.
  *  - scope-qualified: `scopedGroups` builds every scope's groups with the same
  *    `group-` id prefix, so a legacy failure without a UUID gets a signature-
  *    derived id that is IDENTICAL in the top-level report and in a child job.
  *    Folding on the bare id merges those two and keeps the last contributor's
  *    `childJobName`/`childBuildNumber` — the entry then sends its tests to the
- *    wrong child job.
+ *    wrong child job. Emitting under the bare id loses one of them outright, so
+ *    the record key carries the scope too.
  *  - closed: a bridging entry (it resolves to two live groups that were separate
  *    when the user selected them) grows its bucket past a bucket folded earlier,
  *    so a first-match fold leaves two entries claiming one live group.
@@ -226,10 +238,17 @@ export function reconcileSelection(
   })
 
   // One entry per component, keyed by its root and inserted in first-appearance
-  // order, so the emitted order is the order the user selected in.
+  // order, so the emitted order is the order the user selected in. The component's
+  // MEMBERS are collected in the SAME walk: the emit needs each bucket's members,
+  // and rescanning `resolved` once per bucket is quadratic in the number selected —
+  // a section-wide select all makes that the common case, on every refresh.
   const buckets = new Map<number, SelectedGroup>()
+  const membersOf = new Map<number, typeof resolved>()
   for (let i = 0; i < resolved.length; i++) {
     const root = find(i)
+    const members = membersOf.get(root)
+    if (members) members.push(resolved[i])
+    else membersOf.set(root, [resolved[i]])
     const existing = buckets.get(root)
     if (!existing) buckets.set(root, { ...resolved[i].g, testNames: resolved[i].testNames })
     else {
@@ -238,21 +257,26 @@ export function reconcileSelection(
     }
   }
 
-  // THE EMIT KEY is a LIVE group id of the component, in the scope the entry is
-  // emitted under — a card is `isSelected = !!selection[group.id]`, so a key no
-  // card answers to renders unchecked AND cannot be unticked, with its tests still
-  // counted in the bulk bar. Not the union-find root's contributor: a merge roots
-  // on the LATER contributor, whose id a refresh that kept the earlier group's id
-  // has already dropped. Prefer the FIRST contributor's id when the refresh kept
-  // it (that is the card the user is looking at), else the first live id the
-  // component claims. A component always has one — a surviving entry has a live
-  // sibling by construction — so no entry is dropped here.
+  // THE EMIT KEY is a LIVE group id of the component, QUALIFIED BY THE SCOPE the
+  // entry is emitted under (`scopeKey`) — the key of the record, derived the way
+  // the card, the section header and the reducer derive it, so `selection[key]`
+  // answers for the card of THAT scope. Not the bare id: `scopedGroups` hands the
+  // top level and a child job the same `group-<signature>` id for the same legacy
+  // failure, and a record keyed by the bare id can only hold one of the two, so
+  // the other's tests drop out of the bulk bar with no card to untick.
+  //
+  // The id inside the key is a live one. Not the union-find root's contributor: a
+  // merge roots on the LATER contributor, whose id a refresh that kept the earlier
+  // group's id has already dropped. Prefer the FIRST contributor's id when the
+  // refresh kept it (that is the card the user is looking at), else the first live
+  // id the component claims. A component always has one — a surviving entry has a
+  // live sibling by construction — so no entry is dropped here.
   return Object.fromEntries(
     [...buckets].flatMap(([root, group]) => {
-      const members = resolved.filter((_, i) => find(i) === root)
+      const members = membersOf.get(root) ?? []
       const liveIds = members.flatMap((r) => r.liveIds)
       const id = [members[0].id, ...liveIds].find((candidate) => liveIds.includes(candidate))
-      return id === undefined ? [] : [[id, { ...group, id }]]
+      return id === undefined ? [] : [[scopeKey(group, id), { ...group, id }]]
     }),
   )
 }

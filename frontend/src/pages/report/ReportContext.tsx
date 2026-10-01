@@ -2,7 +2,7 @@ import { createContext, useContext, useReducer, useRef, useCallback, type Dispat
 import { api } from '@/lib/api'
 import { reviewKey } from '@/lib/reviewKey'
 import type { SelectedGroup } from './failureUpdates'
-import { reconcileSelection } from './failureUpdates'
+import { reconcileSelection, scopeKey } from './failureUpdates'
 import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
 
 interface ReportState {
@@ -17,7 +17,8 @@ interface ReportState {
   classifications: Record<string, string>
   /** Tracked-in links keyed by composite key (reviewKey format). */
   trackedIn: Record<string, TrackedInEntry[]>
-  /** Selected failure groups for bulk updates, keyed by group id. */
+  /** Selected failure groups for bulk updates, keyed by `scopeKey(group, group.id)`
+   *  — scope-qualified, because two scopes can hold the same group id. */
   selection: Record<string, SelectedGroup>
   githubIssuesEnabled: boolean
   jiraIssuesEnabled: boolean
@@ -179,7 +180,10 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
     case 'SET_TRACKED_IN_ENTRY':
       return { ...state, trackedIn: { ...state.trackedIn, [action.payload.testName]: [...(state.trackedIn[action.payload.testName] || []), action.payload.entry] } }
     case 'TOGGLE_GROUP_SELECTION': {
-      const { id } = action.payload
+      // Keyed the way every other site keys a record — the card, the section
+      // header and `reconcileSelection` all derive it from the same helper, so a
+      // toggle always finds the entry its card is rendering.
+      const id = scopeKey(action.payload, action.payload.id)
       if (state.selection[id]) {
         const rest = { ...state.selection }
         delete rest[id]
@@ -190,8 +194,9 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
     case 'SET_GROUP_SELECTION': {
       const next = { ...state.selection }
       for (const g of action.payload.groups) {
-        if (action.payload.selected) next[g.id] = g
-        else delete next[g.id]
+        const id = scopeKey(g, g.id)
+        if (action.payload.selected) next[id] = g
+        else delete next[id]
       }
       return { ...state, selection: next }
     }
