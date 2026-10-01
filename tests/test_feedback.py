@@ -2,6 +2,7 @@
 
 import json
 import os
+from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -1015,6 +1016,38 @@ class TestAiAttribution:
             ),
         )
 
+    # Every Unicode character a client could swap for a plain newline.  The
+    # digest must NOT treat them as line breaks, or the swap verifies.
+    _SEPARATORS: ClassVar[list[str]] = [
+        "\v",
+        "\f",
+        "\x1c",
+        "\x1d",
+        "\x1e",
+        "\u0085",
+        "\u2028",
+        "\u2029",
+    ]
+
+    @classmethod
+    async def _preview_with_separator(cls, settings, separator: str):
+        """Return a real AI preview whose body carries *separator* mid-text."""
+        response = AIResult(
+            success=True,
+            text=json.dumps(
+                {
+                    "title": "Broken",
+                    "body": f"## Bug{separator}separator{separator}Broken.",
+                    "labels": ["bug"],
+                }
+            ),
+        )
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=response):
+            return await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+
     @staticmethod
     async def _posted_body(title: str, body: str, labels: list[str]) -> str:
         """Create the issue through the real creator and return what GitHub got."""
@@ -1168,6 +1201,43 @@ class TestAiAttribution:
         # Changed content is still rejected, whatever the line endings are.
         tampered = crlf.replace("## Bug", "## Something else")
         assert read_provenance(tampered) is None
+
+    @pytest.mark.parametrize("separator", _SEPARATORS)
+    async def test_unicode_separator_swapped_for_newline_loses_credit(
+        self, settings, separator
+    ):
+        """\v, \f, \\x1c-\\x1e, U+2028/U+2029 are not line breaks (Qodo HIGH).
+
+        ``str.splitlines`` folded them into LF, so a client could swap one for
+        a real newline and the signed digest still verified — model credit on
+        a body whose text changed.
+        """
+        preview = await self._preview_with_separator(settings, separator)
+        # The positive control: the untouched preview verifies and credits.
+        assert read_provenance(preview.body) == AiProvenance(
+            ai_used=True, provider="claude", model="sonnet-4-5"
+        )
+        tampered = preview.body.replace(separator, "\n")
+        assert tampered != preview.body
+        assert read_provenance(tampered) is None
+        body = await self._posted_body(preview.title, tampered, preview.labels)
+        assert "sonnet-4-5" not in body
+        assert body.count(self._NO_AI_MARKER) == 1
+        assert self._AI_MARKER not in body
+
+    async def test_lone_cr_round_trip_keeps_the_credit(self, settings):
+        """The CRLF tolerance is CRLF *and* lone CR, nothing else."""
+        req = FeedbackRequest(description="The button is broken")
+        with patch("rootcoz.feedback.call_ai_once", return_value=self._ai_response()):
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="sonnet-4-5"
+            )
+        expected = AiProvenance(ai_used=True, provider="claude", model="sonnet-4-5")
+        lone_cr = preview.body.replace("\n", "\r")
+        assert read_provenance(lone_cr) == expected
+        body = await self._posted_body(preview.title, lone_cr, preview.labels)
+        assert "(claude / sonnet-4-5)" in body
+        assert body.count(self._AI_MARKER) == 1
 
     async def test_forged_provenance_token_is_ignored(self):
         """A hand-written provenance token fails signature verification."""

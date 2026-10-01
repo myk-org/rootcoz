@@ -32,9 +32,14 @@ the server can verify still says who wrote them.
 CLI on Windows or a pasted file, so the same content arrives with LF, CRLF or
 lone-CR separators.  Stripping therefore matches any line break
 (:data:`ATTRIBUTION_RE` / :data:`_PROVENANCE_RE`), and the digest normalizes
-line breaks to LF before hashing (:func:`_content_digest`) so a preview
+*only* CRLF/CR to LF before hashing (:func:`_content_digest`) so a preview
 round-trips through a CRLF round-trip unchanged while a *changed* body still
-fails the digest check.
+fails the digest check.  Every other character — including the Unicode line
+separators ``\\v``, ``\\f``, ``\\x1c``-``\\x1e``, U+2028 and U+2029 — is left
+exactly as it is, deliberately: were they folded to LF, a client could swap one
+for a plain newline and the digest would still verify, keeping the model credit
+on a body whose text changed.  ``str.splitlines`` and friends fold all of
+them, so they are never used here.
 """
 
 import hashlib
@@ -71,6 +76,12 @@ _PROVENANCE_PREFIX = "<!--rootcoz-ai:"
 # One line only, under either line-ending style, so a CRLF-embedded token is
 # stripped exactly like an LF one.
 _PROVENANCE_RE = re.compile(r"<!--rootcoz-ai:[^\r\n]*-->")
+
+# Genuine line endings only — CRLF and lone CR to LF.  Deliberately NOT
+# str.splitlines()/re.split(r"\s+"), which also break on \v, \f, \x1c-\x1e,
+# U+2028 and U+2029 and would let a client swap those for a newline without
+# invalidating the signature (see _content_digest).
+_LINE_ENDING_RE = re.compile(r"\r\n?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,12 +124,16 @@ def _strip_attribution(body: str) -> str:
 def _content_digest(body: str) -> str:
     """Digest the content a token describes: *body* minus its attribution.
 
-    Line breaks are normalized to LF first, so the digest depends on the text
-    and not on the client's line-ending style — a CRLF round-trip of the same
-    body still verifies, a changed body still does not.
+    ONLY CRLF and lone CR are normalized (to LF), so the digest depends on the
+    text and not on the client's line-ending style — a CRLF round-trip of the
+    same body still verifies, a changed body still does not.  No other
+    character is touched: ``\v``, ``\f``, ``\x1c``-``\x1e``, U+2028 and U+2029
+    are *not* line breaks here even though ``str.splitlines`` treats them as
+    such, because folding them into LF would let a client replace one with a
+    plain newline and keep the model credit on a body whose text changed.
     """
     return hashlib.sha256(
-        "\n".join(_strip_attribution(body).splitlines()).encode()
+        _LINE_ENDING_RE.sub("\n", _strip_attribution(body)).encode()
     ).hexdigest()
 
 

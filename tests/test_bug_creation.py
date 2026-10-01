@@ -6,7 +6,7 @@ import httpx
 import pytest
 from pi_sidecar_client import AIResult
 
-from rootcoz.attribution import AiProvenance
+from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
 from rootcoz.bug_creation import create_github_issue
 from rootcoz.models import (
     AnalysisDetail,
@@ -679,6 +679,26 @@ class TestAiFooterNotDoubled:
         posted = await self._posted(spoofed, attribution=AiProvenance(ai_used=True))
         assert "spoofed-model" not in posted
         assert posted.count(_GITHUB_FOOTER_MARKER) == 1
+
+    async def test_swapped_separator_cannot_credit_a_model(self):
+        """The published body is the no-AI one after a separator swap (Qodo HIGH).
+
+        \v, \f, \\x1c-\\x1e, U+2028/U+2029 are not line breaks, so replacing one
+        with a newline changes the content: the token no longer verifies and the
+        issue creator publishes the NO-AI footer.
+        """
+        for separator in ["\v", "\f", "\x1c", "\x1d", "\x1e", "\u2028", "\u2029"]:
+            preview = apply_ai_attribution(
+                f"## Bug{separator}separator{separator}Broken.",
+                AiProvenance(ai_used=True, provider="cli-claude", model="sonnet-4-5"),
+            )
+            tampered = preview.replace(separator, "\n")
+            assert read_provenance(preview) is not None
+            assert read_provenance(tampered) is None
+            posted = await self._posted(tampered, attribution=read_provenance(tampered))
+            assert "sonnet-4-5" not in posted
+            assert "No AI model generated this issue" in posted
+            assert _GITHUB_FOOTER_MARKER not in posted
 
     async def test_without_a_signal_no_model_is_credited(self):
         posted = await self._posted("## Details\nSome content")
