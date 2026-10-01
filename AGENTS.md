@@ -134,6 +134,7 @@ src/rootcoz/
   - **Reviewers** can: everything viewers can, plus chat about jobs, comment on jobs, register, login, rotate their own API key, manage their own tracker tokens.
   - **Operators** can: everything reviewers can, plus submit NEW analyses (`POST /analyze` or ingest-only `POST /submit`), re-analyze any job, delete their own jobs.
   - **Admins** can: everything operators can, plus delete any job, rotate any user's key (`POST /api/admin/users/{username}/rotate-key`), create/delete users, change user roles, manage `can_view_reports`, access admin-only endpoints (`/api/admin/*`). Admins always have reports access.
+  - **`can_use_server_providers`** (DB flag, default false, orthogonal to role): when true, the user may send analyses and chat using the server's stored AI credentials instead of their own. Same reload-per-request and admin-implies-`True` semantics as `can_view_reports`. Managed via `PUT /api/admin/users/{username}/can-use-server-providers`, admin user create (`can_use_server_providers` in body), CLI `admin users create --can-use-server-providers` / `admin users set-can-use-server-providers`, and the admin UI (`Server providers` column). Gating the "Use server credentials" toggle.
   - **`can_view_reports`** (DB flag, default false, orthogonal to role): when true, the user may call `/api/reports/*`. Non-admins reload the flag from the users table on each request (so grants/revokes apply without session invalidation); admins have effective access (`True`) without depending on the stored column. Managed via `PUT /api/admin/users/{username}/can-view-reports`, admin user create (`can_view_reports` in body), CLI `admin users create --can-view-reports` / `admin users set-can-view-reports`, and the admin UI. Exposed on `request.state.can_view_reports`, `GET /api/auth/me`, and `POST /api/auth/login`.
 - **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
   - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions)
@@ -156,9 +157,24 @@ Every new environment variable added to `Settings` in `config.py` **MUST** also 
 2. Add to `_SENSITIVE_SETTINGS` if it contains passwords/tokens/keys
 3. Add to `_RESTART_REQUIRED_SETTINGS` if it requires server restart to take effect
 
-### Auto-Generated Documentation
+### Documentation Site (`docs/`)
 
-The `docs/` directory is **auto-generated** by [docsfy](https://github.com/myk-org/docsfy). **NEVER edit files in `docs/` manually** — all changes will be overwritten. To update documentation, modify source code and regenerate with docsfy, or edit `AGENTS.md` / `README.md` for project-level docs.
+`docs/` is a [pi-docsite](https://pypi.org/project/pi-docsite) site, served from the `main` branch by GitHub Pages.
+
+**Authored sources** (edit these):
+
+- `docs/*.md` — one page each, exactly one H1 that becomes its sidebar title
+- `docs/nav.json` — sidebar layout; array order is display order, a slug with no `.md` is a build error
+
+**Generated files** (`*.html`, `assets/`, `llms.txt`, `llms-full.txt`, `search-index.json`) — **NEVER edit these by hand**; they are overwritten on every build and are excluded from AI review via the `[ignore] glob` list in `.pr_agent.toml`.
+
+Rebuild and commit the generated files together with the source change:
+
+```bash
+uvx pi-docsite --docs-dir docs --tagline "AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML"
+```
+
+Output is byte-for-byte reproducible — churn in untouched files means something else changed. Link between pages with `.html` extensions (`[Quickstart](quickstart.html)`), not `.md`.
 
 ### Project Customization (`.rootcoz/` folder)
 
@@ -176,7 +192,7 @@ Analyzed repositories can provide project-specific customization files under a `
     extensions/                    # Custom pi extensions for this project
 ```
 
-- **`settings.json`**: Optional non-sensitive analysis settings for the test repo. Validated against the JSON Schema in `src/rootcoz/schemas/rootcoz-settings.schema.json` (Pydantic model `RootcozRepoSettings`). Allowed keys only: `ai_provider`, `ai_model`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds`, `additional_repos`. No secrets (tokens rejected). Priority for all allowed keys: request → `settings.json` → server. Loaded after the test repo is cloned (`rootcoz_repo_settings.py`).
+- **`settings.json`**: Optional non-sensitive analysis settings for the test repo. Validated against the JSON Schema in `src/rootcoz/schemas/rootcoz-settings.schema.json` (Pydantic model `RootcozRepoSettings`). Allowed keys only: `ai_provider`, `ai_model`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `force_server_credentials`, `peer_analysis_max_rounds`, `additional_repos`. No secrets (tokens rejected). Priority for all allowed keys: request → `settings.json` → server. Loaded after the test repo is cloned (`rootcoz_repo_settings.py`).
 - **Prompt files**: `build_resources_section()` and `build_prompt_sections()` in `engine/core.py` scan `<repo>/.rootcoz/` for `ROOTCOZ_PROMPT.md` and `ROOTCOZ_HISTORY_PROMPT.md`. The issue prompt (`ROOTCOZ_ISSUE_PROMPT.md`) is fetched via the GitHub Contents API from `.rootcoz/` in `main.py`.
 - **Pi resources**: After cloning repos (analysis, re-analysis, and chat paths), `.rootcoz/{agents,skills,extensions}/` are copied into `<workspace>/.pi/` via `copy_rootcoz_pi_resources()` so pi's `DefaultResourceLoader` discovers them. Built-in agents from `src/rootcoz/agents/` are then copied via `copy_builtin_agents_to_workspace()` — existing user agent files with the same name are NOT overwritten (user agents take precedence). Analysis sessions use exactly the builtin tools `["read", "ls", "find", "grep"]` (no `subagent`); the `test-analyzer` agent file is loaded as `system_prompt`. Chat sessions still include `subagent`.
 - This is a **breaking change** — the previous legacy prompt filenames in the repo root are no longer supported. Only `.rootcoz/` is recognized.

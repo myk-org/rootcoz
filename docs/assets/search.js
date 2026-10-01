@@ -11,12 +11,34 @@
 
   var input = overlay.querySelector('.search-modal-input');
   var results = overlay.querySelector('.search-modal-results');
-  var index = [];
   var selectedIdx = -1;
-
-  // Load index
-  fetch('search-index.json').then(function(r) { return r.json(); })
-    .then(function(data) { index = data; }).catch(function() {});
+  // Load index. Normally fetched once and shared by every page, so nothing is
+  // inlined and the pages stay small. An inline copy is used when the generator
+  // was asked to embed it. Note: fetch() of a local file is blocked by CORS on
+  // file:// in most browsers, so opening the site straight off disk needs the
+  // inline mode; served over HTTP this is not an issue.
+  var index = Array.isArray(window.__DOCS_SEARCH_INDEX__) ? window.__DOCS_SEARCH_INDEX__ : null;
+  var indexError = null;
+  if (!index) {
+    fetch('search-index.json').then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function(data) {
+      index = data;
+      // The user may have typed before the fetch resolved. Their first query
+      // was answered with "Loading search index..." and never re-run, so the
+      // results stayed hidden until they edited the box again.
+      if (typeof render === 'function' && input.value.trim()) render();
+    }).catch(function(err) {
+      indexError = err;
+      console.error('[docs] search index unavailable:', err,
+        '— serve the site over HTTP, or build it with the search index inlined.');
+      // Same reason as the success path: a query typed while the request was
+      // pending would otherwise stay on "Loading search index..." forever, now
+      // that the request has failed.
+      if (typeof render === 'function' && input.value.trim()) render();
+    });
+  }
 
   // Open/close
   function openModal() {
@@ -65,11 +87,21 @@
   }
 
   // Search logic
-  input.addEventListener('input', function() {
-    var q = this.value.toLowerCase().trim();
+  function render() {
+    var q = input.value.toLowerCase().trim();
     results.innerHTML = '';
     selectedIdx = -1;
     if (!q) return;
+
+    if (!index) {
+      var err = document.createElement('div');
+      err.className = 'search-no-results';
+      err.textContent = indexError
+        ? 'Search needs the site served over HTTP (opening the file directly blocks it).'
+        : 'Loading search index...';
+      results.appendChild(err);
+      return;
+    }
 
     var matches = index.filter(function(item) {
       return item.title.toLowerCase().includes(q) || item.content.toLowerCase().includes(q);
@@ -105,7 +137,9 @@
       empty.textContent = 'No results found';
       results.appendChild(empty);
     }
-  });
+  }
+
+  input.addEventListener('input', render);
 
   // Keyboard navigation
   input.addEventListener('keydown', function(e) {

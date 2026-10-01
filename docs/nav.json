@@ -1,0 +1,35 @@
+{
+  "groups": [
+    {
+      "name": "Getting Started",
+      "pages": ["quickstart", "deploy-rootcoz", "configuration-reference"]
+    },
+    {
+      "name": "Analyzing Results",
+      "pages": [
+        "submit-analyses",
+        "track-analysis-progress",
+        "review-and-classify-failures",
+        "collaborate-on-results",
+        "create-follow-up-issues-and-push-results"
+      ]
+    },
+    {
+      "name": "Exploring Data",
+      "pages": ["explore-history-and-reports", "use-server-chat-for-cross-job-analysis"]
+    },
+    {
+      "name": "Account and Administration",
+      "pages": ["manage-account-and-notifications", "manage-users-and-server-settings"]
+    },
+    {
+      "name": "Reference",
+      "pages": [
+        "api-reference",
+        "cli-reference",
+        "automate-common-tasks-with-the-cli",
+        "configure-analysis-context"
+      ]
+    }
+  ]
+}
