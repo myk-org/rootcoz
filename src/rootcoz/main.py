@@ -10313,6 +10313,7 @@ async def set_user_ai_credential(
 ) -> JSONResponse:
     """Encrypt and save a key for a sidecar-confirmed provider."""
     _require_reviewer(request)
+    _check_allow_list(request)
     username = await _credential_user(request)
     if provider not in await supported_key_providers():
         raise HTTPException(
@@ -10368,6 +10369,7 @@ async def set_user_ai_credential(
 async def delete_user_ai_credential(provider: str, request: Request) -> JSONResponse:
     """Remove one credential; do not reveal whether a key was present."""
     _require_reviewer(request)
+    _check_allow_list(request)
     username = await _credential_user(request)
     try:
         sessions = await storage.update_user_ai_credential(username, provider, None)
@@ -10408,6 +10410,7 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     Pass empty string to clear a field.
     """
     _require_reviewer(request)
+    _check_allow_list(request)
     username = request.state.username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")

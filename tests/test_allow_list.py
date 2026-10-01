@@ -367,3 +367,47 @@ class TestRestrictedAccess:
             headers={"Authorization": f"Bearer {raw_key}"},
         )
         assert resp.status_code == 403
+
+    def test_user_tokens_blocked(self, client_restricted, temp_db_path):
+        """PUT /api/user/tokens must honour the allow list (#299)."""
+        auth = _create_user_sync(temp_db_path, "charlie")
+        resp = client_restricted.put(
+            "/api/user/tokens",
+            json={"jira_api_token": "leaked", "github_token": "leaked"},
+            headers=auth,
+        )
+        assert resp.status_code == 403
+        assert "allow list" in resp.json()["detail"].lower()
+
+    def test_user_tokens_allowed(self, client_restricted, temp_db_path):
+        """A user on the allow list can still save their own tokens."""
+        auth = _create_user_sync(temp_db_path, "alice")
+        resp = client_restricted.put(
+            "/api/user/tokens",
+            json={"jira_api_token": "cfg-tok", "github_token": "ghp_tok"},
+            headers=auth,
+        )
+        assert resp.status_code == 200
+
+    def test_set_ai_credential_blocked(self, client_restricted, temp_db_path):
+        """PUT /api/user/ai-credentials/{provider} must honour the allow list (#299)."""
+        auth = _create_user_sync(temp_db_path, "charlie")
+        resp = client_restricted.put(
+            "/api/user/ai-credentials/anthropic",
+            json={
+                "api_key": "sk-ant-leaked",  # pragma: allowlist secret
+                "model": "claude-sonnet-4-5",
+            },
+            headers=auth,
+        )
+        assert resp.status_code == 403
+        assert "allow list" in resp.json()["detail"].lower()
+
+    def test_delete_ai_credential_blocked(self, client_restricted, temp_db_path):
+        """DELETE /api/user/ai-credentials/{provider} must honour the allow list."""
+        auth = _create_user_sync(temp_db_path, "charlie")
+        resp = client_restricted.delete(
+            "/api/user/ai-credentials/anthropic",
+            headers=auth,
+        )
+        assert resp.status_code == 403
