@@ -11,8 +11,8 @@ The create step re-verifies the signature, so a client can neither change the
 credited model nor forge one, and any *rootcoz* attribution line it adds anywhere
 in the body is stripped before the single server-owned footer is appended.  Prose
 that merely resembles a footer — a user's own feedback quoting another tool's
-"Generated using AI by ..." — is content, not a claim, and survives untouched
-(issue #301).
+"Generated using AI by ...", or a note linking the project docs — is content, not
+a claim, and survives untouched (issue #301).
 
 **Who decides the attribution.**  Only the caller does, and only through an
 explicit ``AiProvenance``: :func:`read_provenance` returns a token's provenance
@@ -31,14 +31,16 @@ credited to no model.  The price is deliberate: edits *outside* the attribution
 region change the content and therefore lose the model credit, because nothing
 the server can verify still says who wrote them.
 
-One body class is exempt from that price.  The strip was tightened to
-rootcoz's own markers (issue #301), which moves a *foreign* lookalike from the
-ignored attribution region into the digested content, so a token minted before
-the change no longer matches the body it describes.  :func:`read_provenance`
-therefore also accepts the digest computed under the old, looser strip
-(:data:`_LEGACY_ATTRIBUTION_RE`).  That widens which *digest* a token may carry,
-never whether its HMAC is genuine, and it accepts only digests this code already
-accepted — so the set of verifiable bodies is exactly today's, not larger.
+The binding is deliberately exact.  Tightening the strip to rootcoz's own
+wording (issue #301) moves a *foreign* lookalike from the ignored attribution
+region into the digested content, so a token minted before the change no longer
+matches the body it describes; such a body is credited to no model.  There is
+deliberately no second, looser digest to fall back to: the legacy digest strips
+*more*, so anything a client appended would be invisible to it and the token
+would verify against content the client chose — an unsigned footer published
+under the server's signature and its model credit.  An already-published issue
+losing its AI credit is the honest price; that is far better than publishing a
+client's forged footer under the server's signature.
 
 **Line endings never decide anything.**  A client posts text from a browser, a
 CLI on Windows or a pasted file, so the same content arrives with LF, CRLF or
@@ -79,28 +81,19 @@ AI_ATTRIBUTION_PREFIX = (
 # Matches a *rootcoz* attribution line wherever it appears in a body (not only
 # a trailing one), so a client-supplied fake rootcoz footer cannot survive
 # creation.  Placement stays unanchored for exactly that reason; the *text* is
-# anchored, because the bare shape ("---" then an italic line starting "Generated
-# using AI") also matches a user's own prose quoting another tool's footer, and
-# stripping that deletes their words from the preview and from the issue created
-# from it (issue #301).  Every footer rootcoz itself writes carries the project
-# link — except the no-AI fallback sentence, which carries the literal "No AI
-# model generated this issue" — so keying on those two covers all three footers
-# and no foreign one.  The separator/line breaks are any run of CR/LF, never a
-# bare LF: a CRLF (or lone-CR) footer must not slip past an LF-shaped pattern
-# and get published.
+# anchored on the immutable wording of rootcoz's own three footers — the
+# "Generated using AI with [rootcoz](...)" line, whose variable
+# " (provider / model)" suffix stays outside the literal, and the "No AI model
+# generated this issue" fallback sentence.  Anything looser eats a user's own
+# words: a bare project URL is not an attribution (a note linking the docs is
+# prose), and neither is another tool's "Generated using AI by ..." (issue #301).
+# The separator/line breaks are any run of CR/LF, never a bare LF: a CRLF (or
+# lone-CR) footer must not slip past an LF-shaped pattern and get published.
 ATTRIBUTION_RE = re.compile(
-    r"[\r\n]*---[\r\n]*\*[^\r\n]*(?:github\.com/myk-org/rootcoz|No AI model generated this issue)[^\r\n]*\*"
-)
-
-# The pre-#301 pattern: any italic "Generated using AI"/"No AI model generated"
-# line, no matter whose footer it really is.  Retained deliberately as a
-# read_provenance digest fallback for tokens minted before the anchor, so an
-# already-published AI issue does not silently lose its credit to the no-AI
-# fallback.  Never used to strip what gets published — that is ATTRIBUTION_RE
-# alone; keeping the two in one module is what stops the shim from creeping
-# back into the strip path.
-_LEGACY_ATTRIBUTION_RE = re.compile(
-    r"[\r\n]*---[\r\n]*\*(?:Generated using AI|No AI model generated)[^\r\n]*\*"
+    r"[\r\n]*---[\r\n]*\*[^\r\n]*"
+    r"(?:Generated using AI with \[rootcoz\]\(https://github\.com/myk-org/rootcoz\)"
+    r"|No AI model generated this issue)"
+    r"[^\r\n]*\*"
 )
 
 _PROVENANCE_PREFIX = "<!--rootcoz-ai:"
@@ -147,17 +140,12 @@ def _sign(payload: str) -> str:
     ).hexdigest()
 
 
-def _strip_attribution(body: str, pattern: re.Pattern[str] = ATTRIBUTION_RE) -> str:
-    """Return *body* without any attribution footer or provenance token.
-
-    *pattern* exists so the legacy-digest fallback reuses this one strip (see
-    :data:`_LEGACY_ATTRIBUTION_RE`) instead of duplicating it; publishing always
-    takes the default.
-    """
-    return _PROVENANCE_RE.sub("", pattern.sub("", body)).rstrip()
+def _strip_attribution(body: str) -> str:
+    """Return *body* without any attribution footer or provenance token."""
+    return _PROVENANCE_RE.sub("", ATTRIBUTION_RE.sub("", body)).rstrip()
 
 
-def _content_digest(body: str, pattern: re.Pattern[str] = ATTRIBUTION_RE) -> str:
+def _content_digest(body: str) -> str:
     """Digest the content a token describes: *body* minus its attribution.
 
     ONLY CRLF and lone CR are normalized (to LF), so the digest depends on the
@@ -169,7 +157,7 @@ def _content_digest(body: str, pattern: re.Pattern[str] = ATTRIBUTION_RE) -> str
     plain newline and keep the model credit on a body whose text changed.
     """
     return hashlib.sha256(
-        _LINE_ENDING_RE.sub("\n", _strip_attribution(body, pattern)).encode()
+        _LINE_ENDING_RE.sub("\n", _strip_attribution(body)).encode()
     ).hexdigest()
 
 
@@ -192,6 +180,10 @@ def read_provenance(body: str) -> AiProvenance | None:
 
     Unsigned, tampered or content-mismatched tokens are ignored: the caller
     must fall back to a safe (no-AI) attribution rather than trust client text.
+    Exactly one digest is accepted — this body as stripped by
+    :data:`ATTRIBUTION_RE`.  A second, looser digest would be a hole rather than
+    a courtesy: it strips *more*, so a client-added footer would be invisible to
+    it and the token would verify against content the client chose.
     """
     digest = _content_digest(body)
     for match in _PROVENANCE_RE.finditer(body):
@@ -207,14 +199,7 @@ def read_provenance(body: str) -> AiProvenance | None:
             continue
         ai_used, provider, model, token_digest = parts
         if not hmac.compare_digest(str(token_digest), digest):
-            # Token predates the anchored strip (#301): accept the digest the old
-            # pattern produced for this body.  Signature is already verified, so
-            # this widens the accepted digest, not the attacker's reach.
-            # ponytail: one extra regex pass + sha256, only on the rare fallback
-            # path — drop this branch once pre-#301 tokens can no longer exist.
-            legacy = _content_digest(body, _LEGACY_ATTRIBUTION_RE)
-            if not hmac.compare_digest(str(token_digest), legacy):
-                continue
+            continue
         return AiProvenance(bool(ai_used), str(provider), str(model))
     return None
 
