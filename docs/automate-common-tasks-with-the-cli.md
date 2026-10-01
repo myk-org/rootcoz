@@ -253,28 +253,21 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
      --fields result.summary,result.failed_count | jq -c '.result')
    echo "summary: $SUMMARY"
 
-   rootcoz --json results tests "$JOB_ID" --status failed --limit 200 \
-     | jq -r '.entries[].test_name' | while read -r TEST; do
-         rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
-         rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
-           --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
-       done
-
-`--limit` bounds one page and nothing advances past it, so a job with more than 200 failed tests leaves the remainder unreviewed and unpushed. Page with `--offset`, and stop when a page comes back empty:
-
-```bash
-OFFSET=0
-while :; do
-  PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed --limit 200 --offset "$OFFSET")
-  [ "$(jq 'length' <<<"$PAGE.entries")" -eq 0 ] && break
-  jq -r '.entries[].test_name' <<<"$PAGE" | while read -r TEST; do
-    rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
-    rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
-      --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
-  done
-  OFFSET=$((OFFSET + 200))
-done
-```
+   # Page through failed tests. --limit bounds a single page on its own, so a
+   # job with more than 200 failed tests would leave the rest unreviewed and
+   # unpushed. The API returns has_more, so follow it until it is false.
+   OFFSET=0
+   while :; do
+     PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed \
+       --limit 200 --offset "$OFFSET")
+     [ "$(jq -r '.has_more' <<<"$PAGE")" = "true" ] || break
+     jq -r '.entries[].test_name' <<<"$PAGE" | while read -r TEST; do
+       rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
+       rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
+         --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
+     done
+     OFFSET=$((OFFSET + 200))
+   done
 
    rootcoz --json push "$JOB_ID" --plugin reportportal | jq '{pushed, unmatched, errors}'
    ```

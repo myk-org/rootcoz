@@ -15,9 +15,12 @@ Use per-job chat and comments when you need to understand one analysis together 
 ## Quick Example
 
 ```bash
+rootcoz chat init JOB_ID
 rootcoz chat send JOB_ID "Which failures share the same error signature?"
 rootcoz comments add JOB_ID --test "tests.test_auth.test_login" -m "Reproduced locally, see PROJ-1234."
 ```
+
+`chat init` starts the session and is required: `chat send` needs a provider and model selected and returns `409 Start a new chat session first` until you do. Both commands need at least the `reviewer` role.
 
 This asks the job's assistant for a cross-failure answer and leaves the evidence in the result's comment thread for the next reviewer.
 

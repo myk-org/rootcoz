@@ -231,10 +231,12 @@
 <li>For the CLI examples, an authenticated CLI profile. See <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> for details.</li>
 </ul>
 <h2 id="quick-example">Quick Example</h2>
-<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>send<span class="w"> </span>JOB_ID<span class="w"> </span><span class="s2">"Which failures share the same error signature?"</span>
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>init<span class="w"> </span>JOB_ID
+rootcoz<span class="w"> </span>chat<span class="w"> </span>send<span class="w"> </span>JOB_ID<span class="w"> </span><span class="s2">"Which failures share the same error signature?"</span>
 rootcoz<span class="w"> </span>comments<span class="w"> </span>add<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">"tests.test_auth.test_login"</span><span class="w"> </span>-m<span class="w"> </span><span class="s2">"Reproduced locally, see PROJ-1234."</span>
 </code></pre></div>
 
+<p><code>chat init</code> starts the session and is required: <code>chat send</code> needs a provider and model selected and returns <code>409 Start a new chat session first</code> until you do. Both commands need at least the <code>reviewer</code> role.</p>
 <p>This asks the job's assistant for a cross-failure answer and leaves the evidence in the result's comment thread for the next reviewer.</p>
 <h2 id="step-by-step">Step-by-Step</h2>
 <ol>
