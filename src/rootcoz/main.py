@@ -11995,9 +11995,9 @@ async def create_feedback(
             github_token=github_token,
         )
     except httpx.HTTPStatusError as exc:
-        # 401 means the token is bad; 403 means it is valid but lacks the repo
-        # scope. A classic PAT authenticates fine without `repo`, so identity
-        # checks cannot tell these apart — only GitHub's status can. Reporting
+        # 401 means the token is bad; 403 means it is valid but either lacks
+        # the repo scope or is rate limited. A classic PAT authenticates fine
+        # without `repo`, so identity checks cannot tell these apart. Reporting
         # both as "invalid or expired" made a scope problem look like a lost
         # key. Neither is a gateway failure: 502 stays reserved for an
         # unreachable GitHub API.
@@ -12008,6 +12008,16 @@ async def create_feedback(
                 "Generate a new token in Profile Settings.",
             ) from exc
         if exc.response.status_code == 403:
+            # GitHub answers 403 for rate limiting too, and a new token cannot
+            # fix a spent quota. Only a real scope failure points at the token.
+            if (
+                exc.response.headers.get("x-ratelimit-remaining") == "0"
+                or "rate limit" in exc.response.text.lower()
+            ):
+                raise HTTPException(
+                    status_code=429,
+                    detail="GitHub API rate limit reached. Try again later.",
+                ) from exc
             raise HTTPException(
                 status_code=403,
                 detail="GitHub token is missing the 'repo' scope. "

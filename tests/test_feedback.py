@@ -987,10 +987,10 @@ class TestFeedbackEndpoint:
             json={"title": "Test title", "body": "Test body", "labels": ["bug"]},
         )
 
-    def _raise_status(self, status: int):
+    def _raise_status(self, status: int, *, json: dict | None = None, headers=None):
         """Build a create_github_issue side effect raising HTTPStatusError."""
         request = httpx.Request("POST", "https://api.github.com/repos/x/y/issues")
-        response = httpx.Response(status, request=request)
+        response = httpx.Response(status, json=json, headers=headers, request=request)
         return httpx.HTTPStatusError(
             f"GitHub returned {status}", request=request, response=response
         )
@@ -1023,6 +1023,32 @@ class TestFeedbackEndpoint:
         assert "repo" in detail
         assert "scope" in detail.lower()
         assert "invalid or expired" not in detail
+        assert "rate limit" not in detail.lower()
+
+    def test_create_rate_limited_403_does_not_blame_the_token(
+        self, _init_db, temp_db_path
+    ):
+        """A 403 with a rate-limit body must not send the user to their token."""
+        exc = self._raise_status(403, json={"message": "rate limit exceeded"})
+        resp = self._create_with_github_failure(temp_db_path, exc)
+        assert resp.status_code == 429
+        detail = resp.json()["detail"]
+        assert "rate limit" in detail.lower()
+        assert "scope" not in detail.lower()
+        assert "Regenerate" not in detail
+
+    def test_create_rate_limit_header_does_not_blame_the_token(
+        self, _init_db, temp_db_path
+    ):
+        """x-ratelimit-remaining: 0 alone identifies a rate limit."""
+        exc = self._raise_status(
+            403,
+            json={"message": "Resource not accessible by personal access token"},
+            headers={"x-ratelimit-remaining": "0"},
+        )
+        resp = self._create_with_github_failure(temp_db_path, exc)
+        assert resp.status_code == 429
+        assert "Regenerate" not in resp.json()["detail"]
 
     def test_create_other_github_status_stays_502(self, _init_db, temp_db_path):
         resp = self._create_with_github_failure(temp_db_path, self._raise_status(422))
