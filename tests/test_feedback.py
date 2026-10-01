@@ -1732,16 +1732,3 @@ class TestFeedbackAttributionEndpoints:
         assert "other-model" not in created_body
         assert "evil" not in created_body
         assert created_body.count(_GITHUB_FOOTER_MARKER) == 1
-
-
-# ---------------------------------------------------------------------------
-# Attribution-shaped USER prose is never deleted (#297)
-# ---------------------------------------------------------------------------
-
-# A user's own text that happens to look like a rootcoz footer: separator plus
-# an italic "Generated using AI" line, naming another tool.
-_LOOKALIKE_PROSE = (
-    "## Bug\n\nChart crashes on load.\n\n---\n"
-    "*Generated using AI by [OtherTool](https://example.com/othertool)*"
-)
-_REPORTED_BY = "\n\n---\n_Reported by: alice via rootcoz_"
