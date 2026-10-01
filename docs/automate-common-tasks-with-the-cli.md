@@ -86,7 +86,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
      --prow-url https://prow.example.com --gcs-bucket prow-artifacts | jq -r .job_id)
    ```
 
-   To record CI results without paying for AI, call `POST /submit` directly — the CLI has no ingest-only command. Then run `rootcoz results analyze JOB_ID` to analyze the stored job later on the same job ID.
+   Use `rootcoz submit` instead of `analyze` when you want the CI results stored without paying for AI, then `rootcoz results analyze JOB_ID` to run the analysis later on the same job ID. Both take the same flags — `submit` is the same command registered under a second name, and the CLI posts to the ingest-only endpoint when you invoke it under that name.
 
    Tag and label the run so it shows up in filtered dashboards and reports:
 

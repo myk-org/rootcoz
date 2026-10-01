@@ -69,7 +69,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 
 5. **Submit analyses.**
 
-`rootcoz analyze [OPTIONS]` submits a job and runs the full pipeline. There is no `rootcoz submit` command and no ingest-only flag: ingest-without-analysis (`POST /submit`) is available through the API only.
+`rootcoz analyze [OPTIONS]` and `rootcoz submit [OPTIONS]` share one flag set. They are the same command registered under two names, and the CLI switches behaviour on the name you invoke: `submit` posts to `POST /submit` so the run ingests and stores CI results without cloning a repo or calling the AI, while `analyze` posts to `POST /analyze` and runs the full pipeline. Pair `submit` with `rootcoz results analyze JOB_ID` to analyze the stored job later on the same job ID.
 
 | Option | Purpose |
 | --- | --- |

@@ -307,7 +307,7 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
    JOB_ID=$(rootcoz --json analyze --source prow -j my-periodic-test -b 20250731 \
      --prow-url https://prow.example.com --gcs-bucket prow-artifacts | jq -r .job_id)
    ```</p>
-<p>To record CI results without paying for AI, call <code>POST /submit</code> directly — the CLI has no ingest-only command. Then run <code>rootcoz results analyze JOB_ID</code> to analyze the stored job later on the same job ID.</p>
+<p>Use <code>rootcoz submit</code> instead of <code>analyze</code> when you want the CI results stored without paying for AI, then <code>rootcoz results analyze JOB_ID</code> to run the analysis later on the same job ID. Both take the same flags — <code>submit</code> is the same command registered under a second name, and the CLI posts to the ingest-only endpoint when you invoke it under that name.</p>
 <p>Tag and label the run so it shows up in filtered dashboards and reports:</p>
 <p><code>bash
    rootcoz --json analyze --source jenkins -j nightly -b 412 \

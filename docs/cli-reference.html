@@ -393,7 +393,7 @@
 <ol>
 <li><strong>Submit analyses.</strong></li>
 </ol>
-<p><code>rootcoz analyze [OPTIONS]</code> submits a job and runs the full pipeline. There is no <code>rootcoz submit</code> command and no ingest-only flag: ingest-without-analysis (<code>POST /submit</code>) is available through the API only.</p>
+<p><code>rootcoz analyze [OPTIONS]</code> and <code>rootcoz submit [OPTIONS]</code> share one flag set. They are the same command registered under two names, and the CLI switches behaviour on the name you invoke: <code>submit</code> posts to <code>POST /submit</code> so the run ingests and stores CI results without cloning a repo or calling the AI, while <code>analyze</code> posts to <code>POST /analyze</code> and runs the full pipeline. Pair <code>submit</code> with <code>rootcoz results analyze JOB_ID</code> to analyze the stored job later on the same job ID.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
