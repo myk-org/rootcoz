@@ -8,8 +8,16 @@ import { ReportProvider, useReportDispatch } from '../ReportContext'
 import { FailureCard } from '../FailureCard'
 import { GroupSelectAll } from '../GroupSelectAll'
 import { BulkUpdateBar } from '../BulkUpdateBar'
-import { groupFailures } from '@/lib/grouping'
-import type { FailureAnalysis } from '@/types'
+import { groupFailures, scopedGroups } from '@/lib/grouping'
+import { reconcileSelection, type SelectedGroup } from '../failureUpdates'
+import type { AnalysisResult, FailureAnalysis } from '@/types'
+
+// The real grouping behaviour, with `scopedGroups` wrapped in a spy so the
+// reconciliation pass can be counted instead of timed.
+vi.mock('@/lib/grouping', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/grouping')>()
+  return { ...actual, scopedGroups: vi.fn(actual.scopedGroups) }
+})
 
 const { put, get, role } = vi.hoisted(() => ({ put: vi.fn(), get: vi.fn(), role: { current: 'reviewer' } }))
 vi.mock('@/lib/api', () => ({ api: { get, put, post: vi.fn(), delete: vi.fn() }, extractApiDetail: () => null }))
@@ -52,7 +60,7 @@ function SseRefresh({ label = 'Simulate background refresh', failures }: { label
   return <button onClick={() => dispatch({ type: 'SET_RESULT', payload: resultPayload(failures) })}>{label}</button>
 }
 
-function Harness({ seedGroupId, removedFailures }: { seedGroupId?: string; removedFailures?: FailureAnalysis[] }) {
+function Harness({ seedGroupId, removedFailures, refreshedFailures }: { seedGroupId?: string; removedFailures?: FailureAnalysis[]; refreshedFailures?: FailureAnalysis[] }) {
   const groups = groupFailures(FAILURES)
   return (
     <MemoryRouter>
@@ -62,6 +70,9 @@ function Harness({ seedGroupId, removedFailures }: { seedGroupId?: string; remov
           <SseRefresh />
           {removedFailures && (
             <SseRefresh label="Simulate refresh without removed failures" failures={removedFailures} />
+          )}
+          {refreshedFailures && (
+            <SseRefresh label="Simulate refresh with changed failures" failures={refreshedFailures} />
           )}
           <GroupSelectAll groups={groups} scopeLabel="Failures" />
           {groups.map((g, i) => (
@@ -85,7 +96,7 @@ function SeedSelection({ groupId, groups }: { groupId: string; groups: ReturnTyp
   return null
 }
 
-function renderHarness(props: { seedGroupId?: string; removedFailures?: FailureAnalysis[] } = {}) {
+function renderHarness(props: { seedGroupId?: string; removedFailures?: FailureAnalysis[]; refreshedFailures?: FailureAnalysis[] } = {}) {
   render(<Harness {...props} />)
   return userEvent.setup()
 }
@@ -341,6 +352,106 @@ describe('bulk failure selection', () => {
       })
     }
     expect(put).not.toHaveBeenCalledWith('/results/job-1/reviewed', expect.objectContaining({ test_name: 'test-b' }))
+  })
+
+  it('picks up a test that joined the selected group on a background refresh', async () => {
+    // The refreshed report has a new test-c3 failing with the sig-c signature the
+    // selection already covers. The group id is unchanged — only membership grew.
+    const user = renderHarness({ refreshedFailures: [...FAILURES, failure('test-c3', 'sig-c')] })
+    await user.click(screen.getByRole('checkbox', { name: 'Select all failures in Failures' }))
+    expect(screen.getByText(/4 tests selected in 3 failures/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Simulate refresh with changed failures' }))
+    // The entry was not narrowed by a retry, so it re-widens to the live members.
+    expect(screen.getByText(/5 tests selected in 3 failures/)).toBeInTheDocument()
+
+    await confirmBulkAction(user, 'Mark reviewed')
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(5))
+    // The new test is in the next request, not just in the count.
+    expect(put).toHaveBeenCalledWith('/results/job-1/reviewed', {
+      test_name: 'test-c3', reviewed: true, child_job_name: '', child_build_number: 0,
+    })
+  })
+
+  it('does not re-widen a retry-narrowed selection on a later refresh', async () => {
+    // The opposite direction of the rule above, on the same refresh: a
+    // partial-failure retry is the only thing that sets `narrowed`.
+    put.mockImplementation(async (path: string, body: { test_name: string }) => {
+      if (path.endsWith('/reviewed') && body.test_name === 'test-c2') throw new Error('boom')
+      return { reviewed_by: 'rev' }
+    })
+    const user = renderHarness({ refreshedFailures: [...FAILURES, failure('test-c3', 'sig-c')] })
+    await user.click(screen.getByRole('checkbox', { name: 'Select test-c1' }))
+    await confirmBulkAction(user, 'Mark reviewed')
+    await waitFor(() => expect(screen.getByText(/1 test selected in 1 failure/)).toBeInTheDocument())
+
+    // Identical refresh, narrowed entry: the retry leftover stands, so neither
+    // test-c1 (already done) nor test-c3 (newly joined) is dragged back in.
+    await user.click(screen.getByRole('button', { name: 'Simulate refresh with changed failures' }))
+    expect(screen.getByText(/1 test selected in 1 failure/)).toBeInTheDocument()
+
+    await confirmBulkAction(user, 'Mark reviewed')
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(3))
+    expect(put).toHaveBeenLastCalledWith('/results/job-1/reviewed', {
+      test_name: 'test-c2', reviewed: true, child_job_name: '', child_build_number: 0,
+    })
+  })
+
+  it('reconciles a selection in one grouping pass per scope, not one pass per group', () => {
+    // One report, two scopes: the top level and one child job.
+    const result: AnalysisResult = {
+      ...resultPayload(FAILURES).result,
+      child_job_analyses: [{
+        id: 'child-1', job_name: 'child', build_number: 7, jenkins_url: null, summary: null,
+        note: null, failed_children: [], failures: [failure('test-d1', 'sig-d')],
+      }],
+    }
+    // Four selected groups over those two scopes: three top-level, one child.
+    const groups: SelectedGroup[] = [
+      { id: 'g-a', testNames: ['test-a'] },
+      { id: 'g-b', testNames: ['test-b'] },
+      { id: 'g-c', testNames: ['test-c1', 'test-c2'] },
+      { id: 'g-d', testNames: ['test-d1'], childJobName: 'child', childBuildNumber: 7 },
+    ]
+    const spy = vi.mocked(scopedGroups)
+    spy.mockClear()
+
+    const next = reconcileSelection(result, Object.fromEntries(groups.map((g) => [g.id, g])))
+    // The count is the claim: 4 groups, 2 calls — once per DISTINCT scope. Before
+    // the per-pass memo this was one full grouping walk per selected group.
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(Object.values(next).flatMap((g) => g.testNames)).toEqual([
+      'test-a', 'test-b', 'test-c1', 'test-c2', 'test-d1',
+    ])
+  })
+
+  it('sends one override request per group when a refresh splits the selected signature', async () => {
+    // The refreshed report gives test-c2 a signature of its own, splitting the
+    // selected sig-c group across two live groups.
+    const user = renderHarness({
+      refreshedFailures: [FAILURES[0], FAILURES[1], failure('test-c1', 'sig-c'), failure('test-c2', 'sig-c-split')],
+    })
+    await user.click(screen.getByRole('checkbox', { name: 'Select test-c1' }))
+    expect(screen.getByText(/2 tests selected in 1 failure/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Simulate refresh with changed failures' }))
+    // Reconciled membership is the union of both halves, still under the one id.
+    expect(screen.getByText(/2 tests selected in 1 failure/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Bulk classification' }))
+    await user.click(await screen.findByRole('option', { name: 'PRODUCT BUG' }))
+    expect(await screen.findByRole('dialog')).toHaveTextContent('every test sharing the error signature — 2 tests in 2 failures')
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Apply' }))
+
+    // Both halves get their own request — the moved test is not silently dropped.
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    for (const name of ['test-c1', 'test-c2']) {
+      expect(put).toHaveBeenCalledWith('/results/job-1/override-classification', {
+        test_name: name, classification: 'PRODUCT BUG', child_job_name: '', child_build_number: 0,
+      })
+    }
+    // ...and both were covered, so neither half is left stranded in the selection.
+    await waitFor(() => expect(screen.queryByText(/selected in/)).not.toBeInTheDocument())
   })
 
   it('applies an override to the whole signature group after the selection was narrowed', async () => {

@@ -31,6 +31,10 @@ interface PendingAction {
   title: string
   description: string
   confirmLabel: string
+  /** The scopes this action actually sends — the widened ones for an override, the
+   *  raw selection for review/link. `keepSelectionAfterRun` clears exactly these, so
+   *  a test no request covered stays selected instead of vanishing. */
+  covered: FailureScope[]
   /** Runs the bulk mutation; resolves with the selection groups that still need
    *  work plus an optional warning about a post-write step that did not land. */
   run: () => Promise<{ failed: SelectedGroup[]; warning?: string }>
@@ -45,11 +49,18 @@ type BulkRequest =
   | { kind: 'pattern'; pattern: string }
   | { kind: 'trackIn'; url: string }
 
-/** Map failed per-test scopes back to narrowed groups so a retry skips what succeeded. */
+/** Map failed per-test scopes back to narrowed groups so a retry skips what succeeded.
+ *  This is the ONLY place `narrowed` is set, and that is what makes the retry stick:
+ *  a selected group re-widens to its current members only when the user has not
+ *  narrowed it; a selection narrowed by a partial-failure retry stays narrowed
+ *  across refreshes until that run completes. */
 function failedGroups(groups: SelectedGroup[], failed: FailureScope[]): SelectedGroup[] {
   const keys = new Set(failed.map((s) => reviewKey(s.testName, s.childJobName, s.childBuildNumber)))
   return groups
-    .map((g) => ({ ...g, testNames: g.testNames.filter((n) => keys.has(reviewKey(n, g.childJobName, g.childBuildNumber))) }))
+    .map((g) => {
+      const testNames = g.testNames.filter((n) => keys.has(reviewKey(n, g.childJobName, g.childBuildNumber)))
+      return { ...g, testNames, narrowed: g.narrowed || testNames.length !== g.testNames.length }
+    })
     .filter((g) => g.testNames.length > 0)
 }
 
@@ -131,6 +142,7 @@ export function BulkUpdateBar() {
           title: request.next ? 'Mark as reviewed' : 'Mark as unreviewed',
           description: `Apply to ${scopeText}?`,
           confirmLabel: request.next ? 'Mark reviewed' : 'Unmark reviewed',
+          covered: scopes,
           run: async () => {
             const failed = await runBatched(scopes, async (scope) => {
               const res = await putReviewed(jobId, scope, request.next)
@@ -151,6 +163,7 @@ export function BulkUpdateBar() {
           title: `Set classification to ${request.classification}`,
           description: `The override applies to ${overrideScopeText}?`,
           confirmLabel: 'Apply',
+          covered: overrideScopes,
           run: async () => ({
             failed: await runOverrides(overrideTargets, async (g, rep) => {
               await putOverrideClassification(jobId, rep, request.classification)
@@ -163,6 +176,7 @@ export function BulkUpdateBar() {
           title: `Set pattern to ${request.pattern}`,
           description: `The override applies to ${overrideScopeText}?`,
           confirmLabel: 'Apply',
+          covered: overrideScopes,
           run: async () => ({
             failed: await runOverrides(overrideTargets, async (g, rep) => {
               await putOverridePattern(jobId, rep, request.pattern)
@@ -175,6 +189,7 @@ export function BulkUpdateBar() {
           title: 'Link to issue',
           description: `Link ${request.url} to ${scopeText}?`,
           confirmLabel: 'Link',
+          covered: scopes,
           run: async () => {
             const failed = await runBatched(scopes, (scope) => putTrackedIn(jobId, scope, request.url, detectTrackerType(request.url)), BULK_BATCH_SIZE)
             try {
@@ -206,7 +221,9 @@ export function BulkUpdateBar() {
         const k = reviewKey(n, g.childJobName, g.childBuildNumber)
         return !coveredKeys.has(k) || failedKeys.has(k)
       })
-      if (kept.length > 0) next[id] = { ...g, testNames: kept }
+      // The rebuilt entry is the retry leftover, so it carries the same `narrowed`
+      // flag `failedGroups` set: a refresh after this point must not re-widen it.
+      if (kept.length > 0) next[id] = { ...g, testNames: kept, narrowed: g.narrowed || kept.length !== g.testNames.length }
     }
     if (Object.keys(next).length === 0) {
       dispatch({ type: 'CLEAR_SELECTION' })
@@ -221,10 +238,10 @@ export function BulkUpdateBar() {
     setError(null)
     try {
       const { failed, warning } = await action.run()
-      const emptied = keepSelectionAfterRun(scopes, failed)
+      const emptied = keepSelectionAfterRun(action.covered, failed)
       // Both can happen at once: some writes failed and a post-write step did not land.
       const names = failed.flatMap((g) => g.testNames)
-      const failureText = names.length > 0 ? `Failed to update ${names.length} of ${scopes.length}: ${names.join(', ')}. ` : ''
+      const failureText = names.length > 0 ? `Failed to update ${names.length} of ${action.covered.length}: ${names.join(', ')}. ` : ''
       const message = `${failureText}${warning ?? ''}`.trim()
       if (emptied) setStandaloneError(message || null)
       else setError(message || null)

@@ -1,7 +1,7 @@
 import { api } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { scopedGroups } from '@/lib/grouping'
-import type { AnalysisResult, ReviewState, TrackedInEntry } from '@/types'
+import type { AnalysisResult, GroupedFailure, ReviewState, TrackedInEntry } from '@/types'
 
 /** Every per-failure mutation is scoped by the reviewKey triple. */
 export interface FailureScope {
@@ -17,6 +17,39 @@ export interface SelectedGroup {
   testNames: string[]
   childJobName?: string
   childBuildNumber?: number
+  /** Set when a partial-failure retry narrowed this selection to the tests that
+   *  failed. Deliberate, user-visible state — the bulk bar counts exactly those
+   *  tests, so the next refresh must not undo what the user is looking at.
+   *
+   *  A selected group re-widens to its current members only when the user has not
+   *  narrowed it; a selection narrowed by a partial-failure retry stays narrowed
+   *  across refreshes until that run completes. */
+  narrowed?: boolean
+}
+
+/** Every test name of a list of groups. */
+function groupNames(groups: GroupedFailure[]): string[] {
+  return groups.flatMap((x) => x.tests.map((t) => t.test_name))
+}
+
+/** `scopedGroups` memoized per scope for the duration of ONE reconciliation or
+ *  widening pass. The grouping walk is O(report), so a selection of N groups must
+ *  not repeat it per group: the count is once per DISTINCT scope per pass, not
+ *  once per selected group.
+ *
+ *  The cache lives on this closure and is thrown away when the pass returns — it
+ *  must never outlive the call, because a later pass reconciles a later
+ *  (refreshed) result and would otherwise answer from stale membership. */
+function scopedGroupPass(result: Pick<AnalysisResult, 'failures' | 'child_job_analyses'>) {
+  const cache = new Map<string, GroupedFailure[]>()
+  return (childJobName?: string, childBuildNumber?: number): GroupedFailure[] => {
+    const key = `${childJobName ?? ''}#${childBuildNumber ?? 0}`
+    const hit = cache.get(key)
+    if (hit) return hit
+    const groups = scopedGroups(result, childJobName, childBuildNumber)
+    cache.set(key, groups)
+    return groups
+  }
 }
 
 function scopeBody({ childJobName, childBuildNumber }: Omit<FailureScope, 'testName'>) {
@@ -105,7 +138,19 @@ export function selectedScopes(groups: SelectedGroup[]): FailureScope[] {
   )
 }
 
-/** Drop selected groups and test names a refreshed result no longer contains.
+/** Reconcile the selection against the live group membership of a refreshed result.
+ *
+ *  THE RULE: a selected group re-widens to its current members only when the user
+ *  has not narrowed it; a selection narrowed by a partial-failure retry stays
+ *  narrowed across refreshes until that run completes.
+ *
+ *  Both branches reconcile MEMBERSHIP, not bare name existence:
+ *  - `narrowed` entry: keeps exactly its own names, minus any the refresh removed.
+ *    NEVER re-widened — the retry leftover is what the user is looking at.
+ *  - any other entry: tracks the group's ACTUAL live members, so a test that joins
+ *    the signature is picked up by the next request. When a refresh splits the
+ *    entry across several live groups it holds the union, so a name is dropped
+ *    here only when it no longer exists in the report.
  *
  *  ponytail: keeps the original group ids, so a regrouped signature can leave an id
  *  with no card (at worst one duplicated write if the user re-selects everything).
@@ -115,28 +160,54 @@ export function reconcileSelection(
   result: AnalysisResult,
   selection: Record<string, SelectedGroup>,
 ): Record<string, SelectedGroup> {
+  const scoped = scopedGroupPass(result)
   const next: Record<string, SelectedGroup> = {}
   for (const [id, g] of Object.entries(selection)) {
-    const live = new Set(
-      scopedGroups(result, g.childJobName, g.childBuildNumber).flatMap((x) => x.tests.map((t) => t.test_name)),
-    )
-    const testNames = g.testNames.filter((n) => live.has(n))
+    const live = scoped(g.childJobName, g.childBuildNumber)
+    const selected = new Set(g.testNames)
+    const alive = new Set(groupNames(live))
+    const testNames = g.narrowed
+      ? g.testNames.filter((n) => alive.has(n))
+      : groupNames(live.filter((x) => x.tests.some((t) => selected.has(t.test_name))))
     if (testNames.length > 0) next[id] = { ...g, testNames }
   }
   return next
 }
 
-/** Widen each group back to its full error-signature group: the backend applies an
- *  override to every sibling, so the optimistic patch must cover them too. */
+/** Widen each group back to its full error-signature group(s): the backend applies an
+ *  override to every sibling, so the optimistic patch must cover them too. A refresh
+ *  can split one selected signature group across several live ones — every match is
+ *  emitted, so each still gets its own request instead of losing the moved half. */
 export function widenToSignatureGroups(
   result: AnalysisResult | null,
   groups: SelectedGroup[],
 ): SelectedGroup[] {
-  return groups.map((g) => {
-    const sibling = result && scopedGroups(result, g.childJobName, g.childBuildNumber)
-      .find((x) => x.tests.some((t) => g.testNames.includes(t.test_name)))
-    return sibling ? { ...g, testNames: sibling.tests.map((t) => t.test_name) } : g
-  })
+  if (!result) return groups
+  const scoped = scopedGroupPass(result)
+  const seen = new Set<string>()
+  const widened: SelectedGroup[] = []
+  for (const g of groups) {
+    const selected = new Set(g.testNames)
+    const siblings = scoped(g.childJobName, g.childBuildNumber)
+      .filter((x) => x.tests.some((t) => selected.has(t.test_name)))
+    const targets: SelectedGroup[] = siblings.length === 0
+      ? [g]
+      : siblings.map((x) => ({
+        id: x.id,
+        testNames: groupNames([x]),
+        childJobName: g.childJobName,
+        childBuildNumber: g.childBuildNumber,
+      }))
+    for (const t of targets) {
+      // One request per signature group: two selection entries that widen to the
+      // same live group must not send it twice.
+      const key = `${t.childJobName ?? ''}#${t.childBuildNumber ?? 0}:${t.testNames.join(',')}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      widened.push(t)
+    }
+  }
+  return widened
 }
 
 /** Run a mutation over every scope in batches; never rejects — returns the failed scopes. */
