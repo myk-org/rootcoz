@@ -3192,6 +3192,52 @@ def _append_reanalysis_forward_link(
     params["reanalyzed_to_job_ids"] = links
 
 
+def _remove_reanalysis_forward_link(result_data: dict[str, Any], job_id: str) -> None:
+    """Drop *job_id* from the original job's ``reanalyzed_to_job_ids``."""
+    params = result_data.get("request_params")
+    if not isinstance(params, dict):
+        return
+    links = params.get("reanalyzed_to_job_ids")
+    if isinstance(links, list) and job_id in links:
+        params["reanalyzed_to_job_ids"] = [j for j in links if j != job_id]
+
+
+def _make_unlinker(job_id: str) -> Callable[[dict[str, Any]], None]:
+    """Return a ``patch_result_json`` callback unlinking *job_id*.
+
+    A factory rather than an inline lambda: the value is bound instead of the
+    loop variable (ruff B023) and the callback type is inferable by mypy.
+    """
+
+    def _unlink(data: dict[str, Any]) -> None:
+        _remove_reanalysis_forward_link(data, job_id)
+
+    return _unlink
+
+
+async def _unlink_reanalysis_origins(job_ids: Iterable[str]) -> None:
+    """Remove *job_ids* from their origin jobs' forward links.
+
+    Called before the jobs are deleted so the origin report never links to a
+    missing re-analysis.  A failed patch is logged, never raised — the
+    deletion itself must still succeed.
+    """
+    for job_id in job_ids:
+        stored = await storage.get_result(job_id)
+        params = ((stored or {}).get("result") or {}).get("request_params") or {}
+        origin_id = str(params.get("reanalyzed_from_job_id") or "")
+        if not origin_id:
+            continue
+        try:
+            await patch_result_json(origin_id, _make_unlinker(job_id))
+            notify_job_status_changed(origin_id)
+        except Exception:
+            logger.warning(
+                f"Failed to remove deleted re-analysis {job_id} from origin {origin_id}",
+                exc_info=True,
+            )
+
+
 def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
     """Return *tags* with *username* included (lowercased, deduplicated)."""
     result = list(tags) if tags else []
@@ -3440,13 +3486,14 @@ async def _enqueue_ci_source_analysis(
                 continue
             merged_result[key] = value
         initial_result = merged_result
+        # request_params was rebuilt above, so carry the recorded re-analysis
+        # links of the job analyzed in place over to the new params.
+        prior_links = (prior.get("request_params") or {}).get("reanalyzed_to_job_ids")
+        if isinstance(prior_links, list) and prior_links:
+            initial_result["request_params"]["reanalyzed_to_job_ids"] = list(
+                prior_links
+            )
     await save_result(job_id, initial_build_url, initial_status, initial_result)
-    if reanalyzed_from_job_id:
-        # Point the original job at this re-analysis (accumulating list).
-        await patch_result_json(
-            reanalyzed_from_job_id,
-            lambda data: _append_reanalysis_forward_link(data, job_id),
-        )
     notify_active_count_changed()
     notify_dashboard_changed()
 
@@ -3471,6 +3518,23 @@ async def _enqueue_ci_source_analysis(
         )
     )
     _register_job_task(job_id, task)
+
+    if reanalyzed_from_job_id:
+        # Point the original job at this re-analysis (accumulating list) and
+        # wake its open report.  The job is already running, so a failed patch
+        # is logged rather than raised — it must not orphan the new job.
+        try:
+            await patch_result_json(
+                reanalyzed_from_job_id,
+                lambda data: _append_reanalysis_forward_link(data, job_id),
+            )
+            notify_job_status_changed(reanalyzed_from_job_id)
+        except Exception:
+            logger.warning(
+                f"Failed to record re-analysis {job_id} on origin "
+                f"{reanalyzed_from_job_id}",
+                exc_info=True,
+            )
 
     response: dict[str, Any] = {
         "status": "queued",
@@ -8122,6 +8186,7 @@ async def bulk_delete_jobs_endpoint(
         job_ids = [jid for jid in job_ids if submitters.get(jid) == username]
         unauthorized_ids = [jid for jid in body.job_ids if jid not in job_ids]
 
+    await _unlink_reanalysis_origins(job_ids)
     result = await storage.delete_jobs_bulk(job_ids)
     await _cleanup_revoked_ai_sessions()
     result["unauthorized"] = unauthorized_ids
@@ -8165,6 +8230,7 @@ async def delete_job_endpoint(
             detail="You can only delete jobs you submitted",
         )
 
+    await _unlink_reanalysis_origins([job_id])
     await storage.delete_job(job_id)
     await _cleanup_revoked_ai_sessions()
     await _cleanup_deleted_job_chat_workspaces(job_id)

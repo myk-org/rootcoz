@@ -2223,6 +2223,72 @@ async def test_delete_job_metadata_cleans_labels(setup_test_db):
             assert count == 0
 
 
+class TestReanalysisForwardLinkPreserved:
+    """update_status must not erase a forward link appended while the job ran."""
+
+    async def test_completion_write_keeps_newer_forward_links(
+        self, setup_test_db: Path
+    ) -> None:
+        """A finishing job's stale request_params cannot drop the stored links."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="origin-running",
+                status="running",
+                result={"request_params": {"ai_provider": "claude"}},
+            )
+
+            def _append(data: dict) -> None:
+                params = data["request_params"]
+                params["reanalyzed_to_job_ids"] = ["re-1", "re-2"]
+
+            await storage.patch_result_json("origin-running", _append)
+
+            # Completion write carries the params read *before* the append.
+            await storage.update_status(
+                "origin-running",
+                "completed",
+                {"summary": "done", "request_params": {"ai_provider": "claude"}},
+            )
+            stored = await storage.get_result("origin-running")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1",
+                "re-2",
+            ]
+
+    async def test_completion_write_keeps_link_removal(
+        self, setup_test_db: Path
+    ) -> None:
+        """A removed forward link is not resurrected by a stale completion write."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                job_id="origin-deleted",
+                status="running",
+                result={
+                    "request_params": {
+                        "reanalyzed_to_job_ids": ["re-1", "re-2"],
+                    }
+                },
+            )
+
+            def _drop(data: dict) -> None:
+                params = data["request_params"]
+                params["reanalyzed_to_job_ids"] = ["re-1"]
+
+            await storage.patch_result_json("origin-deleted", _drop)
+            await storage.update_status(
+                "origin-deleted",
+                "completed",
+                {
+                    "summary": "done",
+                    "request_params": {"reanalyzed_to_job_ids": ["re-1", "re-2"]},
+                },
+            )
+            stored = await storage.get_result("origin-deleted")
+            assert stored["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+                "re-1"
+            ]
+
+
 class TestPatchResultJsonKeyPresence:
     """Regression: patch_result_json must not clobber denorm columns on partial patches."""
 

@@ -5443,6 +5443,101 @@ class TestReAnalyzeEndpoint:
         assert params["reanalyzed_from_job_name"] == "My Job"
 
     @pytest.mark.asyncio
+    async def test_re_analyze_notifies_origin_report(self, test_client) -> None:
+        """Patching the origin wakes its open report so the banner appears."""
+        await self._create_origin_job(
+            "job-origin-notify",
+            "http://jenkins/job/my-job/7/",
+            {
+                "summary": "1 failure",
+                "job_name": "my-job",
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                    }
+                ),
+            },
+        )
+        with (
+            patch("rootcoz.main._process_ci_source_analysis"),
+            patch("rootcoz.main.notify_job_status_changed") as mock_notify,
+        ):
+            response = test_client.post("/re-analyze/job-origin-notify", json={})
+        assert response.status_code == 202
+        assert "job-origin-notify" in [
+            call.args[0] for call in mock_notify.call_args_list
+        ]
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_survives_origin_patch_failure(self, test_client) -> None:
+        """A failed forward-link patch must not orphan the new job."""
+        await self._create_origin_job(
+            "job-origin-patchfail",
+            "http://jenkins/job/my-job/8/",
+            {
+                "summary": "1 failure",
+                "job_name": "my-job",
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                    }
+                ),
+            },
+        )
+        with (
+            patch("rootcoz.main._process_ci_source_analysis"),
+            patch(
+                "rootcoz.main.patch_result_json",
+                side_effect=RuntimeError("database is locked"),
+            ),
+            patch("rootcoz.main._register_job_task") as mock_register,
+        ):
+            response = test_client.post("/re-analyze/job-origin-patchfail", json={})
+        assert response.status_code == 202
+        job_id = response.json()["job_id"]
+
+        # The new job exists, is queued, and has a worker registered.
+        stored = test_client.get(f"/results/{job_id}").json()
+        assert stored["status"] == "pending"
+        assert mock_register.call_args.args[0] == job_id
+
+    @pytest.mark.asyncio
+    async def test_in_place_analyze_keeps_forward_links(self, test_client) -> None:
+        """Analyzing a submitted job in place keeps its recorded re-analyses."""
+        origin_result = {
+            "summary": "1 failure",
+            "job_name": "my-job",
+            "analysis_state": "submitted",
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "analysis_type": "raw",
+                    "failures": [{"test_name": "t", "error_message": "e"}],
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                    "reanalyzed_to_job_ids": ["re-1", "re-2"],
+                }
+            ),
+        }
+        await self._create_origin_job("in-place-origin", "", origin_result)
+        with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/results/in-place-origin/analyze",
+                json={"ai_provider": "claude", "ai_model": "test-model"},
+            )
+        assert response.status_code == 202, response.text
+        origin = await storage.get_result("in-place-origin")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+            "re-1",
+            "re-2",
+        ]
+
+    @pytest.mark.asyncio
     async def test_re_analyze_appends_forward_link_on_origin(self, test_client) -> None:
         """Re-analyze records the new job id on the original job's forward link."""
         await self._create_origin_job(
@@ -5504,6 +5599,66 @@ class TestReAnalyzeEndpoint:
         )
         assert response.status_code == 200
         assert response.json()["reanalyzed_to_job_ids"] == ["re-1", "re-2"]
+
+    @pytest.mark.asyncio
+    async def test_delete_removes_forward_link_on_origin(self, test_client) -> None:
+        """Deleting a re-analysis drops it from the origin's forward links."""
+        await self._create_reanalysis_chain(["re-1", "re-2"])
+        assert test_client.delete("/results/re-2").status_code == 200
+        origin = await storage.get_result("origin-delete")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == ["re-1"]
+        data = test_client.get("/results/origin-delete").json()
+        assert data["reanalyzed_to_job_ids"] == ["re-1"]
+
+    @pytest.mark.asyncio
+    async def test_bulk_delete_removes_forward_links(self, test_client) -> None:
+        """Bulk delete unlinks every deleted re-analysis from its origin."""
+        await self._create_reanalysis_chain(["re-1", "re-2"])
+        response = test_client.request(
+            "DELETE", "/api/results/bulk", json={"job_ids": ["re-1", "re-2"]}
+        )
+        assert response.status_code == 200
+        origin = await storage.get_result("origin-delete")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == []
+
+    @pytest.mark.asyncio
+    async def test_delete_keeps_forward_link_when_unlink_fails(
+        self, test_client
+    ) -> None:
+        """A failed unlink must not block the deletion."""
+        await self._create_reanalysis_chain(["re-1"])
+        with patch(
+            "rootcoz.main.patch_result_json",
+            side_effect=RuntimeError("database is locked"),
+        ):
+            assert test_client.delete("/results/re-1").status_code == 200
+        assert test_client.get("/results/re-1").status_code == 404
+
+    @staticmethod
+    async def _create_reanalysis_chain(reanalysis_ids: list[str]) -> None:
+        """Store an origin job pointing at *reanalysis_ids*, each linking back."""
+        from rootcoz import storage as storage_module
+
+        await storage_module.save_result(
+            "origin-delete",
+            "",
+            "completed",
+            {
+                "summary": "orig",
+                "job_name": "orig",
+                "request_params": {"reanalyzed_to_job_ids": list(reanalysis_ids)},
+            },
+        )
+        for reanalysis_id in reanalysis_ids:
+            await storage_module.save_result(
+                reanalysis_id,
+                "",
+                "completed",
+                {
+                    "summary": "re",
+                    "request_params": {"reanalyzed_from_job_id": "origin-delete"},
+                },
+            )
 
     @pytest.mark.asyncio
     async def test_re_analyze_file_stores_reanalyzed_metadata(

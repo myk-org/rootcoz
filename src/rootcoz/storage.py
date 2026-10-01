@@ -1922,6 +1922,26 @@ async def save_result(
         await db.commit()
 
 
+def _preserve_reanalysis_forward_links(
+    previous: dict[str, Any], result: dict[str, Any]
+) -> None:
+    """Keep the stored ``reanalyzed_to_job_ids`` when writing an analysis result.
+
+    Forward links are appended (and removed on delete) with
+    ``patch_result_json`` while the origin job runs, so the ``request_params``
+    copy a finishing job read earlier must not replace the newer stored list —
+    that would resurrect a deleted link or drop a re-analysis enqueued
+    mid-flight.  The stored list is always the newer one.
+    """
+    stored_params = previous.get("request_params")
+    params = result.get("request_params")
+    if not isinstance(stored_params, dict) or not isinstance(params, dict):
+        return
+    links = stored_params.get("reanalyzed_to_job_ids")
+    if isinstance(links, list):
+        params["reanalyzed_to_job_ids"] = list(links)
+
+
 async def update_status(
     job_id: str,
     status: str,
@@ -1957,6 +1977,7 @@ async def update_status(
                 for key in ("progress_phase", "progress_log", "cloning_repos"):
                     if key in previous:
                         result[key] = previous[key]
+                _preserve_reanalysis_forward_links(previous, result)
             if status in ("failed", "aborted", "completed"):
                 active_repos = result.get("cloning_repos") or []
                 if active_repos:
