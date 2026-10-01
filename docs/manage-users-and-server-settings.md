@@ -47,7 +47,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `can_view_reports` | off | Grants access to `/api/reports/*` and the `Reports` page to a non-admin. It is orthogonal to role: a `viewer` with the grant can read reports, and an `operator` without it cannot. For non-admins the flag is re-read from the users table on every request, so a grant takes effect without invalidating sessions. Admins always have effective access regardless of the stored value. |
    | `can_use_server_providers` | off | Grants the `Use server credentials` toggle on `New Analysis`, which lets the user run analyses on the server's AI keys instead of their own. Admins always have it. |
 
-   > **Note:** `DEFAULT_USER_ROLE` decides the role new registrations get, and it accepts only `viewer`, `reviewer`, or `operator` — it cannot grant `admin`. Set it before startup if you want self-registered users to submit analyses immediately.
+   > **Note:** `DEFAULT_USER_ROLE` decides the role new registrations get, and it accepts only `viewer`, `reviewer`, or `operator` — it cannot grant `admin`. Setting it before startup does **not** by itself let self-registered users submit analyses: `REQUIRE_APPROVAL` defaults to `true`, and registration then creates the account with `pending` status, which cannot reach protected endpoints until an admin approves it. Set `REQUIRE_APPROVAL=false` alongside the role for that outcome.
 
 2. **Create a user.**
 

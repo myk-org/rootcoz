@@ -1723,7 +1723,7 @@ The registration key is the only credential that signs you in; the tracker token
    | `Jira Email` | Your Atlassian account email, required for Jira Cloud API-token auth. |
    | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. |
 
-   Tokens you type are validated against the provider when you use `POST /api/validate-token`, and a failed validation leaves the stored value unchanged. Saving itself does not validate: the registration flow and the settings form both send whatever you typed straight to `PUT /api/user/tokens`, which stores it as supplied. A mistyped or already-revoked token therefore persists and only fails later, when a tracker action tries to use it. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
+   Validation happens through `POST /api/validate-token`, and a failed validation leaves the stored value unchanged. The two entry points differ, though. The Settings form (`ProfileForm.handleSubmit`) validates any non-empty GitHub or Jira token that is not already known-good and **aborts the save** if the check fails, so a bad token typed there is never stored. The registration flow does not: `RegisterPage` sends whatever you typed straight to `PUT /api/user/tokens`, which stores it as supplied. A mistyped or already-revoked token entered at registration therefore persists and only fails later, when a tracker action tries to use it. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
 
    > **Warning:** Stored tokens cannot be cleared from this page or from the API. `PUT /api/user/tokens` treats an empty field as "keep what is already stored" and merges it back over your existing values, and a request with all three fields empty is dropped without saving. Clearing every field in the UI is skipped outright for the same reason. A stored GitHub or Jira credential therefore stays on the server until it is overwritten by a different value, and there is no `DELETE` route for it. If you need the credential gone, register a fresh account or ask an administrator to delete the account with `DELETE /api/admin/users/{username}`; the tokens are columns on the `users` row, so removing the row removes them.
 
@@ -1864,7 +1864,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `can_view_reports` | off | Grants access to `/api/reports/*` and the `Reports` page to a non-admin. It is orthogonal to role: a `viewer` with the grant can read reports, and an `operator` without it cannot. For non-admins the flag is re-read from the users table on every request, so a grant takes effect without invalidating sessions. Admins always have effective access regardless of the stored value. |
    | `can_use_server_providers` | off | Grants the `Use server credentials` toggle on `New Analysis`, which lets the user run analyses on the server's AI keys instead of their own. Admins always have it. |
 
-   > **Note:** `DEFAULT_USER_ROLE` decides the role new registrations get, and it accepts only `viewer`, `reviewer`, or `operator` — it cannot grant `admin`. Set it before startup if you want self-registered users to submit analyses immediately.
+   > **Note:** `DEFAULT_USER_ROLE` decides the role new registrations get, and it accepts only `viewer`, `reviewer`, or `operator` — it cannot grant `admin`. Setting it before startup does **not** by itself let self-registered users submit analyses: `REQUIRE_APPROVAL` defaults to `true`, and registration then creates the account with `pending` status, which cannot reach protected endpoints until an admin approves it. Set `REQUIRE_APPROVAL=false` alongside the role for that outcome.
 
 2. **Create a user.**
 
@@ -2948,12 +2948,13 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
    while :; do
      PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed \
        --limit 200 --offset "$OFFSET")
-     [ "$(jq -r '.has_more' <<<"$PAGE")" = "true" ] || break
+     # Process the page first, then decide whether another one exists.
      jq -r '.entries[].test_name' <<<"$PAGE" | while read -r TEST; do
        rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
        rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
          --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
      done
+     [ "$(jq -r '.has_more' <<<"$PAGE")" = "true" ] || break
      OFFSET=$((OFFSET + 200))
    done
 

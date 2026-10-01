@@ -361,7 +361,7 @@
 </tbody>
 </table></div>
 <blockquote>
-<p><strong>Note:</strong> <code>DEFAULT_USER_ROLE</code> decides the role new registrations get, and it accepts only <code>viewer</code>, <code>reviewer</code>, or <code>operator</code> — it cannot grant <code>admin</code>. Set it before startup if you want self-registered users to submit analyses immediately.</p>
+<p><strong>Note:</strong> <code>DEFAULT_USER_ROLE</code> decides the role new registrations get, and it accepts only <code>viewer</code>, <code>reviewer</code>, or <code>operator</code> — it cannot grant <code>admin</code>. Setting it before startup does <strong>not</strong> by itself let self-registered users submit analyses: <code>REQUIRE_APPROVAL</code> defaults to <code>true</code>, and registration then creates the account with <code>pending</code> status, which cannot reach protected endpoints until an admin approves it. Set <code>REQUIRE_APPROVAL=false</code> alongside the role for that outcome.</p>
 </blockquote>
 <ol>
 <li><strong>Create a user.</strong></li>

@@ -260,12 +260,13 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
    while :; do
      PAGE=$(rootcoz --json results tests "$JOB_ID" --status failed \
        --limit 200 --offset "$OFFSET")
-     [ "$(jq -r '.has_more' <<<"$PAGE")" = "true" ] || break
+     # Process the page first, then decide whether another one exists.
      jq -r '.entries[].test_name' <<<"$PAGE" | while read -r TEST; do
        rootcoz results set-reviewed "$JOB_ID" --test "$TEST" --reviewed
        rootcoz results set-tracked-in "$JOB_ID" --test "$TEST" \
          --url "https://jira.example.com/browse/PLAT-$BUILD_NUMBER"
      done
+     [ "$(jq -r '.has_more' <<<"$PAGE")" = "true" ] || break
      OFFSET=$((OFFSET + 200))
    done
 
