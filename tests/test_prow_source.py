@@ -2371,6 +2371,36 @@ class TestArtifactPrioritization:
         assert result.failures, "JUnit analysis is unaffected"
         assert listing_calls == 1, "non-JUnit artifacts were listed for nothing"
 
+    async def test_no_false_no_artifacts_warning_when_listing_skipped(self):
+        """A skipped listing is not an empty listing: no "no artifacts" warning."""
+        listing_calls = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal listing_calls
+            url = str(request.url)
+            if "/storage/v1/" in url:
+                listing_calls += 1
+                # Only non-JUnit artifacts exist, and they were never listed.
+                return httpx.Response(
+                    200, json={"items": [{"name": f"{self._PREFIX}t-test/pod.log"}]}
+                )
+            return httpx.Response(404)
+
+        source = ProwSource(
+            job_name="job",
+            build_id="1",
+            gcs_bucket="bucket",
+            prow_url=_TEST_PROW_URL,
+            gcs_prefix="logs/job/1",
+            get_job_artifacts=False,
+        )
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert listing_calls == 1, "non-JUnit listing must stay skipped"
+        assert not any("No Prow build artifacts" in w for w in result.warnings)
+
     async def test_fetch_honors_configurable_limits(self, tmp_path, monkeypatch):
         """Object cap, per-file size, and total budget come from settings."""
         monkeypatch.setattr(

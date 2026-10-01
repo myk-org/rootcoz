@@ -1818,7 +1818,9 @@ class ProwSource(CISource):
             warnings=access_warnings,
         )
         # No listing at all when downloads are disabled — the list would go unused.
-        non_junit_objects = (
+        # `None` (not listed) is kept distinct from `[]` (listed, nothing there) so
+        # downstream checks never claim "no artifacts" for a build they never looked at.
+        non_junit_objects: list[dict[str, Any]] | None = (
             await _list_artifacts(
                 client,
                 self.gcs_bucket,
@@ -1828,7 +1830,7 @@ class ProwSource(CISource):
                 warnings=access_warnings,
             )
             if self.get_job_artifacts
-            else []
+            else None
         )
 
         junit_files = [obj["name"] for obj in junit_objects]
@@ -1841,15 +1843,16 @@ class ProwSource(CISource):
         )
         rankable_steps = step_names or {
             _artifact_step(obj.get("name", ""), artifacts_prefix)
-            for obj in non_junit_objects
+            for obj in non_junit_objects or ()
         }
 
         logger.info(
-            "Found %d JUnit XML file(s) and %d other artifact(s) for %s/%s",
+            "Found %d JUnit XML file(s) and %d other artifact(s) for %s/%s%s",
             len(junit_files),
-            len(non_junit_objects),
+            len(non_junit_objects or ()),
             self.job_name,
             self.build_id,
+            " (non-JUnit listing skipped)" if non_junit_objects is None else "",
         )
 
         # ------------------------------------------------------------------
@@ -1930,7 +1933,7 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         extract_path: Path | None = None
         artifacts_context = ""
-        if self.get_job_artifacts and non_junit_objects:
+        if non_junit_objects:
             try:
                 _, extract_path = await self._download_non_junit_artifacts(
                     client,
@@ -1961,7 +1964,8 @@ class ProwSource(CISource):
                 not build_state
                 and not build_log
                 and not junit_files
-                and not non_junit_objects
+                # `None` = never listed, so absence of artifacts is unproven.
+                and non_junit_objects == []
                 and not self._prowjob_metadata
             ):
                 access_warnings.append(
