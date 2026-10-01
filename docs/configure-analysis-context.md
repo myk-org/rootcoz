@@ -188,7 +188,7 @@ This clones the tests repository plus both extra repositories into the analysis 
     | `skills/` | Project skills the agent runtime loads |
     | `extensions/` | Project extensions the agent runtime loads |
 
-    Symlinks are skipped and failures are logged rather than raised, so a bad `.rootcoz/` tree never crashes an analysis.
+    Symlinks are skipped rather than followed. However, a `settings.json` that exists but fails validation is not merely logged — the analysis stops and the job is marked failed with the reason redacted. Treat a malformed `.rootcoz/settings.json` as a job-failing condition, not a warning.
 
     > **Warning:** Anything you add under `.rootcoz/` ships with your repository and steers AI behavior for everyone who analyzes it. Treat it as reviewed code, and document every new file you add — the repository's `AGENTS.md` requires that each repo-side customization file is described alongside the code that reads it.
 

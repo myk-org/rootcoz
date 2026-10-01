@@ -150,7 +150,7 @@ The shared body accepts the server defaults as per-request overrides:
 
 Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, and `PERSISTENT`. These are the exact API values; the UI renders `KNOWN_BUG` as `Known Bug` and spaces the words for readability.
 
-> **Note:** This table lists the role each route **actually enforces**, not the role the role table in AGENTS.md describes. Four routes marked "Known gap" enforce no role beyond authentication — `viewer` is therefore the effective minimum, even though the documented model reserves them for `reviewer` or `admin`. They are tracked in issues [#295](https://github.com/myk-org/rootcoz/issues/295) (`PUT /results/{job_id}/reviewed`), and [#289](https://github.com/myk-org/rootcoz/issues/289) (`POST /api/auth/rotate-key`, `PUT /results/{job_id}/tags`, `GET /api/admin/token-usage/stream`). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
+> **Note:** This table lists the role each route **actually enforces**, not the role the role table in AGENTS.md describes. Three routes marked "Known gap" enforce no role beyond authentication — `viewer` is therefore the effective minimum, even though the documented model reserves them for `reviewer`. They are tracked in issues [#295](https://github.com/myk-org/rootcoz/issues/295) (`PUT /results/{job_id}/reviewed`) and [#289](https://github.com/myk-org/rootcoz/issues/289) (`POST /api/auth/rotate-key`, `PUT /results/{job_id}/tags`). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 
 ### Comments and mentions
 
@@ -220,7 +220,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | `/api/results/{job_id}/stream` | viewer | Per-job status changes |
 | `/api/results/{job_id}/comments/stream` | viewer | Per-job comment changes |
 | `/api/chat/{job_id}/stream` | viewer | Per-job chat messages |
-| `/api/admin/token-usage/stream` | viewer | Token usage changes. Known gap — see the note below |
+| `/api/admin/token-usage/stream` | admin | Token usage changes. Enforced by middleware before the handler runs |
 | `/api/admin/logs/stream` | admin | Live server log tail; `lines` and `level` query parameters |
 | `/api/admin/settings/stream` | admin | Server setting changes |
 

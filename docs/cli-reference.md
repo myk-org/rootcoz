@@ -123,7 +123,7 @@ Related lifecycle commands:
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |
 | `set-reviewed JOB_ID` | `--test`/`-t`, `--reviewed`/`--not-reviewed`, `--child-job`, `--child-build` | Mark one failure reviewed. |
-| `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira`, `github`, or auto), `--child-job`, `--child-build` | Link a failure to a ticket. |
+| `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira` or `github`; omit for auto-detection), `--child-job`, `--child-build` | Link a failure to a ticket. |
 | `delete-tracked-in JOB_ID` | `--link-id` | Remove one tracked-in link. |
 | `enrich-comments JOB_ID` | — | Refresh live PR and ticket status on comments. |
 | `delete [JOB_ID ...]` | `--all`, `--confirm` | Delete jobs and related data. `--all` requires `--confirm`. |

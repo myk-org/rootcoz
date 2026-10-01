@@ -483,7 +483,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `PEER_AI_CONFIGS` | empty | string | no | no | yes |
    | `PEER_ANALYSIS_MAX_ROUNDS` | `3` | integer 1–10 | no | no | yes |
 
-   `AI_PROVIDER` accepts `claude`, `gemini`, or `cursor`. Values are lowercased on load, and legacy `*-cli` names are normalised to their canonical form. `PEER_AI_CONFIGS` uses `provider:model,provider:model`; model names may contain commas inside square brackets, for example `cursor:gpt-5.4[context=272k,reasoning=medium]`.
+   `AI_PROVIDER` accepts any exact provider ID that pi-sidecar reports, provided the `provider/model` pair appears in its catalogue. `claude`, `gemini`, and `cursor` are convenience aliases that resolve through the mapping described above; they are not the only accepted values, and the chart's `ai.provider` field says the same. Values are lowercased on load, and legacy `*-cli` names are normalised to their canonical form. To see what your sidecar actually exposes, read the provider list from `GET /api/models`. `PEER_AI_CONFIGS` uses `provider:model,provider:model`; model names may contain commas inside square brackets, for example `cursor:gpt-5.4[context=272k,reasoning=medium]`.
 
    > **Note:** An unsupported `AI_PROVIDER` value fails at submit time, immediately, even when the model is not yet resolved. Blank provider strings mean "not configured" and defer the error to a clearer message later.
 
@@ -1720,7 +1720,7 @@ The registration key is the only credential that signs you in; the tracker token
    | `Jira Email` | Your Atlassian account email, required for Jira Cloud API-token auth. |
    | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. |
 
-   Tokens you type are validated against the provider before they are saved, and a failed validation leaves the stored value unchanged. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
+   Tokens you type are validated against the provider when you use `POST /api/validate-token`, and a failed validation leaves the stored value unchanged. Saving itself does not validate: the registration flow and the settings form both send whatever you typed straight to `PUT /api/user/tokens`, which stores it as supplied. A mistyped or already-revoked token therefore persists and only fails later, when a tracker action tries to use it. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
 
    > **Warning:** Stored tokens cannot be cleared from this page or from the API. `PUT /api/user/tokens` treats an empty field as "keep what is already stored" and merges it back over your existing values, and a request with all three fields empty is dropped without saving. Clearing every field in the UI is skipped outright for the same reason. A stored GitHub or Jira credential therefore stays on the server until it is overwritten by a different value, and there is no `DELETE` route for it. If you need the credential gone, register a fresh account or ask an administrator to delete the account with `DELETE /api/admin/users/{username}`; the tokens are columns on the `users` row, so removing the row removes them.
 
@@ -1852,7 +1852,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Rotate another user's API key | no | no | no | yes |
    | Access `/api/admin/*` (Users, Tokens, Logs, Settings, admin Chat, DB tools) | no | no | no | yes |
 
-   > **Note:** This table describes what the server currently enforces, which is not always what `AGENTS.md` describes. Rotating your own API key works for a `viewer` today because `POST /api/auth/rotate-key` checks no role, so this row reads `yes`; `AGENTS.md` reserves it for `reviewer`. Three further routes are affected — `PUT /results/{job_id}/reviewed` (which feeds auto-review and the exporter push), `PUT /results/{job_id}/tags`, and `GET /api/admin/token-usage/stream`. Tracked in [#295](https://github.com/myk-org/rootcoz/issues/295) and [#289](https://github.com/myk-org/rootcoz/issues/289); treat the current behaviour as a bug rather than a supported capability.
+   > **Note:** This table describes what the server currently enforces, which is not always what `AGENTS.md` describes. Rotating your own API key works for a `viewer` today because `POST /api/auth/rotate-key` checks no role, so this row reads `yes`; `AGENTS.md` reserves it for `reviewer`. Two further routes are affected — `PUT /results/{job_id}/reviewed` (which feeds auto-review and the exporter push) and `PUT /results/{job_id}/tags`. Tracked in [#295](https://github.com/myk-org/rootcoz/issues/295) and [#289](https://github.com/myk-org/rootcoz/issues/289); treat the current behaviour as a bug rather than a supported capability. `GET /api/admin/token-usage/stream` is correctly admin-only: the authentication middleware rejects every non-admin request under `/api/admin/` before the handler runs, so it does not belong in this list.
 
    Two flags sit outside the role ladder:
 
@@ -2182,7 +2182,7 @@ The shared body accepts the server defaults as per-request overrides:
 
 Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pattern values are `NEW`, `REGRESSION`, `FLAKY`, `INTERMITTENT`, `KNOWN_BUG`, and `PERSISTENT`. These are the exact API values; the UI renders `KNOWN_BUG` as `Known Bug` and spaces the words for readability.
 
-> **Note:** This table lists the role each route **actually enforces**, not the role the role table in AGENTS.md describes. Four routes marked "Known gap" enforce no role beyond authentication — `viewer` is therefore the effective minimum, even though the documented model reserves them for `reviewer` or `admin`. They are tracked in issues [#295](https://github.com/myk-org/rootcoz/issues/295) (`PUT /results/{job_id}/reviewed`), and [#289](https://github.com/myk-org/rootcoz/issues/289) (`POST /api/auth/rotate-key`, `PUT /results/{job_id}/tags`, `GET /api/admin/token-usage/stream`). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
+> **Note:** This table lists the role each route **actually enforces**, not the role the role table in AGENTS.md describes. Three routes marked "Known gap" enforce no role beyond authentication — `viewer` is therefore the effective minimum, even though the documented model reserves them for `reviewer`. They are tracked in issues [#295](https://github.com/myk-org/rootcoz/issues/295) (`PUT /results/{job_id}/reviewed`) and [#289](https://github.com/myk-org/rootcoz/issues/289) (`POST /api/auth/rotate-key`, `PUT /results/{job_id}/tags`). Treat them as bugs, not as a supported way to operate. Review state is tracked per test; classification and pattern changes apply across the whole same-error group.
 
 ### Comments and mentions
 
@@ -2252,7 +2252,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | `/api/results/{job_id}/stream` | viewer | Per-job status changes |
 | `/api/results/{job_id}/comments/stream` | viewer | Per-job comment changes |
 | `/api/chat/{job_id}/stream` | viewer | Per-job chat messages |
-| `/api/admin/token-usage/stream` | viewer | Token usage changes. Known gap — see the note below |
+| `/api/admin/token-usage/stream` | admin | Token usage changes. Enforced by middleware before the handler runs |
 | `/api/admin/logs/stream` | admin | Live server log tail; `lines` and `level` query parameters |
 | `/api/admin/settings/stream` | admin | Server setting changes |
 
@@ -2509,7 +2509,7 @@ Related lifecycle commands:
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |
 | `set-reviewed JOB_ID` | `--test`/`-t`, `--reviewed`/`--not-reviewed`, `--child-job`, `--child-build` | Mark one failure reviewed. |
-| `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira`, `github`, or auto), `--child-job`, `--child-build` | Link a failure to a ticket. |
+| `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira` or `github`; omit for auto-detection), `--child-job`, `--child-build` | Link a failure to a ticket. |
 | `delete-tracked-in JOB_ID` | `--link-id` | Remove one tracked-in link. |
 | `enrich-comments JOB_ID` | — | Refresh live PR and ticket status on comments. |
 | `delete [JOB_ID ...]` | `--all`, `--confirm` | Delete jobs and related data. `--all` requires `--confirm`. |
@@ -3174,7 +3174,7 @@ This clones the tests repository plus both extra repositories into the analysis 
     | `skills/` | Project skills the agent runtime loads |
     | `extensions/` | Project extensions the agent runtime loads |
 
-    Symlinks are skipped and failures are logged rather than raised, so a bad `.rootcoz/` tree never crashes an analysis.
+    Symlinks are skipped rather than followed. However, a `settings.json` that exists but fails validation is not merely logged — the analysis stops and the job is marked failed with the reason redacted. Treat a malformed `.rootcoz/settings.json` as a job-failing condition, not a warning.
 
     > **Warning:** Anything you add under `.rootcoz/` ships with your repository and steers AI behavior for everyone who analyzes it. Treat it as reviewed code, and document every new file you add — the repository's `AGENTS.md` requires that each repo-side customization file is described alongside the code that reads it.
 

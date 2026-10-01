@@ -610,7 +610,7 @@
 </tr>
 </tbody>
 </table></div>
-<p>Symlinks are skipped and failures are logged rather than raised, so a bad <code>.rootcoz/</code> tree never crashes an analysis.</p>
+<p>Symlinks are skipped rather than followed. However, a <code>settings.json</code> that exists but fails validation is not merely logged — the analysis stops and the job is marked failed with the reason redacted. Treat a malformed <code>.rootcoz/settings.json</code> as a job-failing condition, not a warning.</p>
 <blockquote>
 <p><strong>Warning:</strong> Anything you add under <code>.rootcoz/</code> ships with your repository and steers AI behavior for everyone who analyzes it. Treat it as reviewed code, and document every new file you add — the repository's <code>AGENTS.md</code> requires that each repo-side customization file is described alongside the code that reads it.</p>
 </blockquote>
