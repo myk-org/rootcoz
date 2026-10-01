@@ -255,6 +255,17 @@ class TestResultsCommands:
         )
         assert "completed" in result.output
 
+    def test_results_show_reanalyzed_forward_link(self, mock_client):
+        mock_client.get_result.return_value = {
+            "job_id": "abc-123",
+            "status": "completed",
+            "reanalyzed_to_job_ids": ["new-1", "new-2"],
+            "result": {"summary": "done"},
+        }
+        result = runner.invoke(app, ["results", "show", "abc-123"])
+        assert result.exit_code == 0
+        assert "Re-analyzed into: new-1, new-2" in result.output
+
     def test_results_fields(self, mock_client):
         mock_client.list_result_fields.return_value = {
             "fields": ["job_id", "status", "result.summary"]

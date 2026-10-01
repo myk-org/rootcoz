@@ -103,6 +103,21 @@ class TestRootCozClientResults:
         result = client.get_result("abc-123", fields="status,result.summary")
         assert result["status"] == "completed"
 
+    def test_get_result_exposes_reanalysis_forward_link(self):
+        client = _make_client(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "job_id": "abc-123",
+                    "reanalyzed_to_job_ids": ["new-1", "new-2"],
+                },
+            )
+        )
+        assert client.get_result("abc-123")["reanalyzed_to_job_ids"] == [
+            "new-1",
+            "new-2",
+        ]
+
     def test_list_result_fields(self):
         def handler(request):
             assert request.method == "GET"
