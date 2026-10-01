@@ -605,7 +605,9 @@ class TestXDGConfigHome:
 
     def test_default_config_dir_uses_home_dot_config(self, tmp_path: Path):
         """When XDG_CONFIG_HOME is unset, falls back to ~/.config."""
-        env = host_env(HOME=str(tmp_path))
+        # Path.home() reads HOME on POSIX but USERPROFILE on Windows, so pin both
+        # or the reload resolves the real home directory instead of tmp_path.
+        env = host_env(HOME=str(tmp_path), USERPROFILE=str(tmp_path))
         with _reload_config_under_env(env, clear=True) as cfg_mod:
             assert cfg_mod.CONFIG_DIR == tmp_path / ".config" / "rootcoz"
             assert (
