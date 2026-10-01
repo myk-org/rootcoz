@@ -3,7 +3,7 @@ import { useLatestRef } from '@/lib/useLatestRef'
 import { useSSE } from '@/lib/SSEProvider'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
-import { GITHUB_REPO_URL } from '@/lib/constants'
+import { BULK_SELECT_CHECKBOX_CLASS, GITHUB_REPO_URL } from '@/lib/constants'
 import type { DashboardJob, DashboardJobWithMetadata } from '@/types'
 import { Button } from '@/components/ui/button'
 import {
@@ -51,9 +51,6 @@ import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons
 
 const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 const BULK_DELETE_LIMIT = 500
-
-const BULK_SELECT_CHECKBOX_CLASS =
-  "h-4 w-4 cursor-pointer appearance-none rounded border border-text-tertiary bg-surface-elevated checked:bg-signal-blue checked:border-signal-blue checked:bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22white%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M12.207%204.793a1%201%200%20010%201.414l-5%205a1%201%200%2001-1.414%200l-2-2a1%201%200%20011.414-1.414L6.5%209.086l4.293-4.293a1%201%200%20011.414%200z%22%2F%3E%3C%2Fsvg%3E')] checked:bg-no-repeat checked:bg-center transition-all"
 
 function MetricCell({ value, displayValue, icon, tone, tooltipText }: {
   value: number | null | undefined

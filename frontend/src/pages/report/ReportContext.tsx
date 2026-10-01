@@ -1,6 +1,8 @@
 import { createContext, useContext, useReducer, useRef, useCallback, type Dispatch, type ReactNode } from 'react'
 import { api } from '@/lib/api'
 import { reviewKey } from '@/lib/reviewKey'
+import type { SelectedGroup } from './failureUpdates'
+import { reconcileSelection, scopeKey } from './failureUpdates'
 import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
 
 interface ReportState {
@@ -15,6 +17,9 @@ interface ReportState {
   classifications: Record<string, string>
   /** Tracked-in links keyed by composite key (reviewKey format). */
   trackedIn: Record<string, TrackedInEntry[]>
+  /** Selected failure groups for bulk updates, keyed by `scopeKey(group, group.id)`
+   *  — scope-qualified, because two scopes can hold the same group id. */
+  selection: Record<string, SelectedGroup>
   githubIssuesEnabled: boolean
   jiraIssuesEnabled: boolean
   reportportalAvailable: boolean
@@ -56,6 +61,10 @@ type ReportAction =
   | { type: 'SET_ENRICHMENTS'; payload: Record<string, CommentEnrichment[]> }
   | { type: 'SET_TRACKED_IN'; payload: Record<string, TrackedInEntry[]> }
   | { type: 'SET_TRACKED_IN_ENTRY'; payload: { testName: string; entry: TrackedInEntry } }
+  | { type: 'TOGGLE_GROUP_SELECTION'; payload: SelectedGroup }
+  | { type: 'SET_GROUP_SELECTION'; payload: { groups: SelectedGroup[]; selected: boolean } }
+  | { type: 'CLEAR_SELECTION' }
+  | { type: 'REPLACE_SELECTION'; payload: Record<string, SelectedGroup> }
   | { type: 'SET_CLASSIFICATIONS'; payload: Record<string, string> }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_ERROR'; payload: string }
@@ -95,6 +104,7 @@ const initialState: ReportState = {
   enrichments: {},
   classifications: {},
   trackedIn: {},
+  selection: {},
   githubIssuesEnabled: false,
   jiraIssuesEnabled: false,
   reportportalAvailable: false,
@@ -145,7 +155,10 @@ function applyOverrideToResult(
 function reportReducer(state: ReportState, action: ReportAction): ReportState {
   switch (action.type) {
     case 'SET_RESULT':
-      return { ...state, result: action.payload.result, graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', reanalyzedToJobId: action.payload.reanalyzedToJobIds?.at(-1) ?? '', loading: false, error: '' }
+      // The selection survives background SSE refreshes (progress, usage, abort),
+      // reconciled against the refreshed result so removed or regrouped failures
+      // cannot linger in the bulk bar or feed dead test names to a mutation.
+      return { ...state, result: action.payload.result, selection: reconcileSelection(action.payload.result, state.selection), graftEstimatedTokensSaved: action.payload.graftEstimatedTokensSaved ?? 0, createdAt: action.payload.createdAt, completedAt: action.payload.completedAt, analysisStartedAt: action.payload.analysisStartedAt, reanalyzedFromJobId: action.payload.reanalyzedFromJobId ?? '', originJobName: action.payload.originJobName ?? '', reanalyzedToJobId: action.payload.reanalyzedToJobIds?.at(-1) ?? '', loading: false, error: '' }
     case 'SET_COMMENTS_AND_REVIEWS':
       return { ...state, comments: action.payload.comments, reviews: action.payload.reviews }
     case 'ADD_COMMENT':
@@ -172,6 +185,31 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
       return { ...state, trackedIn: action.payload }
     case 'SET_TRACKED_IN_ENTRY':
       return { ...state, trackedIn: { ...state.trackedIn, [action.payload.testName]: [...(state.trackedIn[action.payload.testName] || []), action.payload.entry] } }
+    case 'TOGGLE_GROUP_SELECTION': {
+      // Keyed the way every other site keys a record — the card, the section
+      // header and `reconcileSelection` all derive it from the same helper, so a
+      // toggle always finds the entry its card is rendering.
+      const id = scopeKey(action.payload, action.payload.id)
+      if (state.selection[id]) {
+        const rest = { ...state.selection }
+        delete rest[id]
+        return { ...state, selection: rest }
+      }
+      return { ...state, selection: { ...state.selection, [id]: action.payload } }
+    }
+    case 'SET_GROUP_SELECTION': {
+      const next = { ...state.selection }
+      for (const g of action.payload.groups) {
+        const id = scopeKey(g, g.id)
+        if (action.payload.selected) next[id] = g
+        else delete next[id]
+      }
+      return { ...state, selection: next }
+    }
+    case 'CLEAR_SELECTION':
+      return { ...state, selection: {} }
+    case 'REPLACE_SELECTION':
+      return { ...state, selection: action.payload }
     case 'SET_CLASSIFICATIONS':
       return { ...state, classifications: { ...action.payload, ...state.classifications } }
     case 'SET_LOADING':

@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import { api, extractApiDetail } from '@/lib/api'
-import type { TrackedInEntry } from '@/types'
+import { extractApiDetail } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -15,6 +14,7 @@ import {
 } from '@/components/ui/dialog'
 import { isSafeHref } from '@/lib/autoLink'
 import { useReportDispatch } from './ReportContext'
+import { putTrackedIn, getTrackedIn, trackedInUrlError } from './failureUpdates'
 import { ExternalLink, Link2 } from 'lucide-react'
 
 /** Detect tracker type from URL string patterns (no HTTP requests). */
@@ -101,26 +101,17 @@ export function TrackInDialog({ open, onOpenChange, jobId, testName, childJobNam
   async function handleSave() {
     const trimmed = url.trim()
     if (!trimmed) return
-    // Client-side URL validation
-    try {
-      const parsed = new URL(trimmed)
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        setError('URL must start with http:// or https://')
-        return
-      }
-    } catch {
-      setError('Please enter a valid URL (e.g., https://github.com/org/repo/issues/123)')
+    const urlError = trackedInUrlError(trimmed)
+    if (urlError) {
+      setError(urlError)
       return
     }
     setSaving(true)
     setError('')
     try {
-      await api.put(
-        `/results/${jobId}/tracked-in`,
-        { test_name: testName, url: trimmed, type: detectType(url), child_job_name: childJobName ?? '', child_build_number: childBuildNumber ?? 0 },
-      )
+      await putTrackedIn(jobId, { testName, childJobName, childBuildNumber }, trimmed, detectType(url))
       // Refetch to get consistent state with real ids
-      const tracked = await api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
+      const tracked = await getTrackedIn(jobId)
       dispatch({ type: 'SET_TRACKED_IN', payload: tracked.tracked_in ?? {} })
       onOpenChange(false)
       setUrl('')
