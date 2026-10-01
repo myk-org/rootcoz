@@ -110,7 +110,10 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         })),
         page_state: collectPageState(),
         user_agent: navigator.userAgent,
-        ...(aiProvider ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
+        // Only a complete pair is transmitted: a provider with no model makes the server
+        // substitute its own configured model, which may not exist for that provider.
+        // An incomplete selection is treated as no selection so the server resolves the pair.
+        ...(aiProvider && aiModel ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
       }
 
       const res = await api.post<FeedbackPreviewResponse>('/api/feedback/preview', payload)
@@ -175,6 +178,8 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPreviewBody('')
       setPreviewLabels([])
       setPreviewAi({ provider: '', model: '', generated: false })
+      setAiProvider('')
+      setAiModel('')
     }, 200)
   }
 

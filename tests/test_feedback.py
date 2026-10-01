@@ -2,8 +2,10 @@
 
 import json
 import os
-from unittest.mock import patch
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
@@ -1075,3 +1077,89 @@ class TestFeedbackEndpoint:
             resp = client.get("/api/capabilities")
             assert resp.status_code == 200
             assert resp.json()["feedback_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Attribution survives the preview -> create round-trip exactly once (#297)
+# ---------------------------------------------------------------------------
+
+
+def _capture_posted_body(mock_client):
+    """Return the body POSTed to GitHub by the mocked AsyncClient."""
+    return mock_client.post.call_args.kwargs["json"]["body"]
+
+
+@contextmanager
+def _mocked_github_client():
+    """Yield the AsyncClient mock used by create_github_issue (fake 201 issue)."""
+    mock_response = httpx.Response(
+        201,
+        json={
+            "number": 7,
+            "title": "T",
+            "html_url": "https://github.com/myk-org/rootcoz/issues/7",
+        },
+        request=httpx.Request("POST", "https://api.github.com"),
+    )
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    with patch("rootcoz.bug_creation.httpx.AsyncClient", return_value=mock_client):
+        yield mock_client
+
+
+class TestSingleAttributionFooterEndToEnd:
+    """A preview footer naming the resolved pair must not be doubled on create."""
+
+    async def test_dynamic_footer_is_not_doubled(self, settings):
+        """Preview naming provider/model -> created issue has exactly one footer."""
+        req = FeedbackRequest(description="Chart crashes")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = ("T", "## Bug\n\nBoom", ["bug"], True)
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="gpt-5"
+            )
+        assert "claude/gpt-5" in preview.body
+
+        with _mocked_github_client() as posted:
+            await create_feedback_from_preview(
+                title=preview.title,
+                body=preview.body,
+                labels=preview.labels,
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+        body = _capture_posted_body(posted)
+
+        assert body.count("Generated using AI") == 1
+        assert body.count("No AI model generated") == 0
+        assert "claude/gpt-5" in body
+        assert body.rstrip().endswith("*")
+
+    async def test_fallback_does_not_claim_ai_authorship(self, settings):
+        """Fallback preview -> created issue never claims AI wrote it."""
+        req = FeedbackRequest(description="Add dark mode")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = (
+                "Feedback: Add dark mode",
+                "## Feedback",
+                ["enhancement"],
+                False,
+            )
+            preview = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="gpt-5"
+            )
+
+        with _mocked_github_client() as posted:
+            await create_feedback_from_preview(
+                title=preview.title,
+                body=preview.body,
+                labels=preview.labels,
+                github_token=_TEST_GITHUB_TOKEN,
+            )
+        body = _capture_posted_body(posted)
+
+        assert "No AI model generated this issue" in body
+        assert "Generated using AI" not in body
+        assert _GITHUB_FOOTER_MARKER not in body
+        assert body.count("---") == 1

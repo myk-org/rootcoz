@@ -13,7 +13,7 @@ from typing import Any
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import call_ai_once
-from rootcoz.bug_creation import GITHUB_AI_FOOTER, create_github_issue
+from rootcoz.bug_creation import GITHUB_AI_ATTRIBUTION_RE, create_github_issue
 from rootcoz.config import Settings
 from rootcoz.models import (
     FeedbackPreviewResponse,
@@ -313,7 +313,9 @@ async def generate_feedback_preview(
     )
     # Attribution names the RESOLVED pair the caller resolved server-side, never a
     # raw client-supplied string (#282): the body travels verbatim to create.
-    body = body.replace(GITHUB_AI_FOOTER, "").rstrip() + feedback_ai_attribution(
+    # Strip whatever attribution variant is already there — by shape, so a
+    # dynamic provider/model footer is replaced instead of duplicated.
+    body = GITHUB_AI_ATTRIBUTION_RE.sub("", body).rstrip() + feedback_ai_attribution(
         ai_provider, ai_model, ai_generated=ai_generated
     )
     return FeedbackPreviewResponse(

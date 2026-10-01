@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { useState } from 'react'
 import { FeedbackDialog } from '../FeedbackDialog'
 
 // Mock the api module
@@ -46,14 +47,29 @@ vi.mock('@/lib/cookies', () => ({
 
 // The picker needs auth context; its own behaviour is covered in BugCreationDialog tests.
 vi.mock('@/components/shared/AnalysisAiPicker', () => ({
-  AnalysisProviderSelect: () => <div />,
-  AnalysisModelSelect: () => <div />,
+  AnalysisProviderSelect: ({ onChange }: { onChange: (v: string) => void }) => (
+    <button type="button" aria-label="pick-provider" onClick={() => onChange('claude')} />
+  ),
+  AnalysisModelSelect: ({ onChange }: { onChange: (v: string) => void }) => (
+    <button type="button" aria-label="pick-model" onClick={() => onChange('sonnet')} />
+  ),
 }))
 
 import { api, getRecentFailedCalls } from '@/lib/api'
 
 const mockPost = api.post as ReturnType<typeof vi.fn>
 const mockGetFailedCalls = getRecentFailedCalls as ReturnType<typeof vi.fn>
+
+/** Wrapper that owns the open state so the dialog can be closed and reopened. */
+function ReopenableFeedbackDialog() {
+  const [open, setOpen] = useState(true)
+  return (
+    <>
+      <button type="button" data-testid="reopen" onClick={() => setOpen(true)}>reopen</button>
+      <FeedbackDialog open={open} onOpenChange={setOpen} />
+    </>
+  )
+}
 
 describe('FeedbackDialog', () => {
   const onOpenChange = vi.fn()
@@ -406,5 +422,57 @@ describe('FeedbackDialog', () => {
 
     await waitFor(() => expect(screen.getByText(/GitHub token is required/)).toBeInTheDocument())
     expect(screen.getByText(/You can update your tokens/)).toBeInTheDocument()
+  })
+
+  it('sends the pair once both a provider and a model are chosen', async () => {
+    mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: [] })
+    mockGetFailedCalls.mockReturnValue([])
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.click(screen.getByLabelText('pick-provider'))
+    await user.click(screen.getByLabelText('pick-model'))
+    await user.type(screen.getByLabelText('Description'), 'x')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
+    expect(payload.ai_provider).toBe('claude')
+    expect(payload.ai_model).toBe('sonnet')
+  })
+
+  it('omits the pair entirely when a provider is chosen without a model', async () => {
+    mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: [] })
+    mockGetFailedCalls.mockReturnValue([])
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.click(screen.getByLabelText('pick-provider'))
+    await user.type(screen.getByLabelText('Description'), 'x')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
+    expect('ai_provider' in payload).toBe(false)
+    expect('ai_model' in payload).toBe(false)
+  })
+
+  it('sends no pair after close and reopen', async () => {
+    mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: [] })
+    mockGetFailedCalls.mockReturnValue([])
+    const user = userEvent.setup()
+    render(<ReopenableFeedbackDialog />)
+
+    await user.click(screen.getByLabelText('pick-provider'))
+    await user.click(screen.getByLabelText('pick-model'))
+    await user.type(screen.getByLabelText('Description'), 'first session')
+    await user.click(screen.getByRole('button', { name: /cancel/i }))
+
+    // handleClose resets on a 200ms delay (close animation); reopening cancels that timer.
+    await act(async () => { await new Promise((r) => setTimeout(r, 300)) })
+    fireEvent.click(screen.getByTestId('reopen'))
+
+    await user.type(screen.getByLabelText('Description'), 'second session')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
+    expect('ai_provider' in payload).toBe(false)
+    expect('ai_model' in payload).toBe(false)
   })
 })

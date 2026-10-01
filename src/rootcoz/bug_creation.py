@@ -31,6 +31,14 @@ JIRA_AI_FOOTER = (
     "\n\n----\n_Generated using AI with [rootcoz|https://github.com/myk-org/rootcoz]_"
 )
 
+# Shape of a rootcoz AI attribution line, whatever variant it is: the generic
+# footer above, the resolved provider/model footer, or the "no AI model"
+# fallback. Matched by shape so a dynamic variant is never mistaken for "no
+# attribution present" and duplicated with the generic footer.
+GITHUB_AI_ATTRIBUTION_RE = re.compile(
+    r"\n*---\n\*(?:Generated using AI|No AI model generated)[^\n]*\*"
+)
+
 
 def _build_failure_context(failure: FailureAnalysis) -> dict[str, Any]:
     """Extract structured context from a FailureAnalysis for prompt building.
@@ -677,8 +685,10 @@ async def create_github_issue(
     """
     owner, repo = parse_github_repo_url(repo_url)
 
-    # Append AI attribution footer if not already present.
-    if GITHUB_AI_FOOTER.strip() not in body:
+    # Append the AI attribution footer exactly once. A body already carrying any
+    # rootcoz attribution variant (e.g. feedback's provider/model footer) keeps
+    # it instead of gaining a second, generic — and possibly contradicting — one.
+    if not GITHUB_AI_ATTRIBUTION_RE.search(body):
         body += GITHUB_AI_FOOTER
 
     headers = {

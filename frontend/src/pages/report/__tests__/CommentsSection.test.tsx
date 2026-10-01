@@ -153,6 +153,25 @@ describe('CommentsSection – delete confirmation', () => {
   })
 })
 
+describe('CommentsSection – review suggestion errors', () => {
+  it('shows an error when the comment-intent request fails', async () => {
+    mockPost.mockImplementation((url: string) =>
+      url === '/api/analyze-comment-intent'
+        ? Promise.reject(new Error('Intent check failed'))
+        : Promise.resolve({ id: 2 }),
+    )
+    renderWithComments([makeComment()])
+
+    fireEvent.change(screen.getByPlaceholderText('Add a comment...'), { target: { value: 'already fixed' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Post' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toContain('Intent check failed')
+    })
+    expect(screen.queryByText('Mark as reviewed?')).toBeNull()
+  })
+})
+
 describe('CommentsSection – @mention highlighting', () => {
   it('highlights @mentions in rendered comments', () => {
     renderWithComments([makeComment({ comment: 'Hey @alice check this' })])

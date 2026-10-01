@@ -130,6 +130,19 @@ describe('useReviewSuggestion hook', () => {
     expect(screen.getByTestId('show').textContent).toBe('false')
   })
 
+  it('surfaces the error when the intent API call fails', async () => {
+    mockPost.mockRejectedValueOnce(new Error('Intent check failed'))
+    renderHarness()
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('suggest-reviewed'))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('error').textContent).toBe('Intent check failed')
+    })
+  })
+
   it('does not call API when already reviewed', async () => {
     renderHarness({ setReviewed: true })
     // Wait for the SET_REVIEW dispatch to take effect
@@ -224,6 +237,7 @@ function AiHarness() {
     <>
       <span>{aiProvider}/{aiModel}</span>
       <button data-testid="pick" onClick={() => setAiPair('claude', 'sonnet')}>pick</button>
+      <button data-testid="pick-provider-only" onClick={() => setAiPair('claude', '')}>pick provider only</button>
       <button data-testid="suggest" onClick={() => void maybeSuggest('fixed in PR #1')}>suggest</button>
     </>
   )
@@ -246,6 +260,20 @@ describe('report-scoped AI selection', () => {
         job_id: 'job-1',
         ai_provider: 'claude',
         ai_model: 'sonnet',
+      })
+    })
+  })
+
+  it('omits the pair when a provider is chosen without a model', async () => {
+    render(<ReportProvider><AiHarness /></ReportProvider>)
+    fireEvent.click(screen.getByTestId('pick-provider-only'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('suggest'))
+    })
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith('/api/analyze-comment-intent', {
+        comment: 'fixed in PR #1',
+        job_id: 'job-1',
       })
     })
   })

@@ -37,14 +37,17 @@ export function useReviewSuggestion({ jobId, testName, childJobName, childBuildN
           {
             comment: commentText,
             job_id: jobId,
-            ...(aiProvider ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
+            // Only a complete pair is transmitted; a bare provider would make the server
+            // substitute its own model, which may not exist for that provider.
+            ...(aiProvider && aiModel ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
           },
         )
         if (res.suggests_reviewed) {
           setShowSuggestion(true)
         }
-      } catch {
-        // AI analysis failed — don't prompt (safe default)
+      } catch (err) {
+        // Don't prompt (safe default), but the failure must be visible rather than silent.
+        setError(err instanceof Error ? err.message : 'Failed to analyze comment intent')
       }
     },
     [isAlreadyReviewed, jobId, aiProvider, aiModel],
