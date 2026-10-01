@@ -6,6 +6,8 @@ import httpx
 import pytest
 from pi_sidecar_client import AIResult
 
+from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
+from rootcoz.bug_creation import create_github_issue
 from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
@@ -315,6 +317,7 @@ class TestCreateGithubIssue:
                 body="## Details\nLogin returns 500",
                 repo_url="https://github.com/org/repo",
                 github_token=_TEST_GITHUB_TOKEN,
+                attribution=AiProvenance(ai_used=True),
             )
             assert result["url"] == "https://github.com/org/repo/issues/99"
             assert result["number"] == 99
@@ -348,6 +351,7 @@ class TestCreateGithubIssue:
                 repo_url="https://github.com/org/repo",
                 github_token=_TEST_GITHUB_TOKEN,
                 labels=["bug", "test-failure"],
+                attribution=AiProvenance(ai_used=True),
             )
             assert result["number"] == 100
 
@@ -617,16 +621,11 @@ class TestCreateIssueRequestJiraIssueType:
 
 
 class TestAiFooterNotDoubled:
-    """Verify footer deduplication: content that already has the footer is not doubled."""
+    """The footer comes from the caller's provenance, never from the body."""
 
-    async def test_github_footer_not_doubled(self):
-        from rootcoz.bug_creation import (
-            GITHUB_AI_FOOTER,
-            create_github_issue,
-        )
-
-        body_with_footer = "## Details\nSome content" + GITHUB_AI_FOOTER
-
+    @staticmethod
+    async def _posted(body: str, **kwargs) -> str:
+        """Create the issue through the real creator and return what GitHub got."""
         mock_response = httpx.Response(
             201,
             json={
@@ -642,15 +641,79 @@ class TestAiFooterNotDoubled:
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=False)
             MockClient.return_value = mock_client
-
             await create_github_issue(
                 title="Test",
-                body=body_with_footer,
+                body=body,
                 repo_url="https://github.com/org/repo",
                 github_token=_TEST_GITHUB_TOKEN,
+                **kwargs,
             )
-            posted_body = mock_client.post.call_args.kwargs["json"]["body"]
-            assert posted_body.count(_GITHUB_FOOTER_MARKER) == 1
+        return mock_client.post.call_args.kwargs["json"]["body"]
+
+    async def test_body_footer_never_decides_the_attribution(self):
+        """A footer in the body is stripped, not kept (one server footer)."""
+        from rootcoz.bug_creation import GITHUB_AI_FOOTER
+
+        posted = await self._posted(
+            "## Details\nSome content" + GITHUB_AI_FOOTER,
+            attribution=AiProvenance(ai_used=True),
+        )
+        assert posted.count(_GITHUB_FOOTER_MARKER) == 1
+
+    async def test_client_body_cannot_claim_a_model(self):
+        """`create-issue --body` cannot suppress the server's own footer."""
+        spoofed = (
+            "## Details\nLogin returns 500\n\n---\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*"
+        )
+        posted = await self._posted(spoofed, attribution=AiProvenance(ai_used=True))
+        assert "spoofed-model" not in posted
+        assert posted.count(_GITHUB_FOOTER_MARKER) == 1
+
+    async def test_crlf_client_footer_cannot_claim_a_model(self):
+        """A Windows-style fake footer is stripped like any other (Qodo HIGH)."""
+        spoofed = (
+            "## Details\r\nLogin returns 500\r\n\r\n---\r\n*Generated using AI with "
+            f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*\r\n"
+        )
+        posted = await self._posted(spoofed, attribution=AiProvenance(ai_used=True))
+        assert "spoofed-model" not in posted
+        assert posted.count(_GITHUB_FOOTER_MARKER) == 1
+
+    async def test_swapped_separator_cannot_credit_a_model(self):
+        """The published body is the no-AI one after a separator swap (Qodo HIGH).
+
+        \v, \f, \\x1c-\\x1e, U+2028/U+2029 are not line breaks, so replacing one
+        with a newline changes the content: the token no longer verifies and the
+        issue creator publishes the NO-AI footer.
+        """
+        for separator in ["\v", "\f", "\x1c", "\x1d", "\x1e", "\u2028", "\u2029"]:
+            preview = apply_ai_attribution(
+                f"## Bug{separator}separator{separator}Broken.",
+                AiProvenance(ai_used=True, provider="cli-claude", model="sonnet-4-5"),
+            )
+            tampered = preview.replace(separator, "\n")
+            assert read_provenance(preview) is not None
+            assert read_provenance(tampered) is None
+            posted = await self._posted(tampered, attribution=read_provenance(tampered))
+            assert "sonnet-4-5" not in posted
+            assert "No AI model generated this issue" in posted
+            assert _GITHUB_FOOTER_MARKER not in posted
+
+    async def test_without_a_signal_no_model_is_credited(self):
+        posted = await self._posted("## Details\nSome content")
+        assert "No AI model generated this issue" in posted
+        assert _GITHUB_FOOTER_MARKER not in posted
+
+    async def test_verified_provenance_names_the_model(self):
+        posted = await self._posted(
+            "## Details\nSome content",
+            attribution=AiProvenance(
+                ai_used=True, provider="cli-claude", model="sonnet-4-5"
+            ),
+        )
+        assert "(claude / sonnet-4-5)" in posted
+        assert "cli-" not in posted
 
     async def test_jira_footer_not_doubled(self):
         from rootcoz.bug_creation import JIRA_AI_FOOTER, create_jira_bug
