@@ -596,9 +596,9 @@ class TestLegacyHistoryWhenTheAnchorMoved:
 
     A run whose only difference is header/pointer noise gets a different frozen
     anchor every time, so the anchor a legacy row is filed under is never the
-    one today's run produces. ``signatures_match`` normalizes both messages
-    under the v2 rules as a last branch; it must not widen that into a
-    message-only match.
+    one today's run produces. ``signatures_match`` never sees past the hashes;
+    the message fallback lives in ``previous_analysis_matches``, the rule of the
+    history lookup, and must not widen into a message-only match anywhere else.
     """
 
     @staticmethod
@@ -609,7 +609,8 @@ class TestLegacyHistoryWhenTheAnchorMoved:
     def _current_row(failure: FailedTest) -> dict[str, str]:
         return dual_written_row(failure) | {"error": failure.error_message}
 
-    def test_legacy_row_matches_a_later_run_of_the_same_failure(self) -> None:
+    def test_the_history_lookup_still_matches_a_later_run(self) -> None:
+        """The gap that fix exists for -- closed by the lookup, not by hashes."""
         earlier, later = failure_a(), failure_b()
         # The premise: the anchors share nothing, so the union finds no match.
         assert get_legacy_signature(earlier) != get_legacy_signature(later)
@@ -617,8 +618,14 @@ class TestLegacyHistoryWhenTheAnchorMoved:
             set(storage.signature_hashes(self._history_row(earlier)))
             & set(storage.signature_hashes(self._current_row(later)))
         )
-        assert storage.signatures_match(
+        assert storage.previous_analysis_matches(
             self._history_row(earlier), self._current_row(later)
+        )
+
+    def test_the_universal_comparison_stops_at_the_hashes(self) -> None:
+        """Same pair, universal rule: no match. The fallback is not in here."""
+        assert not storage.signatures_match(
+            self._history_row(failure_a()), self._current_row(failure_b())
         )
 
     def test_a_similar_but_distinct_defect_does_not_match(self) -> None:
@@ -634,6 +641,9 @@ class TestLegacyHistoryWhenTheAnchorMoved:
         assert not storage.signatures_match(
             self._history_row(left), self._current_row(right)
         )
+        assert not storage.previous_analysis_matches(
+            self._history_row(left), self._current_row(right)
+        )
 
     def test_a_different_defect_entirely_does_not_match(self) -> None:
         other = FailedTest(
@@ -643,14 +653,78 @@ class TestLegacyHistoryWhenTheAnchorMoved:
         assert not storage.signatures_match(
             self._history_row(failure_a()), self._current_row(other)
         )
+        assert not storage.previous_analysis_matches(
+            self._history_row(failure_a()), self._current_row(other)
+        )
 
     def test_a_row_with_no_message_is_never_matched_on_message(self) -> None:
         """A trace-only failure stores no message; it must not match everything."""
         trace_only = legacy_row(failure_a())
         assert not storage.signatures_match(trace_only, {"error_message": ""})
         assert not storage.signatures_match(trace_only, {"error": "anything"})
+        assert not storage.previous_analysis_matches(trace_only, {"error": "anything"})
+
+    def test_one_message_and_two_traces_match_only_in_the_lookup(
+        self,
+    ) -> None:
+        """The safety property, as a pair: same message, different stack trace.
+
+        ``failure_history`` stores no stack, so the message fallback cannot tell
+        these two apart -- which is exactly why it is not allowed to answer for
+        the universal comparison, where a wrong answer merges two defects.
+        """
+        left = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.json()",
+        )
+        right = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.text()",
+        )
+        # Distinct failures by every stored hash, identical by message.
+        assert get_failure_signature(left) != get_failure_signature(right)
+        assert get_legacy_signature(left) != get_legacy_signature(right)
+        assert not storage.signatures_match(
+            self._history_row(left), self._current_row(right)
+        )
+        assert storage.previous_analysis_matches(
+            self._history_row(left), self._current_row(right)
+        )
+
+    async def test_that_pair_still_matches_through_the_lookup(self, db: Path) -> None:
+        """End to end: a legacy row the hash union misses is found by the lookup."""
+        left = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.json()",
+        )
+        right = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.text()",
+        )
+        await _add_history_row(
+            db,
+            "job-old",
+            left.test_name,
+            anchor=get_legacy_signature(left),
+            v2=None,
+            username="human-reviewer",
+            message=left.error_message,
+        )
+        with patch.object(storage, "DB_PATH", db):
+            previous = await storage.find_matching_previous_analysis(
+                "my-job", left.test_name, "job-new"
+            )
+        assert previous is not None
+        current = self._current_row(right) | {"test_name": right.test_name}
+        assert not storage.signatures_match(previous, current)
+        assert storage.previous_analysis_matches(previous, current)
 
     async def test_auto_review_chains_to_a_legacy_row(self, db: Path) -> None:
+        """The lookup's widened rule, reached the only way it is reachable."""
         from rootcoz import main as main_mod
 
         earlier, later = failure_a(), failure_b()

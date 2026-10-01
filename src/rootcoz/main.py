@@ -2561,7 +2561,7 @@ async def _match_and_auto_review_failures(
 
     For each failure, looks up the same test_name in the same job_name from a
     previous analysis. If the signatures match (either column -- see
-    storage.signatures_match), applies auto-review.
+    storage.previous_analysis_matches), applies auto-review.
 
     Args:
         job_id: Current analysis job ID.
@@ -2593,8 +2593,10 @@ async def _match_and_auto_review_failures(
         # Hash-set match, not equality on one column: the previous row may predate
         # the v2 rules and carry only its anchor, while this failure carries both.
         # Comparing a single column is what would silently stop auto-review from
-        # chaining across a deploy.
-        if not storage.signatures_match(previous, failure):
+        # chaining across a deploy. That helper, not signatures_match, carries
+        # the wider "same normalized message" last resort -- a human confirms the
+        # chain on the report, so only the history lookup may lean on it.
+        if not storage.previous_analysis_matches(previous, failure):
             continue
 
         prev_job_id = previous["job_id"]
@@ -2625,7 +2627,7 @@ async def _auto_review_matching_failures(
 
     For each failure in the result, looks up the same test_name in the same
     job_name from a previous analysis. If the signatures match (either column --
-    see storage.signatures_match), marks the failure as reviewed with
+    see storage.previous_analysis_matches), marks the failure as reviewed with
     username=AI_SYSTEM_USERNAME and adds an explanatory comment.
 
     If all failures end up reviewed, pushes to exporters configured in

@@ -107,34 +107,6 @@ def signature_hashes(row: Any) -> list[str]:
     )
 
 
-def _row_message(row: Any) -> str:
-    """Return the error text a row stores, whichever column it keeps it in.
-
-    ``failure_history`` calls it ``error_message``; a FailureAnalysis dict calls
-    it ``error``.
-    """
-    return _signature_field(row, "error_message") or _signature_field(row, "error")
-
-
-def _message_signature(row: Any) -> str:
-    """Hash *row*'s error message alone under the current (v2) rules.
-
-    A row stored before the v2 rules has no ``error_signature_v2``, so no stored
-    hash can ever show that it is today's failure. The message is the only thing
-    left to normalize -- under the SAME rules the run's own grouping already
-    accepts as identity, never the raw text. The stack trace is not stored on
-    history rows, so both sides are hashed with an empty one and the comparison
-    is message against message, never message against hash.
-    """
-    message = _row_message(row)
-    if not message:
-        return ""
-    # Imported here: engine.core imports storage at module level.
-    from rootcoz.engine.core import compute_signature
-
-    return compute_signature(message, "")
-
-
 def signatures_match(left: Any, right: Any) -> bool:
     """Return whether two rows describe the same failure across rule versions.
 
@@ -144,17 +116,14 @@ def signatures_match(left: Any, right: Any) -> bool:
     of both rows' hashes -- a legacy row and a new row for the SAME failure
     match on the anchor they share.
 
-    When the hashes share nothing, one last branch: both messages normalized
-    under the v2 rules. It exists for the case the union cannot cover -- a
-    legacy row plus a later run whose only difference is header/pointer noise,
-    so the frozen anchor moved and the legacy row has no v2 hash to meet it on.
-    ponytail: this branch ignores the stack trace (not stored on history rows);
-    drop it if a later column makes the stack comparable again.
+    Hashes only, and that is the whole rule. This is the universal comparison:
+    grouping, dedup, override and peer search all route through it, and a
+    message is not an identity. Two distinct failures that happen to print the
+    same line must never be merged by it. The one wider rule -- the same
+    normalized message as a last resort -- lives with the history lookup in
+    :func:`previous_analysis_matches`.
     """
-    if set(signature_hashes(left)) & set(signature_hashes(right)):
-        return True
-    left_message = _message_signature(left)
-    return bool(left_message) and left_message == _message_signature(right)
+    return bool(set(signature_hashes(left)) & set(signature_hashes(right)))
 
 
 def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
@@ -3103,6 +3072,57 @@ def _extract_child_failures_for_history(
         )
 
 
+def _row_message(row: Any) -> str:
+    """Return the error text a row stores, whichever column it keeps it in.
+
+    ``failure_history`` calls it ``error_message``; a FailureAnalysis dict calls
+    it ``error``.
+    """
+    return _signature_field(row, "error_message") or _signature_field(row, "error")
+
+
+def _message_signature(row: Any) -> str:
+    """Hash *row*'s error message alone under the current (v2) rules.
+
+    For :func:`previous_analysis_matches` only -- it is the whole point of that
+    function and of nothing else. The message is normalized under the SAME
+    rules the run's own grouping already accepts as identity, never the raw
+    text. The stack trace is not stored on history rows, so both sides are
+    hashed with an empty one: the comparison is message against message, never
+    message against hash, and it cannot tell two traces apart.
+    """
+    message = _row_message(row)
+    if not message:
+        return ""
+    # Imported here: engine.core imports storage at module level.
+    from rootcoz.engine.core import compute_signature
+
+    return compute_signature(message, "")
+
+
+def previous_analysis_matches(previous: Any, failure: Any) -> bool:
+    """Whether a :func:`find_matching_previous_analysis` row is *failure* again.
+
+    :func:`signatures_match` first -- the universal rule, and the one that
+    settles it whenever it can. Only when the two rows share no hash at all does
+    the wider rule run: both messages normalized under the v2 rules. That covers
+    the one case the union cannot -- a history row written before the v2 rules,
+    meeting a later run whose only difference is header/pointer noise, so the
+    frozen anchor moved and there is no v2 hash on the old row to meet it on.
+    Chaining there is a suggestion a human confirms on the report; a hash
+    mismatch everywhere else is a decision nobody sees.
+
+    ponytail: the fallback ignores the stack trace (history rows do not store
+    one), so on message alone 80 distinct legacy signatures collapse to 69
+    (1.16x), worst case 4 into 1. Drop it if a column ever makes the stack
+    comparable again.
+    """
+    if signatures_match(previous, failure):
+        return True
+    left_message = _message_signature(previous)
+    return bool(left_message) and left_message == _message_signature(failure)
+
+
 async def find_matching_previous_analysis(
     job_name: str,
     test_name: str,
@@ -3136,9 +3156,9 @@ async def find_matching_previous_analysis(
         Dict with previous failure_history row data if found, None otherwise.
         Includes keys: job_id, build_number, build_id, error_signature,
         error_signature_v2, error_message, classification, pattern, analyzed_at.
-        Compare the pair with :func:`signatures_match`, never field by field --
-        error_message is selected so that comparison can normalize the message of
-        a row stored before the v2 rules.
+        Compare the pair with :func:`previous_analysis_matches`, never field by
+        field -- error_message is selected so that comparison can normalize the
+        message of a row stored before the v2 rules.
     """
     async with _connect_db() as db:
         # Find the most recent failure_history row for the same job+test
