@@ -698,6 +698,15 @@ def backfill_signatures_cmd(
             f"Updated {data['history_rows_changed']} failure_history rows, "
             f"{data['comment_rows_changed']} comment rows."
         )
+    ambiguous = data.get("ambiguous_comment_rows", 0)
+    if ambiguous:
+        typer.echo(
+            f"{ambiguous} comment row(s) kept their old signature: the failures "
+            "they could belong to split onto different hashes, and a comment "
+            "records no failure id to tell them apart. They are still found by "
+            f"test name. Sample of {len(data.get('ambiguous_comments', []))} "
+            "job(s) reported."
+        )
     if data["jobs_deferred"]:
         typer.echo(
             f"{data['jobs_deferred']} job(s) were left to a running analysis; "

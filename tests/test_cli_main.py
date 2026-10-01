@@ -4222,6 +4222,28 @@ class TestAdminBackfillSignaturesCommand:
         assert "3 comment rows" in result.output
         assert "2 job(s) were left to a running analysis" in result.output
 
+    def test_reports_comment_rows_left_ambiguous(self, mock_client):
+        mock_client.admin_backfill_signatures.return_value = {
+            "dry_run": False,
+            "jobs_scanned": 10,
+            "jobs_changed": 2,
+            "failures_scanned": 50,
+            "failures_changed": 7,
+            "history_rows_changed": 7,
+            "comment_rows_changed": 3,
+            "ambiguous_comment_rows": 5,
+            "ambiguous_comments": [{"job_id": "j", "comment_rows": 5}],
+            "unrecoverable_failures_count": 0,
+            "unrecoverable_failures": [],
+            "jobs_deferred": 0,
+        }
+        result = runner.invoke(
+            app, ["admin", "backfill-signatures", "--apply", "--yes"]
+        )
+        assert result.exit_code == 0
+        assert "5 comment row(s) kept their old signature" in result.output
+        assert "Sample of 1 job(s) reported." in result.output
+
     def test_aborts_on_declined_confirmation(self, mock_client):
         result = runner.invoke(
             app, ["admin", "backfill-signatures", "--apply"], input="n\n"

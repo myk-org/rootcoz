@@ -2293,12 +2293,17 @@ class ResultPatch(NamedTuple):
     them. ``in_flight`` says the row was left alone because ``skip_in_flight``
     was set and its analysis is still running -- a skip the backfill has to
     revisit, as opposed to a row that was simply already up to date.
+    ``comment_rows_ambiguous`` counts comment rows that were left on their old
+    hash because the failures they could belong to ended on different hashes
+    and nothing in the row tells them apart (see
+    :func:`_apply_denormalized_signatures`).
     """
 
     written: bool
     history_rows: int = 0
     comment_rows: int = 0
     in_flight: bool = False
+    comment_rows_ambiguous: int = 0
 
 
 def failure_error_text(failure: dict[str, Any]) -> str:
@@ -2318,6 +2323,31 @@ def failure_error_text(failure: dict[str, Any]) -> str:
     return trace if isinstance(trace, str) else ""
 
 
+def _unanimous_signature(updates: Sequence[SignatureUpdate]) -> str:
+    """Return the new signature every failure in *updates* agrees on.
+
+    Returns:
+        The shared signature, or "" when the updates disagree -- the
+        caller's cue that the rows they match cannot be told apart.
+
+    """
+    signatures = {update.new_signature for update in updates}
+    return signatures.pop() if len(signatures) == 1 else ""
+
+
+async def _row_ids(
+    db: aiosqlite.Connection,
+    table: str,
+    where: str,
+    params: tuple[Any, ...],
+) -> list[Any]:
+    """Return the ids of the rows of *table* matching *where*, oldest first."""
+    cursor = await db.execute(
+        f"SELECT id FROM {table} WHERE {where} ORDER BY id", params
+    )
+    return [row[0] for row in await cursor.fetchall()]
+
+
 async def _resign_rows(
     db: aiosqlite.Connection,
     table: str,
@@ -2335,7 +2365,12 @@ async def _resign_rows(
     whichever failure came first and leave the other's row dead.
 
     When every failure in the group collapses onto one hash -- the common case --
-    the whole group is rewritten in a single statement.
+    the whole group is rewritten in a single statement. ``comments`` only ever
+    arrives in that unanimous case (a ``comments`` row carries no message to
+    keep two same-message failures apart, so a split group there has no correct
+    per-row answer to give and the caller skips it instead); the per-row path is
+    ``failure_history``'s, where every row of a group was written from a
+    distinct stored failure.
 
     Args:
         db: Open transaction.
@@ -2348,16 +2383,14 @@ async def _resign_rows(
     Returns:
         The number of rows rewritten.
     """
-    cursor = await db.execute(
-        f"SELECT id FROM {table} WHERE {where} ORDER BY id", params
-    )
-    row_ids = [row[0] for row in await cursor.fetchall()]
+    row_ids = await _row_ids(db, table, where, params)
     if not row_ids:
         return 0
-    if len({update.new_signature for update in updates}) == 1:
+    unanimous = _unanimous_signature(updates)
+    if unanimous:
         cursor = await db.execute(
             f"UPDATE {table} SET error_signature = ? WHERE {where}",
-            (updates[0].new_signature, *params),
+            (unanimous, *params),
         )
         return cursor.rowcount or 0
     for index, row_id in enumerate(row_ids):
@@ -2372,7 +2405,7 @@ async def _apply_denormalized_signatures(
     db: aiosqlite.Connection,
     job_id: str,
     updates: Sequence[SignatureUpdate],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Re-signature this job's ``failure_history`` and ``comments`` rows.
 
     Must run inside the same transaction as the ``results`` update, so an
@@ -2387,8 +2420,17 @@ async def _apply_denormalized_signatures(
     covering two indistinguishable failures hands each its own row instead of
     both to the first (see :func:`_resign_rows`).
 
+    Comment rows get no such treatment, because a comment carries neither a
+    message nor a failure id: when the failures of one group end on different
+    hashes there is nothing in the row that says which of them it was written
+    against, so the row keeps the old hash and is counted as ambiguous. Being
+    left on a stale hash costs the comment its signature-based lookups (it is
+    still found by test name); being given the wrong hash files it under a
+    failure nobody wrote it about. Guessing is the one option that destroys
+    information the reader cannot check.
+
     Returns:
-        ``(history_rows_updated, comment_rows_updated)``.
+        ``(history_rows_updated, comment_rows_updated, comment_rows_ambiguous)``.
     """
     identity = (
         "job_id = ? AND test_name = ? AND child_job_name = ? AND child_build_number = ?"
@@ -2442,20 +2484,15 @@ async def _apply_denormalized_signatures(
             group,
         )
 
-    comments = 0
-    # ponytail: comment rows hold no message and no failure id, so when the
-    # failures in a group end on different hashes the rows are dealt out
-    # round-robin instead of by ownership. Every row still leaves with a live
-    # hash; add a failure id column if per-failure comment counts matter.
+    comments = ambiguous = 0
     for (test_name, child_name, child_build, previous), group in comment_groups.items():
-        comments += await _resign_rows(
-            db,
-            "comments",
-            f"{identity} AND error_signature = ?",
-            (job_id, test_name, child_name, child_build, previous),
-            group,
-        )
-    return history, comments
+        where = f"{identity} AND error_signature = ?"
+        params = (job_id, test_name, child_name, child_build, previous)
+        if not _unanimous_signature(group):
+            ambiguous += len(await _row_ids(db, "comments", where, params))
+            continue
+        comments += await _resign_rows(db, "comments", where, params, group)
+    return history, comments, ambiguous
 
 
 async def patch_result_json(
@@ -2511,7 +2548,7 @@ async def patch_result_json(
                 "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
             )
             row = await cursor.fetchone()
-            in_flight = bool(skip_in_flight and row and row[1] in ACTIVE_STATUSES)
+            in_flight = bool(skip_in_flight and row and analysis_in_flight(row[1]))
             if (
                 not row
                 or not row[0]
@@ -2558,13 +2595,20 @@ async def patch_result_json(
                 f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
                 params,
             )
-            history_rows = comment_rows = 0
+            history_rows = comment_rows = comment_rows_ambiguous = 0
             if denormalized:
-                history_rows, comment_rows = await _apply_denormalized_signatures(
-                    db, job_id, denormalized
-                )
+                (
+                    history_rows,
+                    comment_rows,
+                    comment_rows_ambiguous,
+                ) = await _apply_denormalized_signatures(db, job_id, denormalized)
             await db.commit()
-            return ResultPatch(True, history_rows, comment_rows)
+            return ResultPatch(
+                True,
+                history_rows,
+                comment_rows,
+                comment_rows_ambiguous=comment_rows_ambiguous,
+            )
         except Exception:
             await db.execute("ROLLBACK")
             raise
@@ -4016,6 +4060,17 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict[str, An
 
 
 ACTIVE_STATUSES = ("running", "pending", "waiting")
+
+
+def analysis_in_flight(status: str) -> bool:
+    """Return whether a job in *status* still has an analysis writing to it.
+
+    One definition of "still running", shared by :func:`patch_result_json`'s
+    ``skip_in_flight`` and the backfill's dry run, so a preview cannot count a
+    rewrite the apply path would then refuse to write.
+    """
+    return status in ACTIVE_STATUSES
+
 
 # Statuses whose background task is irrecoverably lost after a restart.
 # These are a subset of ACTIVE_STATUSES — "waiting" is excluded because
@@ -8251,24 +8306,28 @@ RESULT_JSON_BATCH_SIZE = 200
 
 async def iter_result_json_batches(
     batch_size: int = RESULT_JSON_BATCH_SIZE,
-) -> AsyncIterator[list[tuple[str, str]]]:
-    """Yield ``(job_id, result_json)`` batches ordered by ``job_id``.
+) -> AsyncIterator[list[tuple[str, str, str]]]:
+    """Yield ``(job_id, result_json, status)`` batches ordered by ``job_id``.
 
     Keyset pagination on the primary key instead of ``fetchall``: only one
     batch of result blobs is resident at a time, so a database far larger than
     server memory still scans to completion. It is also resumable -- a caller
     that stops part way can restart after the last ``job_id`` it processed.
+    ``status`` rides along because it decides whether a row may be written at
+    all (:func:`analysis_in_flight`); reading it here costs the backfill no
+    extra query per job.
     """
     after = ""
     while True:
         async with _connect_db() as db:
             cursor = await db.execute(
-                "SELECT job_id, COALESCE(result_json, '') FROM results "
+                "SELECT job_id, COALESCE(result_json, ''), COALESCE(status, '') "
+                "FROM results "
                 "WHERE result_json IS NOT NULL AND result_json != '' "
                 "AND job_id > ? ORDER BY job_id LIMIT ?",
                 (after, batch_size),
             )
-            rows = [(row[0], row[1]) for row in await cursor.fetchall()]
+            rows = [(row[0], row[1], row[2]) for row in await cursor.fetchall()]
         if not rows:
             return
         yield rows
