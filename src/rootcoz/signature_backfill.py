@@ -52,7 +52,7 @@ MIGRATION_KEY_PREFIX = "failure-signatures-"
 UNRECOVERABLE_SAMPLE_SIZE = 100
 
 #: Same treatment for the comment groups whose rows cannot be attributed to
-#: one of the failures they match (see
+#: one of the failures sharing their old hash (see
 #: :func:`rootcoz.storage._apply_denormalized_signatures`): counted exactly,
 #: sampled in the report, never reassigned.
 AMBIGUOUS_COMMENT_SAMPLE_SIZE = 100
@@ -75,10 +75,12 @@ class BackfillStats:
         self.unrecoverable_count = 0
         self.unrecoverable_failures: list[dict[str, Any]] = []
         # Comment rows that could not be attributed to the failure they were
-        # written about, because that failure's group split onto several new
-        # hashes and a comment row records nothing that would tell them apart.
-        # They keep their old hash, which costs them signature-based lookups
-        # but never files them under a failure nobody commented on.
+        # written about, because every failure sharing their old hash did not
+        # end on the same hash -- some moved to a new one, another was already
+        # current or unrecoverable and stayed put -- and a comment row records
+        # nothing that would tell them apart. They keep their old hash, which
+        # costs them signature-based lookups but never files them under a
+        # failure nobody commented on.
         self.ambiguous_comment_rows = 0
         self.ambiguous_comments: list[dict[str, Any]] = []
         self.migration_preempted = False
@@ -189,10 +191,29 @@ def signature_inputs(failure: dict[str, Any]) -> tuple[str, str] | None:
     return error, stack_trace
 
 
+def _signature_update(
+    failure: dict[str, Any],
+    child_name: str,
+    child_build: int,
+    previous_signature: str,
+    new_signature: str,
+) -> SignatureUpdate:
+    """Build the denormalized update describing one stored failure."""
+    return SignatureUpdate(
+        test_name=failure.get("test_name", ""),
+        child_job_name=child_name,
+        child_build_number=child_build,
+        error_message=failure_error_text(failure),
+        previous_signature=previous_signature,
+        new_signature=new_signature,
+    )
+
+
 def _rehash_stored_failures(
     result_data: dict[str, Any],
     *,
     collect: Callable[[SignatureUpdate], None] | None = None,
+    retain: Callable[[SignatureUpdate], None] | None = None,
     stats: BackfillStats | None = None,
     job_id: str = "",
 ) -> int:
@@ -203,6 +224,12 @@ def _rehash_stored_failures(
         collect: Called once per failure whose signature changes, with the
             matching ``failure_history`` / ``comments`` update. Only needed when
             writing; a dry run only needs the counts.
+        retain: Called once per failure that *keeps* its signature -- already
+            current under the new rules, or unrecoverable (see
+            :func:`signature_inputs`) -- as an update whose ``new_signature`` is
+            the hash it already holds. Such a failure rewrites no row, but it
+            still owns the comment rows on that hash, and the storage layer
+            needs it to tell a comment it may move from one it may not.
         stats: Collects the scan counts and the unrecoverable-record report.
         job_id: Reported alongside unrecoverable records.
 
@@ -217,6 +244,7 @@ def _rehash_stored_failures(
     for failure, child_name, child_build in iter_stored_failures(result_data):
         if stats is not None:
             stats.failures_scanned += 1
+        previous_signature = failure.get("error_signature", "")
         inputs = signature_inputs(failure)
         if inputs is None:
             if stats is not None:
@@ -226,25 +254,32 @@ def _rehash_stored_failures(
                         "test_name": failure.get("test_name", ""),
                         "child_job_name": child_name,
                         "child_build_number": child_build,
-                        "error_signature": failure.get("error_signature", ""),
+                        "error_signature": previous_signature,
                     }
                 )
-            continue
-        new_signature = compute_signature(*inputs)
-        previous_signature = failure.get("error_signature", "")
+            # An unrecoverable row keeps the hash it has, so it still owns the
+            # comments written against it.
+            new_signature = previous_signature
+        else:
+            new_signature = compute_signature(*inputs)
         if new_signature == previous_signature:
+            if retain is not None:
+                retain(
+                    _signature_update(
+                        failure,
+                        child_name,
+                        child_build,
+                        previous_signature,
+                        new_signature,
+                    )
+                )
             continue
         failure["error_signature"] = new_signature
         changed += 1
         if collect is not None:
             collect(
-                SignatureUpdate(
-                    test_name=failure.get("test_name", ""),
-                    child_job_name=child_name,
-                    child_build_number=child_build,
-                    error_message=failure_error_text(failure),
-                    previous_signature=previous_signature,
-                    new_signature=new_signature,
+                _signature_update(
+                    failure, child_name, child_build, previous_signature, new_signature
                 )
             )
     return changed
@@ -252,6 +287,7 @@ def _rehash_stored_failures(
 
 def _make_updater(
     collect: list[SignatureUpdate],
+    retain: list[SignatureUpdate],
 ) -> Callable[[dict[str, Any]], None]:
     """Return a ``patch_result_json`` callback that re-hashes *only* signatures.
 
@@ -263,10 +299,12 @@ def _make_updater(
 
     Args:
         collect: Collects the matching denormalized updates for this job.
+        retain: Collects the failures that keep their signature, so the storage
+            layer can see which comment rows they still own.
     """
 
     def _update(data: dict[str, Any]) -> None:
-        _rehash_stored_failures(data, collect=collect.append)
+        _rehash_stored_failures(data, collect=collect.append, retain=retain.append)
 
     return _update
 
@@ -413,10 +451,12 @@ async def backfill_signatures(
                 continue
 
             updates: list[SignatureUpdate] = []
+            retained: list[SignatureUpdate] = []
             outcome = await patch_result_json(
                 job_id,
-                _make_updater(updates),
+                _make_updater(updates, retained),
                 denormalized=updates,
+                retained=retained,
                 write_if_changed=True,
                 skip_in_flight=True,
             )
