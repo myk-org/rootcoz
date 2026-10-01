@@ -298,7 +298,7 @@
 </tr>
 </tbody>
 </table></div>
-<p><code>can_view_reports</code> is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Calls that create or modify data also run against the <code>ALLOWED_USERS</code> allow list, which is empty (open) by default and always bypassed for admins.</p>
+<p><code>can_view_reports</code> is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the <code>ALLOWED_USERS</code> allow list, which is empty (open) by default and always bypassed for admins. The check is per-handler, not global, so a few endpoints enforce role without also consulting the list — <code>PUT /api/user/tokens</code> is one: it requires <code>reviewer</code> but does not call the allow-list check, so an authenticated reviewer who is off the list can still update their own stored tracker tokens. Treat the list as defence in depth on most routes rather than a guarantee.</p>
 <blockquote>
 <p><strong>Warning:</strong> A role you do not hold returns <code>403</code>, not <code>404</code>. <code>403 Admin access required</code>, <code>403 Reviewer access required</code>, and <code>403 Operator access required</code> name the exact gate you hit.</p>
 </blockquote>
