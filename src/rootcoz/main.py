@@ -10367,9 +10367,15 @@ async def set_user_ai_credential(
     "/api/user/ai-credentials/{provider:path}", operation_id="deleteUserAiCredential"
 )
 async def delete_user_ai_credential(provider: str, request: Request) -> JSONResponse:
-    """Remove one credential; do not reveal whether a key was present."""
+    """Remove one credential; do not reveal whether a key was present.
+
+    Deliberately not allow-list gated. This is self-service revocation: a user
+    removed from ALLOWED_USERS must still be able to delete the key they
+    previously stored, otherwise taking them off the list leaves a live
+    credential they have no way to remove. Adding a key is gated; removing
+    one is not.
+    """
     _require_reviewer(request)
-    _check_allow_list(request)
     username = await _credential_user(request)
     try:
         sessions = await storage.update_user_ai_credential(username, provider, None)

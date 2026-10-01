@@ -17,14 +17,22 @@ MAIN_PY = Path(__file__).resolve().parents[1] / "src" / "rootcoz" / "main.py"
 
 # Mutating routes that do not create or modify stored data, and so are not
 # gated by the allow list. Each is listed because it is a deliberate decision,
-# not because it was overlooked.
+# not because it was overlooked. The list is exact: a blanket prefix rule was
+# tried and removed, because it let any future ``/api/auth/*`` write escape
+# the guard.
 #
-# - ``/api/auth/*``: authentication itself, which every user must be able to
-#   reach regardless of list membership.
+# - ``/api/auth/*``: authentication itself, which every user must reach
+#   regardless of list membership. Login creates a session, logout deletes
+#   one, and registration is separately gated by its own registration check
+#   (an off-list user is rejected with a different 403 there).
 # - ``/api/jira-projects``, ``/api/jira-security-levels``,
 #   ``/api/validate-token``: POST used to carry a request body, but they only
 #   read from Jira/GitHub and persist nothing.
 # - ``/api/jobs/metadata/rules/preview``: evaluates rules without writing.
+# - ``DELETE /api/user/ai-credentials/{provider}``: self-service revocation.
+#   A user removed from the list must still be able to delete a key they
+#   already stored, or removing them leaves a live credential they cannot
+#   remove. Writing a key (``PUT``) is gated; deleting one is not.
 ALLOW_LIST_EXEMPT_ROUTES = {
     ("POST", "/api/auth/login"),
     ("POST", "/api/auth/logout"),
@@ -33,6 +41,7 @@ ALLOW_LIST_EXEMPT_ROUTES = {
     ("POST", "/api/jira-security-levels"),
     ("POST", "/api/validate-token"),
     ("POST", "/api/jobs/metadata/rules/preview"),
+    ("DELETE", "/api/user/ai-credentials/{provider:path}"),
 }
 
 MUTATING_METHODS = {"post", "put", "delete", "patch"}
@@ -49,11 +58,23 @@ def _mutating_routes() -> list[tuple[str, str, ast.FunctionDef]]:
             if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Attribute):
                 continue
             verb = dec.func.attr.lower()
-            if verb not in MUTATING_METHODS or not dec.args:
+            if verb not in MUTATING_METHODS:
                 continue
-            first = dec.args[0]
-            if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                routes.append((verb.upper(), first.value, node))
+            # Accept both forms: @app.post("/x") and @app.post(path="/x").
+            path = None
+            for arg in dec.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    path = arg.value
+                    break
+            for kw in dec.keywords:
+                if kw.arg == "path" and isinstance(kw.value, ast.Constant):
+                    path = kw.value.value
+            if path is None:
+                raise AssertionError(
+                    f"mutating route {verb.upper()} has no literal path; the "
+                    f"guard cannot classify it: {node.name}"
+                )
+            routes.append((verb.upper(), path, node))
     return routes
 
 
@@ -73,10 +94,10 @@ def test_mutating_route_enforces_allow_list_or_is_exempt(
     """Every mutating route must gate on the allow list, or be a listed exemption.
 
     Admin-only handlers need no check: ``_require_admin`` already rejects a
-    non-admin, and ``_check_allow_list`` bypasses admins. Public paths are
-    unreachable by an authenticated off-list user.
+    non-admin, and ``_check_allow_list`` bypasses admins. Every other route is
+    matched against the exact exemption list.
     """
-    if _calls(handler, "_require_admin") or path.startswith("/api/auth"):
+    if _calls(handler, "_require_admin"):
         return
     if (verb, path) in ALLOW_LIST_EXEMPT_ROUTES:
         return
