@@ -110,6 +110,36 @@ PROWJOB_JSON_PERIODIC = json.dumps(
     }
 )
 
+PROWJOB_JSON_STEPS = json.dumps(
+    {
+        "spec": {
+            "type": "periodic",
+            "job": "periodic-ci-e2e",
+            "refs": {"org": "kubevirt", "repo": "kubevirt", "base_ref": "main"},
+            "podspec": {
+                "containers": [
+                    {"name": "step-fail"},
+                    {"name": "step-pass"},
+                    {"name": "gather-extra"},
+                ]
+            },
+        },
+        "status": {"state": "failure"},
+    }
+)
+
+PROWJOB_JSON_SHARED_STEPS = json.dumps(
+    {
+        "spec": {
+            "type": "periodic",
+            "job": "periodic-ci-e2e",
+            "refs": {"org": "kubevirt", "repo": "kubevirt", "base_ref": "main"},
+            "podspec": {"containers": [{"name": "e2e"}, {"name": "gather"}]},
+        },
+        "status": {"state": "failure"},
+    }
+)
+
 PROWJOB_JSON_SUCCESS = json.dumps(
     {
         "spec": {
@@ -1009,7 +1039,7 @@ class TestProwSourceFetch:
         assert not result.skip_analysis
 
     async def test_fetch_junit_file_budget_skips_remaining(self, monkeypatch):
-        """JUnit downloads stop after `_MAX_JUNIT_FILES` with a warning."""
+        """JUnit listing/download stop after `_MAX_JUNIT_FILES` with a warning."""
         monkeypatch.setattr("rootcoz.sources.prow_source._MAX_JUNIT_FILES", 2)
         junit_files = [
             f"logs/my-job/42/artifacts/junit/junit_{i}.xml" for i in range(5)
@@ -1045,7 +1075,9 @@ class TestProwSourceFetch:
             result = await source._fetch_with_client(client)
 
         assert fetch_count == 2
-        assert any("JUnit download stopped" in w for w in result.warnings)
+        # The JUnit listing is bounded by the same budget, so the remaining
+        # files are never discovered — let alone downloaded.
+        assert any("max 2 objects" in w for w in result.warnings)
 
     async def test_fetch_junit_attempt_budget_caps_http_calls(self, monkeypatch):
         """404/empty JUnit paths still count toward the attempt budget."""
@@ -2071,6 +2103,8 @@ class TestArtifactPrioritization:
 
         def handler(request: httpx.Request) -> httpx.Response:
             url = str(request.url)
+            if url.endswith("prowjob.json"):
+                return httpx.Response(200, text=PROWJOB_JSON_STEPS)
             if "/storage/v1/" in url:
                 return httpx.Response(200, json={"items": items})
             if url.endswith("step-fail/junit.xml"):
@@ -2101,6 +2135,105 @@ class TestArtifactPrioritization:
             "step-fail/pod.log",
             "step-pass/pod.log",
             "gather-extra/metrics.tar.gz",
+        ]
+
+    async def test_junit_survives_object_cap_filled_by_other_artifacts(
+        self, tmp_path, monkeypatch
+    ):
+        """A tiny object cap must not hide JUnit files listed after other artifacts."""
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
+        monkeypatch.setattr(ProwSource, "cleanup", lambda self: None, raising=False)
+        # GCS lists names lexicographically: the three ``a/`` artifacts come
+        # before ``step/junit.xml``, so a combined cap of 2 would hide the XML.
+        items = [
+            {"name": f"{self._PREFIX}a/one.bin", "size": "8"},
+            {"name": f"{self._PREFIX}a/two.bin", "size": "8"},
+            {"name": f"{self._PREFIX}a/three.bin", "size": "8"},
+            {"name": f"{self._PREFIX}step/junit.xml", "size": "500"},
+        ]
+        junit_fetches: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/storage/v1/" in url:
+                return httpx.Response(200, json={"items": items})
+            if url.endswith("step/junit.xml"):
+                junit_fetches.append(url)
+                return httpx.Response(200, text=JUNIT_XML_WITH_FAILURES)
+            if url.endswith(("build-log.txt", "finished.json")):
+                return httpx.Response(404)
+            return httpx.Response(200, content=b"artifact")
+
+        source = ProwSource(
+            job_name="job",
+            build_id="1",
+            gcs_bucket="bucket",
+            prow_url=_TEST_PROW_URL,
+            gcs_prefix="logs/job/1",
+            artifacts_max_objects=2,
+        )
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert junit_fetches, "JUnit file was hidden behind the object cap"
+        assert result.failures
+        # The cap still bounds the downloadable, non-JUnit listing.
+        assert sorted(p.name for p in (result.extract_path / "a").iterdir()) == [
+            "one.bin",
+            "two.bin",
+        ]
+
+    async def test_shared_report_dir_not_ranked_as_failing_step(
+        self, tmp_path, monkeypatch
+    ):
+        """``artifacts/junit/`` is not a Prow step, so it wins no priority."""
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
+        monkeypatch.setattr(ProwSource, "cleanup", lambda self: None, raising=False)
+        items = [
+            {"name": f"{self._PREFIX}junit/junit_results.xml", "size": "500"},
+            {"name": f"{self._PREFIX}e2e/events.json", "size": "8"},
+            {"name": f"{self._PREFIX}gather/pod.log", "size": "8"},
+            {"name": f"{self._PREFIX}junit/aggregate.log", "size": "8"},
+        ]
+        downloaded: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if url.endswith("prowjob.json"):
+                # Only e2e/gather are steps; junit/ is a shared report dir.
+                return httpx.Response(200, text=PROWJOB_JSON_SHARED_STEPS)
+            if "/storage/v1/" in url:
+                return httpx.Response(200, json={"items": items})
+            if url.endswith("junit_results.xml"):
+                return httpx.Response(200, text=JUNIT_XML_WITH_FAILURES)
+            if url.endswith(("build-log.txt", "finished.json")):
+                return httpx.Response(404)
+            downloaded.append(url.split(f"/{self._PREFIX}", 1)[1])
+            return httpx.Response(200, content=b"artifact")
+
+        source = ProwSource(
+            job_name="job",
+            build_id="1",
+            gcs_bucket="bucket",
+            prow_url=_TEST_PROW_URL,
+            gcs_prefix="logs/job/1",
+        )
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+
+        assert result.failures, "shared report failures still drive the analysis"
+        assert downloaded == [
+            "e2e/events.json",
+            "gather/pod.log",
+            "junit/aggregate.log",
         ]
 
     async def test_fetch_honors_configurable_limits(self, tmp_path, monkeypatch):

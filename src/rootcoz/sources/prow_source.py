@@ -123,6 +123,9 @@ class ProwJobMetadata:
     additional_prs: list[dict[str, Any]] | None = None
     """Additional PRs for batch jobs: ``[{"number": N, "author": "..."}]``."""
 
+    steps: list[str] | None = None
+    """Pod step (container) names — also the top-level artifact directories."""
+
     state: str = ""
     """Job result: ``success``, ``failure``, ``aborted``, ``error``."""
 
@@ -174,6 +177,24 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
                     for p in pulls[1:]
                     if isinstance(p, dict)
                 ]
+
+    # spec.podspec / spec.extra_containers — container names double as the
+    # top-level artifact directory names under artifacts/.
+    # ponytail: containers only; add spec.context / spec.extra_refs if a job
+    # ever reports steps that appear in neither list.
+    containers: list[Any] = []
+    podspec = spec.get("podspec")
+    if isinstance(podspec, dict) and isinstance(podspec.get("containers"), list):
+        containers = list(podspec["containers"])
+    if isinstance(spec.get("extra_containers"), list):
+        containers.extend(spec["extra_containers"])
+    step_names = [
+        c["name"]
+        for c in containers
+        if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]
+    ]
+    if step_names:
+        meta.steps = step_names
 
     # status.state
     status = data.get("status", {})
@@ -528,6 +549,34 @@ async def _list_gcs_objects(
             warnings.append(msg)
 
     return matched
+
+
+async def _list_artifacts(
+    client: httpx.AsyncClient,
+    bucket: str,
+    artifacts_prefix: str,
+    *,
+    filter_fn: Callable[[dict[str, Any]], bool],
+    max_objects: int,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """List artifact objects under *artifacts_prefix*, tolerating GCS errors.
+
+    *filter_fn* is always applied during listing (never after) so *max_objects*
+    caps the objects of interest rather than everything sharing the prefix.
+    """
+    try:
+        return await _list_gcs_objects(
+            client,
+            bucket,
+            artifacts_prefix,
+            filter_fn=filter_fn,
+            max_objects=max_objects,
+            warnings=warnings,
+        )
+    except GCSAccessError as exc:
+        warnings.append(str(exc))
+        return []
 
 
 def _is_junit(item: dict[str, Any]) -> bool:
@@ -1106,17 +1155,14 @@ class ProwSource(CISource):
             return [], None
         artifacts_prefix = f"{gcs_prefix}/artifacts/"
         if objects is None:
-            try:
-                all_objects = await _list_gcs_objects(
-                    client,
-                    self.gcs_bucket,
-                    artifacts_prefix,
-                    max_objects=self._max_list_objects,
-                    warnings=warnings,
-                )
-            except GCSAccessError as exc:
-                warnings.append(str(exc))
-                return [], None
+            all_objects = await _list_artifacts(
+                client,
+                self.gcs_bucket,
+                artifacts_prefix,
+                filter_fn=lambda obj: not _is_junit(obj),
+                max_objects=self._max_list_objects,
+                warnings=warnings,
+            )
         else:
             all_objects = objects
         non_junit = [obj for obj in all_objects if not _is_junit(obj)]
@@ -1756,21 +1802,34 @@ class ProwSource(CISource):
         # 3. List all artifact files from GCS
         # ------------------------------------------------------------------
         artifacts_prefix = f"{gcs_prefix}/artifacts/"
-        try:
-            all_artifact_objects = await _list_gcs_objects(
-                client,
-                self.gcs_bucket,
-                artifacts_prefix,
-                max_objects=self._max_list_objects,
-                warnings=access_warnings,
-            )
-        except GCSAccessError as exc:
-            access_warnings.append(str(exc))
-            all_artifact_objects = []
+        # JUnit discovery is listed on its own path with its own bound, so
+        # non-JUnit artifacts cannot fill the listing budget and hide failures.
+        # ponytail: two listings instead of one combined cap; the extra GCS
+        # metadata call is cheap next to missing test failures.
+        junit_objects = await _list_artifacts(
+            client,
+            self.gcs_bucket,
+            artifacts_prefix,
+            filter_fn=_is_junit,
+            max_objects=_MAX_JUNIT_FILES,
+            warnings=access_warnings,
+        )
+        non_junit_objects = await _list_artifacts(
+            client,
+            self.gcs_bucket,
+            artifacts_prefix,
+            filter_fn=lambda obj: not _is_junit(obj),
+            max_objects=self._max_list_objects,
+            warnings=access_warnings,
+        )
 
-        # Partition into JUnit XMLs and non-JUnit artifacts
-        junit_files = [obj["name"] for obj in all_artifact_objects if _is_junit(obj)]
-        non_junit_objects = [obj for obj in all_artifact_objects if not _is_junit(obj)]
+        junit_files = [obj["name"] for obj in junit_objects]
+        # Step names come from prowjob.json: only a directory the job declares
+        # as a step may be ranked as failing.  Shared report directories
+        # (e.g. artifacts/junit/) are not steps, and unknown ones stay unknown.
+        step_names = (
+            set(self._prowjob_metadata.steps or ()) if self._prowjob_metadata else set()
+        )
 
         logger.info(
             "Found %d JUnit XML file(s) and %d other artifact(s) for %s/%s",
@@ -1837,7 +1896,9 @@ class ProwSource(CISource):
                 all_passed.extend(extraction.passed)
                 all_skipped.extend(extraction.skipped)
                 if extraction.failures:
-                    failed_steps.add(_artifact_step(junit_path, artifacts_prefix))
+                    step = _artifact_step(junit_path, artifacts_prefix)
+                    if step in step_names:
+                        failed_steps.add(step)
 
         logger.info(
             "Extracted %d failure(s), %d passed, %d skipped from %d JUnit file(s) "
@@ -1894,7 +1955,11 @@ class ProwSource(CISource):
                     f"No Prow build artifacts found at gs://{self.gcs_bucket}/{gcs_prefix} "
                     "(check prow_job_name, build_id, gcs_bucket, and gcs_prefix)"
                 )
-            elif not build_state and not build_log and not all_artifact_objects:
+            elif (
+                not build_state
+                and not build_log
+                and not (junit_files or non_junit_objects)
+            ):
                 access_warnings.append(
                     "No build completion metadata or console log found; "
                     "job may still be running or GCS path may be incorrect"
