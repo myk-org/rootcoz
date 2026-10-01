@@ -392,7 +392,7 @@ function generate(seed: number): Generated {
   return { scopes, before, selection, live: genReport(scopes, lists) }
 }
 
-/** The four invariants, asserted after EVERY generated pass. */
+/** The five invariants, asserted after EVERY generated pass. */
 function expectInvariants({ scopes, selection, live }: Generated, state: Record<string, SelectedGroup>, label: string) {
   const groups = Object.values(state)
   if (groups.length === 0) return
@@ -467,22 +467,28 @@ function expectInvariants({ scopes, selection, live }: Generated, state: Record<
   // own scope, so a card exists for it. Cards render
   // `isSelected = !!selection[scopeKey(scope, group.id)]`: a key no card answers to
   // leaves the tests counted in the bulk bar with nothing ticked on screen and
-  // nothing the user can untick. Two things are asserted — the key IS the card's
-  // own lookup key (`g.id` is live in the entry's scope, and the key carries that
-  // scope, so a group id another scope shares cannot answer for it), and the
-  // qualified pair exists in the refreshed result. This is the merge case where
-  // the refresh keeps the EARLIER selected group's id while the fold roots on the
-  // later one, plus the same-signature-across-scopes case where two scopes hand
-  // out ONE id and only the qualified key can keep both entries.
+  // nothing the user can untick. TWO assertions, one per claim above:
+  //   1. the key IS the card's own lookup key — rebuilt here from a live group of
+  //      the ENTRY'S scope, so a group id another scope shares cannot answer for
+  //      it, and a key emitted under a bare id cannot answer for it either;
+  //   2. that qualified pair exists among the refreshed result's live groups, so
+  //      the scope half of the key names a scope the report actually has.
+  // This is the merge case where the refresh keeps the EARLIER selected group's id
+  // while the fold roots on the later one, plus the same-signature-across-scopes
+  // case where two scopes hand out ONE id and only the qualified key keeps both.
   const liveIds = new Set(scopes.flatMap((s) =>
-    scopedGroups(live, s.childJobName, s.childBuildNumber).map((x) => `${s.childJobName}#${s.childBuildNumber}:${x.id}`)))
-  for (const key of Object.keys(state)) {
-    // Pinned as a literal, not taken from `scopeKey`: a test that rebuilds the
+    scopedGroups(live, s.childJobName, s.childBuildNumber).map((x) => `${s.childJobName ?? ''}#${s.childBuildNumber ?? 0}:${x.id}`)))
+  for (const [key, g] of Object.entries(state)) {
+    // Both expected keys are literals, never `scopeKey`: a test that rebuilds the
     // expected key with the helper it is policing cancels out its own bug. The
     // UI sites (`FailureCard`, `GroupSelectAll`, the reducer) are held to this
     // same template by the component test "keeps both cards ticked".
-    void key
-    void liveIds
+    const lookupKeys = new Set(scopedGroups(live, g.childJobName, g.childBuildNumber)
+      .map((x) => `${g.childJobName ?? ''}#${g.childBuildNumber ?? 0}:${x.id}`))
+    expect(lookupKeys.has(key),
+      msg(`P4 ${key} is not the lookup key of a live group in the entry's own scope`)).toBe(true)
+    expect(liveIds.has(key),
+      msg(`P4 ${key} is not a live group of the refreshed result`)).toBe(true)
   }
 }
 
