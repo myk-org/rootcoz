@@ -31,6 +31,7 @@ from rootcoz.sources.prow_source import (
     _list_gcs_objects,
     _parse_junit_failures,
     _parse_prowjob_json,
+    _prioritize_artifacts,
     _raise_if_oversize,
 )
 
@@ -2026,6 +2027,124 @@ class TestIsJunit:
 # ---------------------------------------------------------------------------
 # _download_gcs_artifacts
 # ---------------------------------------------------------------------------
+
+
+class TestArtifactPrioritization:
+    """Failing-step artifacts download before passing/gather artifacts."""
+
+    _PREFIX = "logs/job/1/artifacts/"
+
+    def test_orders_failing_then_passing_then_gather(self):
+        objects = [
+            {"name": f"{self._PREFIX}gather-extra/metrics.tar.gz"},
+            {"name": f"{self._PREFIX}step-pass/pod.log"},
+            {"name": f"{self._PREFIX}step-fail/events.json"},
+            {"name": f"{self._PREFIX}gather-audit-logs/audit.log"},
+            {"name": f"{self._PREFIX}step-fail/pod.log"},
+        ]
+        ordered = _prioritize_artifacts(objects, self._PREFIX, {"step-fail"})
+        assert [o["name"].removeprefix(self._PREFIX) for o in ordered] == [
+            "step-fail/events.json",  # stable within the failing step
+            "step-fail/pod.log",
+            "step-pass/pod.log",
+            "gather-extra/metrics.tar.gz",
+            "gather-audit-logs/audit.log",
+        ]
+        # Input list is not mutated.
+        assert objects[0]["name"].endswith("gather-extra/metrics.tar.gz")
+
+    async def _fetch_order(self, tmp_path, monkeypatch, **kwargs) -> list[str]:
+        """Run a fetch and return the artifact paths in download order."""
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
+        monkeypatch.setattr(ProwSource, "cleanup", lambda self: None, raising=False)
+        items = [
+            {"name": f"{self._PREFIX}step-fail/junit.xml", "size": "100"},
+            {"name": f"{self._PREFIX}step-pass/junit.xml", "size": "100"},
+            {"name": f"{self._PREFIX}step-pass/pod.log", "size": "8"},
+            {"name": f"{self._PREFIX}gather-extra/metrics.tar.gz", "size": "8"},
+            {"name": f"{self._PREFIX}step-fail/pod.log", "size": "8"},
+        ]
+        downloaded: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/storage/v1/" in url:
+                return httpx.Response(200, json={"items": items})
+            if url.endswith("step-fail/junit.xml"):
+                return httpx.Response(200, text=JUNIT_XML_WITH_FAILURES)
+            if url.endswith("step-pass/junit.xml"):
+                return httpx.Response(200, text=JUNIT_XML_NO_FAILURES)
+            if url.endswith((".log", ".tar.gz")):
+                downloaded.append(url.split(f"/{self._PREFIX}", 1)[1])
+                return httpx.Response(200, content=b"artifact")
+            return httpx.Response(404)
+
+        source = ProwSource(
+            job_name="job",
+            build_id="1",
+            gcs_bucket="bucket",
+            prow_url=_TEST_PROW_URL,
+            gcs_prefix="logs/job/1",
+            **kwargs,
+        )
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            await source._fetch_with_client(client)
+        return downloaded
+
+    async def test_fetch_downloads_failing_step_first(self, tmp_path, monkeypatch):
+        downloaded = await self._fetch_order(tmp_path, monkeypatch)
+        assert downloaded == [
+            "step-fail/pod.log",
+            "step-pass/pod.log",
+            "gather-extra/metrics.tar.gz",
+        ]
+
+    async def test_fetch_honors_configurable_limits(self, tmp_path, monkeypatch):
+        """Object cap, per-file size, and total budget come from settings."""
+        monkeypatch.setattr(
+            "tempfile.mkdtemp",
+            lambda suffix=None, prefix=None, dir=None: str(tmp_path / (prefix or "")),
+        )
+        monkeypatch.setattr(ProwSource, "cleanup", lambda self: None, raising=False)
+        items = [
+            {"name": f"{self._PREFIX}a/big.bin", "size": "2000000"},
+            {"name": f"{self._PREFIX}a/one.bin", "size": "600000"},
+            {"name": f"{self._PREFIX}a/two.bin", "size": "600000"},
+            {"name": f"{self._PREFIX}a/three.bin", "size": "600000"},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/storage/v1/" in url:
+                return httpx.Response(200, json={"items": items})
+            if url.endswith(".bin"):
+                return httpx.Response(200, content=b"x" * 600_000)
+            return httpx.Response(404)
+
+        source = ProwSource(
+            job_name="job",
+            build_id="1",
+            gcs_bucket="bucket",
+            prow_url=_TEST_PROW_URL,
+            gcs_prefix="logs/job/1",
+            artifacts_max_objects=3,
+            artifact_max_file_size_mb=1,
+            artifacts_max_size_mb=1,
+        )
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            result = await source._fetch_with_client(client)
+        # big.bin (2 MB) exceeds the 1 MB single-file limit; one.bin fits,
+        # two.bin would blow the 1 MB total budget.
+        assert sorted(p.name for p in (result.extract_path / "a").iterdir()) == [
+            "one.bin"
+        ]
+        assert any("big.bin" in w for w in result.warnings)
+        assert any("max 3 objects" in w for w in result.warnings)
 
 
 class TestDownloadGcsArtifacts:

@@ -25,6 +25,11 @@ import httpx
 from defusedxml.common import DefusedXmlException
 from simple_logger.logger import get_logger
 
+from rootcoz.config import (
+    PROW_ARTIFACT_MAX_FILE_SIZE_MB,
+    PROW_ARTIFACTS_MAX_OBJECTS,
+    PROW_ARTIFACTS_MAX_SIZE_MB,
+)
 from rootcoz.models import BaseTestEntry, FailedTest
 from rootcoz.sources.base import (
     CISource,
@@ -67,18 +72,18 @@ _GITHUB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 # Maximum size for prowjob.json (bytes)
 _MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
 
-# Maximum total download size for non-JUnit artifacts (bytes)
-_MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
-
-# Maximum size for a single non-JUnit artifact file (bytes)
-_MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
+# Byte equivalents of the configurable Prow artifact limits (Settings).
+# Fallbacks for callers that do not pass explicit limits.
+_MB = 1_000_000
+_MAX_SIZE_ARTIFACTS_TOTAL = PROW_ARTIFACTS_MAX_SIZE_MB * _MB
+_MAX_SIZE_SINGLE_ARTIFACT = PROW_ARTIFACT_MAX_FILE_SIZE_MB * _MB
 
 # GCS object listing budgets (JSON API pages + accumulated matches).
 # Field projection (items(name,size) only) keeps pages small; page size
 # halved from 1000→500 as defense-in-depth against 2 MB oversize (#219).
 # Budget: 100 pages × 500 = 50k scannable objects (10× the hard cap).
 _MAX_GCS_LIST_PAGE_BYTES = 2_000_000  # 2 MB per listing response page
-_MAX_GCS_LIST_OBJECTS = 5_000  # hard cap on matched objects returned
+_MAX_GCS_LIST_OBJECTS = PROW_ARTIFACTS_MAX_OBJECTS  # hard cap on matched objects
 _GCS_LIST_PAGE_SIZE = 500  # maxResults per GCS JSON API page
 _GCS_LIST_MAX_PAGES = 100
 
@@ -421,14 +426,15 @@ async def _list_gcs_objects(
     prefix: str,
     *,
     filter_fn: Callable[[dict[str, Any]], bool] | None = None,
+    max_objects: int | None = None,
     warnings: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """List GCS objects under a prefix, optionally filtered.
 
     Listing is bounded: each JSON page is streamed with a byte budget,
     ``maxResults`` is set, field projection limits responses to ``name``
-    and ``size`` only, and accumulation stops at ``_MAX_GCS_LIST_OBJECTS``
-    matched items.
+    and ``size`` only, and accumulation stops at ``max_objects``
+    matched items (defaults to ``_MAX_GCS_LIST_OBJECTS``).
 
     Args:
         client: httpx async client.
@@ -437,11 +443,14 @@ async def _list_gcs_objects(
         filter_fn: Optional predicate applied to each item dict from the
             GCS JSON API.  When provided, only items where ``filter_fn(item)``
             returns ``True`` are included.
+        max_objects: Hard cap on matched objects.  ``None`` uses
+            ``_MAX_GCS_LIST_OBJECTS``.
         warnings: Optional list to append truncation warnings to.
 
     Returns:
         List of GCS object dicts (keys: ``name``, ``size``).
     """
+    object_cap = _MAX_GCS_LIST_OBJECTS if max_objects is None else max_objects
     matched: list[dict[str, Any]] = []
     page_token: str | None = None
     api_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
@@ -496,7 +505,7 @@ async def _list_gcs_objects(
                 continue
             if filter_fn is None or filter_fn(item):
                 matched.append(item)
-                if len(matched) >= _MAX_GCS_LIST_OBJECTS:
+                if len(matched) >= object_cap:
                     truncated = True
                     break
 
@@ -512,7 +521,7 @@ async def _list_gcs_objects(
     if truncated:
         msg = (
             f"GCS listing truncated for {prefix} "
-            f"(max {_MAX_GCS_LIST_OBJECTS} objects / {_GCS_LIST_MAX_PAGES} pages)"
+            f"(max {object_cap} objects / {_GCS_LIST_MAX_PAGES} pages)"
         )
         logger.warning(msg)
         if warnings is not None:
@@ -525,6 +534,43 @@ def _is_junit(item: dict[str, Any]) -> bool:
     """Return ``True`` if the GCS object looks like a JUnit XML file."""
     name = item.get("name", "")
     return name.endswith(".xml") and bool(re.search(r"junit", name, re.IGNORECASE))
+
+
+def _artifact_step(obj_name: str, artifacts_prefix: str) -> str:
+    """Return the Prow step name (top-level artifact directory) for an object."""
+    rel = obj_name.removeprefix(artifacts_prefix)
+    return rel.split("/", 1)[0]
+
+
+def _prioritize_artifacts(
+    objects: list[dict[str, Any]],
+    artifacts_prefix: str,
+    failed_steps: set[str],
+) -> list[dict[str, Any]]:
+    """Sort artifacts by relevance: failing steps, passing steps, ``gather-*``.
+
+    Prow multi-stage jobs store artifacts under ``artifacts/<step-name>/``.
+    The failing step's own directory holds the most relevant diagnostics,
+    while ``gather-*`` steps collect cluster-wide telemetry that is large and
+    rarely needed for root cause analysis.  Sorting is stable, so listing
+    (alphabetical) order is preserved within each group.
+
+    Args:
+        objects: Non-JUnit GCS objects.
+        artifacts_prefix: Prefix the objects were listed under.
+        failed_steps: Step names whose JUnit results contained failures.
+
+    Returns:
+        A new list ordered by relevance.
+    """
+
+    def rank(obj: dict[str, Any]) -> int:
+        step = _artifact_step(obj.get("name", ""), artifacts_prefix)
+        if step.startswith("gather-"):
+            return 2
+        return 0 if step in failed_steps else 1
+
+    return sorted(objects, key=rank)
 
 
 async def _download_gcs_artifacts(
@@ -957,6 +1003,9 @@ class ProwSource(CISource):
         prow_url: str,
         gcs_prefix: str = "",
         get_job_artifacts: bool = True,
+        artifacts_max_size_mb: int = PROW_ARTIFACTS_MAX_SIZE_MB,
+        artifact_max_file_size_mb: int = PROW_ARTIFACT_MAX_FILE_SIZE_MB,
+        artifacts_max_objects: int = PROW_ARTIFACTS_MAX_OBJECTS,
     ) -> None:
         """Store config needed to fetch from Prow/GCS.
 
@@ -969,6 +1018,9 @@ class ProwSource(CISource):
                 For PR jobs this is ``pr-logs/pull/{org}_{repo}/{pr}/{job_name}/{build_id}``.
             get_job_artifacts: When True, download non-JUnit build artifacts
                 for AI exploration.
+            artifacts_max_size_mb: Total download budget in MB.
+            artifact_max_file_size_mb: Max size of a single artifact in MB.
+            artifacts_max_objects: Hard cap on listed GCS objects.
         """
         self.job_name = job_name
         self.build_id = build_id
@@ -980,6 +1032,9 @@ class ProwSource(CISource):
         self._resolution_warnings: list[str] = []
         self.get_job_artifacts = get_job_artifacts
         self._extract_path: Path | None = None
+        self._max_artifacts_bytes = artifacts_max_size_mb * _MB
+        self._max_artifact_bytes = artifact_max_file_size_mb * _MB
+        self._max_list_objects = artifacts_max_objects
 
     @property
     def build_url(self) -> str:
@@ -1038,11 +1093,14 @@ class ProwSource(CISource):
         warnings: list[str],
         *,
         objects: list[dict[str, Any]] | None = None,
+        failed_steps: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], Path | None]:
         """List (unless ``objects`` given) and download non-JUnit artifacts.
 
         ``objects`` may be a pre-listed GCS object set from ``fetch`` so
         fetch/refetch/chat share one download path without a second listing.
+        ``failed_steps`` (Prow step names with JUnit failures) reorders the
+        download so the failing step's diagnostics win the size budget.
         """
         if not self.get_job_artifacts:
             return [], None
@@ -1053,6 +1111,7 @@ class ProwSource(CISource):
                     client,
                     self.gcs_bucket,
                     artifacts_prefix,
+                    max_objects=self._max_list_objects,
                     warnings=warnings,
                 )
             except GCSAccessError as exc:
@@ -1061,6 +1120,8 @@ class ProwSource(CISource):
         else:
             all_objects = objects
         non_junit = [obj for obj in all_objects if not _is_junit(obj)]
+        if failed_steps:
+            non_junit = _prioritize_artifacts(non_junit, artifacts_prefix, failed_steps)
         extract_path: Path | None = None
         if non_junit:
             extract_path = await _download_gcs_artifacts(
@@ -1068,6 +1129,8 @@ class ProwSource(CISource):
                 self.gcs_bucket,
                 non_junit,
                 artifacts_prefix,
+                max_total_bytes=self._max_artifacts_bytes,
+                max_single_bytes=self._max_artifact_bytes,
                 warnings=warnings,
             )
             if extract_path:
@@ -1304,6 +1367,9 @@ class ProwSource(CISource):
             prow_url=merged.prow_url,
             gcs_prefix=body.gcs_prefix or "",
             get_job_artifacts=merged.get_job_artifacts,
+            artifacts_max_size_mb=merged.prow_artifacts_max_size_mb,
+            artifact_max_file_size_mb=merged.prow_artifact_max_file_size_mb,
+            artifacts_max_objects=merged.prow_artifacts_max_objects,
         )
 
     async def persist_fetch_metadata(
@@ -1692,7 +1758,11 @@ class ProwSource(CISource):
         artifacts_prefix = f"{gcs_prefix}/artifacts/"
         try:
             all_artifact_objects = await _list_gcs_objects(
-                client, self.gcs_bucket, artifacts_prefix, warnings=access_warnings
+                client,
+                self.gcs_bucket,
+                artifacts_prefix,
+                max_objects=self._max_list_objects,
+                warnings=access_warnings,
             )
         except GCSAccessError as exc:
             access_warnings.append(str(exc))
@@ -1719,6 +1789,7 @@ class ProwSource(CISource):
         junit_bytes_total = 0
         junit_fetched = 0
         junit_attempts = 0
+        failed_steps: set[str] = set()
         for junit_path in junit_files:
             if junit_fetched >= _MAX_JUNIT_FILES:
                 msg = (
@@ -1765,6 +1836,8 @@ class ProwSource(CISource):
                 all_failures.extend(extraction.failures)
                 all_passed.extend(extraction.passed)
                 all_skipped.extend(extraction.skipped)
+                if extraction.failures:
+                    failed_steps.add(_artifact_step(junit_path, artifacts_prefix))
 
         logger.info(
             "Extracted %d failure(s), %d passed, %d skipped from %d JUnit file(s) "
@@ -1790,6 +1863,7 @@ class ProwSource(CISource):
                     gcs_prefix,
                     access_warnings,
                     objects=non_junit_objects,
+                    failed_steps=failed_steps,
                 )
                 if extract_path:
                     # Stable workspace-relative path (symlink target is extract_path).
@@ -1965,6 +2039,17 @@ class ProwSource(CISource):
             prow_url=prow_url or "",
             gcs_prefix=gcs_prefix,
             get_job_artifacts=get_job_artifacts,
+            artifacts_max_size_mb=getattr(
+                settings, "prow_artifacts_max_size_mb", PROW_ARTIFACTS_MAX_SIZE_MB
+            ),
+            artifact_max_file_size_mb=getattr(
+                settings,
+                "prow_artifact_max_file_size_mb",
+                PROW_ARTIFACT_MAX_FILE_SIZE_MB,
+            ),
+            artifacts_max_objects=getattr(
+                settings, "prow_artifacts_max_objects", PROW_ARTIFACTS_MAX_OBJECTS
+            ),
         )
 
     @classmethod
