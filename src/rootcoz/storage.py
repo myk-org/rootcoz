@@ -2255,8 +2255,8 @@ class ResultPatch(NamedTuple):
     was set and its analysis is still running -- a skip the backfill has to
     revisit, as opposed to a row that was simply already up to date.
     ``comment_rows_ambiguous`` counts comment rows that were left on their old
-    hash because the failures they could belong to ended on different hashes
-    and nothing in the row tells them apart (see
+    hash because the failures that could own that hash did not all end on the
+    same hash -- and nothing in the row tells them apart (see
     :func:`_apply_denormalized_signatures`).
     """
 
@@ -2282,6 +2282,21 @@ def failure_error_text(failure: dict[str, Any]) -> str:
         return error
     trace = failure.get("stack_trace")
     return trace if isinstance(trace, str) else ""
+
+
+def _comment_group_key(update: SignatureUpdate) -> tuple[str, str, int, str]:
+    """Return the key whose comment rows this update can reach.
+
+    A ``comments`` row carries no message and no failure id, so the failures it
+    could have been written about are exactly those sharing its test name,
+    child job and *old* hash.
+    """
+    return (
+        update.test_name,
+        update.child_job_name,
+        update.child_build_number,
+        update.previous_signature,
+    )
 
 
 def _unanimous_signature(updates: Sequence[SignatureUpdate]) -> str:
@@ -2366,6 +2381,7 @@ async def _apply_denormalized_signatures(
     db: aiosqlite.Connection,
     job_id: str,
     updates: Sequence[SignatureUpdate],
+    retained: Sequence[SignatureUpdate] = (),
 ) -> tuple[int, int, int]:
     """Re-signature this job's ``failure_history`` and ``comments`` rows.
 
@@ -2382,13 +2398,21 @@ async def _apply_denormalized_signatures(
     both to the first (see :func:`_resign_rows`).
 
     Comment rows get no such treatment, because a comment carries neither a
-    message nor a failure id: when the failures of one group end on different
-    hashes there is nothing in the row that says which of them it was written
-    against, so the row keeps the old hash and is counted as ambiguous. Being
-    left on a stale hash costs the comment its signature-based lookups (it is
-    still found by test name); being given the wrong hash files it under a
-    failure nobody wrote it about. Guessing is the one option that destroys
-    information the reader cannot check.
+    message nor a failure id: a row's old hash can be owned by several
+    failures, and when they do not all end on the same new hash there is
+    nothing in the row that says which of them it was written against. Such a
+    row keeps the old hash and is counted as ambiguous. Being left on a stale
+    hash costs the comment its signature-based lookups (it is still found by
+    test name); being given the wrong hash files it under a failure nobody
+    wrote it about. Guessing is the one option that destroys information the
+    reader cannot check.
+
+    *retained* carries the failures that keep the hash they already have --
+    already current under the new rules, or too old to recompute. They rewrite
+    no row, but they still own every comment row on their hash, so they join
+    the ambiguity decision for their group: only counting the failures in
+    *updates* would let one changed failure claim the comments of an unchanged
+    or unrecoverable one sharing its old hash.
 
     Returns:
         ``(history_rows_updated, comment_rows_updated, comment_rows_ambiguous)``.
@@ -2413,14 +2437,15 @@ async def _apply_denormalized_signatures(
                 update.previous_signature,
             )
         ].append(update)
-        comment_groups[
-            (
-                update.test_name,
-                update.child_job_name,
-                update.child_build_number,
-                update.previous_signature,
-            )
-        ].append(update)
+        comment_groups[_comment_group_key(update)].append(update)
+
+    # Only a hash some changed failure is leaving makes the retained owners
+    # worth a lookup; any other group holds no rows this call can move.
+    rehashable = {_comment_group_key(update) for update in updates}
+    for update in retained:
+        key = _comment_group_key(update)
+        if key in rehashable:
+            comment_groups[key].append(update)
 
     history = 0
     for (
@@ -2464,6 +2489,7 @@ async def patch_result_json(
     allow_completed: bool = False,
     active_reanalysis_failure_id: str = "",
     denormalized: Sequence[SignatureUpdate] = (),
+    retained: Sequence[SignatureUpdate] = (),
     write_if_changed: bool = False,
     skip_in_flight: bool = False,
 ) -> ResultPatch:
@@ -2474,7 +2500,10 @@ async def patch_result_json(
     ``BEGIN IMMEDIATE`` transaction so concurrent patches are serialized
     by SQLite's write lock.  *denormalized* signature updates are applied in
     that same transaction, keeping ``results`` and ``failure_history`` /
-    ``comments`` in agreement even if the process dies mid-run.
+    ``comments`` in agreement even if the process dies mid-run.  *retained*
+    lists the failures that keep the hash they already carry; no row is
+    rewritten for them, but they decide which ``comments`` rows are safe to
+    move (see :func:`_apply_denormalized_signatures`).
 
     After *patch_fn* returns, denormalized identity columns (``job_name``,
     ``build_number``, ``build_id``) are synced from the patched dict using
@@ -2551,12 +2580,14 @@ async def patch_result_json(
                 params,
             )
             history_rows = comment_rows = comment_rows_ambiguous = 0
-            if denormalized:
+            if denormalized or retained:
                 (
                     history_rows,
                     comment_rows,
                     comment_rows_ambiguous,
-                ) = await _apply_denormalized_signatures(db, job_id, denormalized)
+                ) = await _apply_denormalized_signatures(
+                    db, job_id, denormalized, retained
+                )
             await db.commit()
             return ResultPatch(
                 True,

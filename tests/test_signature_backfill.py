@@ -510,6 +510,71 @@ class TestConcurrentUpdateSafety:
         assert stats["ambiguous_comment_rows"] == 2
         assert stats["ambiguous_comments"] == [{"job_id": "job1", "comment_rows": 2}]
 
+    async def test_an_unchanged_failure_keeps_its_comments_off_the_new_hash(self, db):
+        """A changed failure cannot claim a comment an unchanged one owns.
+
+        Two failures of one test shared an old hash; only one of them is
+        stale. Its comments are indistinguishable from the unchanged
+        failure's, so neither can be moved without guessing.
+        """
+        shared_old = compute_signature("boom", TRACE)
+        stale = _failure("t", "boom", "at other.py:9")
+        stale.error_signature = shared_old
+        current = _failure("t", "boom", TRACE)
+        current.error_signature = shared_old
+        await _store_job(db, "job1", _result(failures=[stale, current]))
+        await db.add_comment(
+            "job1", "t", "about the stale one", error_signature=shared_old
+        )
+        await db.add_comment(
+            "job1", "t", "about the current one", error_signature=shared_old
+        )
+
+        stats = await backfill_signatures(dry_run=False)
+
+        # The stale failure is re-hashed; the unchanged one keeps the shared
+        # hash, so the comments cannot follow the stale one there.
+        assert await _signatures(db, "job1") == [
+            compute_signature("boom", "at other.py:9"),
+            shared_old,
+        ]
+        assert {
+            row["error_signature"] for row in await db.get_comments_for_job("job1")
+        } == {shared_old}
+        assert stats["failures_changed"] == 1
+        assert stats["comment_rows_changed"] == 0
+        assert stats["ambiguous_comment_rows"] == 2
+        assert stats["ambiguous_comments"] == [{"job_id": "job1", "comment_rows": 2}]
+
+    async def test_an_unrecoverable_failure_keeps_its_comments_off_the_new_hash(
+        self, db
+    ):
+        """A failure too old to recompute still owns the comments on its hash."""
+        shared_old = compute_signature("boom", TRACE)
+        stale = _failure("t", "boom", "at other.py:9")
+        stale.error_signature = shared_old
+        legacy = _failure("t", "boom", TRACE)
+        legacy.error_signature = shared_old
+        legacy_dict = legacy.model_dump(mode="json")
+        del legacy_dict["stack_trace"]
+        stale_dict = stale.model_dump(mode="json")
+        await _store_job(db, "job1", {"failures": [stale_dict, legacy_dict]})
+        await db.add_comment(
+            "job1", "t", "about the legacy one", error_signature=shared_old
+        )
+
+        stats = await backfill_signatures(dry_run=False)
+
+        assert await _signatures(db, "job1") == [
+            compute_signature("boom", "at other.py:9"),
+            shared_old,
+        ]
+        assert {
+            row["error_signature"] for row in await db.get_comments_for_job("job1")
+        } == {shared_old}
+        assert stats["comment_rows_changed"] == 0
+        assert stats["ambiguous_comment_rows"] == 1
+
     async def test_an_unambiguous_comment_is_still_rewritten(self, db):
         """One failure per comment group: the rewrite still happens."""
         failures = []
