@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
+from rootcoz.bug_creation import GITHUB_AI_FOOTER
 from rootcoz.config import get_settings
 from rootcoz.feedback import (
     _build_fallback_feedback,
@@ -290,7 +291,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, body, labels = await format_feedback_with_ai(
+            title, body, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert title == "Analyze button not responding"
@@ -310,7 +311,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, _, labels = await format_feedback_with_ai(
+            title, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert title == "Add CSV export feature"
@@ -322,7 +323,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="CLI error")
-            title, body, labels = await format_feedback_with_ai(
+            title, body, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -335,7 +336,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text="not json at all")
-            title, _, labels = await format_feedback_with_ai(
+            title, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -358,7 +359,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, _, labels = await format_feedback_with_ai(
+            title, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert title == "Page load error"
@@ -398,7 +399,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            _, _, labels = await format_feedback_with_ai(
+            _, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert labels == ["enhancement"]
@@ -409,7 +410,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
-            title, _, labels = await format_feedback_with_ai(
+            title, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -422,7 +423,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=False, text="fail")
-            _, _, labels = await format_feedback_with_ai(
+            _, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert labels == ["bug"]
@@ -436,7 +437,7 @@ class TestFormatFeedbackWithAi:
         )
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.side_effect = RuntimeError("AI down")
-            _, _, labels = await format_feedback_with_ai(
+            _, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert labels == ["bug"]
@@ -446,7 +447,7 @@ class TestFormatFeedbackWithAi:
         ai_response = json.dumps({"title": "", "body": "Details", "labels": ["bug"]})
         with patch("rootcoz.feedback.call_ai_once") as mock_ai:
             mock_ai.return_value = AIResult(success=True, text=ai_response)
-            title, _, labels = await format_feedback_with_ai(
+            title, _, labels, _ai_generated = await format_feedback_with_ai(
                 req, settings, ai_provider="claude", ai_model="test-model"
             )
         assert "Feedback:" in title
@@ -481,6 +482,7 @@ class TestGenerateFeedbackPreview:
                 "Dashboard crash on load",
                 "## Bug\n\nDetails...",
                 ["bug"],
+                True,
             )
             result = await generate_feedback_preview(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -489,6 +491,10 @@ class TestGenerateFeedbackPreview:
         assert isinstance(result, FeedbackPreviewResponse)
         assert result.title == "Dashboard crash on load"
         assert _GITHUB_FOOTER_MARKER in result.body
+        # #282: attribution names the RESOLVED pair, not a raw browser value.
+        assert "claude/test-model" in result.body
+        assert (result.ai_provider, result.ai_model) == ("claude", "test-model")
+        assert result.ai_generated is True
         assert result.labels == ["bug"]
 
     async def test_feature_preview_returns_correct_labels(self, settings):
@@ -500,6 +506,7 @@ class TestGenerateFeedbackPreview:
                 "Add dark mode support",
                 "## Feature\n\nDark mode...",
                 ["enhancement"],
+                True,
             )
             result = await generate_feedback_preview(
                 req, settings, ai_provider="claude", ai_model="test-model"
@@ -508,7 +515,40 @@ class TestGenerateFeedbackPreview:
         assert isinstance(result, FeedbackPreviewResponse)
         assert result.title == "Add dark mode support"
         assert _GITHUB_FOOTER_MARKER in result.body
+        assert "claude/test-model" in result.body
         assert result.labels == ["enhancement"]
+
+    async def test_fallback_preview_says_no_ai_model(self, settings):
+        """Fallback template: attribution must not claim an AI wrote it."""
+        req = FeedbackRequest(description="Add dark mode")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = (
+                "Feedback: Add dark mode",
+                "## Feedback",
+                ["enhancement"],
+                False,
+            )
+            result = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="test-model"
+            )
+
+        assert "No AI model generated this issue" in result.body
+        assert "Generated using AI" not in result.body
+        assert result.ai_generated is False
+        # Still reports the pair that was attempted, so the UI can name it.
+        assert (result.ai_provider, result.ai_model) == ("claude", "test-model")
+
+    async def test_attribution_replaces_generic_footer(self, settings):
+        """An echoed generic footer is replaced, never duplicated."""
+        req = FeedbackRequest(description="Boom")
+        with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+            mock_format.return_value = ("T", "Body" + GITHUB_AI_FOOTER, ["bug"], True)
+            result = await generate_feedback_preview(
+                req, settings, ai_provider="claude", ai_model="test-model"
+            )
+
+        assert result.body.count("Generated using AI") == 1
+        assert result.body.startswith("Body")
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +654,7 @@ class TestCreateFeedbackIssue:
                 "Dashboard crash on load",
                 "## Bug\n\nDetails...",
                 ["bug"],
+                True,
             )
             mock_create.return_value = {
                 "url": "https://github.com/myk-org/rootcoz/issues/42",
@@ -643,6 +684,7 @@ class TestCreateFeedbackIssue:
                 "Add dark mode support",
                 "## Feature\n\nDark mode...",
                 ["enhancement"],
+                True,
             )
             mock_create.return_value = {
                 "url": "https://github.com/myk-org/rootcoz/issues/99",
@@ -664,7 +706,7 @@ class TestCreateFeedbackIssue:
             patch("rootcoz.feedback.format_feedback_with_ai") as mock_format,
             patch("rootcoz.feedback.create_github_issue") as mock_create,
         ):
-            mock_format.return_value = ("Title", "Body", ["enhancement"])
+            mock_format.return_value = ("Title", "Body", ["enhancement"], True)
             mock_create.return_value = {
                 "url": "https://github.com/x/y/issues/1",
                 "number": 1,
@@ -747,7 +789,7 @@ class TestFeedbackEndpoint:
         """Preview does not need a GitHub token (AI-only formatting)."""
         for client in self._make_client(temp_db_path, github_token=""):
             with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
-                mock_format.return_value = ("Test title", "Test body", ["bug"])
+                mock_format.return_value = ("Test title", "Test body", ["bug"], True)
                 resp = client.post(
                     "/api/feedback/preview",
                     json={
@@ -776,7 +818,7 @@ class TestFeedbackEndpoint:
     def test_preview_successful(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
             with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
-                mock_format.return_value = ("Test title", "Test body", ["bug"])
+                mock_format.return_value = ("Test title", "Test body", ["bug"], True)
                 resp = client.post(
                     "/api/feedback/preview",
                     json={
@@ -791,6 +833,64 @@ class TestFeedbackEndpoint:
             assert _GITHUB_FOOTER_MARKER in data["body"]
             assert data["labels"] == ["bug"]
 
+    def test_preview_attribution_uses_server_resolved_pair(
+        self, _init_db, temp_db_path
+    ):
+        """#282: attribution names the pair the SERVER resolved (#282), not a raw
+        browser value — nothing sent by the client is echoed back as-is."""
+        for client in self._make_client(
+            temp_db_path,
+            github_token=_TEST_GITHUB_TOKEN,
+            ai_provider="claude",
+            ai_model="test-model",
+        ):
+            with patch(
+                "rootcoz.feedback.format_feedback_with_ai",
+                return_value=("T", "B", ["bug"], True),
+            ) as mock_format:
+                resp = client.post(
+                    "/api/feedback/preview", json={"description": "Something broke"}
+                )
+            assert resp.status_code == 200
+            data = resp.json()
+            # No ai_provider/ai_model sent -> server default is resolved and attributed.
+            assert mock_format.call_args.kwargs == {
+                "ai_provider": "claude",
+                "ai_model": "test-model",
+            }
+            assert (data["ai_provider"], data["ai_model"]) == ("claude", "test-model")
+            assert "claude/test-model" in data["body"]
+            assert data["ai_generated"] is True
+
+            with patch(
+                "rootcoz.feedback.format_feedback_with_ai",
+                return_value=("T", "B", ["bug"], True),
+            ) as mock_format:
+                resp = client.post(
+                    "/api/feedback/preview",
+                    json={
+                        "description": "Something broke",
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                    },
+                )
+            assert resp.status_code == 200
+            assert resp.json()["ai_provider"] == "claude"
+
+    def test_preview_rejects_unknown_pair(self, _init_db, temp_db_path):
+        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
+            with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
+                resp = client.post(
+                    "/api/feedback/preview",
+                    json={
+                        "description": "x",
+                        "ai_provider": "not-a-provider",
+                        "ai_model": "nope",
+                    },
+                )
+            assert resp.status_code == 422
+            mock_format.assert_not_called()
+
     def test_preview_feature_returns_enhancement_label(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
             with patch("rootcoz.feedback.format_feedback_with_ai") as mock_format:
@@ -798,6 +898,7 @@ class TestFeedbackEndpoint:
                     "Feature title",
                     "Feature body",
                     ["enhancement"],
+                    True,
                 )
                 resp = client.post(
                     "/api/feedback/preview",

@@ -11671,7 +11671,9 @@ async def preview_feedback(
         raise HTTPException(
             status_code=503, detail="Feedback submission is disabled on this server"
         )
-    ai_provider, ai_model = _resolve_ai_config_values(None, None, request=request)
+    ai_provider, ai_model = _resolve_ai_config_values(
+        body.ai_provider, body.ai_model, request=request
+    )
     token = ai_username.set(request.state.username)
     try:
         ai_provider, ai_model = await _validate_catalog_pair(ai_provider, ai_model)

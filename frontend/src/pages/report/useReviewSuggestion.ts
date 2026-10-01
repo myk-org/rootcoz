@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import { api } from '@/lib/api'
 import { getUsername } from '@/lib/cookies'
 import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { useAiSelection } from './useAiSelection'
 
 /* ------------------------------------------------------------------ */
 /*  Hook                                                               */
@@ -17,6 +18,8 @@ interface UseReviewSuggestionOptions {
 export function useReviewSuggestion({ jobId, testName, childJobName, childBuildNumber }: UseReviewSuggestionOptions) {
   const { reviews } = useReportState()
   const dispatch = useReportDispatch()
+  // Report-scoped selection; empty = backend falls back to settings then the job's params.
+  const { aiProvider, aiModel } = useAiSelection()
   const [showSuggestion, setShowSuggestion] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -31,7 +34,11 @@ export function useReviewSuggestion({ jobId, testName, childJobName, childBuildN
       try {
         const res = await api.post<{ suggests_reviewed: boolean; reason: string }>(
           '/api/analyze-comment-intent',
-          { comment: commentText, job_id: jobId },
+          {
+            comment: commentText,
+            job_id: jobId,
+            ...(aiProvider ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
+          },
         )
         if (res.suggests_reviewed) {
           setShowSuggestion(true)
@@ -40,7 +47,7 @@ export function useReviewSuggestion({ jobId, testName, childJobName, childBuildN
         // AI analysis failed — don't prompt (safe default)
       }
     },
-    [isAlreadyReviewed],
+    [isAlreadyReviewed, jobId, aiProvider, aiModel],
   )
 
   const dismissSuggestion = useCallback(() => {

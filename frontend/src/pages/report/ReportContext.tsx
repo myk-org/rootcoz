@@ -33,6 +33,10 @@ interface ReportState {
   reanalyzedFromJobId: string
   /** Display name of the original job. */
   originJobName: string
+  /** Per-report AI pair chosen for AI-assisted actions (issue generation, comment
+   *  intent). Empty means "no explicit choice" — each surface falls back to its own
+   *  default (the analysis pair, or the server default). */
+  aiSelection: { ai_provider: string; ai_model: string }
 }
 
 type ReportAction =
@@ -56,6 +60,7 @@ type ReportAction =
   | { type: 'INCREMENT_DRAFT_COUNT' }
   | { type: 'DECREMENT_DRAFT_COUNT' }
   | { type: 'SET_RE_ANALYZE_OPEN'; payload: boolean }
+  | { type: 'SET_AI_SELECTION'; payload: { ai_provider: string; ai_model: string } }
   | {
       type: 'OVERRIDE_CLASSIFICATION'
       payload: {
@@ -101,6 +106,7 @@ const initialState: ReportState = {
   localMutationRev: 0,
   reanalyzedFromJobId: '',
   originJobName: '',
+  aiSelection: { ai_provider: '', ai_model: '' },
 }
 
 /**
@@ -235,6 +241,8 @@ function reportReducer(state: ReportState, action: ReportAction): ReportState {
       )
       return { ...state, result: updatedResult }
     }
+    case 'SET_AI_SELECTION':
+      return { ...state, aiSelection: action.payload }
     default:
       return state
   }

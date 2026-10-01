@@ -85,7 +85,7 @@ async def format_feedback_with_ai(
     settings: Settings,
     ai_provider: str = "",
     ai_model: str = "",
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], bool]:
     """Format user feedback into a GitHub issue title, body, and labels using AI.
 
     Args:
@@ -95,7 +95,8 @@ async def format_feedback_with_ai(
         ai_model: Resolved AI model identifier.
 
     Returns:
-        Tuple of (title, body, labels) for the GitHub issue.
+        Tuple of (title, body, labels, ai_generated). ``ai_generated`` is False
+        when the non-AI fallback template was used instead.
     """
     ai_call_timeout = settings.ai_call_timeout
 
@@ -181,7 +182,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
         # feedback formatting should fall back
         logger.warning("AI call failed for feedback formatting: %s", type(exc).__name__)
         title, body = _build_fallback_feedback(request)
-        return title, body, _derive_fallback_labels(request)
+        return title, body, _derive_fallback_labels(request), False
 
     if result.success:
         parsed = _parse_json_response(result.text)
@@ -192,7 +193,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             labels = [lbl for lbl in labels if lbl in _ALLOWED_LABELS]
             if not labels:
                 labels = ["enhancement"]
-            return parsed["title"], parsed["body"], labels
+            return parsed["title"], parsed["body"], labels, True
         logger.debug(
             "AI response JSON parsing failed, using fallback. Output: %s", result.text
         )
@@ -201,7 +202,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
 
     logger.warning("AI formatting failed for feedback, using fallback template")
     title, body = _build_fallback_feedback(request)
-    return title, body, _derive_fallback_labels(request)
+    return title, body, _derive_fallback_labels(request), False
 
 
 def _parse_json_response(text: str) -> dict[str, Any] | None:
@@ -304,15 +305,42 @@ async def generate_feedback_preview(
         ai_model: Resolved AI model identifier.
 
     Returns:
-        FeedbackPreviewResponse with generated title, body, and labels.
+        FeedbackPreviewResponse with generated title, body, labels, and the
+        resolved provider/model used for attribution.
     """
-    title, body, labels = await format_feedback_with_ai(
+    title, body, labels, ai_generated = await format_feedback_with_ai(
         request, settings, ai_provider=ai_provider, ai_model=ai_model
     )
-    # Append AI attribution footer so the user sees it in preview.
-    if GITHUB_AI_FOOTER.strip() not in body:
-        body += GITHUB_AI_FOOTER
-    return FeedbackPreviewResponse(title=title, body=body, labels=labels)
+    # Attribution names the RESOLVED pair the caller resolved server-side, never a
+    # raw client-supplied string (#282): the body travels verbatim to create.
+    body = body.replace(GITHUB_AI_FOOTER, "").rstrip() + feedback_ai_attribution(
+        ai_provider, ai_model, ai_generated=ai_generated
+    )
+    return FeedbackPreviewResponse(
+        title=title,
+        body=body,
+        labels=labels,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        ai_generated=ai_generated,
+    )
+
+
+_NO_AI_ATTRIBUTION = (
+    "\n\n---\n*No AI model generated this issue — the fallback template was used*"
+)
+
+
+def feedback_ai_attribution(
+    ai_provider: str, ai_model: str, *, ai_generated: bool
+) -> str:
+    """Attribution footer naming the resolved provider/model that wrote the issue."""
+    if not ai_generated or not (ai_provider and ai_model):
+        return _NO_AI_ATTRIBUTION
+    return (
+        "\n\n---\n*Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
+        f" — {ai_provider}/{ai_model}*"
+    )
 
 
 _ALLOWED_LABELS: set[str] = {"bug", "enhancement"}

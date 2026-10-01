@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { useEffect } from 'react'
 import { ReportProvider, useReportDispatch } from '../ReportContext'
+import { useAiSelection } from '../useAiSelection'
 import { useReviewSuggestion } from '../useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 
@@ -209,5 +210,58 @@ describe('useReviewSuggestion hook', () => {
       expect(screen.getByTestId('error').textContent).toBe('Network error')
     })
     expect(screen.getByTestId('show').textContent).toBe('false')
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/*  AI pair selection (report-scoped, shared by every AI surface)     */
+/* ------------------------------------------------------------------ */
+
+function AiHarness() {
+  const { aiProvider, aiModel, setAiPair } = useAiSelection('openai', 'gpt-4o')
+  const { maybeSuggest } = useReviewSuggestion({ jobId: 'job-1', testName: 'test-a' })
+  return (
+    <>
+      <span>{aiProvider}/{aiModel}</span>
+      <button data-testid="pick" onClick={() => setAiPair('claude', 'sonnet')}>pick</button>
+      <button data-testid="suggest" onClick={() => void maybeSuggest('fixed in PR #1')}>suggest</button>
+    </>
+  )
+}
+
+describe('report-scoped AI selection', () => {
+  beforeEach(() => {
+    mockPost.mockResolvedValue({ suggests_reviewed: false, reason: '' })
+  })
+
+  it('sends the selected pair to analyze-comment-intent', async () => {
+    render(<ReportProvider><AiHarness /></ReportProvider>)
+    fireEvent.click(screen.getByTestId('pick'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('suggest'))
+    })
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith('/api/analyze-comment-intent', {
+        comment: 'fixed in PR #1',
+        job_id: 'job-1',
+        ai_provider: 'claude',
+        ai_model: 'sonnet',
+      })
+    })
+  })
+
+  it('keeps the last choice on later surfaces instead of reverting to their default', async () => {
+    render(
+      <ReportProvider>
+        <AiHarness />
+        <AiHarness />
+      </ReportProvider>,
+    )
+    fireEvent.click(screen.getAllByTestId('pick')[0])
+    await waitFor(() => {
+      expect(screen.getAllByText('claude/sonnet')).toHaveLength(2)
+    })
+    // Both surfaces read the same page-scoped pair; neither falls back to its default.
+    expect(screen.queryByText('openai/gpt-4o')).toBeNull()
   })
 })

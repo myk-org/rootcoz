@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
 import type {
   FeedbackRequest,
@@ -33,6 +34,10 @@ interface FeedbackDialogProps {
 
 export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [description, setDescription] = useState('')
+  // Local state: the feedback dialog is app-global, not page-scoped, so there is no
+  // shared selection to lift. Empty = server default (resolved server-side).
+  const [aiProvider, setAiProvider] = useState('')
+  const [aiModel, setAiModel] = useState('')
   const [phase, setPhase] = useState<Phase>('form')
   const [issueUrl, setIssueUrl] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
@@ -44,6 +49,8 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [previewTitle, setPreviewTitle] = useState('')
   const [previewBody, setPreviewBody] = useState('')
   const [previewLabels, setPreviewLabels] = useState<string[]>([])
+  // Server-RESOLVED pair for attribution — never the values this dialog sent.
+  const [previewAi, setPreviewAi] = useState({ provider: '', model: '', generated: false })
   // getGithubToken() reads from auth context loaded via /api/user/tokens on login,
   // which mirrors the backend's storage.get_user_tokens() used in the create endpoint.
   const hasGithubToken = !!getGithubToken()
@@ -103,6 +110,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         })),
         page_state: collectPageState(),
         user_agent: navigator.userAgent,
+        ...(aiProvider ? { ai_provider: aiProvider, ai_model: aiModel } : {}),
       }
 
       const res = await api.post<FeedbackPreviewResponse>('/api/feedback/preview', payload)
@@ -110,6 +118,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPreviewTitle(res.title)
       setPreviewBody(res.body)
       setPreviewLabels(res.labels)
+      setPreviewAi({ provider: res.ai_provider ?? '', model: res.ai_model ?? '', generated: res.ai_generated === true })
       setPhase('preview')
     } catch (err) {
       if (gen !== generationRef.current) return
@@ -165,6 +174,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPreviewTitle('')
       setPreviewBody('')
       setPreviewLabels([])
+      setPreviewAi({ provider: '', model: '', generated: false })
     }, 200)
   }
 
@@ -198,6 +208,31 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         {/* Phase 1: Form */}
         {phase === 'form' && (
           <div className="space-y-4">
+            {/* AI for issue generation */}
+            <div className="space-y-2">
+              <span className="text-xs font-display uppercase tracking-widest text-text-tertiary">
+                AI for issue generation
+              </span>
+              <div className="grid grid-cols-2 gap-2">
+                <AnalysisProviderSelect
+                  value={aiProvider}
+                  onChange={(v) => { setAiProvider(v); setAiModel('') }}
+                  forceServer={false}
+                  label="AI Provider for feedback"
+                />
+                <AnalysisModelSelect
+                  provider={aiProvider}
+                  value={aiModel}
+                  onChange={setAiModel}
+                  forceServer={false}
+                  label="AI Model for feedback"
+                />
+              </div>
+              <p className="text-xs text-text-tertiary">
+                Leave unset to use this server&rsquo;s default AI.
+              </p>
+            </div>
+
             {/* Description */}
             <div className="space-y-2">
               <label htmlFor="feedback-description" className="text-xs font-display uppercase tracking-widest text-text-tertiary">
@@ -229,6 +264,11 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         {/* Phase 2: Preview */}
         {phase === 'preview' && (
           <div className="space-y-4">
+            <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
+              {previewAi.generated
+                ? `Generated using AI with ${previewAi.provider}/${previewAi.model}`
+                : 'No AI model generated this issue — the fallback template was used.'}
+            </div>
             <div className="space-y-2">
               <label htmlFor="preview-title" className="text-xs font-display uppercase tracking-widest text-text-tertiary">
                 Title

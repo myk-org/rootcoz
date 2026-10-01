@@ -44,6 +44,12 @@ vi.mock('@/lib/cookies', () => ({
   getGithubToken: () => mockGetGithubToken(),
 }))
 
+// The picker needs auth context; its own behaviour is covered in BugCreationDialog tests.
+vi.mock('@/components/shared/AnalysisAiPicker', () => ({
+  AnalysisProviderSelect: () => <div />,
+  AnalysisModelSelect: () => <div />,
+}))
+
 import { api, getRecentFailedCalls } from '@/lib/api'
 
 const mockPost = api.post as ReturnType<typeof vi.fn>
@@ -62,6 +68,51 @@ describe('FeedbackDialog', () => {
     expect(screen.getByText(/Describe your issue or idea/)).toBeInTheDocument()
     expect(screen.getByLabelText('Description')).toBeInTheDocument()
     expect(screen.getByPlaceholderText('Describe your issue or suggestion...')).toBeInTheDocument()
+  })
+
+  it('omits ai_provider/ai_model so the server default is resolved', async () => {
+    mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: ['bug'] })
+    mockGetFailedCalls.mockReturnValue([])
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'No pair chosen')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
+    expect('ai_provider' in payload).toBe(false)
+    expect('ai_model' in payload).toBe(false)
+  })
+
+  it('shows the server-resolved provider/model in the preview', async () => {
+    mockPost.mockResolvedValue({
+      title: 'T',
+      body: 'B',
+      labels: ['bug'],
+      ai_provider: 'claude',
+      ai_model: 'sonnet',
+      ai_generated: true,
+    })
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'x')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    expect(await screen.findByText('Generated using AI with claude/sonnet')).toBeInTheDocument()
+  })
+
+  it('says no AI model generated the issue when feedback fell back', async () => {
+    mockPost.mockResolvedValue({
+      title: 'T',
+      body: 'B',
+      labels: ['bug'],
+      ai_provider: 'claude',
+      ai_model: 'sonnet',
+      ai_generated: false,
+    })
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'x')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    expect(await screen.findByText(/No AI model generated this issue/)).toBeInTheDocument()
   })
 
   it('disables Preview when description is empty', () => {

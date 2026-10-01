@@ -19,6 +19,11 @@ import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
 import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews } from '@/types'
 import { getGithubToken, getJiraToken, getJiraEmail } from '@/lib/cookies'
 import { useReportDispatch, useRefreshEnrichments } from './ReportContext'
+import { useAiSelection } from './useAiSelection'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { isAnalysisAiAvailable } from '@/lib/analysisAi'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { useAuth } from '@/lib/auth'
 
 type BugTarget = 'github' | 'jira'
 type Phase = 'idle' | 'loading-prompt' | 'prompt' | 'loading' | 'preview' | 'creating' | 'success' | 'error'
@@ -33,8 +38,9 @@ interface BugCreationDialogProps {
   target: BugTarget
   childJobName?: string
   childBuildNumber?: number
-  aiProvider?: string
-  aiModel?: string
+  /** Default AI pair when nothing was chosen yet on this report (the analysis pair). */
+  defaultAiProvider?: string
+  defaultAiModel?: string
   includeLinks?: boolean
   availableRepos?: Array<{ name: string; url: string }>
   defaultProjectKey?: string
@@ -51,14 +57,17 @@ export function BugCreationDialog({
   childJobName,
   childBuildNumber,
   includeLinks = false,
-  aiProvider,
-  aiModel,
+  defaultAiProvider = '',
+  defaultAiModel = '',
   availableRepos,
   defaultProjectKey,
   onIssueCreated,
 }: BugCreationDialogProps) {
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
+  const { canUseServerProviders } = useAuth()
+  const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
+  const { providers, providerStatus } = useProviderCatalog()
   const [phase, setPhase] = useState<Phase>('idle')
   const [issuePrompt, setIssuePrompt] = useState('')
   const [title, setTitle] = useState('')
@@ -78,6 +87,9 @@ export function BugCreationDialog({
   const [customIssueType, setCustomIssueType] = useState('')
 
   const JIRA_ISSUE_TYPES = ['Bug', 'Task', 'Story', 'Epic', 'Sub-task']
+
+  /** No provider selected = server default (resolved server-side), so only gate an explicit pair. */
+  const aiUnavailable = aiProvider.trim() !== '' && !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, false, canUseServerProviders)
 
   const previewPath = target === 'github' ? 'preview-github-issue' : 'preview-jira-bug'
   const createPath = target === 'github' ? 'create-github-issue' : 'create-jira-bug'
@@ -162,8 +174,8 @@ export function BugCreationDialog({
       .post<PreviewIssueResponse>(`/results/${jobId}/${previewPath}`, {
         test_name: testName,
         include_links: includeLinks,
-        ai_provider: aiProvider ?? '',
-        ai_model: aiModel ?? '',
+        ai_provider: aiProvider,
+        ai_model: aiModel,
         child_job_name: childJobName ?? '',
         child_build_number: childBuildNumber ?? 0,
         issue_prompt: issuePrompt,
@@ -264,6 +276,28 @@ export function BugCreationDialog({
         {/* Prompt */}
         {phase === 'prompt' && (
           <div className="space-y-4">
+            {/* AI for issue generation */}
+            <div className="space-y-2">
+              <span className="text-xs font-display uppercase tracking-widest text-text-tertiary">AI for issue generation</span>
+              <div className="grid grid-cols-2 gap-3">
+                <AnalysisProviderSelect
+                  value={aiProvider}
+                  onChange={(v) => setAiPair(v, '')}
+                  forceServer={false}
+                />
+                <AnalysisModelSelect
+                  provider={aiProvider}
+                  value={aiModel}
+                  onChange={(model) => setAiPair(aiProvider, model)}
+                  forceServer={false}
+                />
+              </div>
+              {aiUnavailable && (
+                <p role="alert" className="text-xs text-signal-amber">
+                  The selected AI pair is not available with your credentials. Pick a pair backed by your own AI key, or ask an admin for server access.
+                </p>
+              )}
+            </div>
             <div className="space-y-2">
               <label htmlFor="bug-issue-prompt" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Issue Prompt</label>
               <p className="text-xs text-text-tertiary">Customize the prompt used to generate the issue title and body. Edit or leave as-is, then continue.</p>
@@ -511,7 +545,7 @@ export function BugCreationDialog({
           {phase === 'prompt' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-              <Button onClick={handleContinueFromPrompt}>Continue</Button>
+              <Button onClick={handleContinueFromPrompt} disabled={aiUnavailable}>Continue</Button>
             </div>
           )}
           {(phase === 'success' || phase === 'error') && (

@@ -525,12 +525,20 @@ export interface FeedbackRequest {
   failed_api_calls: { status: number; endpoint: string; error: string }[]
   page_state: { url?: string; active_filters?: string; report_id?: string }
   user_agent: string
+  /** Optional per-request override; omitted = server default. */
+  ai_provider?: string
+  ai_model?: string
 }
 
 export interface FeedbackPreviewResponse {
   title: string
   body: string
   labels: string[]
+  /** Server-RESOLVED pair used for the preview (never a raw client value). */
+  ai_provider: string
+  ai_model: string
+  /** False when the non-AI fallback template was used instead. */
+  ai_generated: boolean
 }
 
 export interface FeedbackCreateRequest {
