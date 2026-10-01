@@ -107,8 +107,10 @@ Create issues from the terminal, including for nested child-job failures:
 rootcoz get-issue-prompt JOB_ID
 rootcoz preview-issue JOB_ID --test "TEST_NAME" --type jira --jira-project-key PROJ
 rootcoz create-issue JOB_ID --test "TEST_NAME" --type jira \
+  --title "Short summary" --body "What failed, and where it was reproduced." \
   --jira-project-key PROJ --jira-issue-type Bug --jira-security-level "Internal"
 rootcoz create-issue JOB_ID --test "TEST_NAME" --type github \
+  --title "Short summary" --body "What failed, and where it was reproduced." \
   --child-job "CHILD_JOB" --child-build 12345
 rootcoz push-reportportal JOB_ID --child-job-name "CHILD_JOB" --child-build-number 12345
 rootcoz push JOB_ID --plugin reportportal --json

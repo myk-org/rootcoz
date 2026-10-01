@@ -425,7 +425,7 @@ Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails
 `AI_PROVIDER` and `AI_MODEL` are resolved as a pair at submit time, and the resolution is strict:
 
 - An **exact** `provider/model` pair that appears in the sidecar catalogue is used as-is.
-- The friendly names `claude`, `gemini`, and `cursor` are **not** provider IDs. Each maps to exactly one sidecar provider (`claude` to `google-vertex-claude`, `gemini` to `google`, `cursor` to any `*-cursor` provider), and that mapping is applied only when the requested model id appears under **exactly one** catalogue provider *and* that provider is the mapped one.
+- The friendly names `claude`, `gemini`, and `cursor` are **not** provider IDs. Each maps to a sidecar provider (`claude` to `google-vertex-claude` or `cli-claude`, `gemini` to `google` or `cli-gemini`, `cursor` to any `*-cursor` provider including `cli-cursor`), and that mapping is applied only when the requested model id appears under **exactly one** catalogue provider *and* that provider is the mapped one.
 - Anything else is rejected with `Unknown Pi-sidecar provider/model pair`, including an id that appears under two providers.
 
 The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticate `AI_PROVIDER=claude`: that key authenticates the `anthropic` provider, while the `claude` alias maps to `google-vertex-claude`, so a literal model id such as `claude-sonnet-4` is rejected unless your sidecar happens to expose it solely under `google-vertex-claude`. Check `rootcoz ai-models` before choosing an id, or set `AI_PROVIDER` to the exact provider ID that endpoint lists alongside the model.
@@ -483,7 +483,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `PEER_AI_CONFIGS` | empty | string | no | no | yes |
    | `PEER_ANALYSIS_MAX_ROUNDS` | `3` | integer 1–10 | no | no | yes |
 
-   `AI_PROVIDER` accepts any exact provider ID that pi-sidecar reports, provided the `provider/model` pair appears in its catalogue. `claude`, `gemini`, and `cursor` are convenience aliases that resolve through the mapping described above; they are not the only accepted values, and the chart's `ai.provider` field says the same. Values are lowercased on load, and legacy `*-cli` names are normalised to their canonical form. To see what your sidecar actually exposes, read the provider list from `GET /api/ai-models`. `PEER_AI_CONFIGS` uses `provider:model,provider:model`; model names may contain commas inside square brackets, for example `cursor:gpt-5.4[context=272k,reasoning=medium]`.
+   `AI_PROVIDER` accepts any exact provider ID that pi-sidecar reports, provided the `provider/model` pair appears in its catalogue. `claude`, `gemini`, and `cursor` are convenience aliases that resolve through the mapping described above; they are not the only accepted values — but the chart's `ai.provider` is more restrictive than the application. `chart/values.schema.json` permits only an empty value or the three aliases, so a discovered ID such as `google` is accepted as `AI_PROVIDER` but rejected by the chart at install time. Values are lowercased on load, and legacy `*-cli` names are normalised to their canonical form. To see what your sidecar actually exposes, read the provider list from `GET /api/ai-models`. `PEER_AI_CONFIGS` uses `provider:model,provider:model`; model names may contain commas inside square brackets, for example `cursor:gpt-5.4[context=272k,reasoning=medium]`.
 
    > **Note:** An unsupported `AI_PROVIDER` value fails at submit time, immediately, even when the model is not yet resolved. Blank provider strings mean "not configured" and defer the error to a clearer message later.
 
@@ -736,7 +736,7 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
 3. **Fill in only what the mode needs.**
 
-   Everything outside the mode's own section is optional and falls back to your server settings.
+   Everything outside the mode's own section is optional and falls back to your server settings. The form sends the additional-repository and peer-provider lists only when they are non-empty, so leaving those fields unfilled does not override a configured server default.
 
    | Field | Appears in | Notes |
    | --- | --- | --- |
@@ -757,7 +757,7 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
 4. **Click `Submit Analysis`.**
 
-   The button stays disabled until the mode's required fields are valid and an AI provider and model are available. `Paste XML` and `Upload File` go straight to the report page; `Jenkins Job` and `Prow Job` open the status page first because they have to reach your CI server and wait for the build.
+   The button stays disabled until the mode's required fields are valid and an AI provider and model are available — with one exception. If a Tests Repo URL is filled and both AI fields are left empty, the form defers the AI choice to the repository's own `.rootcoz/settings.json` and enables the button. `Paste XML` and `Upload File` go straight to the report page; `Jenkins Job` and `Prow Job` open the status page first because they have to reach your CI server and wait for the build.
 
    See [Tracking Analysis Progress](track-analysis-progress.html) for what the status page shows.
 
@@ -1112,12 +1112,12 @@ Use per-job chat and comments when you need to understand one analysis together 
 ## Quick Example
 
 ```bash
-    rootcoz chat init JOB_ID
+    rootcoz chat init JOB_ID --provider claude --model claude-opus-4-6
     rootcoz chat send JOB_ID "Which failures share the same error signature?"
     rootcoz comments add JOB_ID --test "tests.test_auth.test_login" -m "Reproduced locally, see PROJ-1234."
 ```
 
-`chat init` starts the session and is required: `chat send` needs a provider and model selected and returns `409 Start a new chat session first` until you do. Both commands need at least the `reviewer` role.
+`chat init` starts the session and is required: `chat send` needs a provider and model selected and returns `409 Start a new chat session first` until you do. Both `--provider` and `--model` are mandatory options on `chat init` — omitting either fails argument validation before the session is created. Both commands need at least the `reviewer` role.
 
 This asks the job's assistant for a cross-failure answer and leaves the evidence in the result's comment thread for the next reviewer.
 
@@ -1197,7 +1197,7 @@ Check your mention inbox and tracker status from the terminal:
     rootcoz mentions --unread --limit 20
     rootcoz mentions-mark-read --ids 91,92
     rootcoz mentions-mark-all-read
-    rootcoz enrich-comments JOB_ID
+    rootcoz results enrich-comments JOB_ID
 ```
 
 `enrich-comments` refreshes the live status badges for Jira tickets and GitHub PRs found in that job's comments, and `analyze-comment-intent` returns the reviewed/not-reviewed judgment behind the `Mark as reviewed?` prompt:
@@ -1360,8 +1360,10 @@ Create issues from the terminal, including for nested child-job failures:
     rootcoz get-issue-prompt JOB_ID
     rootcoz preview-issue JOB_ID --test "TEST_NAME" --type jira --jira-project-key PROJ
     rootcoz create-issue JOB_ID --test "TEST_NAME" --type jira \
+      --title "Short summary" --body "What failed, and where it was reproduced." \
       --jira-project-key PROJ --jira-issue-type Bug --jira-security-level "Internal"
     rootcoz create-issue JOB_ID --test "TEST_NAME" --type github \
+      --title "Short summary" --body "What failed, and where it was reproduced." \
       --child-job "CHILD_JOB" --child-build 12345
     rootcoz push-reportportal JOB_ID --child-job-name "CHILD_JOB" --child-build-number 12345
     rootcoz push JOB_ID --plugin reportportal --json
@@ -1512,6 +1514,7 @@ Ask RootCoz questions across all jobs when you need trends, summaries, or reusab
     echo
 
     rootcoz auth whoami
+    rootcoz admin-chat init --provider claude --model claude-opus-4-6
     rootcoz admin-chat send "Summarize the top failure trends from the last 7 days."
 ```
 
@@ -1630,7 +1633,7 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
 - `The send button stays disabled in the web UI.`
   The chat session only starts once a valid provider and model pair is selected in the header. Pick both, type a message, and wait for any in-flight reply to finish.
 
-- `rootcoz admin-chat send` fails with an admin error.
+- `rootcoz admin-chat send` fails with an admin error, or returns `409 Start a new chat session first`. The 409 means no session exists yet — run `rootcoz admin-chat init` first, which needs `--provider` and `--model`. A genuine admin error is a different failure: check the caller's role.
   The CLI is not using an admin identity. Confirm it with `rootcoz auth whoami`.
 
 - Server Chat says AI is not configured, or the page never finishes initializing.
@@ -1875,7 +1878,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Username rules | Lowercased, must be non-empty, and must not start with `rootcoz` (that prefix is reserved, including the AI identity `rootcoz-ai`). |
    | Status | The account is created as `active` — admin-created users never go through approval. |
    | API key | Returned once in the response and shown once in the dialog. Copy it before closing. |
-   | Reports flag | Stored exactly as submitted, even for an `admin`. Demoting an admin later does not leave an accidental grant behind. |
+   | Reports flag | Stored exactly as submitted, even for an `admin`. Note that changing a user's role does not clear it: a user created through the API with the flag set keeps the grant after being demoted, so clear it explicitly if that is not what you want. The Settings UI does not offer the flag on admin creation, which is why the UI avoids this case. |
    | Your session | Creating a user does not change or replace your own session. |
 
 3. **Change a role.**
@@ -1999,7 +2002,7 @@ That creates an active operator who can submit analyses, and one server setting 
   The signed-in account is not an admin, or the session predates a role change. Sign out and back in.
 
 - A new registration does not appear as pending.
-  `REQUIRE_APPROVAL` is off, so registrations are created `active` immediately. Turn it on in `Auth & Security` to require approval.
+  `REQUIRE_APPROVAL` is off, so registrations are created `active` immediately. To require approval, set it in the deployment environment — it is a server-only setting, so saving it through Server Settings is rejected with `400 Server-only settings (env var only)` and restart the server afterwards.
 
 - A registered username was rejected.
   Usernames starting with `rootcoz` are reserved. Pick a different username.
@@ -2370,7 +2373,7 @@ For long-lived integrations, open `/api/stream?topics=navbar,results:$JOB` once 
   One path is not on the allowlist. Fetch `GET /api/results/fields` and use an exact path.
 
 - `404` on `/api/results/{job_id}/tests` for tests you expect.
-  Failed tests may live under a child job. Add `child_job_name` and `child_build_number`, and confirm the status filter matches `passed`, `skipped`, or `failed`.
+  A `404` here means the job ID does not exist — the endpoint checks that before applying any filter, so no amount of `child_job_name` or `child_build_number` will help. An existing job that simply has no matching entries returns `200` with an empty `entries` list; to narrow or widen that, confirm the status filter matches `passed`, `skipped`, or `failed`, and add `child_job_name` and `child_build_number` when the tests live under a child job.
 
 - `403` on `POST /analyze` right after registering.
   Your default role is `viewer` or the account is still pending approval. Check `GET /api/auth/me`, then ask an admin to raise your role or approve the account.

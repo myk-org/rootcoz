@@ -1335,7 +1335,7 @@ curl<span class="w"> </span>-s<span class="w"> </span>-H<span class="w"> </span>
 </li>
 <li>
 <p><code>404</code> on <code>/api/results/{job_id}/tests</code> for tests you expect.<br>
-  Failed tests may live under a child job. Add <code>child_job_name</code> and <code>child_build_number</code>, and confirm the status filter matches <code>passed</code>, <code>skipped</code>, or <code>failed</code>.</p>
+  A <code>404</code> here means the job ID does not exist — the endpoint checks that before applying any filter, so no amount of <code>child_job_name</code> or <code>child_build_number</code> will help. An existing job that simply has no matching entries returns <code>200</code> with an empty <code>entries</code> list; to narrow or widen that, confirm the status filter matches <code>passed</code>, <code>skipped</code>, or <code>failed</code>, and add <code>child_job_name</code> and <code>child_build_number</code> when the tests live under a child job.</p>
 </li>
 <li>
 <p><code>403</code> on <code>POST /analyze</code> right after registering.<br>

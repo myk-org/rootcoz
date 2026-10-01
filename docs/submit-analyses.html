@@ -281,7 +281,7 @@
 <ol>
 <li><strong>Fill in only what the mode needs.</strong></li>
 </ol>
-<p>Everything outside the mode's own section is optional and falls back to your server settings.</p>
+<p>Everything outside the mode's own section is optional and falls back to your server settings. The form sends the additional-repository and peer-provider lists only when they are non-empty, so leaving those fields unfilled does not override a configured server default.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -359,7 +359,7 @@
 <ol>
 <li><strong>Click <code>Submit Analysis</code>.</strong></li>
 </ol>
-<p>The button stays disabled until the mode's required fields are valid and an AI provider and model are available. <code>Paste XML</code> and <code>Upload File</code> go straight to the report page; <code>Jenkins Job</code> and <code>Prow Job</code> open the status page first because they have to reach your CI server and wait for the build.</p>
+<p>The button stays disabled until the mode's required fields are valid and an AI provider and model are available — with one exception. If a Tests Repo URL is filled and both AI fields are left empty, the form defers the AI choice to the repository's own <code>.rootcoz/settings.json</code> and enables the button. <code>Paste XML</code> and <code>Upload File</code> go straight to the report page; <code>Jenkins Job</code> and <code>Prow Job</code> open the status page first because they have to reach your CI server and wait for the build.</p>
 <p>See <a href="track-analysis-progress.html">Tracking Analysis Progress</a> for what the status page shows.</p>
 <ol>
 <li><strong>Know what runs after the request is accepted.</strong></li>

@@ -232,6 +232,7 @@
 <span class="nb">echo</span>
 
 rootcoz<span class="w"> </span>auth<span class="w"> </span>whoami
+rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>init<span class="w"> </span>--provider<span class="w"> </span>claude<span class="w"> </span>--model<span class="w"> </span>claude-opus-4-6
 rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class="w"> </span><span class="s2">"Summarize the top failure trends from the last 7 days."</span>
 </code></pre></div>
 
@@ -360,7 +361,7 @@ rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class
   The chat session only starts once a valid provider and model pair is selected in the header. Pick both, type a message, and wait for any in-flight reply to finish.</p>
 </li>
 <li>
-<p><code>rootcoz admin-chat send</code> fails with an admin error.<br>
+<p><code>rootcoz admin-chat send</code> fails with an admin error, or returns <code>409 Start a new chat session first</code>. The 409 means no session exists yet — run <code>rootcoz admin-chat init</code> first, which needs <code>--provider</code> and <code>--model</code>. A genuine admin error is a different failure: check the caller's role.<br>
   The CLI is not using an admin identity. Confirm it with <code>rootcoz auth whoami</code>.</p>
 </li>
 <li>

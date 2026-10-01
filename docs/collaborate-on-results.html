@@ -231,12 +231,12 @@
 <li>For the CLI examples, an authenticated CLI profile. See <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a> for details.</li>
 </ul>
 <h2 id="quick-example">Quick Example</h2>
-<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>init<span class="w"> </span>JOB_ID
+<div class="highlight"><pre><span></span><code>rootcoz<span class="w"> </span>chat<span class="w"> </span>init<span class="w"> </span>JOB_ID<span class="w"> </span>--provider<span class="w"> </span>claude<span class="w"> </span>--model<span class="w"> </span>claude-opus-4-6
 rootcoz<span class="w"> </span>chat<span class="w"> </span>send<span class="w"> </span>JOB_ID<span class="w"> </span><span class="s2">"Which failures share the same error signature?"</span>
 rootcoz<span class="w"> </span>comments<span class="w"> </span>add<span class="w"> </span>JOB_ID<span class="w"> </span>--test<span class="w"> </span><span class="s2">"tests.test_auth.test_login"</span><span class="w"> </span>-m<span class="w"> </span><span class="s2">"Reproduced locally, see PROJ-1234."</span>
 </code></pre></div>
 
-<p><code>chat init</code> starts the session and is required: <code>chat send</code> needs a provider and model selected and returns <code>409 Start a new chat session first</code> until you do. Both commands need at least the <code>reviewer</code> role.</p>
+<p><code>chat init</code> starts the session and is required: <code>chat send</code> needs a provider and model selected and returns <code>409 Start a new chat session first</code> until you do. Both <code>--provider</code> and <code>--model</code> are mandatory options on <code>chat init</code> — omitting either fails argument validation before the session is created. Both commands need at least the <code>reviewer</code> role.</p>
 <p>This asks the job's assistant for a cross-failure answer and leaves the evidence in the result's comment thread for the next reviewer.</p>
 <h2 id="step-by-step">Step-by-Step</h2>
 <ol>
@@ -337,7 +337,7 @@ rootcoz<span class="w"> </span>comments<span class="w"> </span>add<span class="w
 rootcoz<span class="w"> </span>mentions<span class="w"> </span>--unread<span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span>
 rootcoz<span class="w"> </span>mentions-mark-read<span class="w"> </span>--ids<span class="w"> </span><span class="m">91</span>,92
 rootcoz<span class="w"> </span>mentions-mark-all-read
-rootcoz<span class="w"> </span>enrich-comments<span class="w"> </span>JOB_ID
+rootcoz<span class="w"> </span>results<span class="w"> </span>enrich-comments<span class="w"> </span>JOB_ID
 </code></pre></div>
 
 <p><code>enrich-comments</code> refreshes the live status badges for Jira tickets and GitHub PRs found in that job's comments, and <code>analyze-comment-intent</code> returns the reviewed/not-reviewed judgment behind the <code>Mark as reviewed?</code> prompt:</p>

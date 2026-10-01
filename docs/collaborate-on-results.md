@@ -15,12 +15,12 @@ Use per-job chat and comments when you need to understand one analysis together 
 ## Quick Example
 
 ```bash
-rootcoz chat init JOB_ID
+rootcoz chat init JOB_ID --provider claude --model claude-opus-4-6
 rootcoz chat send JOB_ID "Which failures share the same error signature?"
 rootcoz comments add JOB_ID --test "tests.test_auth.test_login" -m "Reproduced locally, see PROJ-1234."
 ```
 
-`chat init` starts the session and is required: `chat send` needs a provider and model selected and returns `409 Start a new chat session first` until you do. Both commands need at least the `reviewer` role.
+`chat init` starts the session and is required: `chat send` needs a provider and model selected and returns `409 Start a new chat session first` until you do. Both `--provider` and `--model` are mandatory options on `chat init` — omitting either fails argument validation before the session is created. Both commands need at least the `reviewer` role.
 
 This asks the job's assistant for a cross-failure answer and leaves the evidence in the result's comment thread for the next reviewer.
 
@@ -100,7 +100,7 @@ rootcoz mentionable-users
 rootcoz mentions --unread --limit 20
 rootcoz mentions-mark-read --ids 91,92
 rootcoz mentions-mark-all-read
-rootcoz enrich-comments JOB_ID
+rootcoz results enrich-comments JOB_ID
 ```
 
 `enrich-comments` refreshes the live status badges for Jira tickets and GitHub PRs found in that job's comments, and `analyze-comment-intent` returns the reviewed/not-reviewed judgment behind the `Mark as reviewed?` prompt:

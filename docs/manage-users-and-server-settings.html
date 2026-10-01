@@ -389,7 +389,7 @@
 </tr>
 <tr>
 <td>Reports flag</td>
-<td>Stored exactly as submitted, even for an <code>admin</code>. Demoting an admin later does not leave an accidental grant behind.</td>
+<td>Stored exactly as submitted, even for an <code>admin</code>. Note that changing a user's role does not clear it: a user created through the API with the flag set keeps the grant after being demoted, so clear it explicitly if that is not what you want. The Settings UI does not offer the flag on admin creation, which is why the UI avoids this case.</td>
 </tr>
 <tr>
 <td>Your session</td>
@@ -668,7 +668,7 @@
 </li>
 <li>
 <p>A new registration does not appear as pending.<br>
-<code>REQUIRE_APPROVAL</code> is off, so registrations are created <code>active</code> immediately. Turn it on in <code>Auth &amp; Security</code> to require approval.</p>
+<code>REQUIRE_APPROVAL</code> is off, so registrations are created <code>active</code> immediately. To require approval, set it in the deployment environment — it is a server-only setting, so saving it through Server Settings is rejected with <code>400 Server-only settings (env var only)</code> and restart the server afterwards.</p>
 </li>
 <li>
 <p>A registered username was rejected.<br>

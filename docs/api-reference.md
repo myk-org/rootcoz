@@ -333,7 +333,7 @@ For long-lived integrations, open `/api/stream?topics=navbar,results:$JOB` once 
   One path is not on the allowlist. Fetch `GET /api/results/fields` and use an exact path.
 
 - `404` on `/api/results/{job_id}/tests` for tests you expect.  
-  Failed tests may live under a child job. Add `child_job_name` and `child_build_number`, and confirm the status filter matches `passed`, `skipped`, or `failed`.
+  A `404` here means the job ID does not exist — the endpoint checks that before applying any filter, so no amount of `child_job_name` or `child_build_number` will help. An existing job that simply has no matching entries returns `200` with an empty `entries` list; to narrow or widen that, confirm the status filter matches `passed`, `skipped`, or `failed`, and add `child_job_name` and `child_build_number` when the tests live under a child job.
 
 - `403` on `POST /analyze` right after registering.  
   Your default role is `viewer` or the account is still pending approval. Check `GET /api/auth/me`, then ask an admin to raise your role or approve the account.

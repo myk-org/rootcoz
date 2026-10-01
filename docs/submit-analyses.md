@@ -37,7 +37,7 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
 3. **Fill in only what the mode needs.**
 
-   Everything outside the mode's own section is optional and falls back to your server settings.
+   Everything outside the mode's own section is optional and falls back to your server settings. The form sends the additional-repository and peer-provider lists only when they are non-empty, so leaving those fields unfilled does not override a configured server default.
 
    | Field | Appears in | Notes |
    | --- | --- | --- |
@@ -58,7 +58,7 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
 4. **Click `Submit Analysis`.**
 
-   The button stays disabled until the mode's required fields are valid and an AI provider and model are available. `Paste XML` and `Upload File` go straight to the report page; `Jenkins Job` and `Prow Job` open the status page first because they have to reach your CI server and wait for the build.
+   The button stays disabled until the mode's required fields are valid and an AI provider and model are available — with one exception. If a Tests Repo URL is filled and both AI fields are left empty, the form defers the AI choice to the repository's own `.rootcoz/settings.json` and enables the button. `Paste XML` and `Upload File` go straight to the report page; `Jenkins Job` and `Prow Job` open the status page first because they have to reach your CI server and wait for the build.
 
    See [Tracking Analysis Progress](track-analysis-progress.html) for what the status page shows.
 

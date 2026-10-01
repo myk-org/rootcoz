@@ -58,7 +58,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Username rules | Lowercased, must be non-empty, and must not start with `rootcoz` (that prefix is reserved, including the AI identity `rootcoz-ai`). |
    | Status | The account is created as `active` — admin-created users never go through approval. |
    | API key | Returned once in the response and shown once in the dialog. Copy it before closing. |
-   | Reports flag | Stored exactly as submitted, even for an `admin`. Demoting an admin later does not leave an accidental grant behind. |
+   | Reports flag | Stored exactly as submitted, even for an `admin`. Note that changing a user's role does not clear it: a user created through the API with the flag set keeps the grant after being demoted, so clear it explicitly if that is not what you want. The Settings UI does not offer the flag on admin creation, which is why the UI avoids this case. |
    | Your session | Creating a user does not change or replace your own session. |
 
 3. **Change a role.**
@@ -182,7 +182,7 @@ That creates an active operator who can submit analyses, and one server setting 
   The signed-in account is not an admin, or the session predates a role change. Sign out and back in.
 
 - A new registration does not appear as pending.  
-  `REQUIRE_APPROVAL` is off, so registrations are created `active` immediately. Turn it on in `Auth & Security` to require approval.
+  `REQUIRE_APPROVAL` is off, so registrations are created `active` immediately. To require approval, set it in the deployment environment — it is a server-only setting, so saving it through Server Settings is rejected with `400 Server-only settings (env var only)` and restart the server afterwards.
 
 - A registered username was rejected.  
   Usernames starting with `rootcoz` are reserved. Pick a different username.
