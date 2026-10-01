@@ -6,6 +6,7 @@ import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import { childJobHashId, expandKey } from '@/lib/childJobHash'
 import { resolveBuildUrl } from '@/lib/utils'
 import { FailureCard } from './FailureCard'
+import { GroupSelectAll } from './GroupSelectAll'
 import { Badge } from '@/components/ui/badge'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { ChevronDown, ChevronRight, ExternalLink, GitFork } from 'lucide-react'
@@ -137,11 +138,12 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
 
           {child.note && <div className="text-xs text-signal-orange">{child.note}</div>}
 
-          {groups.length >= 2 && (
-            <div className="flex justify-end">
+          <div className="flex items-center justify-between gap-3">
+            <GroupSelectAll groups={groups} scopeLabel={`${child.job_name} #${child.build_number}`} childJobName={child.job_name} childBuildNumber={child.build_number} />
+            {groups.length >= 2 && (
               <ExpandCollapseButtons onExpandAll={expandAllFailures} onCollapseAll={collapseAllFailures} />
-            </div>
-          )}
+            )}
+          </div>
 
           <div className="space-y-3" key={failureRemountKey}>
             {groups.map((g, i) => (

@@ -10,6 +10,8 @@ import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import type { ResultResponse, CommentsAndReviews, AiModelsResponse } from '@/types'
 import { ReportProvider, useReportState, useReportDispatch, useRefreshEnrichments } from './report/ReportContext'
 import { FailureCard } from './report/FailureCard'
+import { BulkUpdateBar } from './report/BulkUpdateBar'
+import { GroupSelectAll } from './report/GroupSelectAll'
 import { ChildJobSection } from './report/ChildJobSection'
 import { PeerAnalysisSummary } from './report/PeerAnalysisSummary'
 import { CrossFailurePatterns } from './report/CrossFailurePatterns'
@@ -647,9 +649,12 @@ function ReportContent() {
       {groups.length > 0 && (
         <section>
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-xs font-display uppercase tracking-widest text-text-tertiary">
-              Failures ({(result.failures ?? []).length})
-            </h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-xs font-display uppercase tracking-widest text-text-tertiary">
+                Failures ({(result.failures ?? []).length})
+              </h2>
+              <GroupSelectAll groups={groups} scopeLabel="Failures" />
+            </div>
             {groups.length >= 2 && (
               <ExpandCollapseButtons onExpandAll={expandAllFailures} onCollapseAll={collapseAllFailures} />
             )}
@@ -712,6 +717,7 @@ function ReportContent() {
       </footer>
     </div>
       <AllReviewedPrompt jobId={result.job_id} />
+      <BulkUpdateBar />
       {result.request_params && (
         <ReAnalyzeDialog
           open={state.reAnalyzeOpen}
