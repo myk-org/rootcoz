@@ -682,6 +682,13 @@ def backfill_signatures_cmd(
             f"Updated {data['history_rows_changed']} failure_history rows, "
             f"{data['comment_rows_changed']} comment rows."
         )
+    unrecoverable = data["unrecoverable_failures_count"]
+    if unrecoverable:
+        typer.echo(
+            f"{unrecoverable} failure(s) kept their stored signature: their "
+            "inputs predate stack-trace persistence. Sample of "
+            f"{len(data['unrecoverable_failures'])} reported."
+        )
     if dry_run:
         typer.echo("Re-run with --apply to write these changes.")
 

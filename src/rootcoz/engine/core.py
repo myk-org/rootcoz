@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import threading
-import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -823,37 +822,23 @@ def compute_signature(error_message: str, stack_trace: str) -> str:
 #: :func:`normalization_rules_version` cannot observe on its own.
 SIGNATURE_ALGORITHM_VERSION = 1
 
-
-def _code_fingerprint(code: types.CodeType) -> str:
-    """Return a stable fingerprint of a code object and its nested constants.
-
-    ``repr(code)`` embeds the object's memory address, so nested code objects
-    (closures, comprehensions, lambdas) are recursed into rather than formatted.
-    """
-    return "\x1f".join(
-        [
-            repr(code.co_code),
-            repr(code.co_names),
-            repr(
-                [
-                    _code_fingerprint(c) if isinstance(c, types.CodeType) else repr(c)
-                    for c in code.co_consts
-                ]
-            ),
-        ]
-    )
-
-
-def _callable_fingerprint(func: Callable[..., Any]) -> str:
-    """Fingerprint a callable by what its implementation does.
-
-    A callable's qualified name says nothing about its behaviour, so two
-    implementations sharing a name must not share a migration fingerprint.
-    """
-    code = getattr(func, "__code__", None)
-    if isinstance(code, types.CodeType):
-        return _code_fingerprint(code)
-    return repr(func)
+#: Fixed texts the normalization chain is probed with: one per pattern kind, so
+#: any rule change shows up in the probe output. The fingerprint is behaviour
+#: rather than bytecode because ``co_code`` differs between CPython versions and
+#: ``co_consts`` carries docstrings -- hashing either would re-trigger a full
+#: backfill on an interpreter upgrade or a docstring edit.
+_SIGNATURE_PROBE_TEXTS: tuple[str, ...] = (
+    (
+        "HTTPError 502\nDate: Sun, 31 May 2026 06:50:48 GMT\nContent-Length: 812\n"
+        "X-Request-Id: 9c1f2b7a-1111-2222-3333-444455556666"
+    ),
+    "GET /x\nX-Error-Code: quota-exceeded",
+    "AssertionError: expected 2026-05-31T06:50:48.123Z but got 2026-06-01 07:00:00",
+    (
+        "Timeout in pod virt-launcher-7f8b9c build/123 (#456) commit "
+        "7f3c8a1b2c40deadbeef at 0x7f3c8a1b2c40 (Jan 5 2026 03:04:05)"
+    ),
+)
 
 
 def normalization_rules_version() -> str:
@@ -862,20 +847,30 @@ def normalization_rules_version() -> str:
     Used as a migration key so the signature backfill runs automatically
     whenever signature behaviour changes -- no version number for a human to
     remember bumping. Covers the whole chain, not just the pattern table: every
-    pattern's text and flags, each replacement callable's *implementation*,
+    pattern's text and flags, what each rule does to fixed probe texts (so a
+    replacement callable's body counts without hashing its bytecode),
     ``normalize_for_signature`` itself, the ``compute_signature`` formula, and
     the explicit :data:`SIGNATURE_ALGORITHM_VERSION` lever. The digest is
     returned in full -- the migration key column is unrestricted text.
     """
     parts = [str(SIGNATURE_ALGORITHM_VERSION)]
     for pattern, replacement in _NORMALIZE_PATTERNS:
-        if callable(replacement):
-            replacement_text = _callable_fingerprint(replacement)
-        else:
-            replacement_text = str(replacement)
-        parts.append(f"{pattern.pattern}\x1f{pattern.flags}\x1f{replacement_text}")
-    parts.append(_callable_fingerprint(normalize_for_signature))
-    parts.append(_callable_fingerprint(compute_signature))
+        parts.append(f"{pattern.pattern}\x1f{pattern.flags}")
+        parts.append(
+            "\x1f".join(
+                pattern.sub(replacement, text) for text in _SIGNATURE_PROBE_TEXTS
+            )
+        )
+    parts.append(
+        "\x1f".join(normalize_for_signature(text) for text in _SIGNATURE_PROBE_TEXTS)
+    )
+    probes = _SIGNATURE_PROBE_TEXTS
+    parts.append(
+        "\x1f".join(
+            compute_signature(text, trace)
+            for text, trace in zip(probes, probes[1:] + probes[:1], strict=True)
+        )
+    )
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 

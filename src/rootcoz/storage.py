@@ -2269,6 +2269,11 @@ async def _apply_denormalized_signatures(
     interrupted backfill can never leave a re-hashed result pointing at
     history rows that still carry the old hash.
 
+    Every update is selected by the hash the row currently holds -- the message
+    alone is not an identity: signatures cover the stack trace too, so two
+    failures can share a test name and message and differ only in trace, and
+    matching by message would write one failure's hash onto the other's row.
+
     Returns:
         ``(history_rows_updated, comment_rows_updated)``.
     """
@@ -2281,7 +2286,7 @@ async def _apply_denormalized_signatures(
         )
         cursor = await db.execute(
             f"UPDATE failure_history SET error_signature = ? "
-            f"WHERE {identity} AND error_message = ?",
+            f"WHERE {identity} AND error_message = ? AND error_signature = ?",
             (
                 update.new_signature,
                 job_id,
@@ -2289,6 +2294,7 @@ async def _apply_denormalized_signatures(
                 update.child_job_name,
                 update.child_build_number,
                 update.error_message,
+                update.previous_signature,
             ),
         )
         history += cursor.rowcount or 0
@@ -2319,6 +2325,7 @@ async def patch_result_json(
     active_reanalysis_failure_id: str = "",
     denormalized: Sequence[SignatureUpdate] = (),
     write_if_changed: bool = False,
+    skip_in_flight: bool = False,
 ) -> ResultPatch:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
@@ -2339,6 +2346,10 @@ async def patch_result_json(
     permits completed jobs when a reanalysis updates clone progress. Identified
     re-analysis updates require a running failure regardless of parent status.
     ``write_if_changed`` skips the write when *patch_fn* changed nothing.
+    ``skip_in_flight`` leaves jobs whose analysis is still running
+    (:data:`ACTIVE_STATUSES`) to that analysis, which writes current-rule
+    signatures when it saves; used by the signature backfill, whose read of the
+    stored result would otherwise be stale by the time it commits.
 
     Returns:
         The patch outcome (see :class:`ResultPatch`).
@@ -2353,6 +2364,7 @@ async def patch_result_json(
             if (
                 not row
                 or not row[0]
+                or (skip_in_flight and row[1] in ACTIVE_STATUSES)
                 or (
                     skip_terminal
                     and (

@@ -60,7 +60,7 @@ def _build_failure_context(failure: FailureAnalysis) -> dict[str, Any]:
         }
     context: dict[str, Any] = {
         "test_name": failure.test_name or "",
-        "error": failure.error or "",
+        "error": failure.display_error,
         "classification": analysis.classification or "",
         "details": analysis.details or "",
         "code_fix": code_fix,

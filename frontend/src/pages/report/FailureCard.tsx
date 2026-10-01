@@ -226,6 +226,10 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const rep = group.tests[0]
   const usage = rep.token_usage
   const analysis = rep.analysis
+  // `error` holds the message the source reported, which is empty for
+  // trace-only failures; the trace stands in for display only, never for the
+  // signature the backend hashes (mirrors FailureAnalysis.display_error).
+  const displayError = rep.error || rep.stack_trace || ''
 
   const { showSuggestion: showBugReviewSuggestion, loading: bugReviewLoading, error: bugReviewError, maybeSuggest: maybeSuggestBugReview, dismissSuggestion: dismissBugReviewSuggestion, confirmSuggestion: confirmBugReviewSuggestion } = useReviewSuggestion({
     jobId,
@@ -507,9 +511,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
 
             {/* Error */}
             <div>
-              <CopyableSectionHeader title="Error" content={rep.error} sectionId="error" copiedSection={copiedSection} onCopy={copyToClipboard} />
+              <CopyableSectionHeader title="Error" content={displayError} sectionId="error" copiedSection={copiedSection} onCopy={copyToClipboard} />
               <pre className="overflow-x-auto rounded-md bg-signal-red/5 border border-signal-red/20 p-3 text-xs text-signal-red font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
-                {rep.error}
+                {displayError}
               </pre>
             </div>
 
