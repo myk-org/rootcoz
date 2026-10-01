@@ -812,6 +812,24 @@ def compute_signature(error_message: str, stack_trace: str) -> str:
     return hashlib.sha256(signature_text.encode()).hexdigest()
 
 
+def normalization_rules_version() -> str:
+    """Return a stable fingerprint of the current normalization rules.
+
+    Used as a migration key so the signature backfill runs automatically
+    whenever the rules change -- no version number for a human to remember
+    bumping. Any edit to ``_NORMALIZE_PATTERNS`` (pattern, flags or
+    replacement) yields a new fingerprint and triggers a backfill.
+    """
+    parts = []
+    for pattern, replacement in _NORMALIZE_PATTERNS:
+        if callable(replacement):
+            replacement_text = getattr(replacement, "__qualname__", repr(replacement))
+        else:
+            replacement_text = str(replacement)
+        parts.append(f"{pattern.pattern}\x1f{pattern.flags}\x1f{replacement_text}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
 def get_failure_signature(failure: FailedTest) -> str:
     """Create a signature for grouping identical failures.
 

@@ -21,14 +21,20 @@ import logging
 from collections.abc import Callable, Iterator
 from typing import Any
 
-from rootcoz.engine.core import compute_signature
+from rootcoz.engine.core import compute_signature, normalization_rules_version
 from rootcoz.storage import (
     list_all_result_json,
+    mark_migration_applied,
+    migration_applied,
     patch_result_json,
     update_denormalized_signatures,
 )
 
 logger = logging.getLogger(__name__)
+
+# Migration key prefix. The fingerprint of the normalization rules is appended,
+# so any rule edit produces a new key and re-runs the backfill exactly once.
+MIGRATION_KEY_PREFIX = "failure-signatures-"
 
 
 class BackfillStats:
@@ -113,6 +119,38 @@ def _make_updater(source: dict[str, Any]) -> Callable[[dict[str, Any]], None]:
         data.update(source)
 
     return _update
+
+
+async def ensure_signatures_current() -> dict[str, Any] | None:
+    """Re-hash stored signatures if the normalization rules have changed.
+
+    Gated on a fingerprint of ``_NORMALIZE_PATTERNS``, so this runs itself on
+    startup after any rule change and never needs an admin to remember an
+    operational step -- and, running post-deploy, it always uses the rules the
+    running server is actually applying.
+
+    Returns the backfill stats, or None when already current.
+
+    The gate is a single "applied" key. A crash mid-backfill leaves the key
+    unset so the next startup retries; because recomputation is idempotent a
+    retry (or two processes racing) is safe, just redundant.
+    """
+    key = MIGRATION_KEY_PREFIX + normalization_rules_version()
+    if await migration_applied(key):
+        return None
+    logger.info(
+        "Failure signature normalization changed (%s) - recomputing stored signatures",
+        key,
+    )
+    stats = await backfill_signatures(dry_run=False)
+    await mark_migration_applied(key)
+    logger.info(
+        "Signature backfill complete: %s/%s failures re-hashed across %s jobs",
+        stats["failures_changed"],
+        stats["failures_scanned"],
+        stats["jobs_scanned"],
+    )
+    return stats
 
 
 async def backfill_signatures(*, dry_run: bool = True) -> dict[str, Any]:

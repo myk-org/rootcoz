@@ -8091,3 +8091,20 @@ async def update_denormalized_signatures(
             await db.rollback()
             raise
     return history, comments
+
+
+async def migration_applied(key: str) -> bool:
+    """Return True if the migration *key* has already been applied.
+
+    Connection-opening counterpart of the internal ``_migration_applied``,
+    for callers outside this module (e.g. the signature backfill gate).
+    """
+    async with _connect_db() as db:
+        return await _migration_applied(db, key)
+
+
+async def mark_migration_applied(key: str) -> None:
+    """Record that migration *key* has been applied. Idempotent."""
+    async with _connect_db() as db:
+        await _mark_migration_applied(db, key)
+        await db.commit()

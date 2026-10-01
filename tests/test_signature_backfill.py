@@ -214,3 +214,69 @@ class TestBackfillSignatures:
         stored = (await db.get_result("job1"))["result"]
         nested = stored["child_job_analyses"][0]["failures"][0]
         assert nested["error_signature"] == compute_signature(message, "trace")
+
+
+class TestNormalizationRulesVersion:
+    def test_is_stable_across_calls(self):
+        from rootcoz.engine.core import normalization_rules_version
+
+        assert normalization_rules_version() == normalization_rules_version()
+
+    def test_changes_when_a_rule_changes(self, monkeypatch):
+        import re
+
+        from rootcoz.engine import core
+        from rootcoz.engine.core import normalization_rules_version
+
+        before = normalization_rules_version()
+        monkeypatch.setattr(
+            core,
+            "_NORMALIZE_PATTERNS",
+            core._NORMALIZE_PATTERNS + [(re.compile(r"NEW-NOISE-\d+"), "<NEW>")],
+        )
+        assert normalization_rules_version() != before
+
+    def test_changes_when_a_replacement_callable_changes(self, monkeypatch):
+        from rootcoz.engine import core
+        from rootcoz.engine.core import normalization_rules_version
+
+        before = normalization_rules_version()
+
+        def _other(match):
+            return "x"
+
+        monkeypatch.setattr(
+            core,
+            "_NORMALIZE_PATTERNS",
+            core._NORMALIZE_PATTERNS + [(__import__("re").compile(r"^$"), _other)],
+        )
+        assert normalization_rules_version() != before
+
+
+class TestEnsureSignaturesCurrent:
+    async def test_runs_when_no_marker_and_marks_it(self, db):
+        from rootcoz.engine.core import normalization_rules_version
+        from rootcoz.signature_backfill import (
+            MIGRATION_KEY_PREFIX,
+            ensure_signatures_current,
+        )
+
+        message = "boom\nDate: Sun, 31 May 2026 06:50:48 GMT"
+        failure = _failure("t", message)
+        failure["error_signature"] = "stale-hash"
+        await _store(db, "job1", {"failures": [failure]})
+
+        stats = await ensure_signatures_current()
+
+        assert stats is not None
+        assert stats["failures_changed"] == 1
+        assert await db.migration_applied(
+            MIGRATION_KEY_PREFIX + normalization_rules_version()
+        )
+
+    async def test_second_call_is_a_noop(self, db):
+        from rootcoz.signature_backfill import ensure_signatures_current
+
+        await _store(db, "job1", {"failures": []})
+        await ensure_signatures_current()
+        assert await ensure_signatures_current() is None
