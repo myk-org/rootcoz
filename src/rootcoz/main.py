@@ -10,6 +10,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time as _time
 import uuid
@@ -1470,6 +1471,15 @@ async def _safe_preload_cursor_models() -> None:
         logger.debug("Failed to preload sidecar models", exc_info=True)
 
 
+def _is_pytest() -> bool:
+    """Whether this process is a pytest run.
+
+    Used only to keep startup *maintenance* work out of unit tests; it never
+    gates production behaviour.
+    """
+    return "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None
+
+
 async def _backfill_signatures_if_stale() -> None:
     """Startup task: re-hash stored failure signatures if the rules changed.
 
@@ -1567,9 +1577,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # Re-hash stored failure signatures when the normalization rules change.
         # Self-gating and self-maintaining (no admin step); runs post-deploy so
         # it always uses the rules this process is applying.
-        task = asyncio.create_task(_backfill_signatures_if_stale())
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        #
+        # Skipped under pytest: a unit test that builds the real app would
+        # otherwise start this maintenance task for real, and because each test
+        # gets a fresh database the migration key is always absent, so it would
+        # run every time, take BEGIN IMMEDIATE write locks mid-test and make the
+        # suite order-dependent. Production still runs it on every start.
+        if not _is_pytest():
+            task = asyncio.create_task(_backfill_signatures_if_stale())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
         waiting_jobs, recovered_jobs = await storage.mark_stale_results_failed()
         for rj in recovered_jobs:
