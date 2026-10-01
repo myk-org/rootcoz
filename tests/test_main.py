@@ -5508,6 +5508,150 @@ class TestReAnalyzeEndpoint:
         assert mock_register.call_args.args[0] == job_id
 
     @pytest.mark.asyncio
+    async def test_bulk_delete_survives_origin_lookup_failure(
+        self, test_client
+    ) -> None:
+        """A failing origin lookup must not cancel the whole bulk deletion."""
+        from rootcoz import storage as storage_module
+
+        await self._create_reanalysis_chain(["re-1", "re-2"])
+        real_get_result = storage_module.get_result
+
+        async def _get_result(job_id: str, *args: object, **kwargs: object):
+            if job_id == "re-1":
+                raise RuntimeError("database is locked")
+            return await real_get_result(job_id, *args, **kwargs)
+
+        with patch("rootcoz.storage.get_result", _get_result):
+            response = test_client.request(
+                "DELETE", "/api/results/bulk", json={"job_ids": ["re-1", "re-2"]}
+            )
+        assert response.status_code == 200
+        assert response.json()["deleted"] == ["re-1", "re-2"]
+        assert test_client.get("/results/re-1").status_code == 404
+        assert test_client.get("/results/re-2").status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_delete_unlinks_link_appended_during_deletion(
+        self, test_client
+    ) -> None:
+        """A link appended while the row is being deleted must not survive."""
+        from rootcoz import storage as storage_module
+
+        await self._create_reanalysis_chain(["re-1"])
+        real_delete = storage_module.delete_job
+
+        async def _delete(job_id: str) -> bool:
+            # Simulates a re-analysis enqueued inside the deletion window:
+            # the link is appended before the row disappears.
+            await storage_module.patch_result_json(
+                "origin-delete",
+                lambda data: (
+                    data["request_params"]
+                    .setdefault("reanalyzed_to_job_ids", [])
+                    .append("re-1")
+                ),
+                require_job_id="re-1",
+            )
+            return await real_delete(job_id)
+
+        with patch("rootcoz.storage.delete_job", _delete):
+            assert test_client.delete("/results/re-1").status_code == 200
+
+        origin = await storage_module.get_result("origin-delete")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == []
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_skips_link_for_deleted_job(self, test_client) -> None:
+        """A re-analysis whose row is gone before the patch leaves no dead link."""
+        from rootcoz import storage as storage_module
+
+        await self._create_origin_job(
+            "job-origin-gone",
+            "http://jenkins/job/my-job/7/",
+            {
+                "summary": "1 failure",
+                "job_name": "my-job",
+                "display_name": "My Job",
+                "build_number": 7,
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "job_name": "my-job",
+                        "build_number": 7,
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                    }
+                ),
+            },
+        )
+
+        async def _save(job_id: str, *args: object, **kwargs: object) -> None:
+            if job_id == "job-origin-gone":
+                return
+            await storage_module.save_result(job_id, *args, **kwargs)
+            # Deleted again right after being saved, before the origin is patched.
+            await storage_module.delete_job(job_id)
+
+        with (
+            patch("rootcoz.main._process_ci_source_analysis"),
+            patch("rootcoz.main.save_result", _save),
+        ):
+            response = test_client.post("/re-analyze/job-origin-gone", json={})
+        assert response.status_code == 202
+        origin = await storage_module.get_result("job-origin-gone")
+        assert "reanalyzed_to_job_ids" not in origin["result"]["request_params"]
+
+    @pytest.mark.asyncio
+    async def test_in_place_analyze_keeps_link_appended_during_save(
+        self, test_client
+    ) -> None:
+        """A link appended between the job read and its save must survive."""
+        from rootcoz import storage as storage_module
+
+        origin_result = {
+            "summary": "1 failure",
+            "job_name": "my-job",
+            "analysis_state": "submitted",
+            "request_params": encrypt_sensitive_fields(
+                {
+                    "analysis_type": "raw",
+                    "failures": [{"test_name": "t", "error_message": "e"}],
+                    "ai_provider": "claude",
+                    "ai_model": "opus",
+                    "reanalyzed_to_job_ids": ["re-1"],
+                }
+            ),
+        }
+        await self._create_origin_job("race-origin", "", origin_result)
+        real_save = storage_module.save_result
+
+        async def _save(job_id: str, *args: object, **kwargs: object) -> None:
+            # Another request re-analyzes the job after we read it, before we save.
+            await storage_module.patch_result_json(
+                job_id,
+                lambda data: data["request_params"]["reanalyzed_to_job_ids"].append(
+                    "re-2"
+                ),
+            )
+            await real_save(job_id, *args, **kwargs)
+
+        with (
+            patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock),
+            patch("rootcoz.main.save_result", _save),
+        ):
+            response = test_client.post(
+                "/results/race-origin/analyze",
+                json={"ai_provider": "claude", "ai_model": "test-model"},
+            )
+        assert response.status_code == 202, response.text
+        origin = await storage_module.get_result("race-origin")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == [
+            "re-1",
+            "re-2",
+        ]
+
+    @pytest.mark.asyncio
     async def test_in_place_analyze_keeps_forward_links(self, test_client) -> None:
         """Analyzing a submitted job in place keeps its recorded re-analyses."""
         origin_result = {
