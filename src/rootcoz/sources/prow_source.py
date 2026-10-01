@@ -25,6 +25,11 @@ import httpx
 from defusedxml.common import DefusedXmlException
 from simple_logger.logger import get_logger
 
+from rootcoz.config import (
+    PROW_ARTIFACT_MAX_FILE_SIZE_MB,
+    PROW_ARTIFACTS_MAX_OBJECTS,
+    PROW_ARTIFACTS_MAX_SIZE_MB,
+)
 from rootcoz.models import BaseTestEntry, FailedTest
 from rootcoz.sources.base import (
     CISource,
@@ -67,18 +72,18 @@ _GITHUB_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 # Maximum size for prowjob.json (bytes)
 _MAX_SIZE_PROWJOB = 2_000_000  # 2 MB
 
-# Maximum total download size for non-JUnit artifacts (bytes)
-_MAX_SIZE_ARTIFACTS_TOTAL = 50_000_000  # 50 MB
-
-# Maximum size for a single non-JUnit artifact file (bytes)
-_MAX_SIZE_SINGLE_ARTIFACT = 10_000_000  # 10 MB
+# Byte equivalents of the configurable Prow artifact limits (Settings).
+# Fallbacks for callers that do not pass explicit limits.
+_MB = 1_000_000
+_MAX_SIZE_ARTIFACTS_TOTAL = PROW_ARTIFACTS_MAX_SIZE_MB * _MB
+_MAX_SIZE_SINGLE_ARTIFACT = PROW_ARTIFACT_MAX_FILE_SIZE_MB * _MB
 
 # GCS object listing budgets (JSON API pages + accumulated matches).
 # Field projection (items(name,size) only) keeps pages small; page size
 # halved from 1000→500 as defense-in-depth against 2 MB oversize (#219).
 # Budget: 100 pages × 500 = 50k scannable objects (10× the hard cap).
 _MAX_GCS_LIST_PAGE_BYTES = 2_000_000  # 2 MB per listing response page
-_MAX_GCS_LIST_OBJECTS = 5_000  # hard cap on matched objects returned
+_MAX_GCS_LIST_OBJECTS = PROW_ARTIFACTS_MAX_OBJECTS  # hard cap on matched objects
 _GCS_LIST_PAGE_SIZE = 500  # maxResults per GCS JSON API page
 _GCS_LIST_MAX_PAGES = 100
 
@@ -117,6 +122,9 @@ class ProwJobMetadata:
 
     additional_prs: list[dict[str, Any]] | None = None
     """Additional PRs for batch jobs: ``[{"number": N, "author": "..."}]``."""
+
+    steps: list[str] | None = None
+    """Pod step (container) names — also the top-level artifact directories."""
 
     state: str = ""
     """Job result: ``success``, ``failure``, ``aborted``, ``error``."""
@@ -169,6 +177,24 @@ def _parse_prowjob_json(raw: str) -> ProwJobMetadata | None:
                     for p in pulls[1:]
                     if isinstance(p, dict)
                 ]
+
+    # spec.pod_spec / spec.extra_containers — container names double as the
+    # top-level artifact directory names under artifacts/.
+    # ponytail: containers only; add spec.context / spec.extra_refs if a job
+    # ever reports steps that appear in neither list.
+    containers: list[Any] = []
+    pod_spec = spec.get("pod_spec")
+    if isinstance(pod_spec, dict) and isinstance(pod_spec.get("containers"), list):
+        containers = list(pod_spec["containers"])
+    if isinstance(spec.get("extra_containers"), list):
+        containers.extend(spec["extra_containers"])
+    step_names = [
+        c["name"]
+        for c in containers
+        if isinstance(c, dict) and isinstance(c.get("name"), str) and c["name"]
+    ]
+    if step_names:
+        meta.steps = step_names
 
     # status.state
     status = data.get("status", {})
@@ -421,14 +447,15 @@ async def _list_gcs_objects(
     prefix: str,
     *,
     filter_fn: Callable[[dict[str, Any]], bool] | None = None,
+    max_objects: int | None = None,
     warnings: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """List GCS objects under a prefix, optionally filtered.
 
     Listing is bounded: each JSON page is streamed with a byte budget,
     ``maxResults`` is set, field projection limits responses to ``name``
-    and ``size`` only, and accumulation stops at ``_MAX_GCS_LIST_OBJECTS``
-    matched items.
+    and ``size`` only, and accumulation stops at ``max_objects``
+    matched items (defaults to ``_MAX_GCS_LIST_OBJECTS``).
 
     Args:
         client: httpx async client.
@@ -437,11 +464,14 @@ async def _list_gcs_objects(
         filter_fn: Optional predicate applied to each item dict from the
             GCS JSON API.  When provided, only items where ``filter_fn(item)``
             returns ``True`` are included.
+        max_objects: Hard cap on matched objects.  ``None`` uses
+            ``_MAX_GCS_LIST_OBJECTS``.
         warnings: Optional list to append truncation warnings to.
 
     Returns:
         List of GCS object dicts (keys: ``name``, ``size``).
     """
+    object_cap = _MAX_GCS_LIST_OBJECTS if max_objects is None else max_objects
     matched: list[dict[str, Any]] = []
     page_token: str | None = None
     api_url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o"
@@ -496,7 +526,7 @@ async def _list_gcs_objects(
                 continue
             if filter_fn is None or filter_fn(item):
                 matched.append(item)
-                if len(matched) >= _MAX_GCS_LIST_OBJECTS:
+                if len(matched) >= object_cap:
                     truncated = True
                     break
 
@@ -512,7 +542,7 @@ async def _list_gcs_objects(
     if truncated:
         msg = (
             f"GCS listing truncated for {prefix} "
-            f"(max {_MAX_GCS_LIST_OBJECTS} objects / {_GCS_LIST_MAX_PAGES} pages)"
+            f"(max {object_cap} objects / {_GCS_LIST_MAX_PAGES} pages)"
         )
         logger.warning(msg)
         if warnings is not None:
@@ -521,10 +551,75 @@ async def _list_gcs_objects(
     return matched
 
 
+async def _list_artifacts(
+    client: httpx.AsyncClient,
+    bucket: str,
+    artifacts_prefix: str,
+    *,
+    filter_fn: Callable[[dict[str, Any]], bool],
+    max_objects: int,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """List artifact objects under *artifacts_prefix*, tolerating GCS errors.
+
+    *filter_fn* is always applied during listing (never after) so *max_objects*
+    caps the objects of interest rather than everything sharing the prefix.
+    """
+    try:
+        return await _list_gcs_objects(
+            client,
+            bucket,
+            artifacts_prefix,
+            filter_fn=filter_fn,
+            max_objects=max_objects,
+            warnings=warnings,
+        )
+    except GCSAccessError as exc:
+        warnings.append(str(exc))
+        return []
+
+
 def _is_junit(item: dict[str, Any]) -> bool:
     """Return ``True`` if the GCS object looks like a JUnit XML file."""
     name = item.get("name", "")
     return name.endswith(".xml") and bool(re.search(r"junit", name, re.IGNORECASE))
+
+
+def _artifact_step(obj_name: str, artifacts_prefix: str) -> str:
+    """Return the Prow step name (top-level artifact directory) for an object."""
+    rel = obj_name.removeprefix(artifacts_prefix)
+    return rel.split("/", 1)[0]
+
+
+def _prioritize_artifacts(
+    objects: list[dict[str, Any]],
+    artifacts_prefix: str,
+    failed_steps: set[str],
+) -> list[dict[str, Any]]:
+    """Sort artifacts by relevance: failing steps, passing steps, ``gather-*``.
+
+    Prow multi-stage jobs store artifacts under ``artifacts/<step-name>/``.
+    The failing step's own directory holds the most relevant diagnostics,
+    while ``gather-*`` steps collect cluster-wide telemetry that is large and
+    rarely needed for root cause analysis.  Sorting is stable, so listing
+    (alphabetical) order is preserved within each group.
+
+    Args:
+        objects: Non-JUnit GCS objects.
+        artifacts_prefix: Prefix the objects were listed under.
+        failed_steps: Step names whose JUnit results contained failures.
+
+    Returns:
+        A new list ordered by relevance.
+    """
+
+    def rank(obj: dict[str, Any]) -> int:
+        step = _artifact_step(obj.get("name", ""), artifacts_prefix)
+        if step.startswith("gather-"):
+            return 2
+        return 0 if step in failed_steps else 1
+
+    return sorted(objects, key=rank)
 
 
 async def _download_gcs_artifacts(
@@ -957,6 +1052,9 @@ class ProwSource(CISource):
         prow_url: str,
         gcs_prefix: str = "",
         get_job_artifacts: bool = True,
+        artifacts_max_size_mb: int = PROW_ARTIFACTS_MAX_SIZE_MB,
+        artifact_max_file_size_mb: int = PROW_ARTIFACT_MAX_FILE_SIZE_MB,
+        artifacts_max_objects: int = PROW_ARTIFACTS_MAX_OBJECTS,
     ) -> None:
         """Store config needed to fetch from Prow/GCS.
 
@@ -969,6 +1067,9 @@ class ProwSource(CISource):
                 For PR jobs this is ``pr-logs/pull/{org}_{repo}/{pr}/{job_name}/{build_id}``.
             get_job_artifacts: When True, download non-JUnit build artifacts
                 for AI exploration.
+            artifacts_max_size_mb: Total download budget in MB.
+            artifact_max_file_size_mb: Max size of a single artifact in MB.
+            artifacts_max_objects: Hard cap on listed GCS objects.
         """
         self.job_name = job_name
         self.build_id = build_id
@@ -980,6 +1081,9 @@ class ProwSource(CISource):
         self._resolution_warnings: list[str] = []
         self.get_job_artifacts = get_job_artifacts
         self._extract_path: Path | None = None
+        self._max_artifacts_bytes = artifacts_max_size_mb * _MB
+        self._max_artifact_bytes = artifact_max_file_size_mb * _MB
+        self._max_list_objects = artifacts_max_objects
 
     @property
     def build_url(self) -> str:
@@ -1038,29 +1142,32 @@ class ProwSource(CISource):
         warnings: list[str],
         *,
         objects: list[dict[str, Any]] | None = None,
+        failed_steps: set[str] | None = None,
     ) -> tuple[list[dict[str, Any]], Path | None]:
         """List (unless ``objects`` given) and download non-JUnit artifacts.
 
         ``objects`` may be a pre-listed GCS object set from ``fetch`` so
         fetch/refetch/chat share one download path without a second listing.
+        ``failed_steps`` (Prow step names with JUnit failures) reorders the
+        download so the failing step's diagnostics win the size budget.
         """
         if not self.get_job_artifacts:
             return [], None
         artifacts_prefix = f"{gcs_prefix}/artifacts/"
         if objects is None:
-            try:
-                all_objects = await _list_gcs_objects(
-                    client,
-                    self.gcs_bucket,
-                    artifacts_prefix,
-                    warnings=warnings,
-                )
-            except GCSAccessError as exc:
-                warnings.append(str(exc))
-                return [], None
+            all_objects = await _list_artifacts(
+                client,
+                self.gcs_bucket,
+                artifacts_prefix,
+                filter_fn=lambda obj: not _is_junit(obj),
+                max_objects=self._max_list_objects,
+                warnings=warnings,
+            )
         else:
             all_objects = objects
         non_junit = [obj for obj in all_objects if not _is_junit(obj)]
+        if failed_steps:
+            non_junit = _prioritize_artifacts(non_junit, artifacts_prefix, failed_steps)
         extract_path: Path | None = None
         if non_junit:
             extract_path = await _download_gcs_artifacts(
@@ -1068,6 +1175,8 @@ class ProwSource(CISource):
                 self.gcs_bucket,
                 non_junit,
                 artifacts_prefix,
+                max_total_bytes=self._max_artifacts_bytes,
+                max_single_bytes=self._max_artifact_bytes,
                 warnings=warnings,
             )
             if extract_path:
@@ -1304,6 +1413,9 @@ class ProwSource(CISource):
             prow_url=merged.prow_url,
             gcs_prefix=body.gcs_prefix or "",
             get_job_artifacts=merged.get_job_artifacts,
+            artifacts_max_size_mb=merged.prow_artifacts_max_size_mb,
+            artifact_max_file_size_mb=merged.prow_artifact_max_file_size_mb,
+            artifacts_max_objects=merged.prow_artifacts_max_objects,
         )
 
     async def persist_fetch_metadata(
@@ -1690,24 +1802,57 @@ class ProwSource(CISource):
         # 3. List all artifact files from GCS
         # ------------------------------------------------------------------
         artifacts_prefix = f"{gcs_prefix}/artifacts/"
-        try:
-            all_artifact_objects = await _list_gcs_objects(
-                client, self.gcs_bucket, artifacts_prefix, warnings=access_warnings
+        # JUnit discovery is listed on its own path with its own bound, so
+        # non-JUnit artifacts cannot fill the listing budget and hide failures.
+        # ponytail: two listings instead of one combined cap; the extra GCS
+        # metadata call is cheap next to missing test failures.
+        junit_objects = await _list_artifacts(
+            client,
+            self.gcs_bucket,
+            artifacts_prefix,
+            filter_fn=_is_junit,
+            # Discovery budget = attempt budget, so reports after the first
+            # _MAX_JUNIT_FILES are still found when earlier ones 404.
+            # _MAX_JUNIT_FILES remains the cap on successful downloads.
+            max_objects=_MAX_JUNIT_FETCH_ATTEMPTS,
+            warnings=access_warnings,
+        )
+        # No listing at all when downloads are disabled — the list would go unused.
+        # `None` (not listed) is kept distinct from `[]` (listed, nothing there) so
+        # downstream checks never claim "no artifacts" for a build they never looked at.
+        non_junit_objects: list[dict[str, Any]] | None = (
+            await _list_artifacts(
+                client,
+                self.gcs_bucket,
+                artifacts_prefix,
+                filter_fn=lambda obj: not _is_junit(obj),
+                max_objects=self._max_list_objects,
+                warnings=access_warnings,
             )
-        except GCSAccessError as exc:
-            access_warnings.append(str(exc))
-            all_artifact_objects = []
+            if self.get_job_artifacts
+            else None
+        )
 
-        # Partition into JUnit XMLs and non-JUnit artifacts
-        junit_files = [obj["name"] for obj in all_artifact_objects if _is_junit(obj)]
-        non_junit_objects = [obj for obj in all_artifact_objects if not _is_junit(obj)]
+        junit_files = [obj["name"] for obj in junit_objects]
+        # Step names come from prowjob.json: only a directory the job declares
+        # as a step may be ranked as failing, so shared report directories
+        # (e.g. artifacts/junit/) are never misranked.  Without metadata, fall
+        # back to directories holding their own artifacts — step-local ones.
+        step_names = (
+            set(self._prowjob_metadata.steps or ()) if self._prowjob_metadata else set()
+        )
+        rankable_steps = step_names or {
+            _artifact_step(obj.get("name", ""), artifacts_prefix)
+            for obj in non_junit_objects or ()
+        }
 
         logger.info(
-            "Found %d JUnit XML file(s) and %d other artifact(s) for %s/%s",
+            "Found %d JUnit XML file(s) and %d other artifact(s) for %s/%s%s",
             len(junit_files),
-            len(non_junit_objects),
+            len(non_junit_objects or ()),
             self.job_name,
             self.build_id,
+            " (non-JUnit listing skipped)" if non_junit_objects is None else "",
         )
 
         # ------------------------------------------------------------------
@@ -1719,6 +1864,7 @@ class ProwSource(CISource):
         junit_bytes_total = 0
         junit_fetched = 0
         junit_attempts = 0
+        failed_steps: set[str] = set()
         for junit_path in junit_files:
             if junit_fetched >= _MAX_JUNIT_FILES:
                 msg = (
@@ -1765,6 +1911,10 @@ class ProwSource(CISource):
                 all_failures.extend(extraction.failures)
                 all_passed.extend(extraction.passed)
                 all_skipped.extend(extraction.skipped)
+                if extraction.failures:
+                    step = _artifact_step(junit_path, artifacts_prefix)
+                    if step in rankable_steps:
+                        failed_steps.add(step)
 
         logger.info(
             "Extracted %d failure(s), %d passed, %d skipped from %d JUnit file(s) "
@@ -1783,13 +1933,14 @@ class ProwSource(CISource):
         # ------------------------------------------------------------------
         extract_path: Path | None = None
         artifacts_context = ""
-        if self.get_job_artifacts and non_junit_objects:
+        if non_junit_objects:
             try:
                 _, extract_path = await self._download_non_junit_artifacts(
                     client,
                     gcs_prefix,
                     access_warnings,
                     objects=non_junit_objects,
+                    failed_steps=failed_steps,
                 )
                 if extract_path:
                     # Stable workspace-relative path (symlink target is extract_path).
@@ -1813,14 +1964,19 @@ class ProwSource(CISource):
                 not build_state
                 and not build_log
                 and not junit_files
-                and not non_junit_objects
+                # `None` = never listed, so absence of artifacts is unproven.
+                and non_junit_objects == []
                 and not self._prowjob_metadata
             ):
                 access_warnings.append(
                     f"No Prow build artifacts found at gs://{self.gcs_bucket}/{gcs_prefix} "
                     "(check prow_job_name, build_id, gcs_bucket, and gcs_prefix)"
                 )
-            elif not build_state and not build_log and not all_artifact_objects:
+            elif (
+                not build_state
+                and not build_log
+                and not (junit_files or non_junit_objects)
+            ):
                 access_warnings.append(
                     "No build completion metadata or console log found; "
                     "job may still be running or GCS path may be incorrect"
@@ -1965,6 +2121,17 @@ class ProwSource(CISource):
             prow_url=prow_url or "",
             gcs_prefix=gcs_prefix,
             get_job_artifacts=get_job_artifacts,
+            artifacts_max_size_mb=getattr(
+                settings, "prow_artifacts_max_size_mb", PROW_ARTIFACTS_MAX_SIZE_MB
+            ),
+            artifact_max_file_size_mb=getattr(
+                settings,
+                "prow_artifact_max_file_size_mb",
+                PROW_ARTIFACT_MAX_FILE_SIZE_MB,
+            ),
+            artifacts_max_objects=getattr(
+                settings, "prow_artifacts_max_objects", PROW_ARTIFACTS_MAX_OBJECTS
+            ),
         )
 
     @classmethod
