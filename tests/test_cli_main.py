@@ -3307,12 +3307,18 @@ class TestAnalyzeSourceFlag:
         assert result.exit_code == 0
         assert "get_job_artifacts" not in mock_client.analyze_file.call_args.kwargs
 
-    def test_analyze_failures_help_uses_error_message(self):
-        """Regression: FailedTest's field is error_message, not error."""
+    def test_analyze_failures_help_uses_error_message(self, mock_client):
+        """Regression: FailedTest's field is error_message, not error.
+
+        mock_client stubs the server resolution. Without it the group callback
+        calls _resolve_server, which exits before help renders when no server
+        is configured, so this test passed only on machines that happened to
+        have a rootcoz config.toml.
+        """
         result = runner.invoke(app, ["analyze", "--help"])
         assert '"error_message"' in result.output
 
-    def test_analyze_source_mentions_raw_in_help(self):
+    def test_analyze_source_mentions_raw_in_help(self, mock_client):
         result = runner.invoke(app, ["analyze", "--help"])
         assert "raw" in result.output
         assert "--build-number" in result.output
