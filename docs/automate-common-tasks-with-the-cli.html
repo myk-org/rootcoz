@@ -379,7 +379,7 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
 <p># Leave a note for the next reviewer
    rootcoz comments add "$JOB_ID" --test "TEST_NAME" --message "Reproduced on the staging pool"
    ```</p>
-<p>If the job is a pipeline parent, add <code>--child-job CHILD_JOB --child-build 12345</code> to every one of those commands so the change lands on the right failure.</p>
+<p>If the job is a pipeline parent, add <code>--child-job CHILD_JOB --child-build 12345</code> to the write commands — <code>results set-reviewed</code>, <code>override-classification</code>, <code>override-pattern</code>, <code>classify</code>, <code>results set-tracked-in</code>, and <code>comments add</code> — so the change lands on the right failure. <code>results review-status</code> takes neither flag, so it always reports across the whole job.</p>
 <ol>
 <li><strong>Push to an exporter.</strong></li>
 </ol>

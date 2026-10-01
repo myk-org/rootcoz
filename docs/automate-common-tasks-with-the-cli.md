@@ -178,7 +178,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
    rootcoz comments add "$JOB_ID" --test "TEST_NAME" --message "Reproduced on the staging pool"
    ```
 
-   If the job is a pipeline parent, add `--child-job CHILD_JOB --child-build 12345` to every one of those commands so the change lands on the right failure.
+   If the job is a pipeline parent, add `--child-job CHILD_JOB --child-build 12345` to the write commands — `results set-reviewed`, `override-classification`, `override-pattern`, `classify`, `results set-tracked-in`, and `comments add` — so the change lands on the right failure. `results review-status` takes neither flag, so it always reports across the whole job.
 
 7. **Push to an exporter.**
 

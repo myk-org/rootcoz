@@ -782,7 +782,7 @@ SECURE_COOKIES=false
 </tr>
 </tbody>
 </table></div>
-<p>Both are normalised on load, so trailing slashes and bucket prefixes are stripped rather than rejected. Both are also request-tunable, so a per-build submission can override the server default.</p>
+<p>Both are validated on load rather than transformed. <code>PROW_URL</code> must start with <code>https://</code>, must contain a hostname, and must not embed credentials (<code>prow_validation.normalize_prow_url</code>) — surrounding whitespace is trimmed, but a trailing slash is left in place, so <code>https://prow.example.com/</code> and <code>https://prow.example.com</code> are both accepted and stay as written. <code>GCS_BUCKET</code> must match <code>[a-z0-9][a-z0-9._-]*</code> after trimming (<code>normalize_gcs_bucket</code>), so a <code>gs://</code> prefix is <strong>rejected</strong> rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.</p>
 <ol>
 <li>
 <p><strong>Server category.</strong></p>

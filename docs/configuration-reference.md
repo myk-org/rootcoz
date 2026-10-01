@@ -146,7 +146,7 @@ Only `AI_PROVIDER` and `AI_MODEL` are hard-required. `docker-compose.yaml` fails
    | `PROW_URL` | empty | string | no | no | yes |
    | `GCS_BUCKET` | empty | string | no | no | yes |
 
-   Both are normalised on load, so trailing slashes and bucket prefixes are stripped rather than rejected. Both are also request-tunable, so a per-build submission can override the server default.
+   Both are validated on load rather than transformed. `PROW_URL` must start with `https://`, must contain a hostname, and must not embed credentials (`prow_validation.normalize_prow_url`) — surrounding whitespace is trimmed, but a trailing slash is left in place, so `https://prow.example.com/` and `https://prow.example.com` are both accepted and stay as written. `GCS_BUCKET` must match `[a-z0-9][a-z0-9._-]*` after trimming (`normalize_gcs_bucket`), so a `gs://` prefix is **rejected** rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.
 
 10. **Server category.**
 
