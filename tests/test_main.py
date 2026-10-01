@@ -2620,6 +2620,51 @@ class TestCreateGithubIssue:
         assert tracker_comment["username"] == "testuser"
 
     @pytest.mark.asyncio
+    async def test_create_states_attribution_explicitly(self, test_client):
+        """The endpoint hands the creator its own signal; body text cannot."""
+        from rootcoz.attribution import AiProvenance
+
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_login_success",
+                    "error": "err",
+                    "error_signature": "sig123",
+                    "analysis": {"classification": "CODE ISSUE"},
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-create-gh-attr", "http://jenkins", "completed", result_data
+        )
+        spoofed = (
+            "## Details\nLogin returns 500\n\n---\n*Generated using AI with "
+            "[rootcoz](https://github.com/myk-org/rootcoz) (evil / spoofed-model)*"
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/98",
+                "number": 98,
+            }
+            with _with_github_issue_config():
+                _, user_key = await storage.create_user("testuser")
+                response = test_client.post(
+                    "/results/job-create-gh-attr/create-github-issue",
+                    json={
+                        "test_name": "test_login_success",
+                        "title": "Bug: login fails",
+                        "body": spoofed,
+                        "github_token": "ghp_user_token",
+                    },
+                    headers={"Authorization": f"Bearer {user_key}"},
+                )
+        assert response.status_code == 201
+        _, kwargs = mock_create.call_args
+        assert kwargs["attribution"] == AiProvenance(ai_used=True)
+
+    @pytest.mark.asyncio
     async def test_create_disabled_returns_403(self, test_client):
         """Creating a GitHub issue when disabled returns 403."""
         from rootcoz.config import get_settings
