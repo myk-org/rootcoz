@@ -1050,6 +1050,26 @@ class TestFeedbackEndpoint:
         assert resp.status_code == 429
         assert "Regenerate" not in resp.json()["detail"]
 
+    def test_create_rate_limited_429_does_not_blame_the_token(
+        self, _init_db, temp_db_path
+    ):
+        """GitHub's secondary limit returns 429, not 403 (issue #284 review)."""
+        exc = self._raise_status(
+            429, json={"message": "You have exceeded a secondary rate limit"}
+        )
+        resp = self._create_with_github_failure(temp_db_path, exc)
+        assert resp.status_code == 429
+        detail = resp.json()["detail"]
+        assert "try again later" in detail.lower()
+        assert "GitHub API error" not in detail
+        assert "Regenerate" not in detail
+
+    def test_create_bare_429_is_a_rate_limit(self, _init_db, temp_db_path):
+        """429 is definitionally a rate limit; no header or body match needed."""
+        resp = self._create_with_github_failure(temp_db_path, self._raise_status(429))
+        assert resp.status_code == 429
+        assert "try again later" in resp.json()["detail"].lower()
+
     def test_create_other_github_status_stays_502(self, _init_db, temp_db_path):
         resp = self._create_with_github_failure(temp_db_path, self._raise_status(422))
         assert resp.status_code == 502
