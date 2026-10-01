@@ -6157,8 +6157,12 @@ async def enrich_comments(
     settings: Settings = _SETTINGS_DEP,
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
-    """Fetch live statuses for GitHub PRs and Jira tickets found in comments."""
-    _require_reviewer(request)
+    """Fetch live statuses for GitHub PRs and Jira tickets found in comments.
+
+    Read-only: no storage writes, no external mutations. Any authenticated user
+    may call it, since the statuses are rendered beside the comment links a
+    viewer can already read.
+    """
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/enrich-comments")
 

@@ -456,7 +456,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
         {expanded && (
           <CardContent className="space-y-4 border-t border-border-muted pt-4">
             {/* Review-all toggle for groups */}
-            {group.count > 1 && (
+            {!isViewer && group.count > 1 && (
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleReviewAll}

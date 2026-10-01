@@ -1182,7 +1182,6 @@ _REVIEWER_GUARDED_ROUTES = [
         "/results/job-v/create-jira-bug",
         {"test_name": "t1", "title": "t", "body": "b"},
     ),
-    ("POST", "/results/job-v/enrich-comments", None),
     ("PUT", "/results/job-v/reviewed", {"test_name": "t1", "reviewed": True}),
     ("PUT", "/results/job-v/tags", {"tags": ["smoke"]}),
     ("PUT", "/api/user/tokens", {"github_token": "ghp_test"}),
@@ -1522,6 +1521,21 @@ class TestRBACRoles:
         resp = client.request(method, path, json=body, cookies=viewer_cookies)
         assert resp.status_code == 403
         assert "reviewer" in resp.json()["detail"].lower()
+
+    def test_viewer_can_enrich_comments(self, client):
+        """enrich-comments is read-only, so viewers must reach it (issue #289).
+
+        Guards it against a future reviewer guard silently dropping the live
+        GitHub/Jira badges rendered beside comment links.
+        """
+        _, viewer_cookies = _create_user_with_role(client, "viewer_enrich", "viewer")
+        resp = client.post(
+            "/results/job-v/enrich-comments", json=None, cookies=viewer_cookies
+        )
+        assert resp.status_code == 200
+        # Real success shape: comment_id -> list of {type, key, status}.
+        # The job has no comments, so the mapping is empty -- not a 404/403.
+        assert resp.json() == {"enrichments": {}}
 
     def test_viewer_cannot_token_usage_stream(self, client):
         """The token-usage SSE stream is admin-only."""
