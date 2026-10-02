@@ -14,6 +14,7 @@ import { BulkUpdateBar } from './report/BulkUpdateBar'
 import { GroupSelectAll } from './report/GroupSelectAll'
 import { ChildJobSection } from './report/ChildJobSection'
 import { PeerAnalysisSummary } from './report/PeerAnalysisSummary'
+import { AiSpendBreakdown } from './report/AiSpendBreakdown'
 import { CrossFailurePatterns } from './report/CrossFailurePatterns'
 import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
@@ -649,6 +650,9 @@ function ReportContent() {
         childJobAnalyses={result.child_job_analyses ?? []}
         repoUrls={repoUrls}
       />
+
+      {/* ---- AI spend breakdown ---- */}
+      <AiSpendBreakdown result={result} />
 
       {/* ---- Top-level failures ---- */}
       {groups.length > 0 && (

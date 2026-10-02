@@ -221,6 +221,8 @@ async def record_ai_usage(
             child_build_number=child[1] if child else 0,
             failure_id=reanalysis[0] if reanalysis else "",
             usage_attempt=reanalysis[1] if reanalysis else "",
+            success=result.success,
+            cost_partial=_result_cost_partial(result, usage),
         )
         if group and group[0] == job_id:
             logger.info(
@@ -233,6 +235,26 @@ async def record_ai_usage(
             _on_usage_recorded(job_id)
     except Exception:
         logger.debug("Failed to record token usage for job %s", job_id, exc_info=True)
+
+
+def _row_success(rec: dict[str, Any]) -> bool | None:
+    """Call outcome from a stored row; None means the row predates tracking it."""
+    value = rec.get("success")
+    return None if value is None else bool(value)
+
+
+def _result_cost_partial(result: Any, usage: Any) -> bool:
+    """Whether the sidecar flagged this prompt's cost as a lower bound.
+
+    pi-sidecar sets ``cost_partial`` when one turn of a prompt reported a real
+    cost and another reported none (turn on a model with no catalog price).
+    Older clients omit the field, so absence means a complete cost.
+    """
+    for holder in (usage, result):
+        value = getattr(holder, "cost_partial", None)
+        if value is not None:
+            return bool(value)
+    return False
 
 
 async def build_token_usage_summary(
@@ -265,6 +287,8 @@ async def build_token_usage_summary(
                 total_tokens=rec["total_tokens"],
                 cost_usd=rec["cost_usd"],
                 duration_ms=rec["duration_ms"],
+                success=_row_success(rec),
+                cost_partial=bool(rec.get("cost_partial")),
             )
             for rec in records
         ]
@@ -301,6 +325,8 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
                 total_tokens=rec["total_tokens"],
                 cost_usd=rec["cost_usd"],
                 duration_ms=rec["duration_ms"],
+                success=_row_success(rec),
+                cost_partial=bool(rec.get("cost_partial")),
             )
         )
         total_input += rec["input_tokens"]
@@ -316,6 +342,7 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
             total_duration += rec["duration_ms"]
 
     sources = {rec.get("credential_source") or "unknown" for rec in records}
+    partial = any(rec.get("cost_partial") for rec in records)
     if {"user", "server"} <= sources:
         credential_source = "mixed"
     elif sources == {"user"}:
@@ -326,6 +353,7 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
         credential_source = "unknown"
     return TokenUsageSummary(
         credential_source=credential_source,
+        cost_partial=partial,
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         total_cache_read_tokens=total_cache_read,

@@ -545,3 +545,63 @@ async def test_probe_cursor_auth_key_set_never_auth_expired(
     assert status["reason"] == "api_key_not_applied"
     assert status["has_api_key"] is True
     assert "does not expire" in status["hint"]
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict) -> None:
+        self.status_code = 200
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+@pytest.mark.asyncio
+async def test_prompt_safely_preserves_partial_cost_flag() -> None:
+    """The user-key prompt path must not drop pi-sidecar's cost_partial flag.
+
+    Dropping it stores a lower-bound cost as a complete one, so the report loses
+    its partial warning.
+    """
+    client = AsyncMock()
+    client._client.post = AsyncMock(
+        return_value=_FakeResponse(
+            {
+                "text": "answer",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cost_usd": 0.02,
+                    "cost_partial": True,
+                    "duration_ms": 100,
+                },
+            }
+        )
+    )
+    result = await ai_client._prompt_safely(client, "s-1", "hi", None)
+    assert result.success is True
+    assert result.usage is not None
+    assert result.usage.cost_partial is True
+    assert result.usage.cost_usd == 0.02
+
+
+@pytest.mark.asyncio
+async def test_prompt_safely_defaults_partial_flag_to_false() -> None:
+    """A response without the flag is a complete cost, not a partial one."""
+    client = AsyncMock()
+    client._client.post = AsyncMock(
+        return_value=_FakeResponse(
+            {
+                "text": "answer",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cost_usd": 0.02,
+                    "duration_ms": 100,
+                },
+            }
+        )
+    )
+    result = await ai_client._prompt_safely(client, "s-1", "hi", None)
+    assert result.usage is not None
+    assert result.usage.cost_partial is False

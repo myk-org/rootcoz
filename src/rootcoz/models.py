@@ -548,6 +548,14 @@ class PeerRound(BaseModel):
 class PeerDebate(BaseModel):
     """Full debate trail for a peer-analyzed failure group."""
 
+    debate_id: str = Field(
+        default_factory=_uuid_str,
+        description=(
+            "Identifies one debate execution. Shared by every failure that received "
+            "the same debate, and new on re-analysis, so consumers can tell two "
+            "independent debates apart even when their content is identical."
+        ),
+    )
     consensus_reached: bool
     rounds_used: int
     max_rounds: int
@@ -683,6 +691,8 @@ class TokenUsageEntry(BaseModel):
     model: str = ""
     call_type: str = ""
     error_signature: str = ""
+    success: bool | None = None
+    cost_partial: bool = False
     credential_source: str = "unknown"
     input_tokens: int = 0
     output_tokens: int = 0
@@ -695,6 +705,14 @@ class TokenUsageEntry(BaseModel):
 
 class TokenUsageSummary(BaseModel):
     """Aggregated token usage for an entire analysis job."""
+
+    cost_partial: bool = Field(
+        default=False,
+        description=(
+            "True when the recorded cost is a lower bound because a turn "
+            "reported no cost (model without a catalog price)."
+        ),
+    )
 
     total_input_tokens: int = 0
     total_output_tokens: int = 0

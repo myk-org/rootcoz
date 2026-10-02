@@ -307,6 +307,7 @@ rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<sp
 <p><strong>Tip:</strong> The UI label <code>KNOWN BUG</code> uses the CLI value <code>KNOWN_BUG</code>.</p>
 </blockquote>
 <p>Use <code>--not-reviewed</code> instead of <code>--reviewed</code> when you need to reopen a failure from the terminal. See <a href="cli-reference.html">CLI Command Reference</a> for details.</p>
+<p>The <code>AI Spend</code> section of the report page attributes what the job spent: a breakdown by stage (primary, peer, revision, agent routing, cross-failure), failed-call cost, primary cost per unique failure group with the number of tests sharing it, and peer cost per debate round and agent. Cache tokens are shown apart from input/output because they are not billed the same way. Anything the server cannot attribute — cost it never recorded, or usage from an older run — is reported as unavailable or <code>N/A</code>, never as zero, so hover any average to see the exact denominator.</p>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
 <li>

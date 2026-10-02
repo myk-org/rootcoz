@@ -767,6 +767,27 @@ class TestPeerDebate:
         assert d.max_rounds == 3
         assert len(d.ai_configs) == 1
 
+    def test_each_debate_execution_gets_its_own_id(self) -> None:
+        """Independent debates differ by id; one execution shared across failures does not."""
+        first = PeerDebate(
+            consensus_reached=True,
+            rounds_used=1,
+            max_rounds=3,
+            ai_configs=[],
+            rounds=[],
+        )
+        second = PeerDebate(
+            consensus_reached=True,
+            rounds_used=1,
+            max_rounds=3,
+            ai_configs=[],
+            rounds=[],
+        )
+        assert first.debate_id
+        assert first.debate_id != second.debate_id
+        # siblings share the instance, so the serialized id is identical for them
+        assert first.model_dump(mode="json")["debate_id"] == first.debate_id
+
     def test_ai_configs_are_ai_config_entry_instances(self) -> None:
         """Test that ai_configs items are coerced to AiConfigEntry instances."""
         d = PeerDebate(

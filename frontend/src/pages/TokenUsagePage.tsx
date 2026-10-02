@@ -40,7 +40,10 @@ interface BreakdownRow {
   output_tokens: number
   cache_read_tokens: number
   cache_write_tokens: number
-  cost_usd: number
+  /** Null when any call in the group has no recorded price — unavailable, never zero. */
+  cost_usd: number | null
+  /** True when any call's recorded cost covers only some turns. */
+  cost_partial: boolean
   avg_duration_ms: number
 }
 
@@ -49,17 +52,21 @@ interface TokenUsageBreakdownResponse {
   total_output_tokens: number
   total_cache_read_tokens: number
   total_cache_write_tokens: number
-  total_cost_usd: number
+  total_cost_usd: number | null
   total_calls: number
+  priced_calls: number
+  cost_partial: boolean
   total_duration_ms: number
   breakdown: Array<{
     group_key: string
     call_count: number
+    priced_calls: number
+    cost_partial: boolean
     input_tokens: number
     output_tokens: number
     cache_read_tokens: number
     cache_write_tokens: number
-    cost_usd: number
+    cost_usd: number | null
     avg_duration_ms: number
   }>
 }
@@ -90,14 +97,17 @@ function formatCallType(raw: string): string {
   return CALL_TYPE_LABELS[raw] ?? raw
 }
 
-function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, cost }: {
+function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, cost, pricedCalls, totalCalls, partial }: {
   title: string
   icon: React.ReactNode
   calls: number
   tokens: number
   inputTokens: number
   outputTokens: number
-  cost: number
+  cost: number | null
+  pricedCalls?: number
+  totalCalls?: number
+  partial?: boolean
 }) {
   return (
     <Card>
@@ -129,6 +139,16 @@ function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, co
               {formatCostCell(cost)}
             </span>
           </div>
+          {cost == null && totalCalls != null && totalCalls > 0 && (
+            <p className="text-[10px] text-text-tertiary">
+              {pricedCalls ?? 0} of {totalCalls} calls have a known price
+            </p>
+          )}
+          {partial && cost != null && (
+            <p className="text-[10px] text-text-tertiary">
+              Partial: some AI turns had no catalog price, so this is a lower bound.
+            </p>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -141,9 +161,119 @@ function formatDurationMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-function formatCostCell(cost: number): string {
+export interface JobUsageRecord {
+  call_type: string
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_write_tokens: number
+  cost_usd: number | null
+  /** Raw endpoint value: SQLite stores 0/1, the aggregates report a boolean. */
+  cost_partial?: boolean | number
+  duration_ms: number
+}
+
+/** Aggregate a job's per-call records by call type for the expanded job row.
+ *
+ *  An unknown price poisons its group permanently: once any call in a group has
+ *  no recorded price, the group stays unavailable. Summing a later priced call
+ *  onto null would produce a partial total that reads as complete. */
+export function aggregateJobCallTypes(records: JobUsageRecord[]): BreakdownRow[] {
+  const byType = new Map<string, BreakdownRow>()
+  for (const r of records) {
+    const key = r.call_type || 'unknown'
+    const existing = byType.get(key) || {
+      group: key, calls: 0, input_tokens: 0, output_tokens: 0,
+      cache_read_tokens: 0, cache_write_tokens: 0,
+      cost_usd: 0 as number | null, cost_partial: false, avg_duration_ms: 0,
+    }
+    existing.calls += 1
+    existing.input_tokens += r.input_tokens
+    existing.output_tokens += r.output_tokens
+    existing.cache_read_tokens += r.cache_read_tokens || 0
+    existing.cache_write_tokens += r.cache_write_tokens || 0
+    existing.cost_usd =
+      r.cost_usd == null || existing.cost_usd == null ? null : existing.cost_usd + r.cost_usd
+    existing.cost_partial = existing.cost_partial || isPartial(r.cost_partial)
+    existing.avg_duration_ms += r.duration_ms || 0
+    byType.set(key, existing)
+  }
+  return [...byType.values()].map(row => ({
+    ...row,
+    avg_duration_ms: row.calls > 0 ? row.avg_duration_ms / row.calls : 0,
+  }))
+}
+
+/** Sort breakdown rows. Unknown-cost rows always sort last: an unavailable cost
+ *  is not free, and flipping that placement by direction would put them first in
+ *  the default descending view. */
+export function compareBreakdownRows(
+  a: BreakdownRow,
+  b: BreakdownRow,
+  sortKey: string,
+  dir: 1 | -1,
+): number {
+  if (sortKey === 'cost_usd' && (a.cost_usd == null || b.cost_usd == null)) {
+    return (a.cost_usd == null ? 1 : 0) - (b.cost_usd == null ? 1 : 0)
+  }
+  const cmp = compareNumbers(a, b, sortKey)
+  return cmp === null ? 0 : cmp * dir
+}
+
+function compareNumbers(a: BreakdownRow, b: BreakdownRow, key: string): number | null {
+  switch (key) {
+    case 'input_tokens': return a.input_tokens - b.input_tokens
+    case 'output_tokens': return a.output_tokens - b.output_tokens
+    case 'cache_read_tokens': return a.cache_read_tokens - b.cache_read_tokens
+    case 'cache_write_tokens': return a.cache_write_tokens - b.cache_write_tokens
+    case 'avg_duration_ms': return a.avg_duration_ms - b.avg_duration_ms
+    // both costs are numbers here — the null case is handled by the caller
+    case 'cost_usd': return (a.cost_usd ?? 0) - (b.cost_usd ?? 0)
+    default: return null
+  }
+}
+
+/** Null cost is unavailable data, not $0 — never collapse the two. */
+function formatCostCell(cost: number | null | undefined): string {
+  if (cost == null) return 'Unavailable'
   if (cost <= 0) return '—'
   return formatCost(cost)
+}
+
+/** SQLite stores the flag as 0/1, so treat both truthy encodings as partial. */
+function isPartial(flag: boolean | number | undefined): boolean {
+  return flag === true || flag === 1
+}
+
+/** Render a cost, marking a NUMERIC lower bound. An unavailable cost stays
+ *  Unavailable: describing unknown spend as a partial dollar total would
+ *  misrepresent it as a number. */
+export function CostCell({ cost, partial, className }: { cost: number | null; partial?: boolean | number; className?: string }) {
+  const numericPartial = isPartial(partial) && cost != null
+  return (
+    <span className={className}>
+      {formatCostCell(cost)}
+      {numericPartial && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="Why this cost is a lower bound"
+              // This trigger lives inside clickable job rows; without stopping
+              // propagation, reading the explanation expands or collapses the row.
+              onClick={(event) => event.stopPropagation()}
+              className="ml-1 cursor-default underline decoration-dotted"
+            >
+              lower bound
+            </button>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            Partial: some AI turns had no catalog price, so this is a lower bound, not the full cost.
+          </TooltipContent>
+        </Tooltip>
+      )}
+    </span>
+  )
 }
 
 export function TokenUsagePage() {
@@ -186,6 +316,7 @@ export function TokenUsagePage() {
           cache_read_tokens: row.cache_read_tokens,
           cache_write_tokens: row.cache_write_tokens,
           cost_usd: row.cost_usd,
+          cost_partial: row.cost_partial,
           avg_duration_ms: row.avg_duration_ms,
         })))
       })
@@ -206,34 +337,21 @@ export function TokenUsagePage() {
       if (!jobDetails[jobId]) {
         setJobDetailsLoading(prev => new Set(prev).add(jobId))
         try {
-          const records = await api.get<Array<{
-            call_type: string
-            input_tokens: number
-            output_tokens: number
-            cache_read_tokens: number
-            cache_write_tokens: number
-            cost_usd: number
-            duration_ms: number
-          }>>(`/api/admin/token-usage/${encodeURIComponent(jobId)}`)
-          // Aggregate by call_type
-          const byType = new Map<string, BreakdownRow>()
-          for (const r of records) {
-            const key = r.call_type || 'unknown'
-            const existing = byType.get(key) || { group: key, calls: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0, avg_duration_ms: 0 }
-            existing.calls += 1
-            existing.input_tokens += r.input_tokens
-            existing.output_tokens += r.output_tokens
-            existing.cache_read_tokens += r.cache_read_tokens || 0
-            existing.cache_write_tokens += r.cache_write_tokens || 0
-            existing.cost_usd += r.cost_usd || 0
-            existing.avg_duration_ms += r.duration_ms || 0
-            byType.set(key, existing)
-          }
-          // Calculate averages
-          for (const row of byType.values()) {
-            if (row.calls > 0) row.avg_duration_ms /= row.calls
-          }
-          setJobDetails(prev => ({ ...prev, [jobId]: Array.from(byType.values()) }))
+          const payload = await api.get<{
+            job_id: string
+            records: Array<{
+              call_type: string
+              input_tokens: number
+              output_tokens: number
+              cache_read_tokens: number
+              cache_write_tokens: number
+              cost_usd: number | null
+              cost_partial?: boolean
+              duration_ms: number
+            }>
+          }>(`/api/admin/token-usage/${encodeURIComponent(jobId)}`)
+          const records = payload.records ?? []
+          setJobDetails(prev => ({ ...prev, [jobId]: aggregateJobCallTypes(records) }))
         } catch {
           // Silently fail — just don't expand
         } finally {
@@ -284,6 +402,7 @@ export function TokenUsagePage() {
             cache_read_tokens: row.cache_read_tokens,
             cache_write_tokens: row.cache_write_tokens,
             cost_usd: row.cost_usd,
+            cost_partial: row.cost_partial,
             avg_duration_ms: row.avg_duration_ms,
           }))
         )
@@ -321,19 +440,9 @@ export function TokenUsagePage() {
     const copy = [...breakdown]
     const dir = sortDir === 'asc' ? 1 : -1
     copy.sort((a, b) => {
-      let cmp = 0
-      switch (sortKey) {
-        case 'group': cmp = a.group.localeCompare(b.group); break
-        case 'calls': cmp = a.calls - b.calls; break
-        case 'input_tokens': cmp = a.input_tokens - b.input_tokens; break
-        case 'output_tokens': cmp = a.output_tokens - b.output_tokens; break
-        case 'cache_read_tokens': cmp = a.cache_read_tokens - b.cache_read_tokens; break
-        case 'cache_write_tokens': cmp = a.cache_write_tokens - b.cache_write_tokens; break
-        case 'cost_usd': cmp = a.cost_usd - b.cost_usd; break
-        case 'avg_duration_ms': cmp = a.avg_duration_ms - b.avg_duration_ms; break
-        default: cmp = 0
-      }
-      return cmp * dir
+      if (sortKey === 'group') return a.group.localeCompare(b.group) * dir
+      if (sortKey === 'calls') return (a.calls - b.calls) * dir
+      return compareBreakdownRows(a, b, sortKey, dir)
     })
     return copy
   }, [breakdown, sortKey, sortDir])
@@ -384,6 +493,9 @@ export function TokenUsagePage() {
             inputTokens={summary.today.input_tokens}
             outputTokens={summary.today.output_tokens}
             cost={summary.today.cost_usd}
+            pricedCalls={summary.today.priced_calls}
+            totalCalls={summary.today.calls}
+            partial={summary.today.cost_partial}
           />
           <SummaryCard
             title="Last 7 Days"
@@ -393,6 +505,9 @@ export function TokenUsagePage() {
             inputTokens={summary.this_week.input_tokens}
             outputTokens={summary.this_week.output_tokens}
             cost={summary.this_week.cost_usd}
+            pricedCalls={summary.this_week.priced_calls}
+            totalCalls={summary.this_week.calls}
+            partial={summary.this_week.cost_partial}
           />
           <SummaryCard
             title="Last 30 Days"
@@ -402,6 +517,9 @@ export function TokenUsagePage() {
             inputTokens={summary.this_month.input_tokens}
             outputTokens={summary.this_month.output_tokens}
             cost={summary.this_month.cost_usd}
+            pricedCalls={summary.this_month.priced_calls}
+            totalCalls={summary.this_month.calls}
+            partial={summary.this_month.cost_partial}
           />
         </div>
       )}
@@ -419,7 +537,7 @@ export function TokenUsagePage() {
                       <span className="font-mono text-xs text-text-secondary truncate">{m.model}</span>
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-text-tertiary">{m.calls.toLocaleString()} calls</span>
-                        <span className="font-mono text-xs text-signal-green">{formatCostCell(m.cost_usd)}</span>
+                        <CostCell cost={m.cost_usd} partial={m.cost_partial} className="font-mono text-xs text-signal-green" />
                       </div>
                     </div>
                   ))}
@@ -437,7 +555,7 @@ export function TokenUsagePage() {
                       <Link to={`/results/${j.job_id}`} className="font-mono text-xs text-text-secondary truncate hover:underline hover:text-text-primary transition-colors">{j.job_id}</Link>
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-text-tertiary">{j.calls.toLocaleString()} calls</span>
-                        <span className="font-mono text-xs text-signal-green">{formatCostCell(j.cost_usd)}</span>
+                        <CostCell cost={j.cost_usd} partial={j.cost_partial} className="font-mono text-xs text-signal-green" />
                       </div>
                     </div>
                   ))}
@@ -455,7 +573,7 @@ export function TokenUsagePage() {
             <div key={cat.group} className="inline-flex items-center gap-2 rounded-lg border border-border-default bg-surface-card px-3 py-1.5">
               <span className="text-xs font-medium text-text-secondary">{formatCallType(cat.group)}</span>
               <span className="font-mono text-xs text-text-tertiary">{cat.calls} calls</span>
-              <span className="font-mono text-xs text-signal-green">{formatCostCell(cat.cost_usd)}</span>
+              <CostCell cost={cat.cost_usd} partial={cat.cost_partial} className="font-mono text-xs text-signal-green" />
             </div>
           ))}
         </div>
@@ -540,7 +658,7 @@ export function TokenUsagePage() {
                     <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.output_tokens)}</TableCell>
                     <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_read_tokens)}</TableCell>
                     <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_write_tokens)}</TableCell>
-                    <TableCell className="text-right font-mono text-xs text-signal-green">{formatCostCell(row.cost_usd)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-signal-green"><CostCell cost={row.cost_usd} partial={row.cost_partial} /></TableCell>
                     <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(row.avg_duration_ms)}</TableCell>
                   </TableRow>
                   {isExpanded && isLoading && (
@@ -558,7 +676,7 @@ export function TokenUsagePage() {
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.output_tokens)}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.cache_read_tokens)}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.cache_write_tokens)}</TableCell>
-                      <TableCell className="text-right font-mono text-xs text-signal-green/70">{formatCostCell(sub.cost_usd)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-signal-green/70"><CostCell cost={sub.cost_usd} partial={sub.cost_partial} /></TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(sub.avg_duration_ms)}</TableCell>
                     </TableRow>
                   ))}

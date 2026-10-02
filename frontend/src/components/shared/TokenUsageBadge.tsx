@@ -1,6 +1,6 @@
 import { Zap } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { formatCompactNumber, formatCost } from '@/lib/format'
+import { formatCompactNumber, formatCost, formatSummedDuration } from '@/lib/format'
 import type { TokenUsageSummary } from '@/types'
 
 type TokenUsageBadgeProps =
@@ -26,6 +26,11 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
   }
 
   const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
+  // Only a numeric cost can be a lower bound; "Unavailable+" would mean nothing.
+  const showPartial = usage.cost_partial === true && usage.total_cost_usd != null
+  const partialNote = showPartial
+    && 'Partial: some AI turns had no catalog price, so this is a lower bound.'
+  const summedDuration = formatSummedDuration(usage.total_duration_ms)
   const sources = new Set(usage.calls.map(call => call.credential_source))
   const source = usage.credential_source ?? (sources.has('user') && sources.has('server') ? 'mixed'
     : sources.size === 1 && sources.has('user') ? 'user'
@@ -38,7 +43,7 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
         <span tabIndex={0} className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary">
           <Zap className="h-3 w-3" />
           {formatCompactNumber(usage.total_input_tokens)} in / {formatCompactNumber(usage.total_output_tokens)} out
-          {' · '}{cost}
+          {' · '}{cost}{showPartial ? '+' : ''}
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-h-80 max-w-sm overflow-y-auto">
@@ -51,10 +56,13 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
           <p>Credential source: {credentialSource}</p>
           {graftTooltip}
           {usage.calls.map((call, index) => (
-            <p key={index}>{call.call_type} · {call.provider}/{call.model} · {call.credential_source ?? 'unknown'}: {call.total_tokens.toLocaleString()} tokens</p>
+            <p key={index}>{call.call_type} · {call.provider}/{call.model} · {call.credential_source ?? 'unknown'}{call.success === false ? ' · failed' : ''}: {call.total_tokens.toLocaleString()} tokens</p>
           ))}
-          {usage.total_duration_ms > 0 && <p>Duration: {(usage.total_duration_ms / 1000).toFixed(1)}s</p>}
-          <p>Cost: {cost}</p>
+          {summedDuration && (
+            <p>Summed call duration: {summedDuration} (not wall-clock)</p>
+          )}
+          <p>Cost: {cost}{showPartial ? ' (partial)' : ''}</p>
+          {partialNote && <p>{partialNote}</p>}
         </div>
       </TooltipContent>
     </Tooltip>
