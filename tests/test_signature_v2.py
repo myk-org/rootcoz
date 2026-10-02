@@ -1151,3 +1151,52 @@ class TestOneSearchCoversTheWholeGroup:
             and get_legacy_signature(group[1]) in line
         ]
         assert len(signature_lines) == 1
+
+
+# ---------------------------------------------------------------------------
+# A trace-only failure stores no message; its trace is the comparison
+# ---------------------------------------------------------------------------
+class TestTraceOnlyFailuresReachTheFallback:
+    """``failure_history.error_message`` holds the trace when there is no message.
+
+    ``error`` is a signature input and persists verbatim, so a trace-only
+    failure stores an empty message and the history copy keeps the trace
+    standing in for it. Both sides of the comparison must therefore hash the
+    trace -- reading only the message compared a trace against nothing.
+    """
+
+    @staticmethod
+    def _trace_only(trace: str) -> FailedTest:
+        return FailedTest(test_name="test_gateway", error_message="", stack_trace=trace)
+
+    def test_a_trace_only_rerun_matches_its_own_pre_v2_history(self) -> None:
+        failure = self._trace_only("  at Frame.java:12")
+        history = legacy_row(failure) | {"error_message": failure.stack_trace}
+        current = {
+            "error": "",
+            "stack_trace": failure.stack_trace,
+            "error_signature": get_legacy_signature(failure),
+        }
+        assert storage.failure_error_text(current) == failure.stack_trace
+        assert storage.previous_analysis_matches(history, current)
+
+    def test_the_same_trace_under_a_moved_anchor_still_matches(self) -> None:
+        """The v2 rules normalize pointer noise out of the trace, the anchor keeps it."""
+        earlier = self._trace_only("  at Frame.java:12  (0x7f3c9a10)")
+        later = self._trace_only("  at Frame.java:12  (0x118ab430)")
+        assert get_legacy_signature(earlier) != get_legacy_signature(later)
+        history = legacy_row(earlier) | {"error_message": earlier.stack_trace}
+        current = {
+            "error": "",
+            "stack_trace": later.stack_trace,
+            "error_signature": get_legacy_signature(later),
+        }
+        assert storage.previous_analysis_matches(history, current)
+
+    def test_a_different_trace_still_does_not_match(self) -> None:
+        """The guard on the new fallback: it reads the trace, it does not ignore it."""
+        history = legacy_row(self._trace_only("  at Frame.java:12")) | {
+            "error_message": "  at Frame.java:12"
+        }
+        current = {"error": "", "stack_trace": "  at Other.java:99"}
+        assert not storage.previous_analysis_matches(history, current)

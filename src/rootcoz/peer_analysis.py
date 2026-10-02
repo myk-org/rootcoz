@@ -23,11 +23,11 @@ from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
+    _expand_group_to_analyses,
     build_failure_details_instruction,
     build_other_groups_instruction,
     build_prompt_sections,
     build_signature_section,
-    get_legacy_signature,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
@@ -1101,18 +1101,8 @@ async def analyze_failure_group_with_peers(
                 )
 
     # Apply analysis to all failures in the group.
-    # All failures share the same v2 signature (that's how they were grouped),
-    # so reuse the already-computed value instead of calling get_failure_signature()
-    # again. The anchor is per failure.
-    return [
-        FailureAnalysis(
-            test_name=f.test_name,
-            error=f.error_message,
-            stack_trace=f.stack_trace,
-            analysis=parsed_analysis,
-            error_signature=get_legacy_signature(f),
-            error_signature_v2=error_signature,
-            peer_debate=peer_debate,
-        )
-        for f in failures
-    ]
+    # Shared with the non-peer path: all failures share the same v2 signature
+    # (that's how they were grouped), and the anchor is per failure.
+    return _expand_group_to_analyses(
+        error_signature, failures, parsed_analysis, peer_debate
+    )

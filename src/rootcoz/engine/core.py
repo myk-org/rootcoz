@@ -44,6 +44,7 @@ from rootcoz.models import (
     CrossFailurePattern,
     FailedTest,
     FailureAnalysis,
+    PeerDebate,
     ProductBugReport,
 )
 from rootcoz.repository import RepositoryManager
@@ -2469,11 +2470,17 @@ def _expand_group_to_analyses(
     sig: str,
     failures: list[FailedTest],
     analysis: AnalysisDetail,
+    peer_debate: PeerDebate | None = None,
 ) -> list[FailureAnalysis]:
     """Create FailureAnalysis objects for all failures in a group.
 
     Dual-writes the group's v2 signature (``error_signature_v2``) and each
     failure's own frozen anchor (``error_signature``).
+
+    The peer path passes *peer_debate* and comes back here too. Both write paths
+    must stay in step -- a per-failure field added here and not there is a
+    signature assigned in one analysis and missing from the other -- so this is
+    the only mapping from a grouped failure to its stored record.
     """
     return [
         FailureAnalysis(
@@ -2483,6 +2490,7 @@ def _expand_group_to_analyses(
             analysis=analysis,
             error_signature=get_legacy_signature(f),
             error_signature_v2=sig,
+            peer_debate=peer_debate,
         )
         for f in failures
     ]

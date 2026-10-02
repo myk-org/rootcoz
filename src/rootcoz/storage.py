@@ -2430,12 +2430,11 @@ def failure_error_text(failure: dict[str, Any]) -> str:
     searched, so it takes the trace standing in for the missing message --
     otherwise those failures have nothing to show and cannot be found by
     :func:`get_all_failures`.
+
+    Reading is :func:`_row_message`'s single rule: same precedence, so a row
+    written here compares equal to the failure it came from.
     """
-    error = failure.get("error")
-    if isinstance(error, str) and error:
-        return error
-    trace = failure.get("stack_trace")
-    return trace if isinstance(trace, str) else ""
+    return _row_message(failure)
 
 
 async def patch_result_json(
@@ -3076,9 +3075,17 @@ def _row_message(row: Any) -> str:
     """Return the error text a row stores, whichever column it keeps it in.
 
     ``failure_history`` calls it ``error_message``; a FailureAnalysis dict calls
-    it ``error``.
+    it ``error``. A trace-only failure has neither worth comparing -- its
+    message is empty and the trace carries everything -- and the history copy
+    stores that trace *as* ``error_message`` (see :func:`failure_error_text`).
+    Falling through to ``stack_trace`` is what lets the two sides hash the same
+    text instead of one hashing a message the other never had.
     """
-    return _signature_field(row, "error_message") or _signature_field(row, "error")
+    return (
+        _signature_field(row, "error_message")
+        or _signature_field(row, "error")
+        or _signature_field(row, "stack_trace")
+    )
 
 
 def _message_signature(row: Any) -> str:
