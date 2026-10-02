@@ -3104,13 +3104,18 @@ def previous_analysis_matches(previous: Any, failure: Any) -> bool:
     """Whether a :func:`find_matching_previous_analysis` row is *failure* again.
 
     :func:`signatures_match` first -- the universal rule, and the one that
-    settles it whenever it can. Only when the two rows share no hash at all does
-    the wider rule run: both messages normalized under the v2 rules. That covers
-    the one case the union cannot -- a history row written before the v2 rules,
-    meeting a later run whose only difference is header/pointer noise, so the
-    frozen anchor moved and there is no v2 hash on the old row to meet it on.
-    Chaining there is a suggestion a human confirms on the report; a hash
-    mismatch everywhere else is a decision nobody sees.
+    settles it whenever it can. Only then does the wider rule run, and only for
+    a history row written before the v2 rules: that row has no v2 hash to meet a
+    later run on, so when its only difference is header/pointer noise the frozen
+    anchor moved and the message is the comparison left. That covers the one
+    case the union cannot.
+
+    A row that *does* carry a v2 hash was already compared under the current
+    rules one line above and disagreed, so it never reaches the fallback. That
+    guard is load-bearing, not defensive: without it the message-only hash --
+    which cannot tell two stack traces apart, because history rows store none --
+    would report a real mismatch as a match, and the auto-review caller in
+    ``main.py`` would mark a new failure reviewed against a different defect.
 
     ponytail: the fallback ignores the stack trace (history rows do not store
     one), so on message alone 80 distinct legacy signatures collapse to 69
@@ -3119,6 +3124,8 @@ def previous_analysis_matches(previous: Any, failure: Any) -> bool:
     """
     if signatures_match(previous, failure):
         return True
+    if _signature_field(previous, "error_signature_v2"):
+        return False
     left_message = _message_signature(previous)
     return bool(left_message) and left_message == _message_signature(failure)
 
@@ -3846,6 +3853,16 @@ async def get_test_history(
     }
 
 
+def _signature_list(signature: str) -> list[str]:
+    """Split a caller-supplied hash argument into individual hashes.
+
+    The analysis prompt hands the AI a whole failure group's hash set in one
+    value, so ``/history/search`` accepts comma-separated hashes rather than
+    forcing a tool call per member.
+    """
+    return [part for part in (s.strip() for s in signature.split(",")) if part]
+
+
 async def search_by_signature(
     signature: str, exclude_job_id: str = ""
 ) -> dict[str, Any]:
@@ -3857,8 +3874,13 @@ async def search_by_signature(
     -- the value the report and the AI prompt show -- is the only query that
     spans the whole history, because pre-v2 rows carry no other hash.
 
+    *signature* takes one hash or a comma-separated set. A v2 failure group's
+    members each carry a different frozen anchor, so its prompt names all of
+    them; one call with the whole set answers the same question as one call per
+    hash, without the AI having to make a tool call per group member.
+
     Args:
-        signature: Error signature hash to search for.
+        signature: One error signature hash, or several separated by commas.
         exclude_job_id: Exclude results from this job ID.
 
     Returns:
@@ -3876,7 +3898,8 @@ async def search_by_signature(
         "last_classification": "",
         "comments": [],
     }
-    sig_where, sig_params = signature_match([signature])
+    signatures = _signature_list(signature)
+    sig_where, sig_params = signature_match(signatures)
     if not sig_where:
         # No signature, no fragment -- by contract. Interpolating it anyway
         # would leave "WHERE" with nothing and match every row.
@@ -3918,7 +3941,7 @@ async def search_by_signature(
         last_classification = (await cursor.fetchone())[0] or ""
 
         # Comments related to this signature
-        comments_where, comments_sig_params = signature_match([signature])
+        comments_where, comments_sig_params = signature_match(signatures)
         comments_params: list[str] = list(comments_sig_params)
         comments_query = (
             f"SELECT comment, username, created_at FROM comments WHERE {comments_where}"

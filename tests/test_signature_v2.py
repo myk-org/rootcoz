@@ -889,7 +889,7 @@ async def _prompt_for(failures: list[FailedTest], tmp_path: Path) -> str:
 
 
 class TestGroupHistorySearchCoversEveryMember:
-    """search_by_signature matches ONE hash, so the prompt must name them all."""
+    """One search per group must reach every member hash, in one call."""
 
     async def test_prompt_names_every_member_anchor_and_the_v2_hash(
         self, tmp_path: Path
@@ -1039,3 +1039,115 @@ class TestPeerPromptSearchesTheSameSet:
         )
         assert f"ERROR SIGNATURE: {get_failure_signature(failure)}\n" in summary
         assert "ERROR SIGNATURES" not in summary
+
+
+# ---------------------------------------------------------------------------
+# The message fallback must not answer for a row that has a v2 hash
+# ---------------------------------------------------------------------------
+class TestMessageFallbackStopsAtTheFirstV2Hash:
+    """The fallback is for pre-v2 rows only.
+
+    ``failure_history`` stores no stack trace, so the message-only hash cannot
+    tell two failures apart -- and ``main.py``'s auto-review gate uses
+    ``previous_analysis_matches`` to decide a new failure is already-seen. A row
+    that carries a v2 hash was compared under the current rules and disagreed;
+    letting the fallback answer for it auto-reviews a different defect.
+    """
+
+    @staticmethod
+    def _previous_v2_row(failure: FailedTest) -> dict[str, str]:
+        return dual_written_row(failure) | {"error_message": failure.error_message}
+
+    @staticmethod
+    def _current_row(failure: FailedTest) -> dict[str, str]:
+        return dual_written_row(failure) | {"error": failure.error_message}
+
+    def test_same_message_different_trace_does_not_match_a_v2_row(self) -> None:
+        earlier = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.json()",
+        )
+        later = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.text()",
+        )
+        previous, current = self._previous_v2_row(earlier), self._current_row(later)
+        # The premise: distinct by every stored hash, identical by message.
+        assert get_legacy_signature(earlier) != get_legacy_signature(later)
+        assert not storage.signatures_match(previous, current)
+        # The guard: no auto-review for a different failure behind one message.
+        assert not storage.previous_analysis_matches(previous, current)
+
+    def test_the_pre_v2_row_still_reaches_the_fallback(self) -> None:
+        """The case the fallback exists for is untouched by the guard."""
+        earlier = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.json()",
+        )
+        later = FailedTest(
+            test_name="test_gateway",
+            error_message="AssertionError: expected 3 rows in report, got 4",
+            stack_trace="await response.text()",
+        )
+        previous = legacy_row(earlier) | {"error_message": earlier.error_message}
+        assert not storage.signatures_match(previous, self._current_row(later))
+        assert storage.previous_analysis_matches(previous, self._current_row(later))
+
+
+# ---------------------------------------------------------------------------
+# One search per group, however many hashes it has
+# ---------------------------------------------------------------------------
+class TestOneSearchCoversTheWholeGroup:
+    async def test_a_comma_separated_search_returns_every_hash_s_rows(
+        self, db: Path
+    ) -> None:
+        left, right = failure_a(), failure_b()
+        await _add_history_row(
+            db,
+            "job-old",
+            left.test_name,
+            anchor=get_legacy_signature(left),
+            v2=None,
+        )
+        await _add_history_row(
+            db,
+            "job-older",
+            right.test_name,
+            anchor=get_legacy_signature(right),
+            v2=None,
+        )
+        both = f"{get_legacy_signature(left)}, {get_legacy_signature(right)}"
+        with patch.object(storage, "DB_PATH", db):
+            result = await storage.search_by_signature(both)
+        assert result["total_occurrences"] == 2
+        assert {t["test_name"] for t in result["tests"]} == {left.test_name}
+
+    async def test_a_single_hash_still_searches_that_hash_only(self, db: Path) -> None:
+        """One value and a set of one are the same query."""
+        left, right = failure_a(), failure_b()
+        await _add_history_row(
+            db, "job-old", left.test_name, anchor=get_legacy_signature(left), v2=None
+        )
+        with patch.object(storage, "DB_PATH", db):
+            result = await storage.search_by_signature(get_legacy_signature(left))
+        assert result["total_occurrences"] == 1
+        assert get_legacy_signature(right) not in result["signature"]
+
+    async def test_the_prompt_asks_for_one_call_not_one_per_hash(
+        self, tmp_path: Path
+    ) -> None:
+        group = v2_group()
+        prompt = await _prompt_for(group, tmp_path)
+        assert "ONCE" in prompt
+        assert "comma-separated" in prompt
+        # One line carrying the whole set -- not a bullet list to walk.
+        signature_lines = [
+            line
+            for line in prompt.splitlines()
+            if get_legacy_signature(group[0]) in line
+            and get_legacy_signature(group[1]) in line
+        ]
+        assert len(signature_lines) == 1

@@ -9354,7 +9354,11 @@ async def search_by_signature_endpoint(
         default="", description="Exclude results from this job ID"
     ),
 ) -> dict[str, Any]:
-    """Find all tests that failed with the same error signature."""
+    """Find all tests that failed with the same error signature.
+
+    ``signature`` accepts a comma-separated set, so one request covers every
+    hash of a failure group.
+    """
     _require_authenticated(request)
     logger.debug(f"GET /history/search: signature={signature}")
     result = await storage.search_by_signature(signature, exclude_job_id=exclude_job_id)

@@ -919,11 +919,16 @@ def get_legacy_signature(failure: FailedTest) -> str:
 def build_signature_section(failures: list[FailedTest], group_signature: str) -> str:
     """Prompt line(s) naming every hash the AI must search history for.
 
-    ``search_by_signature`` matches one hash at a time, and a v2 group's members
-    carry *different* frozen anchors -- that is exactly why they grouped. Naming
-    only the representative's anchor drops the rest of the group's history, so
-    the whole set goes in the prompt: each member's anchor (which reaches rows
-    stored before the v2 rules) plus the group's v2 hash.
+    A v2 group's members carry *different* frozen anchors -- that is exactly why
+    they grouped. Naming only the representative's anchor drops the rest of the
+    group's history, so the whole set goes in the prompt: each member's anchor
+    (which reaches rows stored before the v2 rules) plus the group's v2 hash.
+
+    The whole set is one comma-separated ``signature`` value, not one line per
+    hash: ``search_error_signature`` takes them all in a single call, so a group
+    of any size still costs the AI exactly one history search. A per-hash line
+    list made that cost scale with the group, and the groups the v2 rules merge
+    are the large ones.
     """
     hashes = list(
         dict.fromkeys(
@@ -936,9 +941,11 @@ def build_signature_section(failures: list[FailedTest], group_signature: str) ->
     if len(hashes) <= 1:
         return f"ERROR SIGNATURE: {hashes[0] if hashes else group_signature}\n"
     return (
-        "ERROR SIGNATURES: this failure group has several hashes. You MUST call "
-        "search_error_signature once for EACH hash below and read the results "
-        "together:\n" + "".join(f"- {h}\n" for h in hashes)
+        "ERROR SIGNATURES: this failure group has several hashes. Call "
+        "search_error_signature ONCE with every hash below as a single "
+        "comma-separated 'signature' value and read the combined results:\n"
+        + ", ".join(hashes)
+        + "\n"
     )
 
 
