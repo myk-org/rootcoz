@@ -14,7 +14,7 @@ from rootcoz.storage import generate_api_key, hash_api_key
 from tests.conftest import host_env
 
 
-def _create_user_sync(temp_db_path, username: str) -> dict:
+def _create_user_sync(temp_db_path, username: str, role: str = "operator") -> dict:
     """Create a user with an API key and return Bearer auth headers."""
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
@@ -28,8 +28,8 @@ def _create_user_sync(temp_db_path, username: str) -> dict:
             rows = (await (await db.execute("SELECT changes()")).fetchone())[0]
             if rows == 0:
                 await db.execute(
-                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, 'operator')",
-                    (username, key_hash),
+                    "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, ?)",
+                    (username, key_hash, role),
                 )
             await db.commit()
 
@@ -365,5 +365,66 @@ class TestRestrictedAccess:
             "/results/job-1/comments",
             json={"test_name": "test_foo", "comment": "should be blocked"},
             headers={"Authorization": f"Bearer {raw_key}"},
+        )
+        assert resp.status_code == 403
+
+    def test_user_tokens_blocked(self, client_restricted, temp_db_path):
+        """PUT /api/user/tokens must honour the allow list (#299)."""
+        auth = _create_user_sync(temp_db_path, "charlie")
+        resp = client_restricted.put(
+            "/api/user/tokens",
+            json={"jira_api_token": "leaked", "github_token": "leaked"},
+            headers=auth,
+        )
+        assert resp.status_code == 403
+        assert "allow list" in resp.json()["detail"].lower()
+
+    def test_user_tokens_allowed(self, client_restricted, temp_db_path):
+        """A user on the allow list can still save their own tokens."""
+        auth = _create_user_sync(temp_db_path, "alice")
+        resp = client_restricted.put(
+            "/api/user/tokens",
+            json={"jira_api_token": "cfg-tok", "github_token": "ghp_tok"},
+            headers=auth,
+        )
+        assert resp.status_code == 200
+
+    def test_set_ai_credential_blocked(self, client_restricted, temp_db_path):
+        """PUT /api/user/ai-credentials/{provider} must honour the allow list (#299)."""
+        auth = _create_user_sync(temp_db_path, "charlie")
+        resp = client_restricted.put(
+            "/api/user/ai-credentials/anthropic",
+            json={
+                "api_key": "sk-ant-leaked",  # pragma: allowlist secret
+                "model": "claude-sonnet-4-5",
+            },
+            headers=auth,
+        )
+        assert resp.status_code == 403
+        assert "allow list" in resp.json()["detail"].lower()
+
+    def test_delete_ai_credential_allowed_for_blocked_user(
+        self, client_restricted, temp_db_path
+    ):
+        """Revoking your own key must stay possible after being un-listed (#304).
+
+        Gating DELETE on the allow list would leave a user removed from the
+        list holding a stored credential with no way to remove it.
+        """
+        auth = _create_user_sync(temp_db_path, "charlie")
+        resp = client_restricted.delete(
+            "/api/user/ai-credentials/anthropic",
+            headers=auth,
+        )
+        assert resp.status_code == 200
+
+    def test_delete_ai_credential_blocked_for_viewer(
+        self, client_restricted, temp_db_path
+    ):
+        """Revocation is self-service, but still needs the reviewer role."""
+        auth = _create_user_sync(temp_db_path, "dave", role="viewer")
+        resp = client_restricted.delete(
+            "/api/user/ai-credentials/anthropic",
+            headers=auth,
         )
         assert resp.status_code == 403

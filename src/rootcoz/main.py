@@ -10314,6 +10314,7 @@ async def set_user_ai_credential(
 ) -> JSONResponse:
     """Encrypt and save a key for a sidecar-confirmed provider."""
     _require_reviewer(request)
+    _check_allow_list(request)
     username = await _credential_user(request)
     if provider not in await supported_key_providers():
         raise HTTPException(
@@ -10367,7 +10368,14 @@ async def set_user_ai_credential(
     "/api/user/ai-credentials/{provider:path}", operation_id="deleteUserAiCredential"
 )
 async def delete_user_ai_credential(provider: str, request: Request) -> JSONResponse:
-    """Remove one credential; do not reveal whether a key was present."""
+    """Remove one credential; do not reveal whether a key was present.
+
+    Deliberately not allow-list gated. This is self-service revocation: a user
+    removed from ALLOWED_USERS must still be able to delete the key they
+    previously stored, otherwise taking them off the list leaves a live
+    credential they have no way to remove. Adding a key is gated; removing
+    one is not.
+    """
     _require_reviewer(request)
     username = await _credential_user(request)
     try:
@@ -10409,6 +10417,7 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     Pass empty string to clear a field.
     """
     _require_reviewer(request)
+    _check_allow_list(request)
     username = request.state.username
     if not username:
         raise HTTPException(status_code=401, detail="Username required")
