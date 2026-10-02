@@ -149,10 +149,14 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
     // clearing a different field (#294).
     const needsGithubValidation =
       !!githubToken.trim() && githubToken.trim() !== baseline.gh && (!githubValidation || !githubValidation.valid)
-    // Jira authenticates with email + token, so either one changing is a change.
+    // Jira authenticates with email + token, so a new pair is worth checking.
+    // Clearing the email is not: with no email the backend falls back to bearer
+    // auth, so validating that would test a different credential than the one
+    // being stored and could block the clear (#294).
+    const jiraEmailCleared = !jiraEmail.trim() && baseline.je !== ''
     const needsJiraValidation =
       !!jiraToken.trim() &&
-      (jiraToken.trim() !== baseline.jt || jiraEmail.trim() !== baseline.je) &&
+      (jiraToken.trim() !== baseline.jt || (jiraEmail.trim() !== baseline.je && !jiraEmailCleared)) &&
       (!jiraValidation || !jiraValidation.valid)
 
     if (!isViewer && (needsGithubValidation || needsJiraValidation)) {

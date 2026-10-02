@@ -24,8 +24,16 @@ function renderForm() {
 describe('ProfileForm tracker tokens', () => {
   beforeEach(() => {
     localStorage.clear()
-    apiMock.get.mockClear()
-    apiMock.post.mockClear()
+    // mockReset, not mockClear: these tests swap implementations per case and a
+    // clear would let one test's response leak into the next.
+    apiMock.get.mockReset()
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens' ? { github_token: '', jira_email: '', jira_token: '' } : {},
+    )
+    apiMock.post.mockReset()
+    apiMock.post.mockImplementation(async (path: string) =>
+      path === '/api/validate-token' ? { valid: true, username: 'jdoe', message: 'ok' } : {},
+    )
     apiMock.put.mockClear()
     role.value = 'viewer'
   })
@@ -77,6 +85,32 @@ describe('ProfileForm tracker tokens', () => {
       jira_email: '',
       jira_token: '',
     })
+  })
+
+  it('clears a stored Jira email without blocking on validation (#294)', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok' }
+        : {},
+    )
+    apiMock.post.mockImplementation(async (path: string) =>
+      path === '/api/validate-token' ? { valid: false, username: '', message: 'Bad credentials' } : {},
+    )
+
+    const onSaved = renderForm()
+    const email = await screen.findByLabelText(/jira email/i)
+    await userEvent.clear(email)
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // An email-only clear is not a credential change: validating with no email
+    // switches the backend to bearer auth and would block the save.
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.post).not.toHaveBeenCalledWith('/api/validate-token', expect.anything())
+    expect(apiMock.put).toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ jira_email: '', jira_token: 'jira_tok' }),
+    )
   })
 
   it('validates when only the Jira email changes (#294)', async () => {
