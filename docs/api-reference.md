@@ -80,7 +80,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
-| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens |
+| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. A body with none of the three fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
 | POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving |
 | POST | `/api/jira-projects` | viewer | List Jira projects visible to the supplied credentials |
 | POST | `/api/jira-security-levels` | viewer | List Jira security levels for a project |

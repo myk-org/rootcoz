@@ -422,7 +422,7 @@
 <td>PUT</td>
 <td><code>/api/user/tokens</code></td>
 <td>reviewer</td>
-<td>Save Jira and GitHub tracker tokens</td>
+<td>Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, <code>""</code> or <code>null</code> clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. A body with none of the three fields writes nothing and returns <code>saved: false</code>; anything other than a string or <code>null</code> is rejected with <code>400</code></td>
 </tr>
 <tr>
 <td>POST</td>

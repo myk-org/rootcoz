@@ -1,6 +1,7 @@
 """Tests for admin authentication and user tracking."""
 
 import asyncio
+import json
 import os
 import time
 from datetime import UTC
@@ -644,6 +645,99 @@ class TestUserTokens:
                 assert raw.startswith("enc:")  # Encrypted
 
         asyncio.run(check())
+
+    def _save_all_three(self, client, cookies) -> None:
+        client.put(
+            "/api/user/tokens",
+            json={
+                "github_token": "ghp_original",
+                "jira_email": "orig@test.com",
+                "jira_token": "jira_orig",
+            },
+            cookies=cookies,
+        )
+
+    def test_clear_one_field_leaves_others(self, client):
+        """An empty field clears that field only (#294)."""
+        cookies = _register_user(client, "clearone")
+        self._save_all_three(client, cookies)
+
+        resp = client.put("/api/user/tokens", json={"jira_email": ""}, cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json()["saved"] is True
+
+        data = client.get("/api/user/tokens", cookies=cookies).json()
+        assert data["jira_email"] == ""
+        assert data["github_token"] == "ghp_original"
+        assert data["jira_token"] == "jira_orig"
+
+    def test_clear_all_fields(self, client):
+        """Three empty strings clear all three credentials (#294)."""
+        cookies = _register_user(client, "clearall")
+        self._save_all_three(client, cookies)
+
+        resp = client.put(
+            "/api/user/tokens",
+            json={"github_token": "", "jira_email": "", "jira_token": ""},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["saved"] is True
+
+        data = client.get("/api/user/tokens", cookies=cookies).json()
+        assert data == {"github_token": "", "jira_email": "", "jira_token": ""}
+
+    def test_null_clears_and_never_stores_literal_none(self, client):
+        """A null field clears it and must not persist the string "None" (#294)."""
+        cookies = _register_user(client, "nulltok")
+        self._save_all_three(client, cookies)
+
+        resp = client.put(
+            "/api/user/tokens",
+            json={"github_token": None, "jira_email": None, "jira_token": None},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+
+        data = client.get("/api/user/tokens", cookies=cookies).json()
+        assert data == {"github_token": "", "jira_email": "", "jira_token": ""}
+        assert "None" not in json.dumps(data)
+
+    def test_null_field_does_not_resurrect_on_next_partial_save(self, client):
+        """A cleared field stays cleared when a later save omits it (#294)."""
+        cookies = _register_user(client, "nullstick")
+        self._save_all_three(client, cookies)
+
+        client.put("/api/user/tokens", json={"jira_token": None}, cookies=cookies)
+        client.put(
+            "/api/user/tokens", json={"github_token": "ghp_new"}, cookies=cookies
+        )
+
+        data = client.get("/api/user/tokens", cookies=cookies).json()
+        assert data["jira_token"] == ""
+
+    def test_omitted_body_saves_nothing(self, client):
+        """A body with no token fields reports saved=False and changes nothing (#294)."""
+        cookies = _register_user(client, "omitted")
+        self._save_all_three(client, cookies)
+
+        resp = client.put("/api/user/tokens", json={}, cookies=cookies)
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True, "saved": False}
+
+        data = client.get("/api/user/tokens", cookies=cookies).json()
+        assert data["github_token"] == "ghp_original"
+        assert data["jira_email"] == "orig@test.com"
+        assert data["jira_token"] == "jira_orig"
+
+    def test_non_string_field_rejected(self, client):
+        """A number or object is a client error, not a stored credential."""
+        cookies = _register_user(client, "badtype")
+        resp = client.put(
+            "/api/user/tokens", json={"github_token": 12345}, cookies=cookies
+        )
+        assert resp.status_code == 400
+        assert "github_token" in resp.json()["detail"]
 
 
 class TestAdminDeleteComment:

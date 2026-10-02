@@ -66,4 +66,16 @@ describe('ProfileForm tracker tokens', () => {
     await waitFor(() => expect(onSaved).toHaveBeenCalled())
     expect(apiMock.put).toHaveBeenCalledWith('/api/user/tokens', expect.objectContaining({ github_token: 'ghp_valid' }))
   })
+
+  it('sends empty strings when a reviewer clears every token', async () => {
+    role.value = 'reviewer'
+    const onSaved = renderForm()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).toHaveBeenCalledWith('/api/user/tokens', {
+      github_token: '',
+      jira_email: '',
+      jira_token: '',
+    })
+  })
 })
