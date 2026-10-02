@@ -39,6 +39,8 @@ export function TrackerTokensFields({
         Provide your personal tokens to create issues and bugs directly
         under your name. Without tokens, you can still preview generated
         content but cannot submit.
+        Clear a field and save to remove that credential from the server; the
+        other two are left as they are.
       </p>
 
       {/* GitHub Token field */}

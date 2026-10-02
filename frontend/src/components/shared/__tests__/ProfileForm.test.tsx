@@ -24,8 +24,16 @@ function renderForm() {
 describe('ProfileForm tracker tokens', () => {
   beforeEach(() => {
     localStorage.clear()
-    apiMock.get.mockClear()
-    apiMock.post.mockClear()
+    // mockReset, not mockClear: these tests swap implementations per case and a
+    // clear would let one test's response leak into the next.
+    apiMock.get.mockReset()
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens' ? { github_token: '', jira_email: '', jira_token: '' } : {},
+    )
+    apiMock.post.mockReset()
+    apiMock.post.mockImplementation(async (path: string) =>
+      path === '/api/validate-token' ? { valid: true, username: 'jdoe', message: 'ok' } : {},
+    )
     apiMock.put.mockClear()
     role.value = 'viewer'
   })
@@ -65,5 +73,132 @@ describe('ProfileForm tracker tokens', () => {
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(onSaved).toHaveBeenCalled())
     expect(apiMock.put).toHaveBeenCalledWith('/api/user/tokens', expect.objectContaining({ github_token: 'ghp_valid' }))
+  })
+
+  it('sends empty strings when a reviewer clears every token', async () => {
+    role.value = 'reviewer'
+    const onSaved = renderForm()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).toHaveBeenCalledWith('/api/user/tokens', {
+      github_token: '',
+      jira_email: '',
+      jira_token: '',
+    })
+  })
+
+  it('clears a stored Jira email without blocking on validation (#294)', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok' }
+        : {},
+    )
+    apiMock.post.mockImplementation(async (path: string) =>
+      path === '/api/validate-token' ? { valid: false, username: '', message: 'Bad credentials' } : {},
+    )
+
+    const onSaved = renderForm()
+    const email = await screen.findByLabelText(/jira email/i)
+    await userEvent.clear(email)
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // An email-only clear is not a credential change: validating with no email
+    // switches the backend to bearer auth and would block the save.
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.post).not.toHaveBeenCalledWith('/api/validate-token', expect.anything())
+    expect(apiMock.put).toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ jira_email: '', jira_token: 'jira_tok' }),
+    )
+  })
+
+  it('validates when only the Jira email changes (#294)', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    const email = await screen.findByLabelText(/jira email/i)
+    await userEvent.clear(email)
+    await userEvent.type(email, 'new@test.com')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // Jira authenticates with the email, so changing it alone must re-check.
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        '/api/validate-token',
+        expect.objectContaining({ token_type: 'jira', email: 'new@test.com' }),
+      ),
+    )
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+  })
+
+  it('does not re-validate a token that matches the server (#294)', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    await screen.findByLabelText(/GitHub Token/i) // hydrated from the server
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.post).not.toHaveBeenCalledWith('/api/validate-token', expect.anything())
+  })
+
+  it('validates a browser-cached token that the server no longer has (#294)', async () => {
+    role.value = 'reviewer'
+    setGithubToken('ghp_stale_local')
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // The local cookie disagrees with the server, so it is a new value to check.
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        '/api/validate-token',
+        expect.objectContaining({ token_type: 'github', token: 'ghp_stale_local' }),
+      ),
+    )
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+  })
+
+  it('clears one token even when an unchanged stored token is invalid (#294)', async () => {
+    role.value = 'reviewer'
+    // Server hands back a stored GitHub token that no longer validates.
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: 'ghp_revoked', jira_email: '', jira_token: '' }
+        : {},
+    )
+    apiMock.post.mockImplementation(async (path: string) =>
+      path === '/api/validate-token'
+        ? { valid: false, username: '', message: 'Bad credentials' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    const jira = await screen.findByLabelText(/Jira Token/i)
+    await userEvent.type(jira, 'jira_tok')
+    await userEvent.clear(jira)
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ github_token: 'ghp_revoked', jira_token: '' }),
+    )
   })
 })

@@ -1728,7 +1728,7 @@ The registration key is the only credential that signs you in; the tracker token
 
    Validation happens through `POST /api/validate-token`, and a failed validation leaves the stored value unchanged. The two entry points differ, though. The Settings form (`ProfileForm.handleSubmit`) validates any non-empty GitHub or Jira token that is not already known-good and **aborts the save** if the check fails, so a bad token typed there is never stored. The registration flow does not: `RegisterPage` sends whatever you typed straight to `PUT /api/user/tokens`, which stores it as supplied. A mistyped or already-revoked token entered at registration therefore persists and only fails later, when a tracker action tries to use it. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
 
-   > **Warning:** Stored tokens cannot be cleared from this page or from the API. `PUT /api/user/tokens` treats an empty field as "keep what is already stored" and merges it back over your existing values, and a request with all three fields empty is dropped without saving. Clearing every field in the UI is skipped outright for the same reason. A stored GitHub or Jira credential therefore stays on the server until it is overwritten by a different value, and there is no `DELETE` route for it. If you need the credential gone, register a fresh account or ask an administrator to delete the account with `DELETE /api/admin/users/{username}`; the tokens are columns on the `users` row, so removing the row removes them.
+   > **Clearing a token:** clear the field and save. An empty field in the body of `PUT /api/user/tokens` clears that one credential on the server; the fields you do not send keep their stored values, so clearing your GitHub token leaves your Jira credentials alone. Sending `null` for a field clears it the same way an empty string does, and a request that omits every field changes nothing and reports `"saved": false`. There is no separate `DELETE` route — an empty or `null` field is the clear.
 
    > **Tip:** Without a tracker token you can still preview generated issue content, but you cannot submit it. See [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for details.
 
@@ -2120,7 +2120,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
-| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens |
+| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. A body with none of the three fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
 | POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving |
 | POST | `/api/jira-projects` | viewer | List Jira projects visible to the supplied credentials |
 | POST | `/api/jira-security-levels` | viewer | List Jira security levels for a project |
@@ -2469,7 +2469,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 
 | Option | Purpose |
 | --- | --- |
-| `--source` | `jenkins` (default), `file`, or `prow`. |
+| `--source` | `jenkins` (default), `file`, `prow`, or `raw`. |
 | `--job-name`, `-j` | Job name. Required for `jenkins` and `prow`. |
 | `--build-number`, `-b` | Build number, or Prow build ID as a numeric string. Required for `jenkins` and `prow`. |
 | `--file`, `-f` | Path to a JUnit XML file. Required for `file`. |
@@ -2493,7 +2493,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--additional-repos` | Extra context repos as `"name:url,name:url"`. |
 | `--wait` / `--no-wait`, `--poll-interval`, `--max-wait` | Wait for a still-running Jenkins build. |
 | `--max-concurrent` | Cap concurrent AI calls. `0` keeps the config or server default. |
-| `--passed-tests`, `--skipped-tests` | JSON arrays of extra test entries. The request model accepts these only for `type=raw`, and `analyze --source` offers only `jenkins`, `file`, or `prow` — so on this command they are always rejected with a validation error. Tracked in [#298](https://github.com/myk-org/rootcoz/issues/298). |
+| `--failures`, `--passed-tests`, `--skipped-tests` | JSON arrays of raw test entries. Accepted only with `--source raw`; any other source rejects them with a validation error. `--source raw` requires at least one of the three. |
 | `--tag` | Categorization tag. Repeatable. |
 | `--label`, `-l` | Job metadata label merged on analyze. Repeatable, and distinct from `--tag`. |
 

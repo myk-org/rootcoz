@@ -10455,8 +10455,9 @@ async def get_user_tokens_endpoint(request: Request) -> JSONResponse:
 async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     """Save tokens for the current user. Tokens are encrypted at rest.
 
-    Only fields present in the JSON body are updated. Omitted fields are left unchanged.
-    Pass empty string to clear a field.
+    Each field is set independently: an omitted field is left unchanged, an
+    empty string or ``null`` clears that one field, and a string sets it.
+    Clearing one field never touches the others.
     """
     _require_reviewer(request)
     _check_allow_list(request)
@@ -10469,25 +10470,28 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
         raise HTTPException(status_code=404, detail="User not found. Register first.")
     body = await _read_json_object(request)
 
-    gh = str(body.get("github_token", "")).strip()
-    je = str(body.get("jira_email", "")).strip()
-    jt = str(body.get("jira_token", "")).strip()
+    # Presence-based, so an omitted field keeps its stored value and an empty
+    # one clears it. Stringifying first would store a null as the literal "None".
+    kwargs: dict[str, str] = {}
+    for field in ("github_token", "jira_email", "jira_token"):
+        if field not in body:
+            continue
+        value = body[field]
+        if value is None:
+            kwargs[field] = ""
+        elif isinstance(value, str):
+            kwargs[field] = value.strip()
+        else:
+            raise HTTPException(
+                status_code=400, detail=f"{field} must be a string or null"
+            )
 
-    # If all empty, skip save — don't overwrite existing tokens
-    if not gh and not je and not jt:
-        return JSONResponse(content={"ok": True})
-
-    # Merge with existing: only overwrite fields that have new values
-    existing = await storage.get_user_tokens(username)
-    kwargs: dict[str, str | None] = {
-        "github_token": gh if gh else existing.get("github_token", ""),
-        "jira_email": je if je else existing.get("jira_email", ""),
-        "jira_token": jt if jt else existing.get("jira_token", ""),
-    }
+    if not kwargs:
+        return JSONResponse(content={"ok": True, "saved": False})
 
     await storage.save_user_tokens(username, **kwargs)
-    logger.debug(f"Saved tokens for user '{username}'")
-    return JSONResponse(content={"ok": True})
+    logger.debug(f"Saved tokens for user '{username}': {sorted(kwargs)}")
+    return JSONResponse(content={"ok": True, "saved": True})
 
 
 # --- Admin endpoints ---
