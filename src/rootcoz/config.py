@@ -15,6 +15,13 @@ from rootcoz.vapid import get_vapid_config
 
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
+# Defaults for the Prow artifact download limits (see ``Settings``).
+# Single source of truth — ``rootcoz.sources.prow_source`` reuses them as
+# fallback limits for callers that do not pass settings.
+PROW_ARTIFACTS_MAX_SIZE_MB = 50
+PROW_ARTIFACT_MAX_FILE_SIZE_MB = 10
+PROW_ARTIFACTS_MAX_OBJECTS = 5_000
+
 
 def _split_outside_brackets(raw: str) -> list[str]:
     """Split string on commas that are not inside square brackets."""
@@ -281,6 +288,23 @@ class Settings(BaseSettings):
     gcs_bucket: str = Field(
         default="",
         description="Default GCS bucket for Prow artifacts (e.g. test-platform-results)",
+    )
+
+    # Prow artifact download limits (server-level deployment settings).
+    prow_artifacts_max_size_mb: int = Field(
+        default=PROW_ARTIFACTS_MAX_SIZE_MB,
+        gt=0,
+        description="Total budget in MB for downloaded Prow artifacts",
+    )
+    prow_artifact_max_file_size_mb: int = Field(
+        default=PROW_ARTIFACT_MAX_FILE_SIZE_MB,
+        gt=0,
+        description="Max size in MB of a single downloaded Prow artifact",
+    )
+    prow_artifacts_max_objects: int = Field(
+        default=PROW_ARTIFACTS_MAX_OBJECTS,
+        gt=0,
+        description="Max number of GCS objects listed per Prow build",
     )
 
     # Jenkins job monitoring (wait for completion before analysis)

@@ -382,6 +382,9 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "Prow": [
         "prow_url",
         "gcs_bucket",
+        "prow_artifacts_max_size_mb",
+        "prow_artifact_max_file_size_mb",
+        "prow_artifacts_max_objects",
     ],
     "Server": [
         "public_base_url",
