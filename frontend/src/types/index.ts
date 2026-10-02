@@ -113,6 +113,8 @@ export interface PeerRound {
 }
 
 export interface PeerDebate {
+  /** One debate execution; new on re-analysis. Absent on legacy results. */
+  debate_id?: string
   consensus_reached: boolean
   rounds_used: number
   max_rounds: number

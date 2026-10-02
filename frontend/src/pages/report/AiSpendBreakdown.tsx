@@ -250,7 +250,7 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
             />
             <AverageRow
               label="Peer cost per debated group"
-              hint={`Sum of known peer debate costs / ${averages.debatedGroups} debated group(s); debates with unavailable cost are excluded from both sides.`}
+              hint={`Sum of known peer debate costs / ${averages.peersWithKnownCost} of ${averages.debatedGroups} debated group(s) with a known cost; the rest are excluded from both sides.`}
               value={averages.peerCostPerDebatedGroup}
             />
           </section>

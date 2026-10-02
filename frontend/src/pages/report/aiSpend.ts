@@ -152,11 +152,12 @@ export function peerGroups(result: TreeNode): PeerGroup[] {
   const debates: PeerGroup[] = []
   for (const { childLabel, signature, failures } of uniqueFailureGroups(result)) {
     // Failures sharing a signature can hold different current debates after one is
-    // re-analyzed, so partition them by debate and count each debate exactly once.
+    // re-analyzed. `debate_id` identifies one execution; legacy results fall back to
+    // serialized content, which can only merge debates that are genuinely identical.
     const byDebate = new Map<string, Failure[]>()
     for (const failure of failures) {
       if (!failure.peer_debate) continue
-      const id = JSON.stringify(failure.peer_debate)
+      const id = failure.peer_debate.debate_id ?? JSON.stringify(failure.peer_debate)
       const members = byDebate.get(id)
       if (members) members.push(failure)
       else byDebate.set(id, [failure])
@@ -174,16 +175,18 @@ function buildPeerGroup(key: string, childLabel: string, members: Failure[]): Pe
   const peerCounters = new Map<number, number>()
   const rounds: PeerCallRow[] = groupPeerRounds(debate.rounds ?? []).flatMap(({ round, entries }) =>
     entries.map(entry => {
-      const model = entry.ai_model || 'unknown'
-      const agent = entry.ai_provider ? `${entry.ai_provider}/${model}` : model
       const isPeer = entry.role === 'peer'
       // Number peers within the round: same-model peers stay distinguishable.
       const peerIndex = isPeer ? (peerCounters.get(round) ?? 0) + 1 : 0
       if (isPeer) peerCounters.set(round, peerIndex)
+      // Name the model that was actually billed; the round's configured identity
+      // can differ from what the call reported.
+      const provider = entry.token_usage?.provider || entry.ai_provider
+      const model = entry.token_usage?.model || entry.ai_model || 'unknown'
       return {
         round,
         role: entry.role,
-        agent,
+        agent: provider ? `${provider}/${model}` : model,
         agentLabel: isPeer ? `Peer ${peerIndex}` : 'Main AI',
         usage: entry.token_usage ?? null,
       }
@@ -226,6 +229,8 @@ export interface SpendAverages {
   /** Peer cost / debated groups; null when no debate has a known cost. */
   peerCostPerDebatedGroup: number | null
   debatedGroups: number
+  /** Debates contributing to `peerCostPerDebatedGroup` — the real denominator. */
+  peersWithKnownCost: number
 }
 
 export function spendAverages(
@@ -246,5 +251,6 @@ export function spendAverages(
     groupsWithKnownCost: withCost.length,
     peerCostPerDebatedGroup: peersWithCost.length > 0 ? peerCost / peersWithCost.length : null,
     debatedGroups: peers.length,
+    peersWithKnownCost: peersWithCost.length,
   }
 }

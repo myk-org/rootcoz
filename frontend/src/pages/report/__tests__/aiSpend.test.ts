@@ -241,6 +241,8 @@ describe('peerGroups', () => {
     const original = complete(debate())
     const reanalyzed = {
       ...original,
+      // a re-analysis produces a new execution, even with identical content
+      debate_id: 'exec-2',
       rounds: original.rounds.map(r => ({ ...r, details: 'new attempt', token_usage: { ...r.token_usage!, cost_usd: 0.01 } })),
     }
     const groups = peerGroups(result({
@@ -255,6 +257,56 @@ describe('peerGroups', () => {
     expect(groups.map(g => g.testName).sort()).toEqual(['test_a', 'test_b'])
     // both debates are reported in full; neither is dropped in favour of the first
     expect(groups.map(g => g.costUsd).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([0.05, 1.5])
+  })
+
+  it('keeps identical-content debates apart when they have different execution ids', () => {
+    const first = { ...complete(debate()), debate_id: 'exec-1' }
+    const second = { ...first, debate_id: 'exec-2' }
+    const groups = peerGroups(result({
+      failures: [failure({ peer_debate: first }), failure({ test_name: 'test_b', peer_debate: second })],
+    }))
+    expect(groups).toHaveLength(2)
+    expect(groups.map(g => g.siblingCount)).toEqual([0, 0])
+  })
+
+  it('shares one debate across failures carrying the same execution id', () => {
+    const shared = { ...complete(debate()), debate_id: 'exec-1' }
+    const groups = peerGroups(result({
+      failures: [
+        failure({ peer_debate: shared }),
+        failure({ test_name: 'test_b', peer_debate: { ...shared } }),
+      ],
+    }))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].siblingCount).toBe(1)
+  })
+
+  it('names the model the call was actually billed on', () => {
+    const [group] = peerGroups(result({
+      failures: [failure({
+        peer_debate: {
+          ...complete(debate()),
+          rounds: [{
+            ...complete(debate()).rounds[0],
+            ai_provider: 'gemini', ai_model: 'configured-model',
+            token_usage: call({ provider: 'openrouter', model: 'billed-model', cost_usd: 0.4 }),
+          }],
+        },
+      })],
+    }))
+    expect(group.rounds[0].agent).toBe('openrouter/billed-model')
+  })
+
+  it('falls back to the configured identity when usage records none', () => {
+    const [group] = peerGroups(result({
+      failures: [failure({
+        peer_debate: {
+          ...complete(debate()),
+          rounds: [{ ...complete(debate()).rounds[0], token_usage: { ...call({ cost_usd: 0.4 }), provider: '', model: '' } }],
+        },
+      })],
+    }))
+    expect(group.rounds[0].agent).toBe('gemini/pro')
   })
 })
 
@@ -296,6 +348,25 @@ describe('spendAverages', () => {
     expect(averages.debatedGroups).toBe(1)
     expect(averages.peerCostPerDebatedGroup).toBeCloseTo(0.4)
     expect(averages.debatedGroups).toBe(1)
+    expect(averages.peersWithKnownCost).toBe(1)
+  })
+
+  it('reports the peer denominator as debates with a known cost', () => {
+    const known = peerGroups(result({ failures: [failure({ peer_debate: {
+      consensus_reached: true, rounds_used: 1, max_rounds: 1, ai_configs: [],
+      rounds: [{ round: 1, ai_provider: 'g', ai_model: 'p', role: 'orchestrator', classification: '', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ cost_usd: 0.4 }) }],
+    } })] }))
+    const unavailable = peerGroups(result({ failures: [failure({ test_name: 'test_b', error_signature: 'sig-b', peer_debate: {
+      consensus_reached: false, rounds_used: 2, max_rounds: 2, ai_configs: [],
+      rounds: [
+        { round: 1, ai_provider: 'g', ai_model: 'p', role: 'orchestrator', classification: '', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: null },
+        { round: 1, ai_provider: 'g', ai_model: 'p', role: 'peer', classification: '', pattern: '', details: '', agrees_with_orchestrator: null, token_usage: null },
+      ],
+    } })] }))
+    const averages = spendAverages(0.9, 2, groups, [...known, ...unavailable])
+    expect(averages.debatedGroups).toBe(2)
+    expect(averages.peersWithKnownCost).toBe(1)
+    expect(averages.peerCostPerDebatedGroup).toBeCloseTo(0.4)
   })
 })
 

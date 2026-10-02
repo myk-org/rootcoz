@@ -548,6 +548,14 @@ class PeerRound(BaseModel):
 class PeerDebate(BaseModel):
     """Full debate trail for a peer-analyzed failure group."""
 
+    debate_id: str = Field(
+        default_factory=_uuid_str,
+        description=(
+            "Identifies one debate execution. Shared by every failure that received "
+            "the same debate, and new on re-analysis, so consumers can tell two "
+            "independent debates apart even when their content is identical."
+        ),
+    )
     consensus_reached: bool
     rounds_used: int
     max_rounds: int
