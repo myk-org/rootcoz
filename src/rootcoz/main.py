@@ -3839,6 +3839,7 @@ async def _analyze_failures_or_exit(
     groups: dict[str, list[Any]],
     source_result: CISourceResult | None,
     child_job_analyses: list[ChildJobAnalysis] | None = None,
+    child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] | None = None,
     extra_labels: list[str] | None = None,
 ) -> tuple[list[Any], list[Any], int, list[CrossFailurePattern]] | None:
     """Resolve console-only / no-failure / junit analysis paths.
@@ -4036,6 +4037,24 @@ async def _analyze_failures_or_exit(
         _stamp_result_metadata(fail_data, source_result)
         await _preserve_request_params(job_id, fail_data)
         await _attach_token_usage(job_id, fail_data)
+        # Persist test outcomes and cache counts BEFORE update_status, so the
+        # stored result carries them. Mirrors the normal completion path.
+        _all_test_entries = (
+            source_result.test_entry_dicts() if source_result is not None else []
+        )
+        _scopes = child_test_scopes or []
+        try:
+            await replace_job_test_entries(job_id, _all_test_entries, _scopes)
+        except Exception:
+            # Do NOT cache counts from entries that were not persisted - the
+            # stored result must never claim test outcomes the DB does not have.
+            logger.warning(
+                "Failed to persist test entries for fully failed job_id=%s",
+                job_id,
+                exc_info=True,
+            )
+        else:
+            _apply_cached_test_counts(fail_data, _all_test_entries, _scopes)
         await update_status(job_id, "failed", fail_data)
         notify_active_count_changed()
         notify_dashboard_changed()
@@ -4522,6 +4541,7 @@ async def _process_ci_source_analysis(
             groups=groups,
             source_result=source_result,
             child_job_analyses=child_job_analyses,
+            child_test_scopes=child_test_scopes,
             extra_labels=extra_labels,
         )
         if analysis_result_tuple is None:

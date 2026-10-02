@@ -2,6 +2,7 @@
 
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
@@ -438,3 +439,230 @@ async def test_pipeline_jira_and_saving_stages(
         )
         assert history.await_count == int(not all_failed)
         assert review.await_count == int(not all_failed)
+
+
+@pytest.mark.asyncio
+async def test_fully_failed_analysis_still_persists_test_entries_and_counts(
+    temp_db_path: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression for #306.
+
+    When every failure group fails analysis the pipeline returns early. Before
+    this fix that early return marked the job failed WITHOUT persisting test
+    outcomes or caching their counts, so the job showed zero tests even though
+    the CI source had reported them.
+    """
+    from rootcoz.main import _process_ci_source_analysis
+
+    failures = [FailedTest(test_name="boom.Test", error_message="kaboom")]
+    source_result = CISourceResult(
+        failures=failures,
+        passed_tests=[
+            BaseTestEntry(test_name="ok.Test", duration=0.5, status="passed")
+        ],
+        skipped_tests=[
+            BaseTestEntry(test_name="skip.Test", duration=0.0, status="skipped")
+        ],
+    )
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch(
+            "rootcoz.main.run_orchestrated_analysis",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("orchestrator failed"),
+        ),
+        patch(
+            "rootcoz.main.analyze_failure_group",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("group failed"),
+        ),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._enrich_result_with_jira", new_callable=AsyncMock),
+        patch("rootcoz.main.populate_failure_history", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible",
+            new_callable=AsyncMock,
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=([], []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result("all-failed", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="all-failed",
+            body=UnifiedAnalyzeRequest(type="raw", failures=failures),
+            merged=Settings(),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("all-failed")
+        entries = (await storage.get_test_entries("all-failed", limit=100))["entries"]
+
+    # 1. still marked failed
+    assert row["status"] == "failed"
+    assert "All failure group(s) failed during analysis" in row["result"]["error"]
+
+    # 2. test outcomes actually persisted
+    statuses = {e["test_name"]: e["status"] for e in entries}
+    assert statuses == {
+        "boom.Test": "failed",
+        "ok.Test": "passed",
+        "skip.Test": "skipped",
+    }
+
+    # 3. aggregate counts cached on the stored result
+    result = row["result"]
+    assert result["passed_count"] == 1
+    assert result["skipped_count"] == 1
+    assert result["failed_count"] == 1
+
+
+class _WriteAlwaysFails:
+    """Replace the real writer with one that always raises.
+
+    On the all-groups-failed path this is the ONLY call to
+    ``replace_job_test_entries`` (the ingest path does not run for this
+    flow), so making it raise proves the pipeline caches no counts for
+    entries that were never saved.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        raise RuntimeError("db write failed")
+
+
+@pytest.mark.asyncio
+async def test_fully_failed_analysis_caches_no_counts_when_persist_fails(
+    temp_db_path: Path,
+    tmp_path: Path,
+) -> None:
+    """Regression for #307 review: a failed write must not leave phantom counts.
+
+    ``replace_job_test_entries`` raising on the analysis path must not leave
+    the stored result claiming test outcomes that were never persisted.
+    """
+    from rootcoz.main import _process_ci_source_analysis
+
+    flaky_write = _WriteAlwaysFails()
+    failures = [FailedTest(test_name="boom.Test", error_message="kaboom")]
+    source_result = CISourceResult(
+        failures=failures,
+        passed_tests=[
+            BaseTestEntry(test_name="ok.Test", duration=0.5, status="passed")
+        ],
+        skipped_tests=[
+            BaseTestEntry(test_name="skip.Test", duration=0.0, status="skipped")
+        ],
+    )
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch(
+            "rootcoz.main.run_orchestrated_analysis",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("orchestrator failed"),
+        ),
+        patch(
+            "rootcoz.main.analyze_failure_group",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("group failed"),
+        ),
+        patch("rootcoz.main.replace_job_test_entries", new=flaky_write),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._enrich_result_with_jira", new_callable=AsyncMock),
+        patch("rootcoz.main.populate_failure_history", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=([], []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result("persist-fail", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="persist-fail",
+            body=UnifiedAnalyzeRequest(type="raw", failures=failures),
+            merged=Settings(),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("persist-fail")
+        entries = (await storage.get_test_entries("persist-fail", limit=100))["entries"]
+
+    # the write really was attempted, and it really failed
+    assert flaky_write.calls >= 1
+
+    # status is still reported correctly - a write failure must not swallow
+    # the "analysis failed" report
+    assert row["status"] == "failed"
+    assert "All failure group(s) failed during analysis" in row["result"]["error"]
+
+    # THE INVARIANT: cached counts must never claim more test outcomes than
+    # are actually persisted. Counted from the DB, not from the in-memory
+    # entries the failed write tried to save.
+    persisted: dict[str, int] = {}
+    for e in entries:
+        persisted[e["status"]] = persisted.get(e["status"], 0) + 1
+    result = row["result"]
+    assert result.get("passed_count", 0) == persisted.get("passed", 0)
+    assert result.get("skipped_count", 0) == persisted.get("skipped", 0)
+    assert result.get("failed_count", 0) == persisted.get("failed", 0)
