@@ -78,4 +78,31 @@ describe('ProfileForm tracker tokens', () => {
       jira_token: '',
     })
   })
+
+  it('clears one token even when an unchanged stored token is invalid (#294)', async () => {
+    role.value = 'reviewer'
+    // Server hands back a stored GitHub token that no longer validates.
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: 'ghp_revoked', jira_email: '', jira_token: '' }
+        : {},
+    )
+    apiMock.post.mockImplementation(async (path: string) =>
+      path === '/api/validate-token'
+        ? { valid: false, username: '', message: 'Bad credentials' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    const jira = await screen.findByLabelText(/Jira Token/i)
+    await userEvent.type(jira, 'jira_tok')
+    await userEvent.clear(jira)
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ github_token: 'ghp_revoked', jira_token: '' }),
+    )
+  })
 })

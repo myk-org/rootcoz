@@ -100,7 +100,10 @@ export function RegisterPage() {
       if (gh) setGithubToken(gh)
       if (je) setJiraEmail(je)
       if (jt) setJiraToken(jt)
-      await persistTokensToServer(gh, je, jt)
+      // Only when something was typed: the server reads an empty field as a
+      // clear, and a keyless account can already hold tracker credentials from
+      // earlier authenticated activity (#294).
+      if (gh || je || jt) await persistTokensToServer(gh, je, jt)
 
       setMode('key-reveal')
     } catch (err) {
