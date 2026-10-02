@@ -876,6 +876,113 @@ class TestGetTokenUsageSummary:
         assert summary["total_cost_usd"] == pytest.approx(0.09)
 
     @pytest.mark.asyncio
+    async def test_unknown_only_cost_is_unavailable_not_zero(self, _storage) -> None:
+        """Spend on a model with unknown price is unavailable, never a real $0."""
+        await storage.record_token_usage(
+            job_id="job-1",
+            ai_provider="gemini",
+            ai_model="key-discovered",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=None,
+            duration_ms=1000,
+        )
+        summary = await storage.get_token_usage_summary()
+        assert summary["total_cost_usd"] is None
+        assert summary["priced_calls"] == 0
+        assert summary["total_calls"] == 1
+        # token columns are NOT NULL and still total normally
+        assert summary["total_input_tokens"] == 100
+
+    @pytest.mark.asyncio
+    async def test_mixed_priced_and_unknown_cost_is_unavailable(self, _storage) -> None:
+        """A partial sum over unknown rows is a floor, so it is not reported as the total."""
+        await self._insert_test_records()
+        await storage.record_token_usage(
+            job_id="job-3",
+            ai_provider="gemini",
+            ai_model="key-discovered",
+            call_type="analysis",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=None,
+            duration_ms=100,
+        )
+        summary = await storage.get_token_usage_summary()
+        assert summary["total_cost_usd"] is None
+        assert summary["priced_calls"] == 3
+        assert summary["total_calls"] == 4
+
+    @pytest.mark.asyncio
+    async def test_breakdown_marks_unpriced_groups_and_sorts_them_last(
+        self, _storage
+    ) -> None:
+        """Group rows expose priced/total calls and never price an unknown group at zero."""
+        await self._insert_test_records()
+        await storage.record_token_usage(
+            job_id="job-3",
+            ai_provider="gemini",
+            ai_model="key-discovered",
+            call_type="analysis",
+            input_tokens=10,
+            cost_usd=None,
+            duration_ms=100,
+        )
+        summary = await storage.get_token_usage_summary(group_by="model")
+        rows = {row["group_key"]: row for row in summary["breakdown"]}
+        unknown = rows["gemini / key-discovered"]
+        assert unknown["cost_usd"] is None
+        assert unknown["priced_calls"] == 0
+        assert unknown["call_count"] == 1
+        # complete groups rank ahead of unknown ones regardless of token volume
+        assert list(rows).index("gemini / key-discovered") == len(rows) - 1
+
+    @pytest.mark.asyncio
+    async def test_dashboard_period_reports_unknown_cost_as_unavailable(
+        self, _storage
+    ) -> None:
+        """Period cards must not present unknown spend as a complete total."""
+        await storage.record_token_usage(
+            job_id="job-1",
+            ai_provider="gemini",
+            ai_model="key-discovered",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=None,
+            duration_ms=1000,
+        )
+        result = await storage.get_token_usage_dashboard_summary()
+        assert result["today"]["cost_usd"] is None
+        assert result["today"]["priced_calls"] == 0
+        assert result["today"]["calls"] == 1
+        top_model = next(
+            m for m in result["top_models"] if m["model"] == "gemini / key-discovered"
+        )
+        assert top_model["cost_usd"] is None
+
+    @pytest.mark.asyncio
+    async def test_partial_prompt_cost_is_flagged(self, _storage) -> None:
+        """A prompt whose cost covers only some turns is flagged as a lower bound."""
+        await storage.record_token_usage(
+            job_id="job-1",
+            ai_provider="gemini",
+            ai_model="priced-model",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.02,
+            duration_ms=1000,
+            cost_partial=True,
+        )
+        totals = await storage.get_job_token_usage_totals("job-1")
+        assert totals is not None
+        assert totals["cost_partial"] == 1
+        assert totals["total_cost_usd"] == pytest.approx(0.02)
+        assert totals["priced_calls"] == 1
+
+    @pytest.mark.asyncio
     async def test_empty_db_returns_zeros(self, _storage) -> None:
         """Empty database returns zero totals."""
         summary = await storage.get_token_usage_summary()

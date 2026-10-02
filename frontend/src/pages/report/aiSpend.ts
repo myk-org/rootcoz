@@ -28,6 +28,8 @@ export interface StageUsage {
   outcomeKnown: boolean
   /** Cost of failed calls; null when any failed call has no recorded cost. */
   failedCostUsd: number | null
+  /** True when a call's recorded cost covers only some turns (a lower bound). */
+  partial: boolean
 }
 
 /** Sum costs, treating any unknown cost as making the total unavailable. */
@@ -62,6 +64,7 @@ export function stageBreakdown(usage: TokenUsageSummary | null | undefined): Sta
       failedCalls: failed.length,
       outcomeKnown: calls.every(call => call.success != null),
       failedCostUsd: failed.length > 0 ? sumKnownCost(failed) : null,
+      partial: calls.some(call => call.cost_partial),
     }
   })
 }

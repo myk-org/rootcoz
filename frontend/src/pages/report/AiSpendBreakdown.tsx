@@ -50,7 +50,10 @@ function StageRow({ stage }: { stage: StageUsage }) {
         {stage.cacheWriteTokens > 0 && ` +${formatCompactNumber(stage.cacheWriteTokens)}w`}
       </td>
       <td className="py-1 pr-2 text-right font-mono text-xs">{formatCompactNumber(stage.totalTokens)}</td>
-      <td className="py-1 text-right font-mono text-xs"><Cost value={stage.costUsd} /></td>
+      <td className="py-1 text-right font-mono text-xs">
+        <Cost value={stage.costUsd} />
+        {stage.partial && <span className="text-text-tertiary"> (lower bound)</span>}
+      </td>
     </tr>
   )
 }
@@ -185,6 +188,11 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
             {stages.length > 0
               ? <StageTable stages={stages} />
               : <p className="text-xs text-text-tertiary">No recorded AI calls for this job.</p>}
+            {result.token_usage?.cost_partial && (
+              <p className="text-[10px] text-text-tertiary">
+                Some AI turns had no catalog price, so this job's cost is a lower bound, not the full spend.
+              </p>
+            )}
           </section>
 
           <section className="space-y-2">

@@ -103,6 +103,20 @@ describe('stageBreakdown', () => {
     expect(missingOutcome.failedCostUsd).toBeNull()
   })
 
+  it('marks a stage whose cost is a lower bound', () => {
+    const [stage] = stageBreakdown(usageSummary([
+      call({ cost_usd: 0.02, cost_partial: true }),
+      call({ cost_usd: 0.01 }),
+    ]))
+    expect(stage.partial).toBe(true)
+    expect(stage.costUsd).toBeCloseTo(0.03)
+  })
+
+  it('is not partial when no call was flagged', () => {
+    const [stage] = stageBreakdown(usageSummary([call()]))
+    expect(stage.partial).toBe(false)
+  })
+
   it('has no stages at all for a legacy result without usage', () => {
     expect(stageBreakdown(null)).toEqual([])
     expect(stageBreakdown(undefined)).toEqual([])

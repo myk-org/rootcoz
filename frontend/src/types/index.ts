@@ -466,10 +466,14 @@ export interface TokenUsageEntry {
   duration_ms: number | null
   /** Whether the AI call succeeded. Null = legacy row, outcome unknown. */
   success?: boolean | null
+  /** The recorded cost covers only some turns, so it is a lower bound. */
+  cost_partial?: boolean
 }
 
 export interface TokenUsageSummary {
   credential_source?: 'user' | 'server' | 'mixed' | 'unknown'
+  /** True when any recorded call's cost is a lower bound (some turn had no price). */
+  cost_partial?: boolean
   total_input_tokens: number
   total_output_tokens: number
   total_cache_read_tokens: number
@@ -483,18 +487,21 @@ export interface TokenUsageSummary {
 
 export interface TokenUsagePeriod {
   calls: number
+  /** Calls with a known price; below `calls` means `cost_usd` is a lower bound. */
+  priced_calls: number
   tokens: number
   input_tokens: number
   output_tokens: number
-  cost_usd: number
+  /** Null when any call has an unknown price — unavailable, never zero. */
+  cost_usd: number | null
 }
 
 export interface TokenUsageDashboard {
   today: TokenUsagePeriod
   this_week: TokenUsagePeriod
   this_month: TokenUsagePeriod
-  top_models: { model: string; calls: number; cost_usd: number }[]
-  top_jobs: { job_id: string; calls: number; cost_usd: number }[]
+  top_models: { model: string; calls: number; priced_calls: number; cost_usd: number | null }[]
+  top_jobs: { job_id: string; calls: number; priced_calls: number; cost_usd: number | null }[]
 }
 
 export interface TokenUsageRecord {

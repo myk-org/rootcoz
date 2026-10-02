@@ -1229,6 +1229,12 @@ async def init_db() -> None:
         )
         # NULL (not 0/1) so legacy rows stay "outcome unknown" instead of failed
         await _migrate_add_column(db, "ai_token_usage", "success", "INTEGER")
+        # pi-sidecar sets cost_partial when a multi-turn prompt reported a real
+        # cost for one turn and nothing for another (turn on a model with no
+        # catalog price). The stored sum is then a lower bound, not the spend.
+        await _migrate_add_column(
+            db, "ai_token_usage", "cost_partial", "INTEGER NOT NULL DEFAULT 0"
+        )
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ai_session_sources (
                 session_id TEXT PRIMARY KEY,
@@ -6764,6 +6770,7 @@ async def record_token_usage(
     usage_attempt: str = "",
     success: bool | None = None,
     error_signature_v2: str = "",
+    cost_partial: bool = False,
 ) -> str:
     """Record a single AI call's token usage. Returns the record ID.
 
@@ -6781,8 +6788,8 @@ async def record_token_usage(
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
             "prompt_chars, response_chars, credential_source, error_signature, "
             "child_job_name, child_build_number, failure_id, usage_attempt, "
-            "success, error_signature_v2) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "success, error_signature_v2, cost_partial) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -6806,6 +6813,7 @@ async def record_token_usage(
                 usage_attempt if call_type == "reanalysis" else "",
                 None if success is None else int(success),
                 error_signature_v2 if call_type in ("primary", "reanalysis") else None,
+                int(bool(cost_partial)),
             ),
         )
         await db.commit()
@@ -6822,6 +6830,21 @@ async def get_token_usage_for_job(job_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in await cursor.fetchall()]
 
 
+# --- Cost aggregation contract -----------------------------------------
+#
+# `cost_usd` is the only nullable measure: a model with unknown price records
+# NULL because "we don't know the price" must never render as a genuine $0.
+# Token columns are NOT NULL, so COALESCE stays correct for them. Every cost
+# aggregate therefore uses COUNT(cost_usd) = COUNT(*) and returns NULL unless
+# every contributing row is priced. Callers pair the cost with priced_calls /
+# total_calls to tell a complete total from a lower bound. No rows at all is a
+# genuine zero — nothing was spent.
+_TOTAL_COST_SQL = (
+    "CASE WHEN COUNT(*) = 0 THEN 0 "
+    "WHEN COUNT(cost_usd) = COUNT(*) THEN SUM(cost_usd) END"
+)
+
+
 async def _get_job_token_usage_totals(
     db: aiosqlite.Connection, job_id: str
 ) -> dict[str, Any] | None:
@@ -6833,7 +6856,9 @@ async def _get_job_token_usage_totals(
         "SUM(cache_read_tokens) AS total_cache_read_tokens, "
         "SUM(cache_write_tokens) AS total_cache_write_tokens, "
         "SUM(total_tokens) AS total_tokens, "
-        "CASE WHEN COUNT(cost_usd) = COUNT(*) THEN SUM(cost_usd) END AS total_cost_usd, "
+        f"{_TOTAL_COST_SQL} AS total_cost_usd, "
+        "COUNT(cost_usd) AS priced_calls, "
+        "MAX(COALESCE(cost_partial, 0)) AS cost_partial, "
         "COALESCE(SUM(duration_ms), 0) AS total_duration_ms, "
         "CASE WHEN SUM(credential_source = 'user') > 0 "
         "AND SUM(credential_source = 'server') > 0 THEN 'mixed' "
@@ -6916,7 +6941,8 @@ async def get_token_usage_summary(
             "COALESCE(SUM(output_tokens), 0) as total_output_tokens, "
             "COALESCE(SUM(cache_read_tokens), 0) as total_cache_read_tokens, "
             "COALESCE(SUM(cache_write_tokens), 0) as total_cache_write_tokens, "
-            "COALESCE(SUM(cost_usd), 0) as total_cost_usd, "
+            f"{_TOTAL_COST_SQL} as total_cost_usd, "
+            "COUNT(cost_usd) as priced_calls, "
             "COUNT(*) as total_calls, "
             "COALESCE(SUM(duration_ms), 0) as total_duration_ms "
             f"FROM ai_token_usage{where_clause}"
@@ -6944,7 +6970,8 @@ async def get_token_usage_summary(
                     "COALESCE(SUM(output_tokens), 0) as output_tokens, "
                     "COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens, "
                     "COALESCE(SUM(cache_write_tokens), 0) as cache_write_tokens, "
-                    "COALESCE(SUM(cost_usd), 0) as cost_usd, "
+                    f"{_TOTAL_COST_SQL} as cost_usd, "
+                    "COUNT(cost_usd) as priced_calls, "
                     "COUNT(*) as call_count, "
                     "CASE WHEN COUNT(duration_ms) > 0"
                     " THEN COALESCE(SUM(duration_ms), 0)"
@@ -6952,7 +6979,9 @@ async def get_token_usage_summary(
                     " ELSE 0 END as avg_duration_ms "
                     f"FROM ai_token_usage{where_clause} "
                     f"GROUP BY {group_column} "
-                    "ORDER BY COALESCE(SUM(cost_usd), 0) DESC"
+                    # Complete totals first, then groups with unknown pricing, so a
+                    # NULL cost never sorts as if the group were cheap.
+                    "ORDER BY (COUNT(cost_usd) < COUNT(*)) ASC, SUM(cost_usd) DESC"
                 )
                 cursor = await db.execute(breakdown_query, params)
                 breakdown = [dict(row) for row in await cursor.fetchall()]
@@ -6985,7 +7014,9 @@ async def get_token_usage_dashboard_summary() -> dict[str, Any]:
                 f"COALESCE(SUM(total_tokens), 0) as tokens, "
                 f"COALESCE(SUM(input_tokens), 0) as input_tokens, "
                 f"COALESCE(SUM(output_tokens), 0) as output_tokens, "
-                f"COALESCE(SUM(cost_usd), 0) as cost_usd "
+                f"{_TOTAL_COST_SQL} as cost_usd, "
+                f"COUNT(cost_usd) as priced_calls, "
+                f"COUNT(*) as calls "
                 f"FROM ai_token_usage WHERE {condition}"
             )
             result[period_name] = dict(await cursor.fetchone())
@@ -6993,7 +7024,8 @@ async def get_token_usage_dashboard_summary() -> dict[str, Any]:
         # Top models by cost
         cursor = await db.execute(
             "SELECT ai_provider || ' / ' || ai_model as model, COUNT(*) as calls, "
-            "COALESCE(SUM(cost_usd), 0) as cost_usd "
+            "COUNT(cost_usd) as priced_calls, "
+            f"{_TOTAL_COST_SQL} as cost_usd "
             "FROM ai_token_usage "
             "WHERE created_at >= datetime('now', '-30 days') "
             "GROUP BY ai_provider, ai_model ORDER BY cost_usd DESC LIMIT 5"
@@ -7003,7 +7035,8 @@ async def get_token_usage_dashboard_summary() -> dict[str, Any]:
         # Top jobs by cost
         cursor = await db.execute(
             "SELECT job_id, COUNT(*) as calls, "
-            "COALESCE(SUM(cost_usd), 0) as cost_usd "
+            "COUNT(cost_usd) as priced_calls, "
+            f"{_TOTAL_COST_SQL} as cost_usd "
             "FROM ai_token_usage "
             "WHERE created_at >= datetime('now', '-30 days') "
             "GROUP BY job_id ORDER BY cost_usd DESC LIMIT 5"

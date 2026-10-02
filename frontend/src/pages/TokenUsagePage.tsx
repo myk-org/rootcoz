@@ -40,7 +40,8 @@ interface BreakdownRow {
   output_tokens: number
   cache_read_tokens: number
   cache_write_tokens: number
-  cost_usd: number
+  /** Null when any call in the group has no recorded price — unavailable, never zero. */
+  cost_usd: number | null
   avg_duration_ms: number
 }
 
@@ -49,17 +50,19 @@ interface TokenUsageBreakdownResponse {
   total_output_tokens: number
   total_cache_read_tokens: number
   total_cache_write_tokens: number
-  total_cost_usd: number
+  total_cost_usd: number | null
   total_calls: number
+  priced_calls: number
   total_duration_ms: number
   breakdown: Array<{
     group_key: string
     call_count: number
+    priced_calls: number
     input_tokens: number
     output_tokens: number
     cache_read_tokens: number
     cache_write_tokens: number
-    cost_usd: number
+    cost_usd: number | null
     avg_duration_ms: number
   }>
 }
@@ -90,14 +93,16 @@ function formatCallType(raw: string): string {
   return CALL_TYPE_LABELS[raw] ?? raw
 }
 
-function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, cost }: {
+function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, cost, pricedCalls, totalCalls }: {
   title: string
   icon: React.ReactNode
   calls: number
   tokens: number
   inputTokens: number
   outputTokens: number
-  cost: number
+  cost: number | null
+  pricedCalls?: number
+  totalCalls?: number
 }) {
   return (
     <Card>
@@ -129,6 +134,11 @@ function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, co
               {formatCostCell(cost)}
             </span>
           </div>
+          {cost == null && totalCalls != null && totalCalls > 0 && (
+            <p className="text-[10px] text-text-tertiary">
+              {pricedCalls ?? 0} of {totalCalls} calls have a known price
+            </p>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -141,7 +151,9 @@ function formatDurationMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-function formatCostCell(cost: number): string {
+/** Null cost is unavailable data, not $0 — never collapse the two. */
+function formatCostCell(cost: number | null | undefined): string {
+  if (cost == null) return 'Unavailable'
   if (cost <= 0) return '—'
   return formatCost(cost)
 }
@@ -212,7 +224,7 @@ export function TokenUsagePage() {
             output_tokens: number
             cache_read_tokens: number
             cache_write_tokens: number
-            cost_usd: number
+            cost_usd: number | null
             duration_ms: number
           }>>(`/api/admin/token-usage/${encodeURIComponent(jobId)}`)
           // Aggregate by call_type
@@ -225,7 +237,8 @@ export function TokenUsagePage() {
             existing.output_tokens += r.output_tokens
             existing.cache_read_tokens += r.cache_read_tokens || 0
             existing.cache_write_tokens += r.cache_write_tokens || 0
-            existing.cost_usd += r.cost_usd || 0
+            // any unknown price makes the whole row unavailable, never a partial sum
+            existing.cost_usd = r.cost_usd == null ? null : (existing.cost_usd ?? 0) + r.cost_usd
             existing.avg_duration_ms += r.duration_ms || 0
             byType.set(key, existing)
           }
@@ -329,7 +342,14 @@ export function TokenUsagePage() {
         case 'output_tokens': cmp = a.output_tokens - b.output_tokens; break
         case 'cache_read_tokens': cmp = a.cache_read_tokens - b.cache_read_tokens; break
         case 'cache_write_tokens': cmp = a.cache_write_tokens - b.cache_write_tokens; break
-        case 'cost_usd': cmp = a.cost_usd - b.cost_usd; break
+        case 'cost_usd':
+          // unknown cost is not free — keep those rows at the end either way
+          if (a.cost_usd == null || b.cost_usd == null) {
+            cmp = (a.cost_usd == null ? 1 : 0) - (b.cost_usd == null ? 1 : 0)
+          } else {
+            cmp = a.cost_usd - b.cost_usd
+          }
+          break
         case 'avg_duration_ms': cmp = a.avg_duration_ms - b.avg_duration_ms; break
         default: cmp = 0
       }
@@ -384,6 +404,8 @@ export function TokenUsagePage() {
             inputTokens={summary.today.input_tokens}
             outputTokens={summary.today.output_tokens}
             cost={summary.today.cost_usd}
+            pricedCalls={summary.today.priced_calls}
+            totalCalls={summary.today.calls}
           />
           <SummaryCard
             title="Last 7 Days"
@@ -393,6 +415,8 @@ export function TokenUsagePage() {
             inputTokens={summary.this_week.input_tokens}
             outputTokens={summary.this_week.output_tokens}
             cost={summary.this_week.cost_usd}
+            pricedCalls={summary.this_week.priced_calls}
+            totalCalls={summary.this_week.calls}
           />
           <SummaryCard
             title="Last 30 Days"
@@ -402,6 +426,8 @@ export function TokenUsagePage() {
             inputTokens={summary.this_month.input_tokens}
             outputTokens={summary.this_month.output_tokens}
             cost={summary.this_month.cost_usd}
+            pricedCalls={summary.this_month.priced_calls}
+            totalCalls={summary.this_month.calls}
           />
         </div>
       )}

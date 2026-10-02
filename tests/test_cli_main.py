@@ -4642,6 +4642,43 @@ class TestTokenUsageCommand:
         assert "claude-sonnet" in result.output
         mock_client.get_token_usage_summary.assert_called_once()
 
+    def test_token_usage_reports_unknown_pricing_not_zero(self, mock_client):
+        """Unknown spend prints N/A with its priced-calls disclosure, never $0.00."""
+        mock_client.get_token_usage_summary.return_value = {
+            "today": {"calls": 3, "tokens": 900, "cost_usd": None, "priced_calls": 0},
+            "top_models": [
+                {
+                    "model": "key-discovered",
+                    "calls": 3,
+                    "cost_usd": None,
+                    "priced_calls": 0,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage"])
+        assert result.exit_code == 0
+        assert "N/A" in result.output
+        assert "$0.00" not in result.output
+        assert "0/3 calls have a known price" in result.output
+
+    def test_token_usage_marks_partial_prompt_cost(self, mock_client):
+        """A cost covering only some turns is labelled a lower bound."""
+        mock_client.get_token_usage.return_value = {
+            "total_calls": 5,
+            "total_input_tokens": 1000,
+            "total_output_tokens": 500,
+            "total_cache_read_tokens": 200,
+            "total_cache_write_tokens": 100,
+            "total_cost_usd": 0.10,
+            "priced_calls": 5,
+            "cost_partial": True,
+            "total_duration_ms": 5000,
+            "breakdown": [],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--group-by", "model"])
+        assert result.exit_code == 0
+        assert "lower bound" in result.output
+
     def test_token_usage_summary_json(self, mock_client):
         mock_client.get_token_usage_summary.return_value = {
             "today": {"calls": 10},

@@ -83,6 +83,19 @@ describe('AiSpendBreakdown', () => {
     expect(screen.getByText('15')).toBeInTheDocument()
   })
 
+  it('labels a lower-bound stage cost instead of presenting it as the full spend', () => {
+    renderSection(result({
+      token_usage: summary([
+        call({ cost_partial: true }),
+        call({ call_type: 'agent_routing', cost_usd: 0.01, cost_partial: false }),
+      ], { total_cost_usd: 0.03, cost_partial: true }),
+    }))
+    expand()
+    // the partial stage row and the job-level note both disclose the lower bound
+    expect(screen.getAllByText(/lower bound/).length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText(/this job's cost is a lower bound/)).toBeInTheDocument()
+  })
+
   it('renders nothing for a legacy result with no usage and no failures', () => {
     const { container } = renderSection(result())
     expect(container).toBeEmptyDOMElement()

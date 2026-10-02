@@ -692,6 +692,7 @@ class TokenUsageEntry(BaseModel):
     call_type: str = ""
     error_signature: str = ""
     success: bool | None = None
+    cost_partial: bool = False
     credential_source: str = "unknown"
     input_tokens: int = 0
     output_tokens: int = 0
@@ -704,6 +705,14 @@ class TokenUsageEntry(BaseModel):
 
 class TokenUsageSummary(BaseModel):
     """Aggregated token usage for an entire analysis job."""
+
+    cost_partial: bool = Field(
+        default=False,
+        description=(
+            "True when the recorded cost is a lower bound because a turn "
+            "reported no cost (model without a catalog price)."
+        ),
+    )
 
     total_input_tokens: int = 0
     total_output_tokens: int = 0
