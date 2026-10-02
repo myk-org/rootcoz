@@ -48,12 +48,10 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   const [saving, setSaving] = useState(false)
   const [usernameError, setUsernameError] = useState<string | null>(null)
   const [tokensLoaded, setTokensLoaded] = useState(false)
-  /** Token values as loaded from cookies/server; a save only re-validates what differs (#294) */
-  const [baseline, setBaseline] = useState(() => ({
-    gh: getGithubToken().trim(),
-    je: getJiraEmail().trim(),
-    jt: getJiraToken().trim(),
-  }))
+  /** Token values as last returned by the server. A save only re-validates what
+   *  differs from these, so an untouched stored credential is not re-checked and
+   *  a stale browser-cached one is (#294). */
+  const [baseline, setBaseline] = useState({ gh: '', je: '', jt: '' })
 
   const githubTokenRef = useRef(githubToken)
   githubTokenRef.current = githubToken
@@ -64,23 +62,27 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
 
   const hydrateTokensFromServer = useCallback(
     async (current: { gh: string; je: string; jt: string }) => {
-      const loaded = { ...current }
       try {
         const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string }>('/api/user/tokens')
-        if (tokens.github_token && !current.gh.trim()) {
-          setGithubTokenValue(tokens.github_token)
-          setGithubToken(tokens.github_token)
-          loaded.gh = tokens.github_token.trim()
+        const server = {
+          gh: (tokens.github_token || '').trim(),
+          je: (tokens.jira_email || '').trim(),
+          jt: (tokens.jira_token || '').trim(),
         }
-        if (tokens.jira_email && !current.je.trim()) {
-          setJiraEmailValue(tokens.jira_email)
-          setJiraEmail(tokens.jira_email)
-          loaded.je = tokens.jira_email.trim()
+        // Baseline is the server's value, not the browser's: a cookie left over
+        // from another browser that has since been replaced counts as changed.
+        setBaseline(server)
+        if (server.gh && !current.gh.trim()) {
+          setGithubTokenValue(server.gh)
+          setGithubToken(server.gh)
         }
-        if (tokens.jira_token && !current.jt.trim()) {
-          setJiraTokenValue(tokens.jira_token)
-          setJiraToken(tokens.jira_token)
-          loaded.jt = tokens.jira_token.trim()
+        if (server.je && !current.je.trim()) {
+          setJiraEmailValue(server.je)
+          setJiraEmail(server.je)
+        }
+        if (server.jt && !current.jt.trim()) {
+          setJiraTokenValue(server.jt)
+          setJiraToken(server.jt)
         }
       } catch (err) {
         // 401 (no cookie yet) and 404 (user not registered) are expected; log anything else.
@@ -88,7 +90,6 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
           console.error('Failed to hydrate tokens from server:', err)
         }
       }
-      return loaded
     },
     [],
   )
@@ -99,7 +100,6 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       return
     }
     hydrateTokensFromServer({ gh: githubTokenRef.current, je: jiraEmailRef.current, jt: jiraTokenRef.current })
-      .then((loaded) => setBaseline(loaded))
       .finally(() => setTokensLoaded(true))
   // eslint-disable-next-line react-hooks/exhaustive-deps -- initialUsername (lazy useState) and hydrateTokensFromServer (useCallback) are stable; run once on mount
   }, [])
@@ -149,8 +149,11 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
     // clearing a different field (#294).
     const needsGithubValidation =
       !!githubToken.trim() && githubToken.trim() !== baseline.gh && (!githubValidation || !githubValidation.valid)
+    // Jira authenticates with email + token, so either one changing is a change.
     const needsJiraValidation =
-      !!jiraToken.trim() && jiraToken.trim() !== baseline.jt && (!jiraValidation || !jiraValidation.valid)
+      !!jiraToken.trim() &&
+      (jiraToken.trim() !== baseline.jt || jiraEmail.trim() !== baseline.je) &&
+      (!jiraValidation || !jiraValidation.valid)
 
     if (!isViewer && (needsGithubValidation || needsJiraValidation)) {
       const validations = await Promise.allSettled([

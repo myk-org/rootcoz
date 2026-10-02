@@ -79,6 +79,68 @@ describe('ProfileForm tracker tokens', () => {
     })
   })
 
+  it('validates when only the Jira email changes (#294)', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    const email = await screen.findByLabelText(/jira email/i)
+    await userEvent.clear(email)
+    await userEvent.type(email, 'new@test.com')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // Jira authenticates with the email, so changing it alone must re-check.
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        '/api/validate-token',
+        expect.objectContaining({ token_type: 'jira', email: 'new@test.com' }),
+      ),
+    )
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+  })
+
+  it('does not re-validate a token that matches the server (#294)', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    await screen.findByLabelText(/GitHub Token/i) // hydrated from the server
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.post).not.toHaveBeenCalledWith('/api/validate-token', expect.anything())
+  })
+
+  it('validates a browser-cached token that the server no longer has (#294)', async () => {
+    role.value = 'reviewer'
+    setGithubToken('ghp_stale_local')
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '' }
+        : {},
+    )
+
+    const onSaved = renderForm()
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // The local cookie disagrees with the server, so it is a new value to check.
+    await waitFor(() =>
+      expect(apiMock.post).toHaveBeenCalledWith(
+        '/api/validate-token',
+        expect.objectContaining({ token_type: 'github', token: 'ghp_stale_local' }),
+      ),
+    )
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+  })
+
   it('clears one token even when an unchanged stored token is invalid (#294)', async () => {
     role.value = 'reviewer'
     // Server hands back a stored GitHub token that no longer validates.
