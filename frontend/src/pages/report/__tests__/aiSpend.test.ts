@@ -150,6 +150,35 @@ describe('primaryGroups', () => {
     expect(groups.map(g => g.usage?.total_cost_usd)).toEqual([0.1, 0.2])
   })
 
+  it('keeps failures with differing legacy signatures but one v2 signature in one group', () => {
+    const usage = summary({ total_cost_usd: 0.7 })
+    const job = result({
+      failures: [
+        failure({ test_name: 'test_a', error_signature: 'legacy-a', error_signature_v2: 'v2-sig', token_usage: usage }),
+        failure({ test_name: 'test_b', error_signature: 'legacy-b', error_signature_v2: 'v2-sig', token_usage: usage }),
+      ],
+    })
+    const groups = primaryGroups(job)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].failureCount).toBe(2)
+    expect(groups[0].usage?.total_cost_usd).toBe(0.7)
+    // one debate, one spend row — not two rows repeating the same cost
+    expect(peerGroups(job)).toHaveLength(0)
+    const averages = spendAverages(1.4, 2, groups, [])
+    expect(averages.totalGroups).toBe(1)
+    expect(averages.costPerUniqueGroup).toBeCloseTo(0.7)
+  })
+
+  it('keeps failures with different v2 signatures in separate groups', () => {
+    const groups = primaryGroups(result({
+      failures: [
+        failure({ test_name: 'test_a', error_signature: 'legacy', error_signature_v2: 'v2-a' }),
+        failure({ test_name: 'test_b', error_signature: 'legacy', error_signature_v2: 'v2-b' }),
+      ],
+    }))
+    expect(groups).toHaveLength(2)
+  })
+
   it('falls back to the test name when a legacy failure has no signature', () => {
     const groups = primaryGroups(result({ failures: [failure({ error_signature: '', test_name: 'legacy' })] }))
     expect(groups).toHaveLength(1)

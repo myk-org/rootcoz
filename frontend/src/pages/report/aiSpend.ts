@@ -1,5 +1,6 @@
 import type { AnalysisResult, TokenUsageEntry, TokenUsageSummary } from '@/types'
 import { walkChildTree } from '@/lib/failureKeys'
+import { groupingKey } from '@/lib/grouping'
 import { groupPeerRounds } from '@/lib/peerDebate'
 
 /**
@@ -117,7 +118,9 @@ function uniqueFailureGroups(result: TreeNode): { childLabel: string; signature:
   walkChildTree(result.failures ?? [], result.child_job_analyses ?? [], (failures, jobName, buildNumber) => {
     const childLabel = scopeLabel(jobName, buildNumber)
     for (const failure of failures as Failure[]) {
-      const signature = failure.error_signature || `unique-${failure.test_name}`
+      // Key on the same resolved signature the backend attributes usage by, so
+      // siblings that share a v2 signature never split into duplicate spend rows.
+      const signature = groupingKey(failure)
       const key = `${childLabel}::${signature}`
       const existing = groups.get(key)
       if (existing) existing.failures.push(failure)
