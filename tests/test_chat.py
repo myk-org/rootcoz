@@ -3,7 +3,7 @@
 import asyncio
 import os
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
@@ -2428,6 +2428,10 @@ async def test_init_without_session_does_not_notify(
             side_effect=RuntimeError("session init failed") if raises else None,
             return_value=None,
         ),
+        # Preparation phases notify their own progress; this asserts the
+        # completion contract — no session means no "chat changed" broadcast.
+        patch("rootcoz.main.set_chat_prep_phase"),
+        patch("rootcoz.main.clear_chat_prep_phase"),
         patch("rootcoz.main.notify_chat_changed") as notify,
     ):
         if raises:
@@ -2525,14 +2529,16 @@ async def test_orphan_history_can_start_without_losing_messages(
         first = test_client.post(f"{path}/init", json=body)
         assert first.status_code == 200, first.text
         assert first.json()["session_id"] == "new-orphan-session"
-        notify.assert_called_once_with(job_id, username="admin")
+        # Preparation phases notify too; every notify stays scoped to the user.
+        assert notify.call_args_list
+        assert all(c == call(job_id, username="admin") for c in notify.call_args_list)
         assert await storage.get_latest_chat_session(job_id, "admin") is not None
+        notifies_before_retry = notify.call_count
         second = test_client.post(f"{path}/init", json=body)
         assert second.status_code == 200, second.text
         assert second.json()["session_id"] == first.json()["session_id"]
-        assert notify.call_count == 2
-        assert notify.call_args.args == (job_id,)
-        assert notify.call_args.kwargs == {"username": "admin"}
+        assert notify.call_count > notifies_before_retry
+        assert all(c == call(job_id, username="admin") for c in notify.call_args_list)
         assert init.call_count == 1
     history = test_client.get(path).json()
     assert history["active_session"] == {
