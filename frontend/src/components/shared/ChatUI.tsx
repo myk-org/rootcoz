@@ -26,6 +26,15 @@ const INIT_STEPS = [
   'Ready',
 ] as const
 
+/** Workspace-preparation phases reported by POST /init, in order. */
+const PREP_STEPS = [
+  { phase: 'preparing', label: 'Preparing workspace' },
+  { phase: 'cloning', label: 'Cloning repositories' },
+  { phase: 'indexing', label: 'Indexing repositories for search' },
+  { phase: 'fetching_build_data', label: 'Fetching CI build data' },
+  { phase: 'starting_session', label: 'Starting AI session' },
+] as const
+
 export interface ChatMessage {
   id: number
   job_id: string
@@ -38,7 +47,7 @@ export interface ChatMessage {
   created_at: string
 }
 
-type ChatHistory = { messages: ChatMessage[]; total: number; active_session_version: string; active_session?: { ai_provider: string; ai_model: string; credential_source: string } | null }
+type ChatHistory = { messages: ChatMessage[]; total: number; active_session_version: string; active_session?: { ai_provider: string; ai_model: string; credential_source: string } | null; preparing?: { phase: string; detail: string } | null }
 type SessionChoice = { provider: string; model: string; forceServer: boolean }
 
 interface ChatUIProps {
@@ -92,6 +101,7 @@ export function ChatUI({
   const [sessionChoice, setSessionChoice] = useState<SessionChoice | null>(null)
   const [starting, setStarting] = useState(false)
   const [initStepIndex, setInitStepIndex] = useState(0)
+  const [prepPhase, setPrepPhase] = useState<{ phase: string; detail: string } | null>(null)
   const [clearing, setClearing] = useState(false)
   const [loadingHistory, setLoadingHistory] = useState(true)
   const [historyFailed, setHistoryFailed] = useState(false)
@@ -140,6 +150,15 @@ export function ChatUI({
 
   const historyIsCurrent = useCallback((generation: number) =>
     mountedRef.current && !clearingRef.current && historyGenerationRef.current === generation, [])
+  // Server-driven prep progress; initStepIndex > 0 means POST /init already returned.
+  const prepActiveIndex = useMemo(() => {
+    if (initStepIndex > 0) return PREP_STEPS.length
+    const found = PREP_STEPS.findIndex(s => s.phase === prepPhase?.phase)
+    return found === -1 ? 0 : found
+  }, [initStepIndex, prepPhase])
+  const prepStatus = prepPhase && initStepIndex === 0
+    ? `${PREP_STEPS[prepActiveIndex]?.label ?? INIT_STEPS[0]}${prepPhase.detail ? `: ${prepPhase.detail}` : ''}...`
+    : INIT_STEPS[initStepIndex]
   const selectedModel = providers[aiProvider]?.find(model => model.id === aiModel)
   const needsServerToggle = !effectiveForceServer && !!selectedModel && !selectedModel.credential_sources?.includes('user') && selectedModel.credential_sources?.includes('server')
   const validPair = !needsServerToggle && isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders)
@@ -167,6 +186,7 @@ export function ChatUI({
   const fetchMessages = useCallback(async (): Promise<{ history: ChatHistory; generation: number }> => {
     const generation = historyGenerationRef.current
     const history = await api.get<ChatHistory>(apiBasePath)
+    setPrepPhase(history.preparing ?? null)
     if (history.total > 200) {
       const lastPage = await api.get<ChatHistory>(
         `${apiBasePath}?offset=${Math.max(history.total - 200, 0)}`
@@ -264,6 +284,7 @@ export function ChatUI({
     startInFlightRef.current = true
     setStarting(true)
     setInitStepIndex(0)
+    setPrepPhase(null)
     setError('')
     console.info('[ChatUI] Starting chat session')
     try {
@@ -577,9 +598,14 @@ export function ChatUI({
             : 'Select an available AI provider and model, then Start Chat. History remains visible until you clear it.'}</p>
         )}
         {starting && <div className="px-6 pt-2 text-xs" role="status">
-          <p>{INIT_STEPS[initStepIndex]}</p>
-          {['Create workspace & AI session', 'Load chat history'].map((label, i) =>
-            <StepIndicator key={label} label={label} done={initStepIndex > i} active={initStepIndex === i} />)}
+          <p>{prepStatus}</p>
+          {PREP_STEPS.map((step, i) => <StepIndicator
+            key={step.phase}
+            label={step.label}
+            done={prepActiveIndex > i}
+            active={prepActiveIndex === i} />)}
+          <StepIndicator label="Load chat history" done={initStepIndex > 1} active={initStepIndex === 1} />
+          <StepIndicator label="Ready" done={initStepIndex > 2} active={initStepIndex === 2} />
         </div>}
 
         {/* Messages area */}

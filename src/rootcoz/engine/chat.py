@@ -98,11 +98,13 @@ async def clone_chat_repos(
     workspace: Path,
     request_params: dict[str, Any],
     user_repo_token: str = "",
+    on_repo: Callable[[str], None] | None = None,
 ) -> bool:
     """Clone repos into the chat workspace.
 
     Skips repos already present in the workspace.
     Returns True only when a repository was newly cloned.
+    ``on_repo`` is called with each repo name right before it is cloned.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
@@ -143,6 +145,8 @@ async def clone_chat_repos(
                         logger.info(
                             "Chat: cloning repo %s into %s", repo_name, workspace
                         )
+                        if on_repo:
+                            on_repo(repo_name)
                         # Only use token for GitHub hosts (prevent credential leaks to other hosts)
                         token = ""
                         if user_repo_token and _is_github_url(clean_url):
@@ -179,6 +183,8 @@ async def clone_chat_repos(
                         )
                         continue
                     logger.info("Chat: cloning repo %s into %s", safe_name, workspace)
+                    if on_repo:
+                        on_repo(safe_name)
                     token = getattr(repo, "token", None) or ""
                     await asyncio.to_thread(
                         repo_manager.clone_into,

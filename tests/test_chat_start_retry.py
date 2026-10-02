@@ -3,7 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -83,15 +83,19 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
         assert alice_event.is_set()
         assert not bob_event.is_set()
         assert not broadcast_event.is_set()
-        notify.assert_called_once_with(job_id, username="alice")
+        # Init also notifies on each preparation phase; every notify must be
+        # scoped to the starting user, never broadcast.
+        assert notify.call_args_list
+        assert all(c == call(job_id, username="alice") for c in notify.call_args_list)
         assert await storage.get_latest_chat_session(job_id, "alice") is not None
 
         alice_event.clear()
+        notifies_before_retry = notify.call_count
         retry = await start()
         assert alice_event.is_set()
         assert not bob_event.is_set()
         assert not broadcast_event.is_set()
-        assert notify.call_count == 2
+        assert notify.call_count > notifies_before_retry
     assert retry["ready"] is True
     assert retry["session_id"] == first["session_id"]
     new_session.assert_awaited_once()

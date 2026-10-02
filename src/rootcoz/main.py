@@ -23,7 +23,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -658,6 +658,25 @@ def notify_chat_changed(job_id: str, username: str = "") -> None:
     key = f"{job_id}:{username}" if username else job_id
     for event in _chat_listeners.get(key, set()).copy():
         event.set()
+
+
+# Workspace-preparation phase per job+user, reported to the chat UI while
+# /init runs. In-memory only: init is request-scoped and the chat UI refetches
+# it from GET /api/chat/{job_id} whenever notify_chat_changed fires.
+_chat_prep_phases: dict[str, dict[str, Any]] = {}
+
+
+def set_chat_prep_phase(
+    job_id: str, username: str, phase: str, detail: str = ""
+) -> None:
+    """Record the current chat workspace-preparation phase and notify listeners."""
+    _chat_prep_phases[f"{job_id}:{username}"] = {"phase": phase, "detail": detail}
+    notify_chat_changed(job_id, username=username)
+
+
+def clear_chat_prep_phase(job_id: str, username: str) -> None:
+    """Drop the preparation phase once init finished (or failed)."""
+    _chat_prep_phases.pop(f"{job_id}:{username}", None)
 
 
 def _make_sse_stream(
@@ -12324,7 +12343,15 @@ async def get_chat_history(
         raise HTTPException(status_code=404, detail="Job not found")
 
     username = getattr(request.state, "username", "")
-    async with _hold_chat_lock(f"{job_id}:{username}"):
+    key = f"{job_id}:{username}"
+    preparing = _chat_prep_phases.get(key)
+    # /init holds the per-user chat lock for the whole workspace preparation.
+    # Blocking on it here would hide the very phase we report, so reads skip it
+    # while preparation is in flight — nothing else writes chat rows then.
+    lock: AbstractAsyncContextManager[Any] = (
+        nullcontext() if preparing else _hold_chat_lock(key)
+    )
+    async with lock:
         messages = await storage.get_chat_messages(
             job_id, limit=limit, offset=offset, username=username
         )
@@ -12344,6 +12371,7 @@ async def get_chat_history(
             "total": total,
             "active_session": active,
             "active_session_version": version,
+            "preparing": preparing,
         }
     )
 
@@ -12415,11 +12443,19 @@ async def _init_chat_under_barrier(
 
     session_id: str | None = existing_session_id
     _raise_if_chat_job_deleted(job_id)
-    await clone_chat_repos(workspace, decrypted_params, user_repo_token=github_token)
+    set_chat_prep_phase(job_id, username, "preparing")
+    await clone_chat_repos(
+        workspace,
+        decrypted_params,
+        user_repo_token=github_token,
+        on_repo=lambda name: set_chat_prep_phase(job_id, username, "cloning", name),
+    )
     repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
     if repos_available:
+        set_chat_prep_phase(job_id, username, "indexing")
         await _index_chat_repositories(workspace)
     _raise_if_chat_job_deleted(job_id)
+    set_chat_prep_phase(job_id, username, "fetching_build_data")
     ci_build_data_available = await setup_ci_build_workspace(
         workspace,
         _build_ci_workspace_params(decrypted_params, result_data),
@@ -12462,6 +12498,7 @@ async def _init_chat_under_barrier(
         token = ai_username.set(username)
         force_token = force_server_credentials.set(body.force_server_credentials)
         source_token = chat_session_source.set(_selected_credential_source.get())
+        set_chat_prep_phase(job_id, username, "starting_session")
         try:
             session_id = await init_chat_session(
                 job_id=job_id,
@@ -12554,11 +12591,17 @@ async def init_chat(
             status_code=422, detail="Select provider, model and credential source"
         )
     username = getattr(request.state, "username", "")
-    async with _track_chat_job_task(job_id), _hold_chat_lock(f"{job_id}:{username}"):
-        result = await _init_chat_under_barrier(job_id, username, body)
-        if result["session_id"]:
-            notify_chat_changed(job_id, username=username)
-        return result
+    try:
+        async with (
+            _track_chat_job_task(job_id),
+            _hold_chat_lock(f"{job_id}:{username}"),
+        ):
+            result = await _init_chat_under_barrier(job_id, username, body)
+    finally:
+        clear_chat_prep_phase(job_id, username)
+    if result["session_id"]:
+        notify_chat_changed(job_id, username=username)
+    return result
 
 
 @app.post("/api/chat/{job_id}/close", operation_id="closeChat")
