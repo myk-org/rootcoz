@@ -1,0 +1,248 @@
+import { describe, expect, it } from 'vitest'
+import {
+  analyzedFailingTests,
+  peerGroups,
+  primaryGroups,
+  spendAverages,
+  stageBreakdown,
+} from '../aiSpend'
+import type {
+  AnalysisResult,
+  ChildJobAnalysis,
+  FailureAnalysis,
+  PeerDebate,
+  TokenUsageEntry,
+  TokenUsageSummary,
+} from '@/types'
+
+const call = (over: Partial<TokenUsageEntry> = {}): TokenUsageEntry => ({
+  provider: 'gemini', model: 'pro', call_type: 'primary',
+  input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0,
+  total_tokens: 15, cost_usd: 0.02, duration_ms: 100, success: true,
+  ...over,
+})
+
+const summary = (over: Partial<TokenUsageSummary> = {}): TokenUsageSummary => ({
+  total_input_tokens: 10, total_output_tokens: 5, total_cache_read_tokens: 0,
+  total_cache_write_tokens: 0, total_tokens: 15, total_cost_usd: 0.02,
+  total_duration_ms: 100, total_calls: 1, calls: [call()], ...over,
+})
+
+const failure = (over: Partial<FailureAnalysis> = {}): FailureAnalysis => ({
+  id: 'f1', test_name: 'test_a', error: 'boom', analysis: {} as FailureAnalysis['analysis'],
+  error_signature: 'sig-a', ...over,
+})
+
+const child = (over: Partial<ChildJobAnalysis> = {}): ChildJobAnalysis => ({
+  id: 'c1', job_name: 'child', build_number: 7, jenkins_url: null, summary: null,
+  failures: [], failed_children: [], note: null, ...over,
+})
+
+const result = (over: Partial<AnalysisResult> = {}): AnalysisResult => ({
+  job_id: 'j1', job_name: 'job', build_number: 1, jenkins_url: null, status: 'completed',
+  summary: '', ai_provider: 'gemini', ai_model: 'pro', failures: [], child_job_analyses: [],
+  ...over,
+})
+
+const usageSummary = (calls: TokenUsageEntry[], extra: Partial<TokenUsageSummary> = {}) =>
+  summary({ calls, total_calls: calls.length, ...extra })
+
+describe('stageBreakdown', () => {
+  it('groups every recorded call type and keeps cache tokens out of the billed total', () => {
+    const stages = stageBreakdown(usageSummary([
+      call({ call_type: 'primary', input_tokens: 10, output_tokens: 5, cache_read_tokens: 7, cache_write_tokens: 3, total_tokens: 15 }),
+      call({ call_type: 'peer', input_tokens: 1, output_tokens: 1, total_tokens: 2, cost_usd: 0.01 }),
+      call({ call_type: 'agent_routing', input_tokens: 2, output_tokens: 2, total_tokens: 4, cost_usd: 0.03 }),
+      call({ call_type: 'cross_failure', input_tokens: 5, output_tokens: 5, total_tokens: 10, cost_usd: 0.05 }),
+    ], { total_cost_usd: 0.11 }))
+
+    expect(stages.map(s => s.callType)).toEqual(['primary', 'peer', 'agent_routing', 'cross_failure'])
+    const primary = stages[0]
+    expect(primary.calls).toBe(1)
+    expect(primary.inputTokens).toBe(10)
+    expect(primary.outputTokens).toBe(5)
+    expect(primary.cacheReadTokens).toBe(7)
+    expect(primary.cacheWriteTokens).toBe(3)
+    // cache tokens are reported apart, never folded into the billed total
+    expect(primary.totalTokens).toBe(15)
+    expect(primary.costUsd).toBeCloseTo(0.02)
+  })
+
+  it('counts a card rendered many times once per stored call', () => {
+    const one = call()
+    expect(stageBreakdown(usageSummary([one, one, one]))[0].calls).toBe(3)
+  })
+
+  it('reports stage cost as unavailable when any call cost is unknown', () => {
+    const [stage] = stageBreakdown(usageSummary([
+      call({ cost_usd: 0.02 }),
+      call({ cost_usd: null }),
+    ]))
+    expect(stage.costUsd).toBeNull()
+  })
+
+  it('keeps a genuine zero cost as zero', () => {
+    const [stage] = stageBreakdown(usageSummary([call({ cost_usd: 0 })]))
+    expect(stage.costUsd).toBe(0)
+  })
+
+  it('attributes failed-call waste and flags unknown outcomes', () => {
+    const [known] = stageBreakdown(usageSummary([
+      call({ call_type: 'primary', success: true, cost_usd: 0.02 }),
+      call({ call_type: 'primary', success: false, cost_usd: 0.05 }),
+    ]))
+    expect(known.failedCalls).toBe(1)
+    expect(known.outcomeKnown).toBe(true)
+    expect(known.failedCostUsd).toBeCloseTo(0.05)
+
+    const [missingOutcome] = stageBreakdown(usageSummary([
+      call({ call_type: 'reanalysis', success: undefined, cost_usd: 0.01 }),
+    ]))
+    expect(missingOutcome.failedCalls).toBe(0)
+    expect(missingOutcome.outcomeKnown).toBe(false)
+    expect(missingOutcome.failedCostUsd).toBeNull()
+  })
+
+  it('has no stages at all for a legacy result without usage', () => {
+    expect(stageBreakdown(null)).toEqual([])
+    expect(stageBreakdown(undefined)).toEqual([])
+  })
+})
+
+describe('primaryGroups', () => {
+  it('groups by signature, counts shared failures, and keeps child scopes distinct', () => {
+    const groups = primaryGroups(result({
+      failures: [
+        failure({ test_name: 'test_a' }),
+        failure({ test_name: 'test_b', token_usage: summary() }),
+      ],
+      child_job_analyses: [
+        child({
+          failures: [
+            failure({ test_name: 'test_c', token_usage: summary({ total_cost_usd: 0.5 }) }),
+            failure({ test_name: 'test_d' }),
+          ],
+        }),
+      ],
+    }))
+
+    expect(groups).toHaveLength(2)
+    const top = groups.find(g => g.childLabel === '')!
+    expect(top.testName).toBe('test_a')
+    expect(top.failureCount).toBe(2)
+    expect(top.usage?.total_cost_usd).toBe(0.02)
+
+    const nested = groups.find(g => g.childLabel === 'child #7')!
+    expect(nested.failureCount).toBe(2)
+    expect(nested.usage?.total_cost_usd).toBe(0.5)
+  })
+
+  it('keeps same-named children in different builds apart', () => {
+    const usageA = summary({ total_cost_usd: 0.1 })
+    const usageB = summary({ total_cost_usd: 0.2 })
+    const groups = primaryGroups(result({
+      child_job_analyses: [
+        child({ build_number: 1, failures: [failure({ token_usage: usageA })] }),
+        child({ build_number: 2, failures: [failure({ token_usage: usageB })] }),
+      ],
+    }))
+    expect(groups.map(g => g.childLabel)).toEqual(['child #1', 'child #2'])
+    expect(groups.map(g => g.usage?.total_cost_usd)).toEqual([0.1, 0.2])
+  })
+
+  it('falls back to the test name when a legacy failure has no signature', () => {
+    const groups = primaryGroups(result({ failures: [failure({ error_signature: '', test_name: 'legacy' })] }))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].usage).toBeNull()
+  })
+})
+
+describe('peerGroups', () => {
+  const debate = (): PeerDebate => ({
+    consensus_reached: true, rounds_used: 2, max_rounds: 2,
+    ai_configs: [{ ai_provider: 'gemini', ai_model: 'pro' }, { ai_provider: 'gemini', ai_model: 'pro' }],
+    rounds: [
+      { round: 1, ai_provider: 'gemini', ai_model: 'pro', role: 'orchestrator', classification: 'CODE ISSUE', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ call_type: 'peer', cost_usd: 0.1 }) },
+      { round: 1, ai_provider: 'gemini', ai_model: 'pro', role: 'peer', classification: 'CODE ISSUE', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ call_type: 'peer', cost_usd: 0.2 }) },
+      { round: 1, ai_provider: 'gemini', ai_model: 'pro', role: 'peer', classification: 'CODE ISSUE', pattern: '', details: '', agrees_with_orchestrator: false, token_usage: call({ call_type: 'peer', cost_usd: 0.3 }) },
+      { round: 2, ai_provider: 'gemini', ai_model: 'pro', role: 'orchestrator', classification: 'CODE ISSUE', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ call_type: 'peer', cost_usd: 0.4 }) },
+      { round: 2, ai_provider: 'gemini', ai_model: 'pro', role: 'peer', classification: 'CODE ISSUE', pattern: '', details: '', agrees_with_orchestrator: null, token_usage: null },
+    ],
+  })
+
+  it('distinguishes rounds and same-model peers', () => {
+    const [group] = peerGroups(result({ failures: [failure({ peer_debate: debate() })] }))
+    expect(group.rounds.map(r => `R${r.round} ${r.agentLabel}`)).toEqual([
+      'R1 Main AI', 'R1 Peer 1', 'R1 Peer 2', 'R2 Main AI', 'R2 Peer 1',
+    ])
+    expect(group.rounds.map(r => r.agent).every(a => a === 'gemini/pro')).toBe(true)
+    // the round-2 peer has no recorded usage
+    expect(group.rounds[4].usage).toBeNull()
+    expect(group.costUsd).toBeCloseTo(0.1 + 0.2 + 0.3 + 0.4)
+  })
+
+  it('counts a debate shared by sibling failures once', () => {
+    const shared = debate()
+    const groups = peerGroups(result({
+      failures: [failure({ peer_debate: shared }), failure({ test_name: 'test_b', peer_debate: shared })],
+    }))
+    expect(groups).toHaveLength(1)
+    expect(groups[0].siblingCount).toBe(1)
+  })
+
+  it('reports unavailable cost when an attributable round cost is unknown', () => {
+    const rounds = debate().rounds.map(r => ({ ...r, token_usage: r.token_usage ? { ...r.token_usage, cost_usd: null } : r.token_usage }))
+    const [group] = peerGroups(result({ failures: [failure({ peer_debate: { ...debate(), rounds } })] }))
+    expect(group.costUsd).toBeNull()
+  })
+})
+
+describe('spendAverages', () => {
+  const groups = primaryGroups(result({
+    failures: [failure({ token_usage: summary({ total_cost_usd: 0.2 }) })],
+    child_job_analyses: [child({ failures: [failure({ test_name: 'test_b' })] })],
+  }))
+
+  it('divides job cost by analyzed failing tests', () => {
+    const averages = spendAverages(0.5, 4, groups, [])
+    expect(averages.costPerFailingTest).toBeCloseTo(0.125)
+    expect(averages.totalGroups).toBe(2)
+  })
+
+  it('is N/A with zero analyzed failures or unknown total cost', () => {
+    expect(spendAverages(0.5, 0, groups, []).costPerFailingTest).toBeNull()
+    expect(spendAverages(null, 4, groups, []).costPerFailingTest).toBeNull()
+  })
+
+  it('keeps the unique-group denominator honest when cost is unavailable', () => {
+    const averages = spendAverages(0.5, 2, groups, [])
+    expect(averages.groupsWithKnownCost).toBe(1)
+    expect(averages.totalGroups).toBe(2)
+    expect(averages.costPerUniqueGroup).toBeCloseTo(0.2)
+  })
+
+  it('is N/A when no group has a known cost', () => {
+    const unknown = primaryGroups(result({ failures: [failure()] }))
+    expect(spendAverages(0.5, 1, unknown, []).costPerUniqueGroup).toBeNull()
+  })
+
+  it('averages peer cost only over debates with a known cost', () => {
+    const peer = peerGroups(result({ failures: [failure({ peer_debate: {
+      consensus_reached: true, rounds_used: 1, max_rounds: 1, ai_configs: [],
+      rounds: [{ round: 1, ai_provider: 'g', ai_model: 'p', role: 'peer', classification: '', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ cost_usd: 0.4 }) }],
+    } })] }))
+    const averages = spendAverages(0.5, 1, groups, peer)
+    expect(averages.debatedGroups).toBe(1)
+    expect(averages.peerCostPerDebatedGroup).toBeCloseTo(0.4)
+  })
+})
+
+describe('analyzedFailingTests', () => {
+  it('counts only failures carrying an analysis, across the child tree', () => {
+    const analyzed = result({
+      failures: [failure(), failure({ test_name: 'test_b' })],
+      child_job_analyses: [child({ failures: [failure({ test_name: 'test_c', analysis: null as never })] })],
+    })
+    expect(analyzedFailingTests(analyzed)).toBe(2)
+  })
+})

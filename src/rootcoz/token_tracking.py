@@ -221,6 +221,7 @@ async def record_ai_usage(
             child_build_number=child[1] if child else 0,
             failure_id=reanalysis[0] if reanalysis else "",
             usage_attempt=reanalysis[1] if reanalysis else "",
+            success=result.success,
         )
         if group and group[0] == job_id:
             logger.info(
@@ -233,6 +234,12 @@ async def record_ai_usage(
             _on_usage_recorded(job_id)
     except Exception:
         logger.debug("Failed to record token usage for job %s", job_id, exc_info=True)
+
+
+def _row_success(rec: dict[str, Any]) -> bool | None:
+    """Call outcome from a stored row; None means the row predates tracking it."""
+    value = rec.get("success")
+    return None if value is None else bool(value)
 
 
 async def build_token_usage_summary(
@@ -265,6 +272,7 @@ async def build_token_usage_summary(
                 total_tokens=rec["total_tokens"],
                 cost_usd=rec["cost_usd"],
                 duration_ms=rec["duration_ms"],
+                success=_row_success(rec),
             )
             for rec in records
         ]
@@ -301,6 +309,7 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
                 total_tokens=rec["total_tokens"],
                 cost_usd=rec["cost_usd"],
                 duration_ms=rec["duration_ms"],
+                success=_row_success(rec),
             )
         )
         total_input += rec["input_tokens"]

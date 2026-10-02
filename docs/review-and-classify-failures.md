@@ -81,6 +81,8 @@ rootcoz override-pattern JOB_ID --test "TEST_NAME" --pattern "KNOWN_BUG" --child
 
 Use `--not-reviewed` instead of `--reviewed` when you need to reopen a failure from the terminal. See [CLI Command Reference](cli-reference.html) for details.
 
+The `AI Spend` section of the report page attributes what the job spent: a breakdown by stage (primary, peer, revision, agent routing, cross-failure), failed-call cost, primary cost per unique failure group with the number of tests sharing it, and peer cost per debate round and agent. Cache tokens are shown apart from input/output because they are not billed the same way. Anything the server cannot attribute — cost it never recorded, or usage from an older run — is reported as unavailable or `N/A`, never as zero, so hover any average to see the exact denominator.
+
 ## Troubleshooting
 - `I can open the report but my changes are rejected.`  
   Changing the root cause or pattern needs `reviewer` access or above (`Reviewer access required. Viewers cannot perform this action.`), and re-analysis needs `operator` or `admin` (`Operator access required.`).

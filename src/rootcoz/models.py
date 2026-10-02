@@ -683,6 +683,7 @@ class TokenUsageEntry(BaseModel):
     model: str = ""
     call_type: str = ""
     error_signature: str = ""
+    success: bool | None = None
     credential_source: str = "unknown"
     input_tokens: int = 0
     output_tokens: int = 0

@@ -1227,6 +1227,8 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "ai_token_usage", "usage_attempt", "TEXT NOT NULL DEFAULT ''"
         )
+        # NULL (not 0/1) so legacy rows stay "outcome unknown" instead of failed
+        await _migrate_add_column(db, "ai_token_usage", "success", "INTEGER")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS ai_session_sources (
                 session_id TEXT PRIMARY KEY,
@@ -6760,6 +6762,7 @@ async def record_token_usage(
     child_build_number: int = 0,
     failure_id: str = "",
     usage_attempt: str = "",
+    success: bool | None = None,
     error_signature_v2: str = "",
 ) -> str:
     """Record a single AI call's token usage. Returns the record ID.
@@ -6778,8 +6781,8 @@ async def record_token_usage(
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
             "prompt_chars, response_chars, credential_source, error_signature, "
             "child_job_name, child_build_number, failure_id, usage_attempt, "
-            "error_signature_v2) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "success, error_signature_v2) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -6801,6 +6804,7 @@ async def record_token_usage(
                 child_build_number if call_type in ("primary", "reanalysis") else 0,
                 failure_id if call_type == "reanalysis" else "",
                 usage_attempt if call_type == "reanalysis" else "",
+                None if success is None else int(success),
                 error_signature_v2 if call_type in ("primary", "reanalysis") else None,
             ),
         )

@@ -51,9 +51,9 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
           <p>Credential source: {credentialSource}</p>
           {graftTooltip}
           {usage.calls.map((call, index) => (
-            <p key={index}>{call.call_type} · {call.provider}/{call.model} · {call.credential_source ?? 'unknown'}: {call.total_tokens.toLocaleString()} tokens</p>
+            <p key={index}>{call.call_type} · {call.provider}/{call.model} · {call.credential_source ?? 'unknown'}{call.success === false ? ' · failed' : ''}: {call.total_tokens.toLocaleString()} tokens</p>
           ))}
-          {usage.total_duration_ms > 0 && <p>Duration: {(usage.total_duration_ms / 1000).toFixed(1)}s</p>}
+          {usage.total_duration_ms > 0 && <p>Summed call duration: {(usage.total_duration_ms / 1000).toFixed(1)}s (not wall-clock)</p>}
           <p>Cost: {cost}</p>
         </div>
       </TooltipContent>

@@ -62,7 +62,55 @@ class TestRecordAiUsage:
                 child_build_number=0,
                 failure_id="",
                 usage_attempt="",
+                success=True,
             )
+
+    @pytest.mark.asyncio
+    async def test_records_failed_call_outcome(self) -> None:
+        """A failed call that still consumed tokens is stored as failed, not skipped."""
+        usage = AITokenUsage(input_tokens=10, output_tokens=0, cost_usd=0.01)
+        result = AIResult(success=False, text="", usage=usage)
+
+        with patch(
+            "rootcoz.token_tracking.storage.record_token_usage",
+            new_callable=AsyncMock,
+        ) as mock_record:
+            await record_ai_usage(job_id="job-1", result=result, call_type="primary")
+            assert mock_record.call_args.kwargs["success"] is False
+
+    def test_legacy_rows_without_success_stay_unknown(self) -> None:
+        """Rows predating outcome tracking report None, not a guessed failure."""
+        records = [
+            {
+                "ai_provider": "gemini",
+                "ai_model": "test",
+                "call_type": "primary",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "total_tokens": 2,
+                "cost_usd": 0.01,
+                "duration_ms": 5,
+                "credential_source": "user",
+            },
+            {
+                "ai_provider": "gemini",
+                "ai_model": "test",
+                "call_type": "primary",
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "total_tokens": 2,
+                "cost_usd": 0.01,
+                "duration_ms": 5,
+                "credential_source": "user",
+                "success": 0,
+            },
+        ]
+        calls = summarize_token_usage(records).calls
+        assert [c.success for c in calls] == [None, False]
 
     @pytest.mark.asyncio
     async def test_records_zero_usage_without_metadata(self) -> None:

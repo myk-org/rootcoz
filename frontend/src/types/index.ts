@@ -460,6 +460,8 @@ export interface TokenUsageEntry {
   total_tokens: number
   cost_usd: number | null
   duration_ms: number | null
+  /** Whether the AI call succeeded. Null = legacy row, outcome unknown. */
+  success?: boolean | null
 }
 
 export interface TokenUsageSummary {
