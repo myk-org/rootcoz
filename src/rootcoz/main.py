@@ -12182,9 +12182,24 @@ async def _validate_chat_selection(
     return provider, model
 
 
-async def _available_chat_session(job_id: str, username: str) -> dict[str, str] | None:
-    """Describe only a session the current owner can still use."""
-    active = await storage.get_latest_chat_session(job_id, username)
+# Sentinel for "caller did not supply the latest-session row".
+_UNSET_SESSION: Any = object()
+
+
+async def _available_chat_session(
+    job_id: str, username: str, session: Any = _UNSET_SESSION
+) -> dict[str, str] | None:
+    """Describe only a session the current owner can still use.
+
+    ``session`` reuses an already-read latest-session row (including "no
+    session") so a history read does not re-query it and risk straddling a
+    concurrent Start.
+    """
+    active = (
+        await storage.get_latest_chat_session(job_id, username)
+        if session is _UNSET_SESSION
+        else session
+    )
     if not active:
         return None
     try:
@@ -12347,12 +12362,13 @@ async def get_chat_history(
     preparing = _chat_prep_phases.get(key)
     # /init holds the per-user chat lock for the whole workspace preparation.
     # Blocking on it here would hide the very phase we report, so reads skip it
-    # while preparation is in flight — nothing else writes chat rows then.
+    # while preparation is in flight — the snapshot below keeps them consistent
+    # instead, since a Start writes its session marker and welcome there.
     lock: AbstractAsyncContextManager[Any] = (
         nullcontext() if preparing else _hold_chat_lock(key)
     )
     async with lock:
-        messages = await storage.get_chat_messages(
+        messages, total, session = await storage.get_chat_history_snapshot(
             job_id, limit=limit, offset=offset, username=username
         )
         # Filter out hidden init messages (empty content + completed status, used for session_id storage)
@@ -12362,9 +12378,10 @@ async def get_chat_history(
             for m in messages
             if m.get("content") or m.get("status") in ("pending", "failed")
         ]
-        total = await storage.count_chat_messages(job_id, username=username)
-        active = await _available_chat_session(job_id, username)
-        version = await _current_chat_session_version(job_id, username)
+        active = await _available_chat_session(job_id, username, session=session)
+        version = _chat_session_version(
+            job_id, username, session["session_id"] if session else None
+        )
     return strip_sensitive_from_response(
         {
             "messages": messages,

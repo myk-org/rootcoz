@@ -183,10 +183,11 @@ export function ChatUI({
 
 
   // Fetch messages with pagination (last 200); session metadata belongs to the first page.
+  // Callers apply `preparing` themselves, after their generation check — an
+  // out-of-order response must not rewind the preparation phase.
   const fetchMessages = useCallback(async (): Promise<{ history: ChatHistory; generation: number }> => {
     const generation = historyGenerationRef.current
     const history = await api.get<ChatHistory>(apiBasePath)
-    setPrepPhase(history.preparing ?? null)
     if (history.total > 200) {
       const lastPage = await api.get<ChatHistory>(
         `${apiBasePath}?offset=${Math.max(history.total - 200, 0)}`
@@ -232,9 +233,11 @@ export function ChatUI({
         return
       }
       fetchMessages()
-        .then(({ history: { messages: msgs }, generation: historyGeneration }) => {
+        .then(({ history, generation: historyGeneration }) => {
           if (pollGenerationRef.current !== generation || !historyIsCurrent(historyGeneration)) return
+          const msgs = history.messages
           setMessages(msgs)
+          setPrepPhase(history.preparing ?? null)
           // Check if the specific assistant message is no longer pending
           const hasResponse = msgs.some(m =>
             m.id === assistantMsgId && m.status !== 'pending'
@@ -269,6 +272,7 @@ export function ChatUI({
         const msgs = res.messages
         if (!ignore && historyIsCurrent(generation)) {
           setMessages(msgs)
+          setPrepPhase(res.preparing ?? null)
           const active = res.active_session
           if (active || !confirmedInitRef.current) applySession(active, res.active_session_version)
           console.info('[ChatUI] Chat history loaded, active session:', !!active)
@@ -303,6 +307,7 @@ export function ChatUI({
         if (!historyIsCurrent(generation)) return
         setMessages(history.messages)
         if (history.active_session) sessionVersionRef.current = history.active_session_version
+        setPrepPhase(history.preparing ?? null)
         setInitStepIndex(2)
         console.info('[ChatUI] Chat history loaded after start')
       } catch (err) {
@@ -347,6 +352,7 @@ export function ChatUI({
       .then(({ history }) => {
         if (!historyIsCurrentRef.current(generation)) return
         setMessages(history.messages)
+        setPrepPhase(history.preparing ?? null)
         applySession(history.active_session, history.active_session_version)
         setLoadingHistory(false)
         setHistoryFailed(false)

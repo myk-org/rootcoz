@@ -129,3 +129,32 @@ async def test_clone_reports_repo_name_before_cloning(monkeypatch, tmp_path):
         on_repo=reported.append,
     )
     assert reported == ["tests-repo"]
+
+
+@pytest.mark.asyncio
+async def test_history_reads_messages_and_session_from_one_snapshot(
+    monkeypatch, tmp_path
+):
+    """Qodo: a lock-skipped read must not assemble one response from straddle-able reads."""
+    await _setup_job(monkeypatch, tmp_path)
+
+    async def forbidden(*a, **k):
+        raise AssertionError("history must read one snapshot, not separate queries")
+
+    monkeypatch.setattr(storage, "get_chat_messages", forbidden)
+    monkeypatch.setattr(storage, "count_chat_messages", forbidden)
+    monkeypatch.setattr(storage, "get_latest_chat_session", forbidden)
+
+    calls = []
+    original = storage.get_chat_history_snapshot
+
+    async def counted(*args, **kwargs):
+        calls.append((args, kwargs))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "get_chat_history_snapshot", counted)
+    history = await main.get_chat_history("job", _request(), limit=200, offset=0)
+    assert len(calls) == 1
+    assert history["messages"] == []
+    assert history["total"] == 0
+    assert history["active_session"] is None

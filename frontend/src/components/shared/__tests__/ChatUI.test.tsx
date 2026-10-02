@@ -522,3 +522,29 @@ it('shows the server-reported workspace preparation phase while init runs', asyn
   await act(async () => { finishInit({ ready: true, session_id: 'session' }) })
   await waitFor(() => expect(screen.queryByText('Indexing repositories for search')).not.toBeInTheDocument())
 })
+
+it('ignores an out-of-order history response instead of rewinding preparation', async () => {
+  setup()
+  render(page())
+  expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeEnabled()
+  let finishInit: (v: unknown) => void = () => {}
+  post.mockImplementation((path: string) => path.endsWith('/init')
+    ? new Promise(resolve => { finishInit = resolve })
+    : Promise.resolve({}))
+  const pending: Array<(h: unknown) => void> = []
+  get.mockImplementation((path: string) => path.startsWith('/api/ai-models')
+    ? Promise.resolve(catalog)
+    : new Promise(resolve => pending.push(resolve)))
+  await userEvent.setup().click(screen.getByRole('button', { name: 'Start Chat' }))
+  const sse = vi.mocked(useSSE).mock.lastCall!
+  act(() => { sse[1]['chat-changed']('') })
+  act(() => { sse[1]['chat-changed']('') })
+  const base = { messages: [], total: 0, active_session_version: 'no-session-version' }
+  // Newer response lands first; the stale one must not move progress backwards.
+  await act(async () => { pending[1]({ ...base, preparing: { phase: 'starting_session', detail: '' } }) })
+  expect(await screen.findByText('Starting AI session...')).toBeInTheDocument()
+  await act(async () => { pending[0]({ ...base, preparing: { phase: 'cloning', detail: 'tests-repo' } }) })
+  expect(screen.getByText('Starting AI session...')).toBeInTheDocument()
+  expect(screen.queryByText('Cloning repositories: tests-repo...')).not.toBeInTheDocument()
+  await act(async () => { finishInit({ ready: true, session_id: 'session' }) })
+})

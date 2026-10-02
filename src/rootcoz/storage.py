@@ -7125,6 +7125,36 @@ async def add_chat_message_pair(
         return user_msg_id, assistant_msg_id
 
 
+async def _chat_messages_on(
+    db: aiosqlite.Connection,
+    job_id: str,
+    limit: int | None,
+    offset: int,
+    username: str,
+) -> list[dict[str, Any]]:
+    """Chat messages for a job on an open connection, ordered by id ASC."""
+    limit_clause = "LIMIT ? OFFSET ?" if limit is not None else ""
+    params: tuple[Any, ...]
+    if username:
+        base = (
+            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+            f"FROM chat_messages WHERE job_id = ? AND username = ? ORDER BY id ASC {limit_clause}"
+        )
+        params = (
+            (job_id, username, limit, offset)
+            if limit is not None
+            else (job_id, username)
+        )
+    else:
+        base = (
+            "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
+            f"FROM chat_messages WHERE job_id = ? ORDER BY id ASC {limit_clause}"
+        )
+        params = (job_id, limit, offset) if limit is not None else (job_id,)
+    rows = await (await db.execute(base, params)).fetchall()
+    return [dict(row) for row in rows]
+
+
 async def get_chat_messages(
     job_id: str, limit: int | None = 200, offset: int = 0, username: str = ""
 ) -> list[dict[str, Any]]:
@@ -7134,60 +7164,74 @@ async def get_chat_messages(
         limit: Max messages to return. None = no limit.
     """
     async with _connect_db() as db:
-        limit_clause = "LIMIT ? OFFSET ?" if limit is not None else ""
-        params: tuple[Any, ...]
-        if username:
-            base = (
-                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
-                f"FROM chat_messages WHERE job_id = ? AND username = ? ORDER BY id ASC {limit_clause}"
-            )
-            params = (
-                (job_id, username, limit, offset)
-                if limit is not None
-                else (job_id, username)
-            )
-            cursor = await db.execute(base, params)
-        else:
-            base = (
-                "SELECT id, job_id, role, content, username, ai_provider, ai_model, session_id, status, created_at "
-                f"FROM chat_messages WHERE job_id = ? ORDER BY id ASC {limit_clause}"
-            )
-            params = (job_id, limit, offset) if limit is not None else (job_id,)
-            cursor = await db.execute(base, params)
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return await _chat_messages_on(db, job_id, limit, offset, username)
+
+
+async def _latest_chat_session_on(
+    db: aiosqlite.Connection, job_id: str, username: str
+) -> dict[str, Any] | None:
+    """Latest Start row on an open connection, or None when none is usable."""
+    row = await (
+        await db.execute(
+            "SELECT ai_provider, ai_model, session_id FROM chat_messages "
+            "WHERE job_id = ? AND username = ? AND role = 'assistant' "
+            "AND (session_id != '' OR session_revoked = 1) "
+            "ORDER BY id DESC LIMIT 1",
+            (job_id, username),
+        )
+    ).fetchone()
+    return dict(row) if row and row["session_id"] else None
+
+
+async def _count_chat_messages_on(
+    db: aiosqlite.Connection, job_id: str, username: str
+) -> int:
+    """Total chat message count on an open connection."""
+    if username:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE job_id = ? AND username = ?",
+            (job_id, username),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE job_id = ?",
+            (job_id,),
+        )
+    row = await cursor.fetchone()
+    return row[0] if row else 0
+
+
+async def get_chat_history_snapshot(
+    job_id: str, limit: int | None = 200, offset: int = 0, username: str = ""
+) -> tuple[list[dict[str, Any]], int, dict[str, Any] | None]:
+    """Read messages, total, and the latest session from one snapshot.
+
+    History reads skip the per-user chat lock while a workspace is being
+    prepared, so every field must come from the same read transaction —
+    otherwise a concurrent Start can land between two queries and produce
+    messages and session metadata describing different states.
+    """
+    async with _connect_db() as db:
+        # Deferred transaction: SQLite pins one WAL snapshot at the first read
+        # and holds it until commit, so concurrent writes cannot split the read.
+        await db.execute("BEGIN")
+        messages = await _chat_messages_on(db, job_id, limit, offset, username)
+        total = await _count_chat_messages_on(db, job_id, username)
+        session = await _latest_chat_session_on(db, job_id, username)
+        await db.commit()
+        return messages, total, session
 
 
 async def get_latest_chat_session(job_id: str, username: str) -> dict[str, Any] | None:
     """Return the latest Start, or None when its credential was revoked."""
     async with _connect_db() as db:
-        row = await (
-            await db.execute(
-                "SELECT ai_provider, ai_model, session_id FROM chat_messages "
-                "WHERE job_id = ? AND username = ? AND role = 'assistant' "
-                "AND (session_id != '' OR session_revoked = 1) "
-                "ORDER BY id DESC LIMIT 1",
-                (job_id, username),
-            )
-        ).fetchone()
-    return dict(row) if row and row["session_id"] else None
+        return await _latest_chat_session_on(db, job_id, username)
 
 
 async def count_chat_messages(job_id: str, username: str = "") -> int:
     """Count total chat messages for a job."""
     async with _connect_db() as db:
-        if username:
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM chat_messages WHERE job_id = ? AND username = ?",
-                (job_id, username),
-            )
-        else:
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM chat_messages WHERE job_id = ?",
-                (job_id,),
-            )
-        row = await cursor.fetchone()
-        return row[0] if row else 0
+        return await _count_chat_messages_on(db, job_id, username)
 
 
 async def delete_chat_message_by_id(msg_id: int) -> None:
