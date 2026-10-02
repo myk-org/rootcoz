@@ -44,6 +44,7 @@ from rootcoz.models import (
     CrossFailurePattern,
     FailedTest,
     FailureAnalysis,
+    PeerDebate,
     ProductBugReport,
 )
 from rootcoz.repository import RepositoryManager
@@ -695,9 +696,86 @@ def build_artifacts_section(artifacts_context: str) -> str:
     )
 
 
+def _canonical_header(match: re.Match[str]) -> str:
+    """Normalize an HTTP header line to a case-stable placeholder."""
+    return f"{match.group(1).lower()}: <HEADER>"
+
+
+# Allowlist of HTTP response headers whose *values* are per-request noise, so
+# header churn (ids, lengths, encodings, routing, trace propagation) never
+# splits a signature. Deliberately not a blanket ``x-*``: custom headers such as
+# ``X-Error-Code`` describe the failure itself, and discarding their values would
+# merge distinct failures into one signature.
+_HEADER_NAMES = (
+    r"date|content-length|content-encoding|content-range|transfer-encoding"
+    r"|connection|keep-alive|vary|etag|last-modified|age|expires|cache-control"
+    r"|retry-after|via|request-id|cf-ray|traceparent|tracestate"
+    r"|x-request-id|x-amzn-request-id|x-amzn-trace-id|x-correlation-id"
+    r"|x-trace-id|x-github-request-id|x-cache|x-served-by|x-timer"
+    r"|x-oauth-scopes|x-ratelimit-[a-z0-9-]+"
+    r"|x-b3-[a-z0-9-]+|x-envoy-[a-z0-9-]+|x-forwarded-[a-z0-9-]+"
+)
+
+# Frozen copy of the normalization rules in force before the v2 rules were added
+# (issue #239). Never edit, never reorder, never "fix" -- these hashes are the
+# anchor every stored row is filed under, and recomputing them differently would
+# make historical rows unmatchable (the one thing this design must never do).
+_LEGACY_NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+        ),
+        "<TIMESTAMP>",
+    ),
+    (re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?"), "<TIMESTAMP>"),
+    (
+        re.compile(
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+\d{4}"
+        ),
+        "<DATE>",
+    ),
+    (
+        re.compile(
+            r"\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}"
+        ),
+        "<DATE>",
+    ),
+    (
+        re.compile(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+        ),
+        "<UUID>",
+    ),
+    (re.compile(r"(?<=[a-zA-Z])-[0-9a-f]{5,10}\b"), "-<SUFFIX>"),
+    (re.compile(r"#\d+"), "#<BUILD>"),
+    (re.compile(r"(?:build|run)[/\-]\d+", re.IGNORECASE), "<BUILD_REF>"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), "<DATE>"),
+]
+
+
 # Pre-compiled patterns for signature normalization.
 # Strips run-specific data so the same underlying failure produces identical hashes.
-_NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+_NORMALIZE_PATTERNS: list[
+    tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]
+] = [
+    # HTTP response header lines: "Date: Sun, 31 May 2026 06:50:48 GMT",
+    # "Content-Length: 812", "X-Request-Id: 9c1f...". Must run before the date
+    # rules below, otherwise the date part is replaced and the time-of-day
+    # survives as new signature noise.
+    (
+        re.compile(rf"(?im)^[ \t]*({_HEADER_NAMES})[ \t]*:[^\r\n]*$"),
+        _canonical_header,
+    ),
+    # RFC 1123 date-time (surviving time-of-day of a partially normalized date):
+    # "Sun, 31 May 2026 06:50:48 GMT"
+    (
+        re.compile(
+            r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{1,2} "
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} "
+            r"\d{2}:\d{2}:\d{2}(?: \w+)?"
+        ),
+        "<DATE>",
+    ),
     # ISO timestamps: 2026-05-31T06:50:48.123Z, 2026-05-31T06:50:48+00:00
     (
         re.compile(
@@ -733,15 +811,19 @@ _NORMALIZE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?:build|run)[/\-]\d+", re.IGNORECASE), "<BUILD_REF>"),
     # Standalone date: 2026-05-31 (not already caught by timestamp patterns)
     (re.compile(r"\b\d{4}-\d{2}-\d{2}\b"), "<DATE>"),
+    # Runtime pointers: 0x7f3c8a1b2c40 (must run after UUID/pod-suffix rules).
+    (re.compile(r"\b0[xX][0-9a-fA-F]{6,}\b"), "<PTR>"),
+    # Bare long hex tokens: heap/object addresses, 7f3c8a1b2c40, commit SHAs.
+    (re.compile(r"\b[0-9a-fA-F]{12,}\b"), "<HEX>"),
 ]
 
 
 def normalize_for_signature(text: str) -> str:
     """Strip run-specific data from text before signature hashing.
 
-    Removes timestamps, dates, UUIDs, pod name suffixes, and build
-    numbers so that the same underlying failure produces the same
-    hash across different runs.
+    Removes timestamps, dates, HTTP response-header noise, UUIDs, pod name
+    suffixes, build numbers, and runtime pointer/hex tokens so that the same
+    underlying failure produces the same hash across different runs.
 
     Args:
         text: Error message or stack trace text.
@@ -754,13 +836,61 @@ def normalize_for_signature(text: str) -> str:
     return text
 
 
+def _hash_normalized(
+    error_message: str, stack_trace: str, patterns: list[tuple[Any, Any]]
+) -> str:
+    """Apply *patterns* to both texts and hash the joined result."""
+    texts = []
+    for text in (error_message, stack_trace):
+        for pattern, replacement in patterns:
+            text = pattern.sub(replacement, text)
+        texts.append(text)
+    return hashlib.sha256(f"{texts[0]}|{texts[1]}".encode()).hexdigest()
+
+
+def compute_signature(error_message: str, stack_trace: str) -> str:
+    """Hash an error message and stack trace with the current rules.
+
+    This is the v2 hash: stored in ``error_signature_v2`` and used to group
+    failures within a run. It is deliberately NOT the value stored in
+    ``error_signature`` -- see :func:`compute_legacy_signature`.
+
+    Args:
+        error_message: Error message text.
+        stack_trace: Stack trace text.
+
+    Returns:
+        SHA-256 hash string representing the failure signature.
+    """
+    return _hash_normalized(error_message, stack_trace, _NORMALIZE_PATTERNS)
+
+
+def compute_legacy_signature(error_message: str, stack_trace: str) -> str:
+    """Hash an error message and stack trace with the frozen pre-v2 rules.
+
+    The anchor hash: every row ever written carries this value in
+    ``error_signature``, so history matching and auto-review keep reaching rows
+    stored before the v2 rules existed. Rows are never re-signed, only added to.
+
+    Args:
+        error_message: Error message text.
+        stack_trace: Stack trace text.
+
+    Returns:
+        SHA-256 hash string, stable across all future rule changes.
+    """
+    return _hash_normalized(error_message, stack_trace, _LEGACY_NORMALIZE_PATTERNS)
+
+
 def get_failure_signature(failure: FailedTest) -> str:
-    """Create a signature for grouping identical failures.
+    """Create the current-rules (v2) signature for grouping identical failures.
 
     Uses the full error message and stack trace to identify failures that
     are essentially the same issue. Text is normalized to strip
-    run-specific data (timestamps, UUIDs, pod names, build numbers)
-    before hashing.
+    run-specific data (timestamps, UUIDs, pod names, build numbers, HTTP
+    header noise, pointer/hex tokens) before hashing. This is the grouping
+    key within one analysis; it is stored in ``error_signature_v2`` and is
+    never used as a history-match key on its own.
 
     Args:
         failure: The test failure to create a signature for.
@@ -768,10 +898,56 @@ def get_failure_signature(failure: FailedTest) -> str:
     Returns:
         SHA-256 hash string representing the failure signature.
     """
-    normalized_error = normalize_for_signature(failure.error_message)
-    normalized_trace = normalize_for_signature(failure.stack_trace)
-    signature_text = f"{normalized_error}|{normalized_trace}"
-    return hashlib.sha256(signature_text.encode()).hexdigest()
+    return compute_signature(failure.error_message, failure.stack_trace)
+
+
+def get_legacy_signature(failure: FailedTest) -> str:
+    """Create the frozen anchor signature for *failure*.
+
+    Stored in ``error_signature``, which every row written before the v2 rules
+    also carries -- so a row written today still matches its own history from
+    last month. See :func:`compute_legacy_signature`.
+
+    Args:
+        failure: The test failure to create a signature for.
+
+    Returns:
+        SHA-256 hash string representing the failure's anchor signature.
+    """
+    return compute_legacy_signature(failure.error_message, failure.stack_trace)
+
+
+def build_signature_section(failures: list[FailedTest], group_signature: str) -> str:
+    """Prompt line(s) naming every hash the AI must search history for.
+
+    A v2 group's members carry *different* frozen anchors -- that is exactly why
+    they grouped. Naming only the representative's anchor drops the rest of the
+    group's history, so the whole set goes in the prompt: each member's anchor
+    (which reaches rows stored before the v2 rules) plus the group's v2 hash.
+
+    The whole set is one comma-separated ``signature`` value, not one line per
+    hash: ``search_error_signature`` takes them all in a single call, so a group
+    of any size still costs the AI exactly one history search. A per-hash line
+    list made that cost scale with the group, and the groups the v2 rules merge
+    are the large ones.
+    """
+    hashes = list(
+        dict.fromkeys(
+            h
+            for failure in failures
+            for h in (get_legacy_signature(failure), group_signature)
+            if h
+        )
+    )
+    if len(hashes) <= 1:
+        return f"ERROR SIGNATURE: {hashes[0] if hashes else group_signature}\n"
+    return (
+        "ERROR SIGNATURES: this failure group has several hashes. Call "
+        "search_error_signature ONCE with every hash below as a single "
+        "comma-separated 'signature' value and read the combined results:\n"
+        + ", ".join(hashes)
+        + "\n"
+    )
 
 
 def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
@@ -1427,11 +1603,13 @@ def write_failure_details_file(
     """Write error message, stack trace, and test names for the AI to read.
 
     Per AI Tool Access rules, failure data must not be embedded in the prompt.
+    The header names every hash the group is filed under, so an AI that reads
+    only this file still searches the whole group's history.
     """
     representative = failures[0]
     test_names = [f.test_name for f in failures]
     content = (
-        f"ERROR SIGNATURE: {error_signature}\n"
+        f"{build_signature_section(failures, error_signature)}"
         f"AFFECTED TESTS ({len(failures)} tests with same error):\n"
         + "\n".join(f"- {name}" for name in test_names)
         + f"\n\nERROR:\n{representative.error_message}\n"
@@ -1751,6 +1929,14 @@ async def run_single_ai_analysis(
     """
     representative = failures[0]
     error_signature = get_failure_signature(representative)
+    # The mandatory history search matches one hash at a time, so the prompt
+    # gets the WHOLE group's hash set: every member's anchor (the value every
+    # stored row carries, including rows written before the v2 rules existed)
+    # plus the v2 group hash. Naming only failures[0]'s anchor would drop the
+    # other members' history -- the v2 rules merged them precisely because their
+    # anchors differ.
+    anchor_signature = get_legacy_signature(representative)
+    signature_section = build_signature_section(failures, error_signature)
 
     (
         agent_gate_section,
@@ -1854,7 +2040,7 @@ async def run_single_ai_analysis(
     prompt = f"""{agent_gate_section}{query_section}
 Analyze this test failure from a CI job.
 {other_groups_section}
-ERROR SIGNATURE: {error_signature}
+{signature_section}
 {failure_details_section}
 {console_file_section}
 {artifacts_section}
@@ -1884,7 +2070,10 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         job_id,
     )
     try:
-        with failure_group_usage(job_id, error_signature):
+        # Both hashes: the anchor for legacy attribution and the v2 group hash
+        # so every member of a v2 group -- whose own anchors differ from it --
+        # resolves to the same usage summary (see attach_failure_usage).
+        with failure_group_usage(job_id, anchor_signature, error_signature):
             result = await _call_ai_with_retry(
                 prompt,
                 ai_provider=ai_provider,
@@ -2018,8 +2207,10 @@ async def analyze_failure_group(
     )
 
     # Apply the same analysis to all failures in the group.
-    # All failures share the same signature (that's how they were grouped),
-    # so reuse the already-computed value instead of calling get_failure_signature() again.
+    # All failures share the same v2 signature (that's how they were grouped),
+    # so reuse the already-computed value instead of calling get_failure_signature()
+    # again. The anchor is per failure -- two failures the v2 rules merge can
+    # still differ under the frozen rules -- so each one stores its own.
     return _expand_group_to_analyses(error_signature, failures, parsed)
 
 
@@ -2279,14 +2470,27 @@ def _expand_group_to_analyses(
     sig: str,
     failures: list[FailedTest],
     analysis: AnalysisDetail,
+    peer_debate: PeerDebate | None = None,
 ) -> list[FailureAnalysis]:
-    """Create FailureAnalysis objects for all failures in a group."""
+    """Create FailureAnalysis objects for all failures in a group.
+
+    Dual-writes the group's v2 signature (``error_signature_v2``) and each
+    failure's own frozen anchor (``error_signature``).
+
+    The peer path passes *peer_debate* and comes back here too. Both write paths
+    must stay in step -- a per-failure field added here and not there is a
+    signature assigned in one analysis and missing from the other -- so this is
+    the only mapping from a grouped failure to its stored record.
+    """
     return [
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
+            stack_trace=f.stack_trace,
             analysis=analysis,
-            error_signature=sig,
+            error_signature=get_legacy_signature(f),
+            error_signature_v2=sig,
+            peer_debate=peer_debate,
         )
         for f in failures
     ]
@@ -2384,7 +2588,9 @@ def _failed_group_analyses(
         FailureAnalysis(
             test_name=f.test_name,
             error=f.error_message,
-            error_signature=signature,
+            stack_trace=f.stack_trace,
+            error_signature=get_legacy_signature(f),
+            error_signature_v2=signature,
             analysis=AnalysisDetail(
                 details="Analysis failed; check server logs for details"
             ),

@@ -29,6 +29,7 @@ from rootcoz.engine.core import (
     derive_error_details,
     extract_relevant_console_lines,
     get_failure_signature,
+    get_legacy_signature,
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
@@ -1322,7 +1323,9 @@ async def _analyze_grouped_failures(
                     FailureAnalysis(
                         test_name=tf.test_name,
                         error=tf.error_message,
-                        error_signature=get_failure_signature(tf),
+                        stack_trace=tf.stack_trace,
+                        error_signature=get_legacy_signature(tf),
+                        error_signature_v2=get_failure_signature(tf),
                         analysis=AnalysisDetail(
                             details="Analysis failed; check server logs for details"
                         ),

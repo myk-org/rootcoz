@@ -24,6 +24,11 @@ describe('groupingKey', () => {
     expect(groupingKey(f)).toBe('sig-abc')
   })
 
+  it('prefers error_signature_v2 over the legacy anchor', () => {
+    const f = { ...makeFailure('test1', 'sig-abc'), error_signature_v2: 'sig-v2' }
+    expect(groupingKey(f)).toBe('sig-v2')
+  })
+
   it('falls back to unique-{test_name} when no signature', () => {
     const f = makeFailure('test1', '')
     expect(groupingKey(f)).toBe('unique-test1')
@@ -42,6 +47,24 @@ describe('groupFailures', () => {
     expect(groups[0].count).toBe(2)
     expect(groups[0].tests).toHaveLength(2)
     expect(groups[1].count).toBe(1)
+  })
+
+  it('keeps one group for differing legacy signatures sharing error_signature_v2', () => {
+    const failures = [
+      { ...makeFailure('test1', 'legacy-a'), error_signature_v2: 'sig-v2' },
+      { ...makeFailure('test2', 'legacy-b'), error_signature_v2: 'sig-v2' },
+      { ...makeFailure('test3', 'legacy-c'), error_signature_v2: 'sig-v2' },
+    ]
+    const groups = groupFailures(failures)
+    expect(groups).toHaveLength(1)
+    expect(groups[0].count).toBe(3)
+    expect(groups[0].signature).toBe('sig-v2')
+    // legacy anchors survive untouched on each member
+    expect(groups[0].tests.map((t) => t.error_signature)).toEqual([
+      'legacy-a',
+      'legacy-b',
+      'legacy-c',
+    ])
   })
 
   it('treats empty signature as unique per test', () => {

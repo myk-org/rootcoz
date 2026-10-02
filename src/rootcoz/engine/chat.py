@@ -323,15 +323,21 @@ def build_analysis_history_tools(
         {
             "name": "search_error_signature",
             "description": (
-                "MANDATORY for every failure group. Find other tests/jobs "
-                "sharing this error signature (infrastructure vs isolated)."
+                "MANDATORY for every failure group -- one call per group. Find "
+                "other tests/jobs sharing this error signature (infrastructure "
+                "vs isolated). A failure group can have several hashes: pass "
+                "them ALL as one comma-separated 'signature' value rather than "
+                "calling this once per hash."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "signature": {
                         "type": "string",
-                        "description": "Error signature hash for this failure group",
+                        "description": (
+                            "Error signature hash for this failure group, or "
+                            "every hash it has as one comma-separated value"
+                        ),
                     },
                 },
                 "required": ["signature"],

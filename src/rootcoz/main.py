@@ -2504,13 +2504,16 @@ async def _apply_auto_review(
     prev_build: int | str,
     child_job_name: str = "",
     child_build_number: int = 0,
+    error_sig_v2: str = "",
 ) -> None:
     """Apply auto-review to a single failure: mark reviewed, add comment, log.
 
     Args:
         job_id: Current analysis job ID.
         test_name: Name of the test being auto-reviewed.
-        error_sig: Error signature that matched.
+        error_sig: Anchor signature that matched.
+        error_sig_v2: Current-rules signature of the same failure, dual-written
+            onto the comment so signature lookups find it either way.
         prev_job_id: Job ID of the previous matching analysis.
         prev_build: Build number of the previous matching analysis.
         child_job_name: Child job name (empty for top-level failures).
@@ -2543,6 +2546,7 @@ async def _apply_auto_review(
         child_job_name=child_job_name,
         child_build_number=child_build_number,
         error_signature=error_sig,
+        error_signature_v2=error_sig_v2,
         username=AI_SYSTEM_USERNAME,
     )
 
@@ -2575,8 +2579,8 @@ async def _match_and_auto_review_failures(
     """Check failures against previous analyses and auto-review matches.
 
     For each failure, looks up the same test_name in the same job_name from a
-    previous analysis. If the error_signature matches exactly, applies
-    auto-review.
+    previous analysis. If the signatures match (either column -- see
+    storage.previous_analysis_matches), applies auto-review.
 
     Args:
         job_id: Current analysis job ID.
@@ -2594,8 +2598,7 @@ async def _match_and_auto_review_failures(
     for failure in failures:
         total += 1
         test_name = failure.get("test_name", "")
-        error_sig = failure.get("error_signature", "")
-        if not test_name or not error_sig:
+        if not test_name or not storage.signature_hashes(failure):
             continue
 
         previous = await storage.find_matching_previous_analysis(
@@ -2606,7 +2609,13 @@ async def _match_and_auto_review_failures(
         )
         if previous is None:
             continue
-        if previous["error_signature"] != error_sig:
+        # Hash-set match, not equality on one column: the previous row may predate
+        # the v2 rules and carry only its anchor, while this failure carries both.
+        # Comparing a single column is what would silently stop auto-review from
+        # chaining across a deploy. That helper, not signatures_match, carries
+        # the wider "same normalized message" last resort -- a human confirms the
+        # chain on the report, so only the history lookup may lean on it.
+        if not storage.previous_analysis_matches(previous, failure):
             continue
 
         prev_job_id = previous["job_id"]
@@ -2614,11 +2623,12 @@ async def _match_and_auto_review_failures(
         await _apply_auto_review(
             job_id,
             test_name,
-            error_sig,
+            failure.get("error_signature", ""),
             prev_job_id,
             prev_build,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
+            error_sig_v2=failure.get("error_signature_v2", ""),
         )
         reviewed += 1
 
@@ -2635,9 +2645,9 @@ async def _auto_review_matching_failures(
     """Auto-review failures with identical signatures from previous analyses.
 
     For each failure in the result, looks up the same test_name in the same
-    job_name from a previous analysis. If the error_signature matches exactly,
-    marks the failure as reviewed with username=AI_SYSTEM_USERNAME and adds an
-    explanatory comment.
+    job_name from a previous analysis. If the signatures match (either column --
+    see storage.previous_analysis_matches), marks the failure as reviewed with
+    username=AI_SYSTEM_USERNAME and adds an explanatory comment.
 
     If all failures end up reviewed, pushes to exporters configured in
     AUTO_PUSH_EXPORTERS.
@@ -4097,7 +4107,7 @@ def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
     total = 0
     for child in children:
         signatures = {
-            failure.error_signature
+            storage.resolve_signature(failure)
             for failure in child.failures
             if _is_failed_analysis(failure)
         }
@@ -4570,7 +4580,7 @@ async def _process_ci_source_analysis(
         )
 
         failed_tests = [a for a in all_analyses if _is_failed_analysis(a)]
-        failed_analyses = len({a.error_signature for a in failed_tests})
+        failed_analyses = len({storage.resolve_signature(a) for a in failed_tests})
         analysis_status: Literal["completed", "failed"] = (
             "completed"
             if len(all_analyses) > len(failed_tests)
@@ -6181,23 +6191,29 @@ def _find_child_job_in_result(
     )
 
 
-async def _get_error_signature(
+async def _get_failure_signatures(
     job_id: str,
     test_name: str,
     child_job_name: str = "",
     child_build_number: int = 0,
-) -> str:
-    """Look up the error_signature for a test from stored result data."""
+) -> tuple[str, str]:
+    """Return the stored ``(error_signature, error_signature_v2)`` pair for a test.
+
+    Both are written together on new failures (see rootcoz.storage's signature
+    notes); a failure stored before the v2 rules existed returns an empty v2.
+    """
     stored = await storage.get_result(job_id)
     if not stored or not stored.get("result"):
-        return ""
+        return "", ""
     failure = _find_failure_in_result(
         stored["result"],
         test_name,
         child_job_name,
         child_build_number,
     )
-    return failure.get("error_signature", "") if failure else ""
+    if not failure:
+        return "", ""
+    return failure.get("error_signature", ""), failure.get("error_signature_v2", "")
 
 
 async def _resolve_effective_failure(
@@ -6254,7 +6270,7 @@ async def add_comment(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
 
-    error_signature = await _get_error_signature(
+    error_signature, error_signature_v2 = await _get_failure_signatures(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
 
@@ -6267,6 +6283,7 @@ async def add_comment(
             child_job_name=body.child_job_name,
             child_build_number=body.child_build_number,
             error_signature=error_signature,
+            error_signature_v2=error_signature_v2,
             username=username,
         )
     except ValueError as exc:
@@ -7099,7 +7116,7 @@ async def _add_tracker_comment(
         key = result.get("key", "")
         key_suffix = f" [{key}]" if key else ""
         comment_text = f"{tracker_label}{key_suffix}: [{body.title}]({issue_url})"
-        error_signature = await _get_error_signature(
+        error_signature, error_signature_v2 = await _get_failure_signatures(
             job_id, body.test_name, body.child_job_name, body.child_build_number
         )
         comment_id = await storage.add_comment(
@@ -7109,6 +7126,7 @@ async def _add_tracker_comment(
             child_job_name=body.child_job_name,
             child_build_number=body.child_build_number,
             error_signature=error_signature,
+            error_signature_v2=error_signature_v2,
             username=username,
         )
         for mentioned_user in detect_mentions(comment_text):
@@ -9355,7 +9373,11 @@ async def search_by_signature_endpoint(
         default="", description="Exclude results from this job ID"
     ),
 ) -> dict[str, Any]:
-    """Find all tests that failed with the same error signature."""
+    """Find all tests that failed with the same error signature.
+
+    ``signature`` accepts a comma-separated set, so one request covers every
+    hash of a failure group.
+    """
     _require_authenticated(request)
     logger.debug(f"GET /history/search: signature={signature}")
     result = await storage.search_by_signature(signature, exclude_job_id=exclude_job_id)

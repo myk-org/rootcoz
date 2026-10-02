@@ -4,6 +4,7 @@ import type { RepoUrl } from '@/lib/autoLink'
 import { Badge } from '@/components/ui/badge'
 import { PeerRoundEntry } from '@/components/shared/PeerRoundEntry'
 import { groupPeerRounds } from '@/lib/peerDebate'
+import { resolvedSignature } from '@/lib/grouping'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown, ChevronRight, Users } from 'lucide-react'
 
@@ -17,7 +18,7 @@ interface FailureWithDebate {
   primaryUsage?: FailureAnalysis['token_usage']
 }
 
-/** Recursively collect failures with peer_debate, deduplicating by error_signature.
+/** Recursively collect failures with peer_debate, deduplicating by resolved signature.
  *  Peer analysis runs once per unique signature; sibling failures share the same
  *  debate. This ensures the summary shows one entry per actual AI debate. */
 function collectDebateFailures(
@@ -29,9 +30,12 @@ function collectDebateFailures(
 
   for (const f of failures) {
     if (!f.peer_debate) continue
-    if (!f.error_signature) continue  // skip malformed entries
+    // Group on the resolved signature: siblings in one group may carry
+    // different legacy error_signature values but share error_signature_v2.
+    const signature = resolvedSignature(f)
+    if (!signature) continue  // skip malformed entries
 
-    const key = `${jobLabel}::${f.error_signature}`
+    const key = `${jobLabel}::${signature}`
     const existing = bySignature.get(key)
     if (existing) {
       existing.siblingTestNames.push(f.test_name)

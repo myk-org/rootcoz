@@ -23,9 +23,11 @@ from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
+    _expand_group_to_analyses,
     build_failure_details_instruction,
     build_other_groups_instruction,
     build_prompt_sections,
+    build_signature_section,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
@@ -434,6 +436,10 @@ def _build_failure_summary(
 
     Writes error/stack/test names to a workspace file and returns a MANDATORY
     read instruction. Peers must read the file — not receive data in the prompt.
+
+    ``error_signature`` is the v2 group hash, so peers get the whole group's
+    hash set instead: searching by the group hash alone misses every failure row
+    stored before the v2 rules, which carry only their own anchor.
     """
     try:
         filepath = write_failure_details_file(failures, error_signature, workspace_dir)
@@ -443,7 +449,7 @@ def _build_failure_summary(
             "Check filesystem permissions and available disk space."
         ) from exc
     return (
-        f"ERROR SIGNATURE: {error_signature}\n"
+        f"{build_signature_section(failures, error_signature)}"
         f"{build_failure_details_instruction(filepath)}"
     )
 
@@ -1095,15 +1101,8 @@ async def analyze_failure_group_with_peers(
                 )
 
     # Apply analysis to all failures in the group.
-    # All failures share the same signature (that's how they were grouped),
-    # so reuse the already-computed value instead of calling get_failure_signature() again.
-    return [
-        FailureAnalysis(
-            test_name=f.test_name,
-            error=f.error_message,
-            analysis=parsed_analysis,
-            error_signature=error_signature,
-            peer_debate=peer_debate,
-        )
-        for f in failures
-    ]
+    # Shared with the non-peer path: all failures share the same v2 signature
+    # (that's how they were grouped), and the anchor is per failure.
+    return _expand_group_to_analyses(
+        error_signature, failures, parsed_analysis, peer_debate
+    )

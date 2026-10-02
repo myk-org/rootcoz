@@ -44,6 +44,108 @@ ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
 VALID_ANALYSIS_STATES = frozenset({ANALYSIS_STATE_SUBMITTED, ANALYSIS_STATE_ANALYZED})
 
 
+# --- Failure signatures: anchor + v2 ----------------------------------------
+#
+# Every table that carries ``error_signature`` carries ``error_signature_v2``
+# next to it, and these four functions are the ONLY place either column is
+# interpreted. Adding the v2 rules changed the hash a new analysis produces,
+# so the two columns answer different questions:
+#
+#   error_signature      anchor. SHA-256 under the frozen pre-v2 rules. Written
+#                        once, never rewritten. Every row ever stored carries
+#                        it, which is why a failure analysed today still matches
+#                        its own history from last month.
+#   error_signature_v2   current rules. NULL on rows stored before the rules
+#                        changed; grouping identity for new analyses.
+#
+# Nothing is ever re-signed, so there is no deploy boundary where old and new
+# stop matching.
+
+
+def _signature_field(row: Any, name: str) -> str:
+    """Read a signature column from a dict, a sqlite3/aiosqlite Row or a model.
+
+    Deliberately not ``row.get(...)`` with a getattr fallback: a ``Row`` is not
+    a dict, and silently returning "" for it would make a resolve look like a
+    row with no signature at all.
+    """
+    if isinstance(row, dict):
+        value = row.get(name, "")
+    elif hasattr(row, "keys"):  # sqlite3.Row and aiosqlite.Row
+        try:
+            value = row[name]
+        except IndexError, KeyError:
+            value = ""
+    else:
+        value = getattr(row, name, "")
+    return value if isinstance(value, str) else ""
+
+
+def resolve_signature(row: Any) -> str:
+    """Return the signature identifying *row*: v2 when present, else the anchor.
+
+    The single resolution rule. Use this -- never an ad-hoc
+    ``row["error_signature_v2"] or row["error_signature"]`` -- wherever a row
+    needs one canonical signature (grouping key, dedup key, label, filename).
+    """
+    return _signature_field(row, "error_signature_v2") or _signature_field(
+        row, "error_signature"
+    )
+
+
+def signature_hashes(row: Any) -> list[str]:
+    """Return every hash *row* is filed under, anchor first, empties dropped."""
+    return list(
+        dict.fromkeys(
+            h
+            for h in (
+                _signature_field(row, "error_signature"),
+                _signature_field(row, "error_signature_v2"),
+            )
+            if h
+        )
+    )
+
+
+def signatures_match(left: Any, right: Any) -> bool:
+    """Return whether two rows describe the same failure across rule versions.
+
+    A row written before the v2 rules exists carries only its anchor; a row
+    written after carries both. Comparing the resolved value alone would make a
+    new row stop matching its own history, so the comparison is over the union
+    of both rows' hashes -- a legacy row and a new row for the SAME failure
+    match on the anchor they share.
+
+    Hashes only, and that is the whole rule. This is the universal comparison:
+    grouping, dedup, override and peer search all route through it, and a
+    message is not an identity. Two distinct failures that happen to print the
+    same line must never be merged by it. The one wider rule -- the same
+    normalized message as a last resort -- lives with the history lookup in
+    :func:`previous_analysis_matches`.
+    """
+    return bool(set(signature_hashes(left)) & set(signature_hashes(right)))
+
+
+def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
+    """Return a WHERE fragment and its params matching any of *hashes*.
+
+    The SQL twin of :func:`signatures_match`. Both columns are tested because
+    SQLite uses one index per OR branch -- hence the partial index on
+    ``error_signature_v2``. Returns an empty fragment for an empty *hashes*,
+    so a caller can append it unconditionally.
+    """
+    values = [h for h in dict.fromkeys(h for h in hashes if h)]
+    if not values:
+        return "", []
+    placeholders = ",".join("?" for _ in values)
+    prefix = f"{alias}." if alias else ""
+    fragment = (
+        f"({prefix}error_signature IN ({placeholders})"
+        f" OR {prefix}error_signature_v2 IN ({placeholders}))"
+    )
+    return fragment, values + values
+
+
 @asynccontextmanager
 async def _connect_db() -> AsyncIterator[aiosqlite.Connection]:
     """Open a database connection with WAL mode and busy_timeout."""
@@ -225,6 +327,32 @@ async def _migrate_add_column(
     else:
         logger.debug(f"Migration: {table} already has {column} column")
     return False
+
+
+async def _add_signature_v2_column(
+    db: aiosqlite.Connection, table: str, index: str
+) -> None:
+    """Give *table* its ``error_signature_v2`` column and index, idempotently.
+
+    The column is nullable on purpose: a NULL is exactly what a row written
+    before the v2 rules carries, and the resolution helpers read that as "fall
+    back to the anchor".
+
+    The partial index is needed because ``signature_match()`` tests both columns
+    with an OR and SQLite uses one index per branch -- without it the v2 side of
+    every signature lookup is a table scan. It stays small because it indexes
+    nothing but the rows that have a v2 hash.
+
+    Args:
+        db: Active database connection.
+        table: Table that carries ``error_signature``.
+        index: Name for the new index on ``error_signature_v2``.
+    """
+    await _migrate_add_column(db, table, "error_signature_v2", "TEXT")
+    await db.execute(
+        f"CREATE INDEX IF NOT EXISTS {index} ON {table} (error_signature_v2)"
+        " WHERE error_signature_v2 IS NOT NULL"
+    )
 
 
 async def _ensure_migrations_table(db: aiosqlite.Connection) -> None:
@@ -622,6 +750,13 @@ async def init_db() -> None:
             db, "comments", "error_signature", "TEXT NOT NULL DEFAULT ''"
         )
 
+        # Migration: error_signature_v2 on comments (additive; see the module's
+        # signature notes). NULL on every row written before the v2 rules, so no
+        # stored hash is rewritten.
+        await _add_signature_v2_column(
+            db, "comments", "idx_comments_error_signature_v2"
+        )
+
         # Migration: rebuild failure_reviews with correct 4-column PRIMARY KEY
         # ALTER TABLE cannot change PKs in SQLite, so we need a full rebuild
         cursor = await db.execute("PRAGMA table_info(failure_reviews)")
@@ -808,6 +943,11 @@ async def init_db() -> None:
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_fh_classification ON failure_history (classification)"
+        )
+
+        # Migration: error_signature_v2 on failure_history (see comments above).
+        await _add_signature_v2_column(
+            db, "failure_history", "idx_fh_error_signature_v2"
         )
 
         # Migration: add pattern column to failure_history (two-axis classification)
@@ -1069,6 +1209,9 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "ai_token_usage", "credential_source", "TEXT NOT NULL DEFAULT 'unknown'"
         )
+        # Same anchor/v2 pair as the tables that drive matching; analytics-only
+        # here, but the resolution helper must work on every signature column.
+        await _migrate_add_column(db, "ai_token_usage", "error_signature_v2", "TEXT")
         await _migrate_add_column(
             db, "ai_token_usage", "error_signature", "TEXT NOT NULL DEFAULT ''"
         )
@@ -1506,8 +1649,15 @@ async def add_comment(
     child_build_number: int = 0,
     error_signature: str = "",
     username: str = "",
+    error_signature_v2: str = "",
 ) -> int:
-    """Add a comment to a test failure."""
+    """Add a comment to a test failure.
+
+    Dual-writes the signature pair: the anchor in ``error_signature`` and the
+    current-rules hash in ``error_signature_v2`` (see the module's signature
+    notes). Callers that only have the anchor leave the v2 column NULL, which
+    is also what every pre-existing row looks like.
+    """
     logger.debug(
         f"add_comment: job_id={job_id}, test_name={test_name}, comment_len={len(comment)}"
     )
@@ -1516,8 +1666,8 @@ async def add_comment(
         cursor = await db.execute(
             "INSERT INTO comments"
             " (job_id, test_name, child_job_name, child_build_number,"
-            " comment, error_signature, username)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " comment, error_signature, error_signature_v2, username)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 test_name,
@@ -1525,6 +1675,7 @@ async def add_comment(
                 child_build_number,
                 comment,
                 error_signature,
+                error_signature_v2 or None,
                 username,
             ),
         )
@@ -1569,7 +1720,7 @@ async def get_comments_for_job(job_id: str) -> list[dict[str, Any]]:
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, job_id, test_name, child_job_name,"
-            " child_build_number, comment, error_signature,"
+            " child_build_number, comment, error_signature, error_signature_v2,"
             " username, created_at"
             " FROM comments WHERE job_id = ? ORDER BY created_at ASC",
             (job_id,),
@@ -1674,7 +1825,9 @@ async def get_historical_comments(
 ) -> list[dict[str, Any]]:
     """Get historical comments for similar failures across jobs.
 
-    Matches by test name OR by error signature.
+    Matches by test name OR by any of the signature hashes (both columns, see
+    :func:`signatures_match`), so a comment written before the v2 rules existed
+    is still found by a failure analysed today.
     No arbitrary limit -- returns all matching comments.
     """
     logger.debug(
@@ -1693,9 +1846,10 @@ async def get_historical_comments(
         params.extend(test_names)
 
     if error_signatures:
-        placeholders = ",".join("?" for _ in error_signatures)
-        conditions.append(f"error_signature IN ({placeholders})")
-        params.extend(error_signatures)
+        fragment, match_params = signature_match(error_signatures)
+        if fragment:
+            conditions.append(fragment)
+            params.extend(match_params)
 
     if not conditions:
         return []
@@ -1708,7 +1862,7 @@ async def get_historical_comments(
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT id, job_id, test_name, child_job_name,"
-            " child_build_number, comment, error_signature,"
+            " child_build_number, comment, error_signature, error_signature_v2,"
             " username, created_at "
             f"FROM comments WHERE {where} ORDER BY created_at DESC",
             params,
@@ -2267,6 +2421,22 @@ async def update_progress_phase(job_id: str, phase: str) -> None:
     await patch_result_json(job_id, _make_progress_phase_patcher(phase))
 
 
+def failure_error_text(failure: dict[str, Any]) -> str:
+    """Return the text to denormalize into ``failure_history.error_message``.
+
+    ``error`` is a signature input and is persisted verbatim (see
+    :meth:`rootcoz.models.FailureAnalysis.display_error`), so a trace-only
+    failure stores an empty message. The history copy exists to be read and
+    searched, so it takes the trace standing in for the missing message --
+    otherwise those failures have nothing to show and cannot be found by
+    :func:`get_all_failures`.
+
+    Reading is :func:`_row_message`'s single rule: same precedence, so a row
+    written here compares equal to the failure it came from.
+    """
+    return _row_message(failure)
+
+
 async def patch_result_json(
     job_id: str,
     patch_fn: Callable[[dict[str, Any]], None],
@@ -2278,23 +2448,23 @@ async def patch_result_json(
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
-    The *patch_fn* is called with the parsed ``result`` dict and is expected
+        The *patch_fn* is called with the parsed ``result`` dict and is expected
     to mutate it in place.  The read and write happen inside a single
-    ``BEGIN IMMEDIATE`` transaction so concurrent patches are serialized
-    by SQLite's write lock.
+        ``BEGIN IMMEDIATE`` transaction so concurrent patches are serialized
+        by SQLite's write lock.
 
-    After *patch_fn* returns, denormalized identity columns (``job_name``,
-    ``build_number``, ``build_id``) are synced from the patched dict using
-    key-presence semantics: only keys present in the result update their
-    columns — missing keys leave existing column values unchanged.
+                After *patch_fn* returns, denormalized identity columns (``job_name``,
+                ``build_number``, ``build_id``) are synced from the patched dict using
+                key-presence semantics: only keys present in the result update their
+                columns — missing keys leave existing column values unchanged.
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
-    ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
-    permits completed jobs when a reanalysis updates clone progress. Identified
-    re-analysis updates require a running failure regardless of parent status.
-    ``require_job_id`` makes the patch conditional: when set and that job row no
-    longer exists, the patch is skipped, so a link can never be created for an
-    already-deleted result.
+        ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
+        permits completed jobs when a reanalysis updates clone progress. Identified
+        re-analysis updates require a running failure regardless of parent status.
+        ``require_job_id`` makes the patch conditional: when set and that job row no
+        longer exists, the patch is skipped, so a link can never be created for an
+        already-deleted result.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -2426,13 +2596,21 @@ def _analysis_identity_key(item: dict[str, Any], *fields: str) -> tuple[Any, ...
 
 
 def _copy_failure_ids(prior: list[Any], current: list[Any]) -> None:
+    """Carry failure UUIDs over to the failure they still describe.
+
+    Identity is the test name plus a signature match (see
+    :func:`signatures_match`), not a single hash: the prior result may have
+    been stored before the v2 rules existed and carry only its anchor, and a
+    resolved-value comparison would drop the id and churn the report.
+    """
     unused = [p for p in prior if isinstance(p, dict)]
     for new in current:
         if not isinstance(new, dict):
             continue
-        key = _analysis_identity_key(new, "test_name", "error_signature")
         for index, old in enumerate(unused):
-            if _analysis_identity_key(old, "test_name", "error_signature") != key:
+            if old.get("test_name") != new.get("test_name"):
+                continue
+            if not signatures_match(old, new):
                 continue
             if old.get("id"):
                 new["id"] = old["id"]
@@ -2781,8 +2959,9 @@ def _failure_to_history_row(
         build_number,
         build_id,
         failure.get("test_name", ""),
-        failure.get("error", ""),
+        failure_error_text(failure),
         failure.get("error_signature", ""),
+        failure.get("error_signature_v2") or None,
         classification,
         pattern,
         child_job_name,
@@ -2816,7 +2995,8 @@ def _extract_failures_for_history(
     Returns:
         List of tuples ready for INSERT:
         (job_id, job_name, build_number, build_id, test_name, error_message,
-         error_signature, classification, child_job_name, child_build_number, analyzed_at)
+         error_signature, error_signature_v2, classification,
+         child_job_name, child_build_number, analyzed_at)
     """
     rows: list[tuple[Any, ...]] = []
 
@@ -2891,6 +3071,72 @@ def _extract_child_failures_for_history(
         )
 
 
+def _row_message(row: Any) -> str:
+    """Return the error text a row stores, whichever column it keeps it in.
+
+    ``failure_history`` calls it ``error_message``; a FailureAnalysis dict calls
+    it ``error``. A trace-only failure has neither worth comparing -- its
+    message is empty and the trace carries everything -- and the history copy
+    stores that trace *as* ``error_message`` (see :func:`failure_error_text`).
+    Falling through to ``stack_trace`` is what lets the two sides hash the same
+    text instead of one hashing a message the other never had.
+    """
+    return (
+        _signature_field(row, "error_message")
+        or _signature_field(row, "error")
+        or _signature_field(row, "stack_trace")
+    )
+
+
+def _message_signature(row: Any) -> str:
+    """Hash *row*'s error message alone under the current (v2) rules.
+
+    For :func:`previous_analysis_matches` only -- it is the whole point of that
+    function and of nothing else. The message is normalized under the SAME
+    rules the run's own grouping already accepts as identity, never the raw
+    text. The stack trace is not stored on history rows, so both sides are
+    hashed with an empty one: the comparison is message against message, never
+    message against hash, and it cannot tell two traces apart.
+    """
+    message = _row_message(row)
+    if not message:
+        return ""
+    # Imported here: engine.core imports storage at module level.
+    from rootcoz.engine.core import compute_signature
+
+    return compute_signature(message, "")
+
+
+def previous_analysis_matches(previous: Any, failure: Any) -> bool:
+    """Whether a :func:`find_matching_previous_analysis` row is *failure* again.
+
+    :func:`signatures_match` first -- the universal rule, and the one that
+    settles it whenever it can. Only then does the wider rule run, and only for
+    a history row written before the v2 rules: that row has no v2 hash to meet a
+    later run on, so when its only difference is header/pointer noise the frozen
+    anchor moved and the message is the comparison left. That covers the one
+    case the union cannot.
+
+    A row that *does* carry a v2 hash was already compared under the current
+    rules one line above and disagreed, so it never reaches the fallback. That
+    guard is load-bearing, not defensive: without it the message-only hash --
+    which cannot tell two stack traces apart, because history rows store none --
+    would report a real mismatch as a match, and the auto-review caller in
+    ``main.py`` would mark a new failure reviewed against a different defect.
+
+    ponytail: the fallback ignores the stack trace (history rows do not store
+    one), so on message alone 80 distinct legacy signatures collapse to 69
+    (1.16x), worst case 4 into 1. Drop it if a column ever makes the stack
+    comparable again.
+    """
+    if signatures_match(previous, failure):
+        return True
+    if _signature_field(previous, "error_signature_v2"):
+        return False
+    left_message = _message_signature(previous)
+    return bool(left_message) and left_message == _message_signature(failure)
+
+
 async def find_matching_previous_analysis(
     job_name: str,
     test_name: str,
@@ -2923,7 +3169,10 @@ async def find_matching_previous_analysis(
     Returns:
         Dict with previous failure_history row data if found, None otherwise.
         Includes keys: job_id, build_number, build_id, error_signature,
-        classification, pattern, analyzed_at.
+        error_signature_v2, error_message, classification, pattern, analyzed_at.
+        Compare the pair with :func:`previous_analysis_matches`, never field by
+        field -- error_message is selected so that comparison can normalize the
+        message of a row stored before the v2 rules.
     """
     async with _connect_db() as db:
         # Find the most recent failure_history row for the same job+test
@@ -2937,6 +3186,7 @@ async def find_matching_previous_analysis(
         # the API model where child_build_number=0 means "not specified".
         cursor = await db.execute(
             "SELECT fh.job_id, fh.build_number, fh.build_id, fh.error_signature, "
+            "fh.error_signature_v2, fh.error_message, "
             "fh.classification, fh.pattern, fh.analyzed_at "
             "FROM failure_history fh "
             "WHERE fh.job_name = ? AND fh.test_name = ? AND fh.job_id != ? "
@@ -3002,9 +3252,9 @@ async def populate_failure_history(
                 """
                 INSERT INTO failure_history
                     (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, classification, pattern,
+                     error_signature, error_signature_v2, classification, pattern,
                      child_job_name, child_build_number, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -3013,9 +3263,9 @@ async def populate_failure_history(
                 """
                 INSERT INTO failure_history
                     (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, classification, pattern,
+                     error_signature, error_signature_v2, classification, pattern,
                      child_job_name, child_build_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 # Strip the analyzed_at field (last element) when not backfilling
                 [row[:-1] for row in rows],
@@ -3440,15 +3690,16 @@ async def _get_related_comments(
     Args:
         db: Open aiosqlite connection with row_factory set.
         test_name: Full test name to look up.
-        signatures: Set of error_signature hashes from recent runs.
+        signatures: Every signature hash from recent runs (both columns, see
+            :func:`signature_hashes`).
         exclude_job_id: Exclude comments from this job ID.
     """
     comment_conditions = ["test_name = ?"]
     comment_params: list[Any] = [test_name]
-    if signatures:
-        placeholders = ",".join("?" for _ in signatures)
-        comment_conditions.append(f"error_signature IN ({placeholders})")
-        comment_params.extend(signatures)
+    fragment, match_params = signature_match(signatures)
+    if fragment:
+        comment_conditions.append(fragment)
+        comment_params.extend(match_params)
 
     comment_where = " OR ".join(comment_conditions)
     if exclude_job_id:
@@ -3520,7 +3771,7 @@ async def get_test_history(
         # Recent runs (failures only, since we only track failures)
         cursor = await db.execute(
             f"""SELECT fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.error_message,
-                       fh.error_signature,
+                       fh.error_signature, fh.error_signature_v2,
                        COALESCE(tc_latest.classification, fh.classification) AS classification,
                        fh.child_job_name, fh.child_build_number, fh.analyzed_at,
                        (SELECT GROUP_CONCAT(til.url, ', ') FROM tracked_in_links til
@@ -3575,10 +3826,10 @@ async def get_test_history(
             passes = None
             failure_rate = None
 
-        # Collect error signatures for comment lookup
-        signatures = {
-            r["error_signature"] for r in recent_runs if r.get("error_signature")
-        }
+        # Collect every signature hash for comment lookup -- both columns, so a
+        # comment filed under the anchor of a pre-v2 run is still found by a
+        # recent run that only carries the v2 hash.
+        signatures = {h for row in recent_runs for h in signature_hashes(row)}
 
         comments = await _get_related_comments(
             db, test_name, signatures, exclude_job_id
@@ -3609,13 +3860,34 @@ async def get_test_history(
     }
 
 
+def _signature_list(signature: str) -> list[str]:
+    """Split a caller-supplied hash argument into individual hashes.
+
+    The analysis prompt hands the AI a whole failure group's hash set in one
+    value, so ``/history/search`` accepts comma-separated hashes rather than
+    forcing a tool call per member.
+    """
+    return [part for part in (s.strip() for s in signature.split(",")) if part]
+
+
 async def search_by_signature(
     signature: str, exclude_job_id: str = ""
 ) -> dict[str, Any]:
     """Find all tests that failed with the same error signature.
 
+    The hash is matched against both signature columns (see
+    :func:`signature_match`), so an anchor hash reaches every row and a v2 hash
+    reaches every row written under the current rules. Searching by the anchor
+    -- the value the report and the AI prompt show -- is the only query that
+    spans the whole history, because pre-v2 rows carry no other hash.
+
+    *signature* takes one hash or a comma-separated set. A v2 failure group's
+    members each carry a different frozen anchor, so its prompt names all of
+    them; one call with the whole set answers the same question as one call per
+    hash, without the AI having to make a tool call per group member.
+
     Args:
-        signature: Error signature hash to search for.
+        signature: One error signature hash, or several separated by commas.
         exclude_job_id: Exclude results from this job ID.
 
     Returns:
@@ -3625,35 +3897,43 @@ async def search_by_signature(
     logger.debug(
         f"search_by_signature: signature={signature}, exclude_job_id={exclude_job_id}"
     )
+    empty: dict[str, Any] = {
+        "signature": signature,
+        "total_occurrences": 0,
+        "unique_tests": 0,
+        "tests": [],
+        "last_classification": "",
+        "comments": [],
+    }
+    signatures = _signature_list(signature)
+    sig_where, sig_params = signature_match(signatures)
+    if not sig_where:
+        # No signature, no fragment -- by contract. Interpolating it anyway
+        # would leave "WHERE" with nothing and match every row.
+        logger.warning("search_by_signature called with an empty signature")
+        return empty
     async with _connect_db() as db:
         # Build optional exclude filter
         exclude_filter = ""
-        base_params: list[Any] = [signature]
+        base_params: list[Any] = list(sig_params)
         if exclude_job_id:
             exclude_filter = " AND job_id != ?"
             base_params.append(exclude_job_id)
 
         # Total occurrences
         cursor = await db.execute(
-            f"SELECT COUNT(*) FROM failure_history WHERE error_signature = ?{exclude_filter}",
+            f"SELECT COUNT(*) FROM failure_history WHERE {sig_where}{exclude_filter}",
             base_params,
         )
         total_occurrences = (await cursor.fetchone())[0]
 
         if total_occurrences == 0:
-            return {
-                "signature": signature,
-                "total_occurrences": 0,
-                "unique_tests": 0,
-                "tests": [],
-                "last_classification": "",
-                "comments": [],
-            }
+            return empty
 
         # Tests with this signature and their occurrence counts
         cursor = await db.execute(
             f"SELECT test_name, COUNT(*) as occurrences FROM failure_history "
-            f"WHERE error_signature = ?{exclude_filter} GROUP BY test_name ORDER BY occurrences DESC",
+            f"WHERE {sig_where}{exclude_filter} GROUP BY test_name ORDER BY occurrences DESC",
             base_params,
         )
         tests = [dict(row) for row in await cursor.fetchall()]
@@ -3662,17 +3942,17 @@ async def search_by_signature(
         # Last classification
         cursor = await db.execute(
             f"SELECT classification FROM failure_history "
-            f"WHERE error_signature = ?{exclude_filter} ORDER BY analyzed_at DESC, id DESC LIMIT 1",
+            f"WHERE {sig_where}{exclude_filter} ORDER BY analyzed_at DESC, id DESC LIMIT 1",
             base_params,
         )
         last_classification = (await cursor.fetchone())[0] or ""
 
         # Comments related to this signature
+        comments_where, comments_sig_params = signature_match(signatures)
+        comments_params: list[str] = list(comments_sig_params)
         comments_query = (
-            "SELECT comment, username, created_at FROM comments "
-            "WHERE error_signature = ?"
+            f"SELECT comment, username, created_at FROM comments WHERE {comments_where}"
         )
-        comments_params: list[str] = [signature]
         if exclude_job_id:
             comments_query += " AND job_id != ?"
             comments_params.append(exclude_job_id)
@@ -4315,7 +4595,7 @@ async def get_all_failures(
         # Get paginated results
         cursor = await db.execute(
             f"SELECT fh.id, fh.job_id, fh.job_name, fh.build_number, fh.build_id, fh.test_name, "
-            f"fh.error_message, fh.error_signature, "
+            f"fh.error_message, fh.error_signature, fh.error_signature_v2, "
             f"COALESCE(tc_latest.classification, fh.classification) AS classification, "
             f"fh.child_job_name, fh.child_build_number, fh.analyzed_at "
             f"FROM failure_history fh"
@@ -4552,10 +4832,14 @@ async def _override_failure_field(
 ) -> list[str]:
     """Shared logic for overriding classification or pattern in failure_history.
 
-    1. Look up the error_signature for the test (scoped by child context).
+    1. Look up the resolved signature for the test (scoped by child context).
     2. Read the current value of *field* before mutating (for original_* tracking).
     3. UPDATE all failure_history rows sharing the same signature.
     4. INSERT a test_classifications row for every test in the group.
+
+    The group is keyed by the resolved signature (:func:`resolve_signature`),
+    so failures the v2 rules merged into one group are overridden together even
+    when their frozen anchors differ.
 
     Args:
         job_id: The analysis job ID.
@@ -4574,9 +4858,9 @@ async def _override_failure_field(
     child_sql, child_params = _child_scope_sql(child_job_name, child_build_number)
     is_wildcard = bool(child_job_name and child_build_number == 0)
     async with _connect_db() as db:
-        # Look up error_signature so we can update all grouped failures.
+        # Look up the signature so we can update all grouped failures.
         sig_query = (
-            "SELECT error_signature FROM failure_history "
+            "SELECT error_signature, error_signature_v2 FROM failure_history "
             "WHERE job_id = ? AND test_name = ?"
         )
         sig_params: list[Any] = [job_id, test_name, *child_params]
@@ -4584,15 +4868,16 @@ async def _override_failure_field(
 
         cursor = await db.execute(sig_query, sig_params)
         row = await cursor.fetchone()
-        error_signature = row[0] if row and row[0] else ""
+        error_signature = resolve_signature(row) if row else ""
 
         # Collect all test_names in the signature group BEFORE
         # the UPDATE so we can read per-test original values.
-        if error_signature:
+        group_where, group_sig_params = signature_match([error_signature])
+        if error_signature and group_where:
             group_cursor = await db.execute(
                 "SELECT DISTINCT test_name FROM failure_history "
-                f"WHERE job_id = ? AND error_signature = ?{child_sql}",
-                (job_id, error_signature, *child_params),
+                f"WHERE job_id = ? AND {group_where}{child_sql}",
+                (job_id, *group_sig_params, *child_params),
             )
             group_tests = [r[0] for r in await group_cursor.fetchall()]
         else:
@@ -4611,12 +4896,12 @@ async def _override_failure_field(
             orig_values[t] = orig_row[0] if orig_row and orig_row[0] else ""
 
         # UPDATE failure_history rows.
-        if error_signature:
+        if group_where:
             await db.execute(
                 f"""UPDATE failure_history
                    SET {field} = ?
-                   WHERE job_id = ? AND error_signature = ?{child_sql}""",
-                (value, job_id, error_signature, *child_params),
+                   WHERE job_id = ? AND {group_where}{child_sql}""",
+                (value, job_id, *group_sig_params, *child_params),
             )
         else:
             await db.execute(
@@ -4629,11 +4914,11 @@ async def _override_failure_field(
         # Resolve build numbers for test_classifications INSERT.
         # Wildcard overrides must fan out to each actual build number
         # so reports JOINs on exact child_build_number still match.
-        if is_wildcard and error_signature:
+        if is_wildcard and group_where:
             builds_cursor = await db.execute(
                 "SELECT DISTINCT child_build_number FROM failure_history "
-                "WHERE job_id = ? AND error_signature = ? AND child_job_name = ?",
-                (job_id, error_signature, child_job_name),
+                f"WHERE job_id = ? AND {group_where} AND child_job_name = ?",
+                (job_id, *group_sig_params, child_job_name),
             )
             build_numbers = [r[0] for r in await builds_cursor.fetchall()]
         elif is_wildcard:
@@ -6475,8 +6760,15 @@ async def record_token_usage(
     child_build_number: int = 0,
     failure_id: str = "",
     usage_attempt: str = "",
+    error_signature_v2: str = "",
 ) -> str:
-    """Record a single AI call's token usage. Returns the record ID."""
+    """Record a single AI call's token usage. Returns the record ID.
+
+    ``error_signature`` stays the frozen anchor for legacy attribution;
+    ``error_signature_v2`` carries the group's current-rules hash so every
+    member of a v2 group resolves to the same usage row (see
+    ``storage.resolve_signature``).
+    """
     record_id = str(uuid.uuid4())
     total_tokens = input_tokens + output_tokens
     async with _connect_db() as db:
@@ -6485,8 +6777,9 @@ async def record_token_usage(
             "(id, job_id, ai_provider, ai_model, call_type, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
             "prompt_chars, response_chars, credential_source, error_signature, "
-            "child_job_name, child_build_number, failure_id, usage_attempt) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "child_job_name, child_build_number, failure_id, usage_attempt, "
+            "error_signature_v2) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -6508,6 +6801,7 @@ async def record_token_usage(
                 child_build_number if call_type in ("primary", "reanalysis") else 0,
                 failure_id if call_type == "reanalysis" else "",
                 usage_attempt if call_type == "reanalysis" else "",
+                error_signature_v2 if call_type in ("primary", "reanalysis") else None,
             ),
         )
         await db.commit()

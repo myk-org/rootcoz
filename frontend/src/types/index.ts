@@ -134,8 +134,13 @@ export interface FailureAnalysis {
   id: string
   test_name: string
   error: string
+  /** Fallback display text when the source reported no message (backend `display_error`). */
+  stack_trace?: string
   analysis: AnalysisDetail
+  /** Anchor signature (frozen pre-v2 rules), stable for the life of the row. */
   error_signature: string
+  /** Current-rules signature; absent on failures stored before those rules. */
+  error_signature_v2?: string
   token_usage?: TokenUsageSummary | null
   peer_debate?: PeerDebate | null
   previous_analysis?: AnalysisDetail | null

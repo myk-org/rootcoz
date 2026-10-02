@@ -150,7 +150,9 @@ async def test_fallback_group_failure_keeps_success_and_test_placeholders(
     assert analyze.await_count == 2
     assert analyses[0] == good
     assert [a.test_name for a in analyses[1:]] == ["bad1", "bad2"]
-    assert all(a.error_signature == "bad" for a in analyses[1:])
+    # The group key is the v2 signature; error_signature holds the frozen anchor.
+    assert all(a.error_signature_v2 == "bad" for a in analyses[1:])
+    assert all(a.error_signature for a in analyses[1:])
     assert all(
         a.analysis.details == "Analysis failed; check server logs for details"
         and not a.analysis.classification
@@ -182,7 +184,9 @@ async def test_fallback_empty_group_marks_each_test_failed(tmp_path: Path) -> No
             auth_header="",
         )
     assert len(analyses) == 1
-    assert analyses[0].error_signature == "empty"
+    # The group key is the v2 signature; error_signature holds the frozen anchor.
+    assert analyses[0].error_signature_v2 == "empty"
+    assert analyses[0].error_signature
     assert (
         analyses[0].analysis.details == "Analysis failed; check server logs for details"
     )

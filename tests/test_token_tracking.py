@@ -57,6 +57,7 @@ class TestRecordAiUsage:
                 response_chars=len("analysis output"),
                 credential_source="unknown",
                 error_signature="",
+                error_signature_v2="",
                 child_job_name="",
                 child_build_number=0,
                 failure_id="",
