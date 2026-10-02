@@ -58,6 +58,16 @@ describe('aggregateJobCallTypes', () => {
     const groups = aggregateJobCallTypes([rec({ call_type: '' })])
     expect(groups[0].group).toBe('unknown')
   })
+
+  it('normalizes SQLite integer 1 to a partial flag', () => {
+    const [group] = aggregateJobCallTypes([rec({ cost_partial: 1 })])
+    expect(group.cost_partial).toBe(true)
+  })
+
+  it('treats an integer 0 flag as complete', () => {
+    const [group] = aggregateJobCallTypes([rec({ cost_partial: 0 })])
+    expect(group.cost_partial).toBe(false)
+  })
 })
 
 describe('compareBreakdownRows by cost', () => {

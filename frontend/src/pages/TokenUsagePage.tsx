@@ -144,7 +144,7 @@ function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, co
               {pricedCalls ?? 0} of {totalCalls} calls have a known price
             </p>
           )}
-          {partial && (
+          {partial && cost != null && (
             <p className="text-[10px] text-text-tertiary">
               Partial: some AI turns had no catalog price, so this is a lower bound.
             </p>
@@ -168,7 +168,8 @@ export interface JobUsageRecord {
   cache_read_tokens: number
   cache_write_tokens: number
   cost_usd: number | null
-  cost_partial?: boolean
+  /** Raw endpoint value: SQLite stores 0/1, the aggregates report a boolean. */
+  cost_partial?: boolean | number
   duration_ms: number
 }
 
@@ -193,7 +194,7 @@ export function aggregateJobCallTypes(records: JobUsageRecord[]): BreakdownRow[]
     existing.cache_write_tokens += r.cache_write_tokens || 0
     existing.cost_usd =
       r.cost_usd == null || existing.cost_usd == null ? null : existing.cost_usd + r.cost_usd
-    existing.cost_partial = existing.cost_partial || r.cost_partial === true
+    existing.cost_partial = existing.cost_partial || isPartial(r.cost_partial)
     existing.avg_duration_ms += r.duration_ms || 0
     byType.set(key, existing)
   }
@@ -237,6 +238,39 @@ function formatCostCell(cost: number | null | undefined): string {
   if (cost == null) return 'Unavailable'
   if (cost <= 0) return '—'
   return formatCost(cost)
+}
+
+/** SQLite stores the flag as 0/1, so treat both truthy encodings as partial. */
+function isPartial(flag: boolean | number | undefined): boolean {
+  return flag === true || flag === 1
+}
+
+/** Render a cost, marking a NUMERIC lower bound. An unavailable cost stays
+ *  Unavailable: describing unknown spend as a partial dollar total would
+ *  misrepresent it as a number. */
+export function CostCell({ cost, partial, className }: { cost: number | null; partial?: boolean | number; className?: string }) {
+  const numericPartial = isPartial(partial) && cost != null
+  return (
+    <span className={className}>
+      {formatCostCell(cost)}
+      {numericPartial && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              aria-label="Why this cost is a lower bound"
+              className="ml-1 cursor-default underline decoration-dotted"
+            >
+              lower bound
+            </button>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-xs">
+            Partial: some AI turns had no catalog price, so this is a lower bound, not the full cost.
+          </TooltipContent>
+        </Tooltip>
+      )}
+    </span>
+  )
 }
 
 export function TokenUsagePage() {
@@ -500,7 +534,7 @@ export function TokenUsagePage() {
                       <span className="font-mono text-xs text-text-secondary truncate">{m.model}</span>
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-text-tertiary">{m.calls.toLocaleString()} calls</span>
-                        <span className="font-mono text-xs text-signal-green">{formatCostCell(m.cost_usd)}</span>
+                        <CostCell cost={m.cost_usd} partial={m.cost_partial} className="font-mono text-xs text-signal-green" />
                       </div>
                     </div>
                   ))}
@@ -518,7 +552,7 @@ export function TokenUsagePage() {
                       <Link to={`/results/${j.job_id}`} className="font-mono text-xs text-text-secondary truncate hover:underline hover:text-text-primary transition-colors">{j.job_id}</Link>
                       <div className="flex items-center gap-3">
                         <span className="font-mono text-xs text-text-tertiary">{j.calls.toLocaleString()} calls</span>
-                        <span className="font-mono text-xs text-signal-green">{formatCostCell(j.cost_usd)}</span>
+                        <CostCell cost={j.cost_usd} partial={j.cost_partial} className="font-mono text-xs text-signal-green" />
                       </div>
                     </div>
                   ))}
@@ -536,7 +570,7 @@ export function TokenUsagePage() {
             <div key={cat.group} className="inline-flex items-center gap-2 rounded-lg border border-border-default bg-surface-card px-3 py-1.5">
               <span className="text-xs font-medium text-text-secondary">{formatCallType(cat.group)}</span>
               <span className="font-mono text-xs text-text-tertiary">{cat.calls} calls</span>
-              <span className="font-mono text-xs text-signal-green">{formatCostCell(cat.cost_usd)}</span>
+              <CostCell cost={cat.cost_usd} partial={cat.cost_partial} className="font-mono text-xs text-signal-green" />
             </div>
           ))}
         </div>
@@ -621,7 +655,7 @@ export function TokenUsagePage() {
                     <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.output_tokens)}</TableCell>
                     <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_read_tokens)}</TableCell>
                     <TableCell className="text-right font-mono text-xs text-text-secondary">{formatCompactNumber(row.cache_write_tokens)}</TableCell>
-                    <TableCell className="text-right font-mono text-xs text-signal-green">{formatCostCell(row.cost_usd)}</TableCell>
+                    <TableCell className="text-right font-mono text-xs text-signal-green"><CostCell cost={row.cost_usd} partial={row.cost_partial} /></TableCell>
                     <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(row.avg_duration_ms)}</TableCell>
                   </TableRow>
                   {isExpanded && isLoading && (
@@ -639,7 +673,7 @@ export function TokenUsagePage() {
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.output_tokens)}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.cache_read_tokens)}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatCompactNumber(sub.cache_write_tokens)}</TableCell>
-                      <TableCell className="text-right font-mono text-xs text-signal-green/70">{formatCostCell(sub.cost_usd)}</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-signal-green/70"><CostCell cost={sub.cost_usd} partial={sub.cost_partial} /></TableCell>
                       <TableCell className="text-right font-mono text-xs text-text-tertiary">{formatDurationMs(sub.avg_duration_ms)}</TableCell>
                     </TableRow>
                   ))}

@@ -3380,8 +3380,15 @@ def _format_cost(value: float | None, precision: int = 2) -> str:
 
 
 def _partial_note(row: dict[str, Any]) -> str:
-    """Mark a numeric cost that is only a lower bound, so it is not read as a total."""
+    """Mark a NUMERIC cost that is only a lower bound.
+
+    An unavailable cost is already labelled N/A, so describing it as a partial
+    dollar total would misrepresent unknown spend as a number.
+    """
     if not row.get("cost_partial"):
+        return ""
+    cost = row.get("cost_usd", row.get("total_cost_usd"))
+    if cost is None:
         return ""
     return "  (partial: some AI turns had no catalog price, so this is a lower bound)"
 
@@ -3444,6 +3451,7 @@ def _print_token_usage_table(data: dict[str, Any]) -> None:
                     and row.get("priced_calls") != row.get("call_count")
                     else ""
                 )
+                + _partial_note(row)
             )
 
 

@@ -4679,6 +4679,49 @@ class TestTokenUsageCommand:
         assert result.exit_code == 0
         assert "lower bound" in result.output
 
+    def test_token_usage_breakdown_row_discloses_partial_group(self, mock_client):
+        """A partially priced group is labelled a lower bound, not a plain amount."""
+        mock_client.get_token_usage.return_value = {
+            "total_calls": 2,
+            "total_input_tokens": 1000,
+            "total_output_tokens": 500,
+            "total_cache_read_tokens": 0,
+            "total_cache_write_tokens": 0,
+            "total_cost_usd": 0.10,
+            "priced_calls": 2,
+            "cost_partial": 0,
+            "total_duration_ms": 5000,
+            "breakdown": [
+                {
+                    "group_key": "claude",
+                    "call_count": 1,
+                    "priced_calls": 1,
+                    "cost_usd": 0.10,
+                    "cost_partial": 1,
+                    "avg_duration_ms": 800,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--group-by", "model"])
+        assert result.exit_code == 0
+        assert "lower bound" in result.output
+
+    def test_token_usage_does_not_call_unavailable_cost_partial(self, mock_client):
+        """Unknown-only spend stays N/A — never described as a partial dollar total."""
+        mock_client.get_token_usage_summary.return_value = {
+            "today": {
+                "calls": 3,
+                "tokens": 900,
+                "cost_usd": None,
+                "priced_calls": 0,
+                "cost_partial": 1,
+            },
+        }
+        result = runner.invoke(app, ["admin", "token-usage"])
+        assert result.exit_code == 0
+        assert "lower bound" not in result.output
+        assert "N/A" in result.output
+
     def test_token_usage_summary_json(self, mock_client):
         mock_client.get_token_usage_summary.return_value = {
             "today": {"calls": 10},
