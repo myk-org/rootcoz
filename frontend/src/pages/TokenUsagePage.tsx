@@ -259,6 +259,9 @@ export function CostCell({ cost, partial, className }: { cost: number | null; pa
             <button
               type="button"
               aria-label="Why this cost is a lower bound"
+              // This trigger lives inside clickable job rows; without stopping
+              // propagation, reading the explanation expands or collapses the row.
+              onClick={(event) => event.stopPropagation()}
               className="ml-1 cursor-default underline decoration-dotted"
             >
               lower bound

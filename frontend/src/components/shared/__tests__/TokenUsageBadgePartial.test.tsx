@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { vi } from 'vitest'
 import { TokenUsageBadge } from '../TokenUsageBadge'
 import { CostCell } from '@/pages/TokenUsagePage'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -70,5 +71,22 @@ describe('CostCell lower-bound marker', () => {
   it('shows no marker for a complete numeric cost', () => {
     renderCell(0.10, false)
     expect(screen.queryByRole('button', { name: /lower bound/i })).toBeNull()
+  })
+})
+
+describe('CostCell inside a clickable job row', () => {
+  it('does not toggle the surrounding row when the explanation is clicked', () => {
+    const onRowClick = vi.fn()
+    render(
+      <TooltipProvider>
+        <table><tbody>
+          <tr onClick={onRowClick}>
+            <td><CostCell cost={0.10} partial /></td>
+          </tr>
+        </tbody></table>
+      </TooltipProvider>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /lower bound/i }))
+    expect(onRowClick).not.toHaveBeenCalled()
   })
 })
