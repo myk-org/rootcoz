@@ -155,6 +155,25 @@ describe('primaryGroups', () => {
     expect(groups).toHaveLength(1)
     expect(groups[0].usage).toBeNull()
   })
+
+  it('never reports a re-analysis attempt as the group primary cost', () => {
+    const groups = primaryGroups(result({
+      failures: [
+        // re-analysis leaves the attempt summary on the failure and no primary one
+        failure({ test_name: 'reanalyzed', usage_attempt: 'attempt-1', token_usage: summary({ total_cost_usd: 9 }) }),
+        failure({ test_name: 'original', token_usage: summary({ total_cost_usd: 0.4 }) }),
+      ],
+    }))
+    expect(groups[0].usage?.total_cost_usd).toBe(0.4)
+  })
+
+  it('leaves group cost unavailable when only a re-analysis attempt has usage', () => {
+    const groups = primaryGroups(result({
+      failures: [failure({ usage_attempt: 'attempt-1', token_usage: summary({ total_cost_usd: 9 }) })],
+    }))
+    expect(groups[0].usage).toBeNull()
+    expect(spendAverages(0.5, 1, groups, []).costPerUniqueGroup).toBeNull()
+  })
 })
 
 describe('peerGroups', () => {
@@ -170,6 +189,12 @@ describe('peerGroups', () => {
     ],
   })
 
+  /** The same debate with usage on every round (no unattributed spend). */
+  const complete = (d: PeerDebate): PeerDebate => ({
+    ...d,
+    rounds: d.rounds.map(r => r.token_usage ? r : { ...r, token_usage: call({ call_type: 'peer', cost_usd: 0.5 }) }),
+  })
+
   it('distinguishes rounds and same-model peers', () => {
     const [group] = peerGroups(result({ failures: [failure({ peer_debate: debate() })] }))
     expect(group.rounds.map(r => `R${r.round} ${r.agentLabel}`)).toEqual([
@@ -178,7 +203,6 @@ describe('peerGroups', () => {
     expect(group.rounds.map(r => r.agent).every(a => a === 'gemini/pro')).toBe(true)
     // the round-2 peer has no recorded usage
     expect(group.rounds[4].usage).toBeNull()
-    expect(group.costUsd).toBeCloseTo(0.1 + 0.2 + 0.3 + 0.4)
   })
 
   it('counts a debate shared by sibling failures once', () => {
@@ -188,12 +212,49 @@ describe('peerGroups', () => {
     }))
     expect(groups).toHaveLength(1)
     expect(groups[0].siblingCount).toBe(1)
+    // the shared debate's round-2 peer has no usage, so no total is claimed
+    expect(groups[0].costUsd).toBeNull()
   })
 
   it('reports unavailable cost when an attributable round cost is unknown', () => {
     const rounds = debate().rounds.map(r => ({ ...r, token_usage: r.token_usage ? { ...r.token_usage, cost_usd: null } : r.token_usage }))
     const [group] = peerGroups(result({ failures: [failure({ peer_debate: { ...debate(), rounds } })] }))
     expect(group.costUsd).toBeNull()
+  })
+
+  it('is unavailable when an attempted round has no usage at all', () => {
+    // the round-2 peer keeps no usage after a failed call, so the debate total is partial
+    const [group] = peerGroups(result({ failures: [failure({ peer_debate: debate() })] }))
+    expect(group.rounds[4].usage).toBeNull()
+    expect(group.costUsd).toBeNull()
+  })
+
+  it('keeps a debate cost when only the round-1 orchestrator lacks usage', () => {
+    const full = complete(debate())
+    const rounds = full.rounds.map(r =>
+      r.round === 1 && r.role === 'orchestrator' ? { ...r, token_usage: null } : r)
+    const [group] = peerGroups(result({ failures: [failure({ peer_debate: { ...full, rounds } })] }))
+    expect(group.costUsd).toBeCloseTo(0.2 + 0.3 + 0.4 + 0.5)
+  })
+
+  it('counts sibling debates separately when one sibling was re-analyzed', () => {
+    const original = complete(debate())
+    const reanalyzed = {
+      ...original,
+      rounds: original.rounds.map(r => ({ ...r, details: 'new attempt', token_usage: { ...r.token_usage!, cost_usd: 0.01 } })),
+    }
+    const groups = peerGroups(result({
+      failures: [
+        failure({ test_name: 'test_a', peer_debate: original }),
+        failure({ test_name: 'test_b', peer_debate: reanalyzed }),
+        failure({ test_name: 'test_c', peer_debate: original }),
+      ],
+    }))
+    expect(groups).toHaveLength(2)
+    expect(groups.map(g => g.siblingCount).sort()).toEqual([0, 1])
+    expect(groups.map(g => g.testName).sort()).toEqual(['test_a', 'test_b'])
+    // both debates are reported in full; neither is dropped in favour of the first
+    expect(groups.map(g => g.costUsd).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([0.05, 1.5])
   })
 })
 
@@ -229,11 +290,12 @@ describe('spendAverages', () => {
   it('averages peer cost only over debates with a known cost', () => {
     const peer = peerGroups(result({ failures: [failure({ peer_debate: {
       consensus_reached: true, rounds_used: 1, max_rounds: 1, ai_configs: [],
-      rounds: [{ round: 1, ai_provider: 'g', ai_model: 'p', role: 'peer', classification: '', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ cost_usd: 0.4 }) }],
+      rounds: [{ round: 1, ai_provider: 'g', ai_model: 'p', role: 'orchestrator', classification: '', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ cost_usd: 0.4 }) }],
     } })] }))
     const averages = spendAverages(0.5, 1, groups, peer)
     expect(averages.debatedGroups).toBe(1)
     expect(averages.peerCostPerDebatedGroup).toBeCloseTo(0.4)
+    expect(averages.debatedGroups).toBe(1)
   })
 })
 

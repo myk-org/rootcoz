@@ -135,44 +135,72 @@ export function primaryGroups(result: TreeNode): PrimaryGroup[] {
     signature,
     testName,
     failureCount: failures.length,
-    usage: failures.find(f => f.token_usage)?.token_usage ?? null,
+    // A re-analyzed failure carries that attempt's usage, not the group's original
+    // primary calls. Without an unattempted failure the group cost stays unavailable
+    // rather than being reported as primary spend.
+    usage: failures.find(f => f.token_usage && !f.usage_attempt)?.token_usage ?? null,
   }))
+}
+
+/** Round 1's orchestrator deliberately reuses the primary call, so it has no own usage. */
+function reusesPrimaryCall(round: PeerCallRow): boolean {
+  return round.round === 1 && round.role === 'orchestrator'
 }
 
 /** Peer/revision usage per debate, by round and agent identity. */
 export function peerGroups(result: TreeNode): PeerGroup[] {
-  return uniqueFailureGroups(result)
-    .filter(({ failures }) => failures.some(f => f.peer_debate))
-    .map(({ childLabel, signature, testName, failures }) => {
-      const debate = failures.find(f => f.peer_debate)!.peer_debate!
-      const peerCounters = new Map<number, number>()
-      const rounds: PeerCallRow[] = groupPeerRounds(debate.rounds ?? []).flatMap(({ round, entries }) =>
-        entries.map(entry => {
-          const model = entry.ai_model || 'unknown'
-          const agent = entry.ai_provider ? `${entry.ai_provider}/${model}` : model
-          const isPeer = entry.role === 'peer'
-          // Number peers within the round: same-model peers stay distinguishable.
-          const peerIndex = isPeer ? (peerCounters.get(round) ?? 0) + 1 : 0
-          if (isPeer) peerCounters.set(round, peerIndex)
-          return {
-            round,
-            role: entry.role,
-            agent,
-            agentLabel: isPeer ? `Peer ${peerIndex}` : 'Main AI',
-            usage: entry.token_usage ?? null,
-          }
-        }),
-      )
-      const used = rounds.filter(r => r.usage)
+  const debates: PeerGroup[] = []
+  for (const { childLabel, signature, failures } of uniqueFailureGroups(result)) {
+    // Failures sharing a signature can hold different current debates after one is
+    // re-analyzed, so partition them by debate and count each debate exactly once.
+    const byDebate = new Map<string, Failure[]>()
+    for (const failure of failures) {
+      if (!failure.peer_debate) continue
+      const id = JSON.stringify(failure.peer_debate)
+      const members = byDebate.get(id)
+      if (members) members.push(failure)
+      else byDebate.set(id, [failure])
+    }
+    let index = 0
+    for (const members of byDebate.values()) {
+      debates.push(buildPeerGroup(`${childLabel}::${signature}#${index++}`, childLabel, members))
+    }
+  }
+  return debates
+}
+
+function buildPeerGroup(key: string, childLabel: string, members: Failure[]): PeerGroup {
+  const debate = members[0].peer_debate!
+  const peerCounters = new Map<number, number>()
+  const rounds: PeerCallRow[] = groupPeerRounds(debate.rounds ?? []).flatMap(({ round, entries }) =>
+    entries.map(entry => {
+      const model = entry.ai_model || 'unknown'
+      const agent = entry.ai_provider ? `${entry.ai_provider}/${model}` : model
+      const isPeer = entry.role === 'peer'
+      // Number peers within the round: same-model peers stay distinguishable.
+      const peerIndex = isPeer ? (peerCounters.get(round) ?? 0) + 1 : 0
+      if (isPeer) peerCounters.set(round, peerIndex)
       return {
-        key: `${childLabel}::${signature}`,
-        childLabel,
-        testName,
-        siblingCount: failures.length - 1,
-        rounds,
-        costUsd: used.length > 0 ? sumKnownCost(used.map(r => r.usage!)) : null,
+        round,
+        role: entry.role,
+        agent,
+        agentLabel: isPeer ? `Peer ${peerIndex}` : 'Main AI',
+        usage: entry.token_usage ?? null,
       }
-    })
+    }),
+  )
+  const used = rounds.filter(r => r.usage)
+  // An attempted round without usage means part of the spend was never recorded;
+  // a partial sum would read as a complete debate cost.
+  const unattributed = rounds.some(r => !r.usage && !reusesPrimaryCall(r))
+  return {
+    key,
+    childLabel,
+    testName: members[0].test_name,
+    siblingCount: members.length - 1,
+    rounds,
+    costUsd: used.length > 0 && !unattributed ? sumKnownCost(used.map(r => r.usage!)) : null,
+  }
 }
 
 /** Failures carrying an analysis — the denominator for cost per failing test. */

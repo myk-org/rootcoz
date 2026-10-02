@@ -49,11 +49,38 @@ describe('AiSpendBreakdown', () => {
   })
 
   it('shows N/A averages for a zero-failure job and unavailable costs without inventing zeroes', () => {
-    renderSection(result({ token_usage: summary([call({ cost_usd: null })], { total_cost_usd: null }) }))
+    renderSection(result({ token_usage: summary([call({ cost_usd: null, success: null })], { total_cost_usd: null }) }))
     expand()
     expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(2)
     expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0)
-    expect(screen.getByText(/No failed AI calls recorded/)).toBeInTheDocument()
+    // legacy rows have no recorded outcome, so zero failures is not proof of success
+    expect(screen.getByText(/Some calls predate outcome tracking/)).toBeInTheDocument()
+  })
+
+  it('marks the failed-call count as a lower bound when any stage has unknown outcomes', () => {
+    renderSection(result({
+      token_usage: summary([
+        call({ call_type: 'primary', success: false, cost_usd: 0.08 }),
+        call({ call_type: 'agent_routing', success: null }),
+      ], { total_cost_usd: 0.1 }),
+    }))
+    expand()
+    expect(screen.getByText(/1 failed call \(lower bound/)).toBeInTheDocument()
+  })
+
+  it('exposes every spend hint as a keyboard-focusable control', () => {
+    renderSection(result({ token_usage: summary([call()]) }))
+    expand()
+    expect(screen.getByRole('button', { name: /cache read and write tokens/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /billed tokens include/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /what counts in cost per failing test/i })).toBeInTheDocument()
+  })
+
+  it('reports the billed token total separately from cache tokens', () => {
+    renderSection(result({ token_usage: summary([call()]) }))
+    expand()
+    // 10 in + 5 out billed, cache 4 read / 2 write listed apart
+    expect(screen.getByText('15')).toBeInTheDocument()
   })
 
   it('renders nothing for a legacy result with no usage and no failures', () => {

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { AlertTriangle, ChevronDown, ChevronRight, Coins } from 'lucide-react'
 import type { AnalysisResult } from '@/types'
-import { formatCost, formatCompactNumber } from '@/lib/format'
+import { formatCost, formatCompactNumber, formatSummedDuration } from '@/lib/format'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   analyzedFailingTests,
@@ -23,6 +23,20 @@ function Cost({ value }: { value: number | null }) {
   return <span className={value == null ? 'italic text-text-tertiary' : ''}>{cost(value)}</span>
 }
 
+/** Keyboard-focusable tooltip trigger — plain spans hide the explanation from keyboard users. */
+function Hint({ label, trigger, content }: { label: string; trigger: string; content: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" aria-label={label} className="cursor-default underline decoration-dotted">
+          {trigger}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">{content}</TooltipContent>
+    </Tooltip>
+  )
+}
+
 /** Cache tokens are shown apart from input/output and excluded from the billed total. */
 function StageRow({ stage }: { stage: StageUsage }) {
   return (
@@ -35,6 +49,7 @@ function StageRow({ stage }: { stage: StageUsage }) {
         {formatCompactNumber(stage.cacheReadTokens)}
         {stage.cacheWriteTokens > 0 && ` +${formatCompactNumber(stage.cacheWriteTokens)}w`}
       </td>
+      <td className="py-1 pr-2 text-right font-mono text-xs">{formatCompactNumber(stage.totalTokens)}</td>
       <td className="py-1 text-right font-mono text-xs"><Cost value={stage.costUsd} /></td>
     </tr>
   )
@@ -50,12 +65,18 @@ function StageTable({ stages }: { stages: StageUsage[] }) {
           <th className="py-1 pr-2 text-right font-normal">In</th>
           <th className="py-1 pr-2 text-right font-normal">Out</th>
           <th className="py-1 pr-2 text-right font-normal">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="cursor-default underline decoration-dotted">Cache r/w</span>
-              </TooltipTrigger>
-              <TooltipContent className="max-w-xs">Cache read + write tokens. Not billed like input/output, so they are excluded from the billed token total.</TooltipContent>
-            </Tooltip>
+            <Hint
+              label="What cache read and write tokens are"
+              trigger="Cache r/w"
+              content="Cache read + write tokens. Not billed like input/output, so they are excluded from the billed token total."
+            />
+          </th>
+          <th className="py-1 pr-2 text-right font-normal">
+            <Hint
+              label="What billed tokens include"
+              trigger="Tokens"
+              content="Input + output tokens only. Cache read and write tokens are not billed the same way, so they are excluded."
+            />
           </th>
           <th className="py-1 text-right font-normal">Cost</th>
         </tr>
@@ -109,12 +130,7 @@ function AverageRow({ label, hint, value }: { label: string; hint: string; value
     <div className="flex items-baseline justify-between gap-4 text-xs">
       <span className="flex items-center gap-1 text-text-tertiary">
         {label}
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="cursor-default underline decoration-dotted">what counts?</span>
-          </TooltipTrigger>
-          <TooltipContent className="max-w-xs">{hint}</TooltipContent>
-        </Tooltip>
+        <Hint label={`What counts in ${label.toLowerCase()}`} trigger="what counts?" content={hint} />
       </span>
       {value == null
         ? <span className="font-mono italic text-text-tertiary">N/A</span>
@@ -139,6 +155,10 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
   const wastedCost = failedStages.some(s => s.failedCostUsd == null)
     ? null
     : failedStages.reduce((sum, s) => sum + s.failedCostUsd!, 0)
+  // Any stage can hold legacy calls with no recorded outcome, so the failed-call
+  // count is a lower bound whenever a single stage's outcomes are unknown.
+  const outcomeUnknown = stages.some(s => !s.outcomeKnown)
+  const summedDuration = formatSummedDuration(result.token_usage?.total_duration_ms)
 
   if (stages.length === 0 && groups.length === 0) return null
 
@@ -170,13 +190,18 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
           <section className="space-y-2">
             <h3 className="text-[10px] font-display uppercase tracking-widest text-text-tertiary">Failed calls</h3>
             {failedCalls === 0
-              ? <p className="text-xs text-text-tertiary">No failed AI calls recorded.</p>
+              ? (
+                <p className="text-xs text-text-tertiary">
+                  No failed AI calls recorded.
+                  {outcomeUnknown && ' Some calls predate outcome tracking, so this is not proof that every call succeeded.'}
+                </p>
+              )
               : (
                 <p className="flex items-start gap-2 text-xs text-signal-orange">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
                     {failedCalls} failed call{failedCalls === 1 ? '' : 's'}
-                    {failedStages.some(s => !s.outcomeKnown) && ' (lower bound — some calls have no recorded outcome)'}
+                    {outcomeUnknown && ' (lower bound — some calls have no recorded outcome)'}
                     {' · '}cost wasted: <Cost value={wastedCost} />
                     {' · '}{failedStages.map(s => s.callType).join(', ')}
                   </span>
@@ -225,14 +250,14 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
             />
             <AverageRow
               label="Peer cost per debated group"
-              hint="Sum of known peer debate costs / debates with a known cost."
+              hint={`Sum of known peer debate costs / ${averages.debatedGroups} debated group(s); debates with unavailable cost are excluded from both sides.`}
               value={averages.peerCostPerDebatedGroup}
             />
           </section>
 
-          {(result.token_usage?.total_duration_ms ?? 0) > 0 && (
+          {summedDuration && (
             <p className="text-[10px] text-text-tertiary">
-              Summed AI call duration: {((result.token_usage?.total_duration_ms ?? 0) / 1000).toFixed(1)}s across calls — not wall-clock analysis time.
+              Summed AI call duration: {summedDuration} across calls — not wall-clock analysis time.
             </p>
           )}
         </div>

@@ -142,6 +142,8 @@ export interface FailureAnalysis {
   /** Current-rules signature; absent on failures stored before those rules. */
   error_signature_v2?: string
   token_usage?: TokenUsageSummary | null
+  /** Set when this failure was re-analyzed; `token_usage` then holds that attempt. */
+  usage_attempt?: string
   peer_debate?: PeerDebate | null
   previous_analysis?: AnalysisDetail | null
   previous_analyses?: PreviousAnalysis[] | null

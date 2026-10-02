@@ -12,6 +12,16 @@ export function formatCompactNumber(n: number): string {
 }
 
 /**
+ * Format summed AI call duration as seconds, or null when nothing was recorded.
+ *
+ * Summed call time is not wall-clock analysis time — callers must say so.
+ */
+export function formatSummedDuration(totalDurationMs: number | null | undefined): string | null {
+  if (!totalDurationMs || totalDurationMs <= 0) return null
+  return `${(totalDurationMs / 1000).toFixed(1)}s`
+}
+
+/**
  * Unescape literal `\n` and `\t` sequences that backends sometimes embed
  * in code-snippet strings, turning them into real newline / tab characters.
  */

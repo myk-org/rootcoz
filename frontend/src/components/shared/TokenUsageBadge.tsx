@@ -1,6 +1,6 @@
 import { Zap } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { formatCompactNumber, formatCost } from '@/lib/format'
+import { formatCompactNumber, formatCost, formatSummedDuration } from '@/lib/format'
 import type { TokenUsageSummary } from '@/types'
 
 type TokenUsageBadgeProps =
@@ -26,6 +26,7 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
   }
 
   const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
+  const summedDuration = formatSummedDuration(usage.total_duration_ms)
   const sources = new Set(usage.calls.map(call => call.credential_source))
   const source = usage.credential_source ?? (sources.has('user') && sources.has('server') ? 'mixed'
     : sources.size === 1 && sources.has('user') ? 'user'
@@ -53,7 +54,9 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
           {usage.calls.map((call, index) => (
             <p key={index}>{call.call_type} · {call.provider}/{call.model} · {call.credential_source ?? 'unknown'}{call.success === false ? ' · failed' : ''}: {call.total_tokens.toLocaleString()} tokens</p>
           ))}
-          {usage.total_duration_ms > 0 && <p>Summed call duration: {(usage.total_duration_ms / 1000).toFixed(1)}s (not wall-clock)</p>}
+          {summedDuration && (
+            <p>Summed call duration: {summedDuration} (not wall-clock)</p>
+          )}
           <p>Cost: {cost}</p>
         </div>
       </TooltipContent>
