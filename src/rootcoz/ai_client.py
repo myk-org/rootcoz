@@ -936,6 +936,9 @@ async def _prompt_safely(
         cache_read_tokens=usage_data.get("cache_read_tokens", 0),
         cache_write_tokens=usage_data.get("cache_write_tokens", 0),
         cost_usd=usage_data.get("cost_usd"),
+        # pi-sidecar marks a numeric cost that covers only some turns; dropping the
+        # flag here would store a lower bound as a complete cost.
+        cost_partial=bool(usage_data.get("cost_partial", False)),
         duration_ms=usage_data.get("duration_ms"),
     )
     error = data.get("error")

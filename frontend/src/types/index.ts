@@ -489,6 +489,8 @@ export interface TokenUsagePeriod {
   calls: number
   /** Calls with a known price; below `calls` means `cost_usd` is a lower bound. */
   priced_calls: number
+  /** True when some recorded call's cost covers only some turns. */
+  cost_partial: boolean
   tokens: number
   input_tokens: number
   output_tokens: number
@@ -500,8 +502,8 @@ export interface TokenUsageDashboard {
   today: TokenUsagePeriod
   this_week: TokenUsagePeriod
   this_month: TokenUsagePeriod
-  top_models: { model: string; calls: number; priced_calls: number; cost_usd: number | null }[]
-  top_jobs: { job_id: string; calls: number; priced_calls: number; cost_usd: number | null }[]
+  top_models: { model: string; calls: number; priced_calls: number; cost_partial: boolean; cost_usd: number | null }[]
+  top_jobs: { job_id: string; calls: number; priced_calls: number; cost_partial: boolean; cost_usd: number | null }[]
 }
 
 export interface TokenUsageRecord {

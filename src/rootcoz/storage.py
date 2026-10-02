@@ -6843,6 +6843,9 @@ _TOTAL_COST_SQL = (
     "CASE WHEN COUNT(*) = 0 THEN 0 "
     "WHEN COUNT(cost_usd) = COUNT(*) THEN SUM(cost_usd) END"
 )
+# A numeric cost is only a lower bound when some recorded call was partially
+# priced, so aggregates surface the flag instead of presenting it as a total.
+_PARTIAL_COST_SQL = "MAX(COALESCE(cost_partial, 0))"
 
 
 async def _get_job_token_usage_totals(
@@ -6944,6 +6947,7 @@ async def get_token_usage_summary(
             f"{_TOTAL_COST_SQL} as total_cost_usd, "
             "COUNT(cost_usd) as priced_calls, "
             "COUNT(*) as total_calls, "
+            f"{_PARTIAL_COST_SQL} as cost_partial, "
             "COALESCE(SUM(duration_ms), 0) as total_duration_ms "
             f"FROM ai_token_usage{where_clause}"
         )
@@ -6973,6 +6977,7 @@ async def get_token_usage_summary(
                     f"{_TOTAL_COST_SQL} as cost_usd, "
                     "COUNT(cost_usd) as priced_calls, "
                     "COUNT(*) as call_count, "
+                    f"{_PARTIAL_COST_SQL} as cost_partial, "
                     "CASE WHEN COUNT(duration_ms) > 0"
                     " THEN COALESCE(SUM(duration_ms), 0)"
                     " / COUNT(duration_ms)"
@@ -7016,7 +7021,8 @@ async def get_token_usage_dashboard_summary() -> dict[str, Any]:
                 f"COALESCE(SUM(output_tokens), 0) as output_tokens, "
                 f"{_TOTAL_COST_SQL} as cost_usd, "
                 f"COUNT(cost_usd) as priced_calls, "
-                f"COUNT(*) as calls "
+                f"COUNT(*) as calls, "
+                f"{_PARTIAL_COST_SQL} as cost_partial "
                 f"FROM ai_token_usage WHERE {condition}"
             )
             result[period_name] = dict(await cursor.fetchone())
@@ -7025,7 +7031,8 @@ async def get_token_usage_dashboard_summary() -> dict[str, Any]:
         cursor = await db.execute(
             "SELECT ai_provider || ' / ' || ai_model as model, COUNT(*) as calls, "
             "COUNT(cost_usd) as priced_calls, "
-            f"{_TOTAL_COST_SQL} as cost_usd "
+            f"{_TOTAL_COST_SQL} as cost_usd, "
+            f"{_PARTIAL_COST_SQL} as cost_partial "
             "FROM ai_token_usage "
             "WHERE created_at >= datetime('now', '-30 days') "
             "GROUP BY ai_provider, ai_model ORDER BY cost_usd DESC LIMIT 5"
@@ -7036,7 +7043,8 @@ async def get_token_usage_dashboard_summary() -> dict[str, Any]:
         cursor = await db.execute(
             "SELECT job_id, COUNT(*) as calls, "
             "COUNT(cost_usd) as priced_calls, "
-            f"{_TOTAL_COST_SQL} as cost_usd "
+            f"{_TOTAL_COST_SQL} as cost_usd, "
+            f"{_PARTIAL_COST_SQL} as cost_partial "
             "FROM ai_token_usage "
             "WHERE created_at >= datetime('now', '-30 days') "
             "GROUP BY job_id ORDER BY cost_usd DESC LIMIT 5"

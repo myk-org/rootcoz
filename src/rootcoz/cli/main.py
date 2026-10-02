@@ -3379,6 +3379,13 @@ def _format_cost(value: float | None, precision: int = 2) -> str:
     return f"${value:.{precision}f}"
 
 
+def _partial_note(row: dict[str, Any]) -> str:
+    """Mark a numeric cost that is only a lower bound, so it is not read as a total."""
+    if not row.get("cost_partial"):
+        return ""
+    return "  (partial: some AI turns had no catalog price, so this is a lower bound)"
+
+
 def _priced_note(row: dict[str, Any]) -> str:
     """Explain a cost that is unavailable because some calls had no known price."""
     priced = row.get("priced_calls")
@@ -3397,7 +3404,8 @@ def _print_token_summary(data: dict[str, Any]) -> None:
         typer.echo(f"  Calls: {period.get('calls', 0)}")
         typer.echo(f"  Tokens: {period.get('tokens', 0):,}")
         typer.echo(
-            f"  Cost: {_format_cost(period.get('cost_usd'))}{_priced_note(period)}"
+            f"  Cost: {_format_cost(period.get('cost_usd'))}"
+            f"{_priced_note(period)}{_partial_note(period)}"
         )
 
     top_models = data.get("top_models", [])
@@ -3406,7 +3414,7 @@ def _print_token_summary(data: dict[str, Any]) -> None:
         for m in top_models:
             typer.echo(
                 f"  {m.get('model', 'unknown')}: {m.get('calls', 0)} calls, "
-                f"{_format_cost(m.get('cost_usd'))}{_priced_note(m)}"
+                f"{_format_cost(m.get('cost_usd'))}{_priced_note(m)}{_partial_note(m)}"
             )
 
 
@@ -3418,10 +3426,7 @@ def _print_token_usage_table(data: dict[str, Any]) -> None:
     typer.echo(f"Cache read: {data.get('total_cache_read_tokens', 0):,}")
     typer.echo(f"Cache write: {data.get('total_cache_write_tokens', 0):,}")
     typer.echo(f"Cost: {_format_cost(data.get('total_cost_usd'))}{_priced_note(data)}")
-    if data.get("cost_partial"):
-        typer.echo(
-            "  (partial: some AI turns had no catalog price, so this is a lower bound)"
-        )
+    typer.echo(_partial_note(data))
     typer.echo(f"Duration: {data.get('total_duration_ms', 0):,}ms")
 
     breakdown = data.get("breakdown", [])

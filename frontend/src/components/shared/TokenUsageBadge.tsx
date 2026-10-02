@@ -26,8 +26,9 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
   }
 
   const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
-  const partialNote = usage.cost_partial
-    && usage.total_cost_usd != null
+  // Only a numeric cost can be a lower bound; "Unavailable+" would mean nothing.
+  const showPartial = usage.cost_partial === true && usage.total_cost_usd != null
+  const partialNote = showPartial
     && 'Partial: some AI turns had no catalog price, so this is a lower bound.'
   const summedDuration = formatSummedDuration(usage.total_duration_ms)
   const sources = new Set(usage.calls.map(call => call.credential_source))
@@ -42,7 +43,7 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
         <span tabIndex={0} className="inline-flex items-center gap-1 rounded-full bg-surface-elevated px-2.5 py-0.5 text-[10px] font-mono text-text-tertiary">
           <Zap className="h-3 w-3" />
           {formatCompactNumber(usage.total_input_tokens)} in / {formatCompactNumber(usage.total_output_tokens)} out
-          {' · '}{cost}{usage.cost_partial ? '+' : ''}
+          {' · '}{cost}{showPartial ? '+' : ''}
         </span>
       </TooltipTrigger>
       <TooltipContent className="max-h-80 max-w-sm overflow-y-auto">
@@ -60,7 +61,7 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
           {summedDuration && (
             <p>Summed call duration: {summedDuration} (not wall-clock)</p>
           )}
-          <p>Cost: {cost}{usage.cost_partial ? ' (partial)' : ''}</p>
+          <p>Cost: {cost}{showPartial ? ' (partial)' : ''}</p>
           {partialNote && <p>{partialNote}</p>}
         </div>
       </TooltipContent>

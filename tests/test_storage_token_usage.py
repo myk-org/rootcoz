@@ -963,6 +963,53 @@ class TestGetTokenUsageSummary:
         assert top_model["cost_usd"] is None
 
     @pytest.mark.asyncio
+    async def test_admin_aggregates_surface_partial_flag(self, _storage) -> None:
+        """Admin totals/periods/breakdown must carry cost_partial, not just the per-job path."""
+        await storage.record_token_usage(
+            job_id="job-1",
+            ai_provider="gemini",
+            ai_model="pro",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.02,
+            duration_ms=1000,
+            cost_partial=True,
+        )
+        summary = await storage.get_token_usage_summary()
+        assert summary["cost_partial"] == 1
+        assert summary["total_cost_usd"] == pytest.approx(0.02)
+        row = summary["breakdown"][0] if summary["breakdown"] else None
+        breakdown = await storage.get_token_usage_summary(group_by="call_type")
+        row = breakdown["breakdown"][0]
+        assert row["cost_partial"] == 1
+        assert row["cost_usd"] == pytest.approx(0.02)
+
+        dashboard = await storage.get_token_usage_dashboard_summary()
+        assert dashboard["today"]["cost_partial"] == 1
+        assert dashboard["top_models"][0]["cost_partial"] == 1
+        assert dashboard["top_jobs"][0]["cost_partial"] == 1
+
+    @pytest.mark.asyncio
+    async def test_admin_aggregates_report_no_partial_for_complete_cost(
+        self, _storage
+    ) -> None:
+        await storage.record_token_usage(
+            job_id="job-1",
+            ai_provider="gemini",
+            ai_model="pro",
+            call_type="analysis",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd=0.02,
+            duration_ms=1000,
+        )
+        summary = await storage.get_token_usage_summary()
+        assert summary["cost_partial"] == 0
+        dashboard = await storage.get_token_usage_dashboard_summary()
+        assert dashboard["today"]["cost_partial"] == 0
+
+    @pytest.mark.asyncio
     async def test_partial_prompt_cost_is_flagged(self, _storage) -> None:
         """A prompt whose cost covers only some turns is flagged as a lower bound."""
         await storage.record_token_usage(
