@@ -29,6 +29,8 @@ import {
   compareBreakdownRows,
   formatCostCell,
   isPartial,
+  lowerBoundSentence,
+  LOWER_BOUND_FALLBACK_NOTE,
   type BreakdownRow,
 } from '@/pages/tokenUsageBreakdown'
 import { useTableSort } from '@/lib/useTableSort'
@@ -138,14 +140,14 @@ function SummaryCard({ title, icon, calls, tokens, inputTokens, outputTokens, co
               )}
             </span>
           </div>
-          {totalCalls != null && totalCalls > 0 && pricedCalls != null && pricedCalls < totalCalls && (
+          {lowerBoundSentence(totalCalls, pricedCalls) && (
             <p className="text-[10px] text-text-tertiary">
-              {pricedCalls} of {totalCalls} calls had no recorded price and were counted as $0 — a lower bound.
+              {lowerBoundSentence(totalCalls, pricedCalls)}
             </p>
           )}
-          {isPartial(partial) && (totalCalls == null || pricedCalls == null || pricedCalls >= totalCalls) && (
+          {isPartial(partial) && !lowerBoundSentence(totalCalls, pricedCalls) && (
             <p className="text-[10px] text-text-tertiary">
-              Partial: some AI turns had no catalog price, so this is a lower bound.
+              {LOWER_BOUND_FALLBACK_NOTE}
             </p>
           )}
         </div>

@@ -26,10 +26,14 @@ export interface StageUsage {
   failedCalls: number
   /** False when any call predates outcome tracking, so `failedCalls` is a lower bound. */
   outcomeKnown: boolean
-  /** Cost of failed calls; unpriced failed calls count as $0 (see `partial`). */
+  /** Cost of failed calls; unpriced failed calls count as $0 (see `failedPartial`). */
   failedCostUsd: number
   /** True when a call's recorded cost covers only some turns (a lower bound). */
   partial: boolean
+  /** Partialness of the FAILED calls alone, which is what `failedCostUsd` sums.
+   *  Distinct from `partial`: a stage whose unpriced calls all succeeded has a
+   *  complete failed-spend figure and must not be disclosed as a floor. */
+  failedPartial: boolean
 }
 
 /** Sum costs, counting an unpriced call as $0 so a floor is always reported.
@@ -40,6 +44,14 @@ function sumKnownCost(calls: TokenUsageEntry[]): number {
     if (call.cost_usd != null) total += call.cost_usd
   }
   return total
+}
+
+  /** A usage summary whose cost is a floor rather than a complete sum: pi-sidecar
+   *  flagged it, or one of its calls carries no recorded price. */
+function isFloorUsage(usage: TokenUsageSummary | null | undefined): boolean {
+  if (!usage) return true
+  if (usage.cost_partial) return true
+  return (usage.calls ?? []).some(call => call.cost_partial || call.cost_usd == null)
 }
 
 /** Breakdown of the job summary by recorded `call_type`. */
@@ -67,6 +79,7 @@ export function stageBreakdown(usage: TokenUsageSummary | null | undefined): Sta
       // A stage total is a floor when any call's price is unknown, not just
       // when pi-sidecar flagged a prompt as partially priced.
       partial: calls.some(call => call.cost_partial || call.cost_usd == null),
+      failedPartial: failed.some(call => call.cost_partial || call.cost_usd == null),
     }
   })
 }
@@ -236,17 +249,21 @@ export function analyzedFailingTests(result: TreeNode): number {
 export interface SpendAverages {
   /** job total cost / analyzed failed tests; null when cost or failures are unknown. */
   costPerFailingTest: number | null
-  /** Sum of attributable group costs / groups with a known cost. */
+  /** Sum of attributable group costs / groups whose cost is a complete sum. */
   costPerUniqueGroup: number | null
   /** Unique groups in the job, including those with no usable usage. */
   totalGroups: number
-  /** Groups contributing to `costPerUniqueGroup` — smaller means partial data. */
+  /** Groups contributing to `costPerUniqueGroup` — excludes floor-only groups. */
   groupsWithKnownCost: number
-  /** Peer cost / debated groups; null when no debate has a known cost. */
+  /** Groups priced but excluded because their figure is a floor. */
+  groupsWithFloorCost: number
+  /** Peer cost / debated groups; null when no debate has a complete cost. */
   peerCostPerDebatedGroup: number | null
   debatedGroups: number
   /** Debates contributing to `peerCostPerDebatedGroup` — the real denominator. */
   peersWithKnownCost: number
+  /** Debates priced but excluded because their figure is a floor. */
+  peersWithFloorCost: number
 }
 
 export function spendAverages(
@@ -255,9 +272,15 @@ export function spendAverages(
   groups: PrimaryGroup[],
   peers: PeerGroup[],
 ): SpendAverages {
-  const withCost = groups.filter(g => g.usage?.total_cost_usd != null)
+  // An average is only as trustworthy as its weakest member, so a group whose cost
+  // is a FLOOR cannot be averaged in as a complete sum — that both drags the mean
+  // down and presents the result as known spend. Floors are counted, then excluded
+  // from the numerator AND the denominator.
+  const priced = groups.filter(g => g.usage?.total_cost_usd != null)
+  const withCost = priced.filter(g => !isFloorUsage(g.usage))
   const groupCost = withCost.reduce((sum, g) => sum + g.usage!.total_cost_usd!, 0)
-  const peersWithCost = peers.filter(p => p.attributedRounds > 0)
+  const peerPriced = peers.filter(p => p.attributedRounds > 0)
+  const peersWithCost = peerPriced.filter(p => !p.partial)
   const peerCost = peersWithCost.reduce((sum, p) => sum + p.costUsd, 0)
   return {
     costPerFailingTest:
@@ -265,8 +288,10 @@ export function spendAverages(
     costPerUniqueGroup: withCost.length > 0 ? groupCost / withCost.length : null,
     totalGroups: groups.length,
     groupsWithKnownCost: withCost.length,
+    groupsWithFloorCost: priced.length - withCost.length,
     peerCostPerDebatedGroup: peersWithCost.length > 0 ? peerCost / peersWithCost.length : null,
     debatedGroups: peers.length,
     peersWithKnownCost: peersWithCost.length,
+    peersWithFloorCost: peerPriced.length - peersWithCost.length,
   }
 }

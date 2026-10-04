@@ -1,12 +1,18 @@
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { formatCostCell, isPartial } from '@/pages/tokenUsageBreakdown'
+import {
+  formatCostCell,
+  isPartial,
+  lowerBoundSentence,
+  LOWER_BOUND_FALLBACK_NOTE,
+} from '@/pages/tokenUsageBreakdown'
 
 /** Render a cost, marking a NUMERIC lower bound. An incomplete total still
  *  shows its dollar figure — the floor is real spend, and `pricedCalls` /
  *  `totalCalls` disclose how much was excluded. */
 export function CostCell({ cost, partial, className, pricedCalls, totalCalls }: { cost: number | null; partial?: boolean | number; className?: string; pricedCalls?: number; totalCalls?: number }) {
-  const numericPartial = isPartial(partial)
-  const floor = numericPartial && pricedCalls != null && totalCalls != null && pricedCalls < totalCalls
+  // A marker next to a figure we cannot show would claim a floor exists when
+  // nothing is displayed at all, so an unavailable cost carries no marker.
+  const numericPartial = isPartial(partial) && cost != null
   return (
     <span className={className}>
       {formatCostCell(cost)}
@@ -25,9 +31,7 @@ export function CostCell({ cost, partial, className, pricedCalls, totalCalls }: 
             </button>
           </TooltipTrigger>
           <TooltipContent className="max-w-xs">
-            {floor
-              ? `${pricedCalls} of ${totalCalls} calls had no recorded price and were counted as $0, so this is a lower bound.`
-              : 'Partial: some AI turns had no catalog price, so this is a lower bound.'}
+            {lowerBoundSentence(totalCalls, pricedCalls) ?? LOWER_BOUND_FALLBACK_NOTE}
           </TooltipContent>
         </Tooltip>
       )}

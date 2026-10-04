@@ -245,13 +245,12 @@ async def list_models(provider: str = "") -> list[dict[str, Any]]:
 
 # Fallback model IDs, used only when the sidecar cannot list a provider for a
 # user's own key (pi-sidecar#892: a multi-API builtin like OpenRouter is refused
-# outright). This is a frozen copy of the pi-ai generated catalog at the version
-# below — it is NOT refreshed at runtime, so it can lag real models badly. A
+# outright). This is a frozen copy of the pi-ai generated catalog at pi-ai 0.84.4
+# — it is NOT refreshed at runtime, so it can lag real models badly. A
 # model added upstream after that version is simply absent, which reads as "this
 # model does not exist" even though typing it by hand works. Entries derived from
 # it are therefore tagged `snapshot` so the UI can say so, and never presented as
-# a verified or current listing. Refresh the file and this constant together.
-_PI_SUGGESTIONS_VERSION = "0.84.4"
+# a verified or current listing. Refresh the file and this comment together.
 _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
     Path(__file__).with_name("pi_model_suggestions.json").read_text()
 )

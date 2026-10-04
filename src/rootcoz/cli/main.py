@@ -3379,6 +3379,19 @@ def _format_cost(value: float | None, precision: int = 2) -> str:
     return f"${value:.{precision}f}"
 
 
+def _format_call_cost(record: dict[str, Any]) -> str:
+    """Format ONE recorded call's cost.
+
+    A missing price is unknown, not free, so a per-call line must say which it is.
+    Only aggregate totals coerce unpriced calls to $0, and those carry
+    ``_partial_note`` to disclose it.
+    """
+    value = record.get("cost_usd")
+    if value is None:
+        return "$0.0000 (no recorded price)"
+    return _format_cost(value, precision=4)
+
+
 def _partial_note(row: dict[str, Any]) -> str:
     """Mark a total that is a floor rather than a complete sum.
 
@@ -3471,7 +3484,7 @@ def _print_job_token_usage(data: dict[str, Any]) -> None:
             f"Output: {rec.get('output_tokens', 0):,}"
         )
         typer.echo(
-            f"    Cost: {_format_cost(rec.get('cost_usd'), precision=4)}  Duration: {rec.get('duration_ms', 0)}ms"
+            f"    Cost: {_format_call_cost(rec)}  Duration: {rec.get('duration_ms', 0)}ms"
         )
 
 

@@ -4820,6 +4820,73 @@ class TestTokenUsageCommand:
         assert "claude" in result.output
         mock_client.get_token_usage_for_job.assert_called_once_with("abc-123")
 
+    def test_token_usage_job_discloses_an_unpriced_call(self, mock_client):
+        """A per-call NULL price is unknown, not free, so the line must say so.
+
+        Only aggregate totals coerce unpriced calls to $0, and those carry a
+        partial note. A per-call line has no such disclosure, so it states it.
+        """
+        mock_client.get_token_usage_for_job.return_value = {
+            "job_id": "abc-123",
+            "records": [
+                {
+                    "call_type": "analysis",
+                    "ai_provider": "openrouter",
+                    "ai_model": "key-discovered",
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cost_usd": None,
+                    "duration_ms": 1200,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--job-id", "abc-123"])
+        assert result.exit_code == 0
+        assert "(no recorded price)" in result.output
+
+    def test_token_usage_job_keeps_a_priced_call_undisclosed(self, mock_client):
+        """A priced call prints its figure with no unpriced-call caveat."""
+        mock_client.get_token_usage_for_job.return_value = {
+            "job_id": "abc-123",
+            "records": [
+                {
+                    "call_type": "analysis",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet",
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cost_usd": 0.01,
+                    "duration_ms": 1200,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--job-id", "abc-123"])
+        assert result.exit_code == 0
+        assert "$0.0100" in result.output
+        assert "(no recorded price)" not in result.output
+
+    def test_token_usage_job_discloses_a_free_zero_call(self, mock_client):
+        """A numeric $0 from a free model is a complete figure, not an unknown one."""
+        mock_client.get_token_usage_for_job.return_value = {
+            "job_id": "abc-123",
+            "records": [
+                {
+                    "call_type": "analysis",
+                    "ai_provider": "openrouter",
+                    "ai_model": "stealth/space-bunny-alpha",
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cost_usd": 0,
+                    "cost_partial": False,
+                    "duration_ms": 1200,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--job-id", "abc-123"])
+        assert result.exit_code == 0
+        assert "$0.0000" in result.output
+        assert "(no recorded price)" not in result.output
+
     def test_token_usage_job_id_json(self, mock_client):
         mock_client.get_token_usage_for_job.return_value = {
             "job_id": "abc-123",

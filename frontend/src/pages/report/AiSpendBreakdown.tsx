@@ -4,6 +4,15 @@ import type { AnalysisResult } from '@/types'
 import { formatCost, formatCompactNumber, formatSummedDuration } from '@/lib/format'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
+  formatCostCell,
+  formatResolvedCost,
+  lowerBoundSentence,
+  LOWER_BOUND_FALLBACK_NOTE,
+  resolveUsageCost,
+  UNAVAILABLE_COST,
+  type UsageCost,
+} from '@/pages/tokenUsageBreakdown'
+import {
   analyzedFailingTests,
   peerGroups,
   primaryGroups,
@@ -14,14 +23,31 @@ import {
   type StageUsage,
 } from './aiSpend'
 
-/** A cost total is always shown: unpriced calls count as $0 and `partial`
- *  marks the figure as a floor. */
-function cost(value: number | null | undefined): string {
-  return formatCost(value ?? 0)
+/** A plain numeric figure. A `null` figure is *unavailable* and must not read as a
+ *  free $0 — that is the state this reporting removed. */
+function CostFigure({ value }: { value: number | null }) {
+  return <span>{value == null ? UNAVAILABLE_COST : formatCost(value)}</span>
 }
 
-function Cost({ value }: { value: number | null | undefined }) {
-  return <span>{cost(value)}</span>
+/** A recorded usage summary's cost, with its floor disclosure.
+ *
+ *  A recorded total is authoritative. A legacy `null` means *unavailable*, so it
+ *  renders as unavailable unless the summary's own calls support a floor. */
+function Cost({ usage }: { usage: UsageCost | null | undefined }) {
+  const resolved = resolveUsageCost(usage)
+  const calls = usage?.calls ?? []
+  return (
+    <span>
+      {formatResolvedCost(resolved)}
+      {resolved.partial && (
+        <Hint
+          label="Why this cost is a lower bound"
+          trigger="lower bound"
+          content={lowerBoundSentence(calls.length, calls.filter(c => c.cost_usd != null).length) ?? LOWER_BOUND_FALLBACK_NOTE}
+        />
+      )}
+    </span>
+  )
 }
 
 /** Keyboard-focusable tooltip trigger — plain spans hide the explanation from keyboard users. */
@@ -52,7 +78,7 @@ function StageRow({ stage }: { stage: StageUsage }) {
       </td>
       <td className="py-1 pr-2 text-right font-mono text-xs">{formatCompactNumber(stage.totalTokens)}</td>
       <td className="py-1 text-right font-mono text-xs">
-        <Cost value={stage.costUsd} />
+        <CostFigure value={stage.costUsd} />
         {stage.partial && <span className="text-text-tertiary"> (lower bound)</span>}
       </td>
     </tr>
@@ -100,7 +126,7 @@ function PrimaryGroupRow({ group }: { group: PrimaryGroup }) {
         {group.childLabel || 'top-level'} · shared by {group.failureCount} test{group.failureCount === 1 ? '' : 's'}
       </td>
       <td className="py-1 text-right font-mono text-xs">
-        <Cost value={group.usage?.total_cost_usd ?? null} />
+        <Cost usage={group.usage} />
       </td>
     </tr>
   )
@@ -118,13 +144,13 @@ function PeerGroupRow({ group }: { group: PeerGroup }) {
             <li key={`${row.round}-${row.agentLabel}-${i}`} className="font-mono">
               R{row.round} {row.agentLabel} · {row.agent}:{' '}
               {row.usage
-                ? `${formatCompactNumber(row.usage.total_tokens)} tokens · ${cost(row.usage.cost_usd)}`
+                ? `${formatCompactNumber(row.usage.total_tokens)} tokens · ${formatCostCell(row.usage.cost_usd)}`
                 : <span className="italic">usage unavailable</span>}
             </li>
           ))}
         </ul>
       </td>
-      <td className="py-1 text-right font-mono text-xs"><Cost value={group.costUsd} />
+      <td className="py-1 text-right font-mono text-xs"><CostFigure value={group.costUsd} />
         {group.partial && <span className="text-text-tertiary"> (lower bound)</span>}</td>
     </tr>
   )
@@ -157,9 +183,12 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
 
   const failedStages = stages.filter(s => s.failedCalls > 0)
   const failedCalls = failedStages.reduce((sum, s) => sum + s.failedCalls, 0)
-  // Unpriced failed calls count as $0, so this is the spend we can prove.
+  // Unpriced failed calls count as $0, so this is the spend we can prove — and it
+  // is a floor only when a FAILED call is unpriced. A stage whose unpriced calls
+  // all succeeded has a complete failed-spend figure, so stage-wide partialness
+  // must not flag it.
   const wastedCost = failedStages.reduce((sum, s) => sum + s.failedCostUsd, 0)
-  const wastedPartial = failedStages.some(s => s.partial)
+  const wastedPartial = failedStages.some(s => s.failedPartial)
   // Any stage can hold legacy calls with no recorded outcome, so the failed-call
   // count is a lower bound whenever a single stage's outcomes are unknown.
   const outcomeUnknown = stages.some(s => !s.outcomeKnown)
@@ -179,7 +208,7 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
         <Coins className="h-4 w-4 shrink-0 text-signal-green" />
         <h2 className="text-xs font-display uppercase tracking-widest text-text-tertiary">AI Spend</h2>
         <span className="ml-auto font-mono text-xs text-text-secondary">
-          {stages.reduce((sum, s) => sum + s.calls, 0)} calls · <Cost value={result.token_usage?.total_cost_usd ?? null} />
+          {stages.reduce((sum, s) => sum + s.calls, 0)} calls · <Cost usage={result.token_usage} />
         </span>
       </button>
 
@@ -212,7 +241,7 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
                   <span>
                     {failedCalls} failed call{failedCalls === 1 ? '' : 's'}
                     {outcomeUnknown && ' (lower bound — some calls have no recorded outcome)'}
-                    {' · '}cost wasted: <Cost value={wastedCost} />
+                    {' · '}cost wasted: <CostFigure value={wastedCost} />
                     {wastedPartial && <span className="text-text-tertiary"> (lower bound)</span>}
                     {' · '}{failedStages.map(s => s.callType).join(', ')}
                   </span>
@@ -256,12 +285,12 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
             />
             <AverageRow
               label="Cost per unique failure group"
-              hint={`Sum of attributable primary group costs / ${averages.groupsWithKnownCost} of ${averages.totalGroups} groups with a known cost. Groups with unavailable cost are excluded from both sides.`}
+              hint={`Sum of attributable primary group costs / ${averages.groupsWithKnownCost} of ${averages.totalGroups} groups with a completely priced cost.${averages.groupsWithFloorCost > 0 ? ` ${averages.groupsWithFloorCost} group(s) are excluded because their cost is a lower bound.` : ''} Groups with unavailable cost are excluded from both sides.`}
               value={averages.costPerUniqueGroup}
             />
             <AverageRow
               label="Peer cost per debated group"
-              hint={`Sum of known peer debate costs / ${averages.peersWithKnownCost} of ${averages.debatedGroups} debated group(s) with a known cost; the rest are excluded from both sides.`}
+              hint={`Sum of known peer debate costs / ${averages.peersWithKnownCost} of ${averages.debatedGroups} debated group(s) with a completely priced cost; the rest are excluded from both sides.${averages.peersWithFloorCost > 0 ? ` ${averages.peersWithFloorCost} debate(s) are excluded because their cost is a lower bound.` : ''}`}
               value={averages.peerCostPerDebatedGroup}
             />
           </section>

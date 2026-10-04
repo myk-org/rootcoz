@@ -1,6 +1,12 @@
 import { Zap } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { formatCompactNumber, formatCost, formatSummedDuration } from '@/lib/format'
+import { formatCompactNumber, formatSummedDuration } from '@/lib/format'
+import {
+  formatResolvedCost,
+  lowerBoundSentence,
+  LOWER_BOUND_FALLBACK_NOTE,
+  resolveUsageCost,
+} from '@/pages/tokenUsageBreakdown'
 import type { TokenUsageSummary } from '@/types'
 
 type TokenUsageBadgeProps =
@@ -25,16 +31,15 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
     )
   }
 
-  // A total is always shown: unpriced calls count as $0, so this figure is the
-  // spend we can prove. `cost_partial` says whether calls were excluded.
-  const cost = formatCost(usage.total_cost_usd ?? 0)
-  const showPartial = usage.cost_partial === true
+  // A recorded total is authoritative; a legacy null is *unavailable*, not free, so
+  // it falls back to the floor its own calls support. `partial` says whether calls
+  // were excluded from that figure.
+  const resolved = resolveUsageCost(usage)
+  const cost = formatResolvedCost(resolved)
+  const showPartial = resolved.partial
   const pricedCalls = usage.calls.filter(c => c.cost_usd != null).length
-  const unpriced = usage.calls.length - pricedCalls
   const partialNote = showPartial && (
-    unpriced > 0
-      ? `${unpriced} of ${usage.calls.length} calls had no recorded price and were counted as $0, so this is a lower bound.`
-      : 'Partial: some AI turns had no catalog price, so this is a lower bound.'
+    lowerBoundSentence(usage.calls.length, pricedCalls) ?? LOWER_BOUND_FALLBACK_NOTE
   )
   const summedDuration = formatSummedDuration(usage.total_duration_ms)
   const sources = new Set(usage.calls.map(call => call.credential_source))

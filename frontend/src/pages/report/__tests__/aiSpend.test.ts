@@ -355,7 +355,26 @@ describe('peerGroups', () => {
     }))
     expect(group.rounds[0].agent).toBe('gemini/pro')
   })
+  it('excludes a debate with unattributed rounds from the peer cost average', () => {
+    const [group] = peerGroups(result({ failures: [failure({ peer_debate: debate() })] }))
+    expect(group.partial).toBe(true)
+    const averages = spendAverages(1.0, 1, [], [group])
+    expect(averages.peerCostPerDebatedGroup).toBeNull()
+    expect(averages.peersWithKnownCost).toBe(0)
+    expect(averages.peersWithFloorCost).toBe(1)
+    expect(averages.debatedGroups).toBe(1)
+  })
+
+  it('averages a fully priced debate and counts it in the denominator', () => {
+    const [group] = peerGroups(result({ failures: [failure({ peer_debate: complete(debate()) })] }))
+    expect(group.partial).toBe(false)
+    const averages = spendAverages(2.0, 1, [], [group])
+    expect(averages.peersWithKnownCost).toBe(1)
+    expect(averages.peersWithFloorCost).toBe(0)
+    expect(averages.peerCostPerDebatedGroup).toBeCloseTo(group.costUsd)
+  })
 })
+
 
 describe('spendAverages', () => {
   const groups = primaryGroups(result({
@@ -424,5 +443,76 @@ describe('analyzedFailingTests', () => {
       child_job_analyses: [child({ failures: [failure({ test_name: 'test_c', analysis: null as never })] })],
     })
     expect(analyzedFailingTests(analyzed)).toBe(2)
+  })
+})
+
+describe('failed-cost partialness is independent of stage partialness', () => {
+  it('does not flag a failed-spend figure because a SUCCEEDED call was unpriced', () => {
+    // The failed call is fully priced, so `failedCostUsd` is a complete figure.
+    // Stage-wide partialness comes from the successful unpriced call and must not
+    // leak into the wasted-cost disclosure.
+    const [stage] = stageBreakdown(usageSummary([
+      call({ success: false, cost_usd: 0.4 }),
+      call({ success: true, cost_usd: null }),
+    ]))
+    expect(stage.failedCostUsd).toBeCloseTo(0.4)
+    expect(stage.partial).toBe(true)
+    expect(stage.failedPartial).toBe(false)
+  })
+
+  it('flags the failed figure when a FAILED call is itself unpriced', () => {
+    const [stage] = stageBreakdown(usageSummary([
+      call({ success: false, cost_usd: null }),
+      call({ success: true, cost_usd: 0.2 }),
+    ]))
+    expect(stage.failedPartial).toBe(true)
+  })
+
+  it('flags a failed call whose recorded cost covers only some turns', () => {
+    const [stage] = stageBreakdown(usageSummary([
+      call({ success: false, cost_usd: 0.4, cost_partial: true }),
+    ]))
+    expect(stage.failedPartial).toBe(true)
+  })
+})
+
+describe('spendAverages excludes floor-only costs from known-cost averages', () => {
+  const floorGroup = primaryGroups(result({
+    failures: [failure({
+      error_signature: 'floor',
+      token_usage: summary({
+        total_cost_usd: 0.5,
+        cost_partial: true,
+        calls: [call({ cost_usd: 0.5, cost_partial: true })],
+      }),
+    })],
+  }))
+  const exactGroup = primaryGroups(result({
+    failures: [failure({ error_signature: 'exact', token_usage: summary({ total_cost_usd: 0.2 }) })],
+  }))
+
+  it('excludes a partial group rather than averaging its floor as known spend', () => {
+    const averages = spendAverages(0.7, 2, [...exactGroup, ...floorGroup], [])
+    // Only the exact group counts, so the mean is 0.2 — not (0.2 + 0.5) / 2.
+    expect(averages.costPerUniqueGroup).toBeCloseTo(0.2)
+    expect(averages.groupsWithKnownCost).toBe(1)
+    expect(averages.groupsWithFloorCost).toBe(1)
+    expect(averages.totalGroups).toBe(2)
+  })
+
+  it('excludes a group whose own calls carry an unpriced entry', () => {
+    const unpricedCallGroup = primaryGroups(result({
+      failures: [failure({
+        error_signature: 'unpriced',
+        token_usage: summary({ total_cost_usd: 0.9, cost_partial: false, calls: [call({ cost_usd: null })] }),
+      })],
+    }))
+    const averages = spendAverages(0.9, 1, unpricedCallGroup, [])
+    expect(averages.costPerUniqueGroup).toBeNull()
+    expect(averages.groupsWithFloorCost).toBe(1)
+  })
+
+  it('reports N/A when every priced group is a floor', () => {
+    expect(spendAverages(0.5, 1, floorGroup, []).costPerUniqueGroup).toBeNull()
   })
 })
