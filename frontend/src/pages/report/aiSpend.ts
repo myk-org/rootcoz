@@ -26,18 +26,18 @@ export interface StageUsage {
   failedCalls: number
   /** False when any call predates outcome tracking, so `failedCalls` is a lower bound. */
   outcomeKnown: boolean
-  /** Cost of failed calls; null when any failed call has no recorded cost. */
-  failedCostUsd: number | null
+  /** Cost of failed calls; unpriced failed calls count as $0 (see `partial`). */
+  failedCostUsd: number
   /** True when a call's recorded cost covers only some turns (a lower bound). */
   partial: boolean
 }
 
-/** Sum costs, treating any unknown cost as making the total unavailable. */
-function sumKnownCost(calls: TokenUsageEntry[]): number | null {
+/** Sum costs, counting an unpriced call as $0 so a floor is always reported.
+ *  `partial` discloses that the total excludes unpriced calls. */
+function sumKnownCost(calls: TokenUsageEntry[]): number {
   let total = 0
   for (const call of calls) {
-    if (call.cost_usd == null) return null
-    total += call.cost_usd
+    if (call.cost_usd != null) total += call.cost_usd
   }
   return total
 }
@@ -63,8 +63,10 @@ export function stageBreakdown(usage: TokenUsageSummary | null | undefined): Sta
       costUsd: sumKnownCost(calls),
       failedCalls: failed.length,
       outcomeKnown: calls.every(call => call.success != null),
-      failedCostUsd: failed.length > 0 ? sumKnownCost(failed) : null,
-      partial: calls.some(call => call.cost_partial),
+      failedCostUsd: failed.length > 0 ? sumKnownCost(failed) : 0,
+      // A stage total is a floor when any call's price is unknown, not just
+      // when pi-sidecar flagged a prompt as partially priced.
+      partial: calls.some(call => call.cost_partial || call.cost_usd == null),
     }
   })
 }
@@ -98,8 +100,12 @@ export interface PeerGroup {
   /** Other failures sharing this debate via the same signature. */
   siblingCount: number
   rounds: PeerCallRow[]
-  /** Null when any attributable round cost is unknown. */
-  costUsd: number | null
+  /** Attributable round cost; unpriced rounds count as $0 (see `partial`). */
+  costUsd: number
+  /** True when rounds were unattributable or unpriced, so `costUsd` is a floor. */
+  partial: boolean
+  /** Rounds that carried usage — the honest denominator for a per-debate average. */
+  attributedRounds: number
 }
 
 interface TreeNode {
@@ -200,15 +206,19 @@ function buildPeerGroup(key: string, childLabel: string, members: Failure[]): Pe
   )
   const used = rounds.filter(r => r.usage)
   // An attempted round without usage means part of the spend was never recorded;
-  // a partial sum would read as a complete debate cost.
+  // Unattributable rounds are excluded from the sum, so the reported figure is
+  // a floor rather than the debate's full cost.
   const unattributed = rounds.some(r => !r.usage && !reusesPrimaryCall(r))
+  const usages = used.map(r => r.usage!)
   return {
     key,
     childLabel,
     testName: members[0].test_name,
     siblingCount: members.length - 1,
     rounds,
-    costUsd: used.length > 0 && !unattributed ? sumKnownCost(used.map(r => r.usage!)) : null,
+    costUsd: sumKnownCost(usages),
+    partial: unattributed || usages.some(u => u.cost_partial || u.cost_usd == null),
+    attributedRounds: used.length,
   }
 }
 
@@ -247,8 +257,8 @@ export function spendAverages(
 ): SpendAverages {
   const withCost = groups.filter(g => g.usage?.total_cost_usd != null)
   const groupCost = withCost.reduce((sum, g) => sum + g.usage!.total_cost_usd!, 0)
-  const peersWithCost = peers.filter(p => p.costUsd != null)
-  const peerCost = peersWithCost.reduce((sum, p) => sum + p.costUsd!, 0)
+  const peersWithCost = peers.filter(p => p.attributedRounds > 0)
+  const peerCost = peersWithCost.reduce((sum, p) => sum + p.costUsd, 0)
   return {
     costPerFailingTest:
       totalCostUsd != null && failedTests > 0 ? totalCostUsd / failedTests : null,

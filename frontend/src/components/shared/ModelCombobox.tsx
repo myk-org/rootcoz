@@ -45,7 +45,7 @@ export function ModelCombobox({
   canUseServer = true,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
-  const [highlightIndex, setHighlightIndex] = useState(-1)
+  const [highlight, setHighlight] = useState<{ key: string; index: number }>({ key: '', index: -1 })
   const [coords, setCoords] = useState<DropdownCoords | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -66,13 +66,28 @@ export function ModelCombobox({
 
   const showDropdown = !disabled && open && filtered.length > 0
 
+  // Position is only meaningful while the dropdown is mounted; derive `null`
+  // when closed instead of clearing it from the layout effect.
+  const activeCoords = showDropdown ? coords : null
+
+  // Changing the value or opening/closing invalidates the keyboard highlight,
+  // so it is stored per value+open key and derived back to -1 when stale.
+  const highlightKey = `${value}|${open}`
+  const highlightIndex = highlight.key === highlightKey ? highlight.index : -1
+  const setHighlightIndex = useCallback(
+    (next: number | ((prev: number) => number)) => {
+      setHighlight((prev) => {
+        const current = prev.key === highlightKey ? prev.index : -1
+        return { key: highlightKey, index: typeof next === 'function' ? next(current) : next }
+      })
+    },
+    [highlightKey],
+  )
+
   // Position dropdown from trigger (portal to body — outside dialog transform /
   // RemoveScroll) and keep it aligned on scroll/resize.
   useLayoutEffect(() => {
-    if (!showDropdown || !containerRef.current) {
-      setCoords(null)
-      return
-    }
+    if (!showDropdown || !containerRef.current) return
     const update = () => {
       const rect = containerRef.current!.getBoundingClientRect()
       setCoords({
@@ -102,7 +117,7 @@ export function ModelCombobox({
     }
     el.addEventListener('wheel', onWheel, { passive: false, capture: true })
     return () => el.removeEventListener('wheel', onWheel, { capture: true })
-  }, [showDropdown, coords])
+  }, [showDropdown, activeCoords])
 
   // Close on outside click (portal is outside containerRef)
   useEffect(() => {
@@ -118,11 +133,6 @@ export function ModelCombobox({
       return () => document.removeEventListener('mousedown', handleClick)
     }
   }, [open])
-
-  // Reset highlight when filtered list changes
-  useEffect(() => {
-    setHighlightIndex(-1)
-  }, [value, open])
 
   // Scroll highlighted item into view
   useEffect(() => {
@@ -178,11 +188,11 @@ export function ModelCombobox({
           break
       }
     },
-    [open, filtered, highlightIndex, selectModel],
+    [open, filtered, highlightIndex, selectModel, setHighlightIndex],
   )
 
   const dropdown =
-    showDropdown && coords
+    activeCoords
       ? createPortal(
           <ul
             ref={listRef}
@@ -193,9 +203,9 @@ export function ModelCombobox({
             data-model-combobox-dropdown=""
             style={{
               position: 'fixed',
-              top: coords.top,
-              left: coords.left,
-              minWidth: coords.minWidth,
+              top: activeCoords.top,
+              left: activeCoords.left,
+              minWidth: activeCoords.minWidth,
               pointerEvents: 'auto',
             }}
             // w-max: grow to full model id text; max-w keeps it on-screen.

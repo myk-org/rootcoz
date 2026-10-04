@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Outlet, useLocation } from 'react-router-dom'
 import { Header } from './Header'
 import { Sidebar } from './Sidebar'
 import { useAuth } from '@/lib/auth'
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 import { useHasMoreBelow } from './useHasMoreBelow'
 
 export function Layout() {
@@ -15,10 +15,14 @@ export function Layout() {
   const [pendingCount, setPendingCount] = useState(0)
   const [mobileOpen, setMobileOpen] = useState(false)
 
-  // Close mobile sidebar on route change
-  useEffect(() => {
+  // Close mobile sidebar on route change. Adjusting state during render (the
+  // React-recommended "reset state on prop change" pattern) keeps the close
+  // in the same commit as the navigation instead of an extra effect pass.
+  const [lastPath, setLastPath] = useState(location.pathname)
+  if (lastPath !== location.pathname) {
+    setLastPath(location.pathname)
     setMobileOpen(false)
-  }, [location.pathname])
+  }
 
   // Multiplexed SSE stream for navbar badges — shared single connection
   const navbarEvents = useMemo(() => ({
@@ -38,21 +42,21 @@ export function Layout() {
 
   useSSE(username ? 'navbar' : null, navbarEvents)
 
-  // Clear stale counts when user is logged out
-  useEffect(() => {
-    if (!username) {
-      setUnreadCount(0)
-      setActiveCount(0)
-      setPendingCount(0)
-    }
-  }, [username])
+  // Counts are only meaningful while signed in — derive the zeros for a
+  // logged-out user instead of clearing them from an effect. No event can
+  // arrive while signed out because the navbar subscription is disabled.
+  const badges = {
+    activeCount: username ? activeCount : 0,
+    unreadCount: username ? unreadCount : 0,
+    pendingCount: username ? pendingCount : 0,
+  }
 
   return (
     <div className="flex h-screen flex-col bg-surface-page">
       <Header mobileOpen={mobileOpen} onMobileToggle={() => setMobileOpen(prev => !prev)} />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar
-          badges={{ activeCount, unreadCount, pendingCount }}
+          badges={badges}
           mobileOpen={mobileOpen}
           onMobileClose={() => setMobileOpen(false)}
         />

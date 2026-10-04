@@ -1,25 +1,8 @@
-import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { api, ApiError } from './api'
 import { getUsername, setUsername, getIsAdmin, setIsAdmin, setRole, clearTokens, clearUsername, setGithubToken, setJiraEmail, setJiraToken } from './cookies'
 import type { AuthUser } from '@/types'
-
-interface AuthState {
-  username: string
-  isAdmin: boolean
-  /** True when the user has operator or admin role. */
-  isOperator: boolean
-  /** Effective reports access from /me (true for admins; otherwise stored flag). */
-  canViewReports: boolean
-  canUseServerProviders: boolean
-  role: string
-  loading: boolean
-  authenticated: boolean
-  login: (username: string, apiKey: string) => Promise<void>
-  logout: () => Promise<void>
-  refreshAuth: () => Promise<void>
-}
-
-const AuthContext = createContext<AuthState | null>(null)
+import { AuthContext } from './auth'
 
 async function syncTokensFromServer(forUsername: string, isCurrent: () => boolean) {
   if (!forUsername) return
@@ -231,10 +214,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   )
-}
-
-export function useAuth(): AuthState {
-  const ctx = useContext(AuthContext)
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider')
-  return ctx
 }

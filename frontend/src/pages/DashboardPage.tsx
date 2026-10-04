@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLatestRef } from '@/lib/useLatestRef'
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { BULK_SELECT_CHECKBOX_CLASS, GITHUB_REPO_URL } from '@/lib/constants'
@@ -44,7 +44,8 @@ import { useTableSort } from '@/lib/useTableSort'
 import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, MinusCircle } from 'lucide-react'
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { useAuth } from '@/lib/auth'
-import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
@@ -283,12 +284,12 @@ export function DashboardPage() {
   const showCheckboxes = selectedIds.size > 0
 
   /** Check if the current user can delete a specific job */
-  function canDeleteJob(job: DashboardJob): boolean {
+  const canDeleteJob = useCallback((job: DashboardJob): boolean => {
     if (!canDelete) return false
     if (isAdmin) return true
     // Operators can only delete their own jobs
     return !!job.submitted_by && job.submitted_by === username
-  }
+  }, [canDelete, isAdmin, username])
 
   useEffect(() => {
     if (!canDelete && selectedIds.size > 0) {
@@ -347,7 +348,7 @@ export function DashboardPage() {
   // Multiplexed SSE connection (stable — doesn't depend on fetchJobs)
   const dashboardEvents = useMemo(() => ({
     'dashboard-changed': () => { fetchJobsRef.current() },
-  }), [])
+  }), [fetchJobsRef])
 
   useSSE('dashboard', dashboardEvents)
   // Reset page when filters change (but not when page itself changes)
@@ -415,7 +416,7 @@ export function DashboardPage() {
   const safePage = Math.min(page, totalPages)
   const pageJobs = sorted
 
-  const deletablePageJobIds = useMemo(() => pageJobs.filter(j => canDeleteJob(j)).map(j => j.job_id), [pageJobs, isAdmin, username, canDelete])
+  const deletablePageJobIds = useMemo(() => pageJobs.filter(j => canDeleteJob(j)).map(j => j.job_id), [pageJobs, canDeleteJob])
   const allPageSelected = deletablePageJobIds.length > 0 && deletablePageJobIds.every(id => selectedIds.has(id))
   const somePageSelected = deletablePageJobIds.some(id => selectedIds.has(id))
 

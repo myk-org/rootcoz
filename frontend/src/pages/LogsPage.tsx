@@ -11,10 +11,28 @@ import {
 import { Trash2, ArrowDownToLine, Pause, Play, AlertCircle } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
-/** Strip ANSI escape codes (color, bold, reset, etc.) from a string. */
+/**
+ * Strip ANSI escape codes (color, bold, reset, etc.) from a string.
+ *
+ * Walks the string by UTF-16 code unit and drops SGR sequences —
+ * ESC (0x1B), '[', a run of digits/semicolons, then 'm'. Anything that does
+ * not match that exact shape is passed through untouched.
+ */
 function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/\x1b\[[0-9;]*m/g, '')
+  const isParam = (code: number) => (code >= 0x30 && code <= 0x39) || code === 0x3b
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 0x1b && text.charCodeAt(i + 1) === 0x5b) {
+      let j = i + 2
+      while (j < text.length && isParam(text.charCodeAt(j))) j++
+      if (text.charCodeAt(j) === 0x6d) { // 'm' terminator
+        i = j
+        continue
+      }
+    }
+    out += text[i]
+  }
+  return out
 }
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -44,7 +62,12 @@ export function LogsPage() {
   const [levelFilter, setLevelFilter] = useState('all')
   const [initialLines, setInitialLines] = useState('500')
   const [connected, setConnected] = useState(false)
-  const [error, setError] = useState('')
+  // Stream errors belong to the stream they arrived on; key them so switching
+  // `lines`/`level` immediately hides the previous stream's error instead of
+  // waiting for the new EventSource to open.
+  const streamKey = `${initialLines}:${levelFilter}`
+  const [streamError, setStreamError] = useState<{ key: string; text: string }>({ key: streamKey, text: '' })
+  const error = streamError.key === streamKey ? streamError.text : ''
   const containerRef = useRef<HTMLDivElement>(null)
   const autoScrollRef = useRef(autoScroll)
 
@@ -70,7 +93,7 @@ export function LogsPage() {
     params.set('lines', initialLines)
     if (levelFilter && levelFilter !== 'all') params.set('level', levelFilter)
 
-    setError('')
+    const setError = (text: string) => setStreamError({ key: streamKey, text })
     const es = new EventSource(`/api/admin/logs/stream?${params}`)
 
     es.addEventListener('log', (e) => {
@@ -99,7 +122,7 @@ export function LogsPage() {
     }
 
     return () => es.close()
-  }, [levelFilter, initialLines])
+  }, [levelFilter, initialLines, streamKey])
 
   // Auto-scroll effect
   useEffect(() => {

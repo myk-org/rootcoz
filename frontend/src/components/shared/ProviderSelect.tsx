@@ -10,9 +10,6 @@ import { useProviderCatalog, useProviderOptions } from '@/lib/useProviderOptions
 import { normalizeProvider } from '@/lib/aiProviders'
 import { allowsUnverified, credentialLabel, usableModels } from '@/lib/analysisAi'
 
-export type { AiProviderOption } from '@/lib/aiProviders'
-export { buildProviderOptions, normalizeProvider } from '@/lib/aiProviders'
-
 interface ProviderSelectProps {
   value: string
   onChange: (value: string) => void

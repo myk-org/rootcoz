@@ -127,7 +127,9 @@ describe('analysis credential-scoped pickers', () => {
     expect(model).not.toHaveAttribute('readonly')
     await user.click(model)
     expect(screen.getByRole('option', { name: /suggested.*UNVERIFIED/i })).toBeInTheDocument()
-    expect(screen.getByText(/not verified.*model ID/i)).toBeInTheDocument()
+    // The notice must name the bundled snapshot, not just say "unverified"
+    expect(screen.getByText(/bundled suggestions from an older pi-ai catalog/i)).toBeInTheDocument()
+    expect(screen.getByText(/Newer models are missing/i)).toBeInTheDocument()
     await user.type(model, 'custom-model')
     await user.click(screen.getByRole('button', { name: 'Paste XML' }))
     await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')

@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { ChatUI } from '@/components/shared/ChatUI'
 import { ApiError } from '@/lib/api'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 
 const get = vi.fn()
 const post = vi.fn()
@@ -15,7 +15,7 @@ vi.mock('@/lib/api', async importOriginal => ({
   api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args), delete: (...args: unknown[]) => remove(...args) },
 }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: false, authenticated: true, canUseServerProviders: grant }) }))
-vi.mock('@/lib/SSEProvider', () => ({ useSSE: vi.fn() }))
+vi.mock('@/lib/useSSE', () => ({ useSSE: vi.fn() }))
 
 HTMLElement.prototype.hasPointerCapture = () => false
 HTMLElement.prototype.setPointerCapture = () => {}

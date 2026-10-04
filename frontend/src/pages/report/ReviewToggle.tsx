@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { useReportState, useReportDispatch } from '@/pages/report/reportState'
+import { reviewKey } from '@/lib/reviewKey'
 import { putReviewed, notifyReviewChanged, scopedReviewState } from './failureUpdates'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { CheckCircle2 } from 'lucide-react'

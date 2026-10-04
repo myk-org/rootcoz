@@ -403,3 +403,86 @@ async def test_listed_empty_is_not_manual(monkeypatch):
             await ai_client.resolve_catalog_pair("openai", "gpt-4o")
     finally:
         ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_unlistable_provider_marks_snapshot_models_as_unverified(
+    monkeypatch,
+):
+    """IDs from the bundled fallback catalog must not look like a live listing.
+
+    The sidecar refuses key-scoped listing for multi-API builtins such as
+    OpenRouter (pi-sidecar#892), so we fall back to a frozen snapshot that is not
+    refreshed at runtime. Presenting those IDs with the provider's normal source
+    hides that they are old, which is what made a usable model look nonexistent.
+    """
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(return_value={"openrouter": "key"}),
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["openrouter"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(return_value={"models": [], "modelListingSupported": False}),
+    )
+    monkeypatch.setitem(
+        ai_client._PI_MODEL_SUGGESTIONS, "openrouter", ["stealth/space-bunny-alpha"]
+    )
+
+    token = ai_client.ai_username.set("alice")
+    try:
+        models = await ai_client.scoped_models()
+    finally:
+        ai_client.ai_username.reset(token)
+
+    assert [m["id"] for m in models["openrouter"]] == ["stealth/space-bunny-alpha"]
+    entry = models["openrouter"][0]
+    assert entry["source"] == "snapshot"
+    assert entry["verified"] is False
+    # An unknown-price-free listing must not be claimed as verified or current.
+    assert entry["source"] != "api"
+
+
+@pytest.mark.asyncio
+async def test_listed_models_keep_their_live_source(monkeypatch):
+    """A real key-scoped listing is unaffected by the snapshot tagging."""
+    monkeypatch.setattr(ai_client, "_get_model_catalog", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(return_value={"openrouter": "key"}),
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["openrouter"])
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "models_for_api_key",
+        AsyncMock(
+            return_value={
+                "models": [
+                    {
+                        "provider": "openrouter",
+                        "id": "stealth/space-bunny-alpha",
+                        "name": "Space Bunny Alpha",
+                    }
+                ],
+                "modelListingSupported": True,
+            }
+        ),
+    )
+
+    token = ai_client.ai_username.set("alice")
+    try:
+        models = await ai_client.scoped_models()
+    finally:
+        ai_client.ai_username.reset(token)
+
+    entry = models["openrouter"][0]
+    assert entry["source"] == "api"
+    assert entry["verified"] is True

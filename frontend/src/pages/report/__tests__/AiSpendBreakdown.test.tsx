@@ -48,11 +48,12 @@ describe('AiSpendBreakdown', () => {
     expect(screen.getByText(/not wall-clock/)).toBeInTheDocument()
   })
 
-  it('shows N/A averages for a zero-failure job and unavailable costs without inventing zeroes', () => {
-    renderSection(result({ token_usage: summary([call({ cost_usd: null, success: null })], { total_cost_usd: null }) }))
+  it('shows a $0.00 floor for unpriced costs without inventing a spend', () => {
+    renderSection(result({ token_usage: summary([call({ cost_usd: null, success: null })], { total_cost_usd: 0, cost_partial: true }) }))
     expand()
-    expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/\$0\.00/).length).toBeGreaterThan(0)
     // legacy rows have no recorded outcome, so zero failures is not proof of success
     expect(screen.getByText(/Some calls predate outcome tracking/)).toBeInTheDocument()
   })

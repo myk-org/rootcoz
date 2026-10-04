@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { useEffect, useImperativeHandle, forwardRef, createRef } from 'react'
 import { AllReviewedPrompt } from '../AllReviewedPrompt'
-import { ReportProvider, useReportDispatch } from '../ReportContext'
+import { useReportDispatch } from '@/pages/report/reportState'
+import { ReportProvider } from '../ReportContext'
 import type { AnalysisResult, ReviewState } from '@/types'
 
 /* ------------------------------------------------------------------ */

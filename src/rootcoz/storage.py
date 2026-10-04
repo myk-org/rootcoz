@@ -6832,20 +6832,42 @@ async def get_token_usage_for_job(job_id: str) -> list[dict[str, Any]]:
 
 # --- Cost aggregation contract -----------------------------------------
 #
-# `cost_usd` is the only nullable measure: a model with unknown price records
-# NULL because "we don't know the price" must never render as a genuine $0.
-# Token columns are NOT NULL, so COALESCE stays correct for them. Every cost
-# aggregate therefore uses COUNT(cost_usd) = COUNT(*) and returns NULL unless
-# every contributing row is priced. Callers pair the cost with priced_calls /
-# total_calls to tell a complete total from a lower bound. No rows at all is a
-# genuine zero — nothing was spent.
-_TOTAL_COST_SQL = (
-    "CASE WHEN COUNT(*) = 0 THEN 0 "
-    "WHEN COUNT(cost_usd) = COUNT(*) THEN SUM(cost_usd) END"
+# A cost total is ALWAYS a number. An unknown-price row records NULL in
+# `cost_usd`, and excluding it from the sum would render a real, known spend as
+# "Unavailable" — strictly less useful than the floor we can actually compute,
+# and wrong whenever the period also contains priced calls. So every cost
+# aggregate sums the priced rows and treats NULL as zero.
+#
+# What keeps that honest is `cost_partial`: the total is a floor, not a sum,
+# whenever any contributing row was excluded. That covers both reasons a row
+# can understate its cost — pi-sidecar flagging a prompt that covered only some
+# turns, and a row whose price is unknown outright. Callers pair the total with
+# priced_calls / total_calls so a floor is never presented as complete spend.
+#
+# Note the floor is exact, not an estimate: NULL means "no price recorded",
+# never "we guessed". A genuinely free model reports cost_usd = 0 and therefore
+# counts as priced, so a period of only free calls is a complete $0.00 total
+# rather than a floor. That distinction depends on pi-sidecar telling the two
+# apart by provenance rather than by value (see pi-config#890 / PR #891 and its
+# CONSUMER-GUIDE): only a fabricated placeholder price becomes NULL.
+#
+# Token columns are NOT NULL, so their COALESCE stays correct on its own.
+#
+# No rows at all is a genuine zero — nothing was spent, nothing unknown.
+#
+# This follows the guide's recipe for SQLite: SUM the cost, carry partialness in
+# its own expression, and label any total that includes unknown spend as
+# incomplete. SUM(COALESCE(cost_usd, 0)) equals a plain SUM(cost_usd) and adds
+# the empty-set guard, which would otherwise be NULL rather than 0.
+_TOTAL_COST_SQL = "CASE WHEN COUNT(*) = 0 THEN 0 ELSE SUM(COALESCE(cost_usd, 0)) END"
+# A total is a lower bound when a row was flagged partial OR when at least one
+# row had no recorded price and was therefore counted as zero. The second clause
+# is the aggregate's own responsibility: a row with no price may predate
+# cost_partial, and MAX() over the stored flag alone would miss it.
+_PARTIAL_COST_SQL = (
+    "CASE WHEN MAX(COALESCE(cost_partial, 0)) = 1 OR COUNT(cost_usd) < COUNT(*) "
+    "THEN 1 ELSE 0 END"
 )
-# A numeric cost is only a lower bound when some recorded call was partially
-# priced, so aggregates surface the flag instead of presenting it as a total.
-_PARTIAL_COST_SQL = "MAX(COALESCE(cost_partial, 0))"
 
 
 async def _get_job_token_usage_totals(
@@ -6861,7 +6883,7 @@ async def _get_job_token_usage_totals(
         "SUM(total_tokens) AS total_tokens, "
         f"{_TOTAL_COST_SQL} AS total_cost_usd, "
         "COUNT(cost_usd) AS priced_calls, "
-        "MAX(COALESCE(cost_partial, 0)) AS cost_partial, "
+        f"{_PARTIAL_COST_SQL} AS cost_partial, "
         "COALESCE(SUM(duration_ms), 0) AS total_duration_ms, "
         "CASE WHEN SUM(credential_source = 'user') > 0 "
         "AND SUM(credential_source = 'server') > 0 THEN 'mixed' "

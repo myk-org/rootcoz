@@ -21,7 +21,7 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => mockAuth,
 }))
 
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 
 const mockUseSSE = useSSE as unknown as ReturnType<typeof vi.fn>
 
@@ -37,7 +37,7 @@ vi.mock('../UserBadge', () => ({
 }))
 
 // Mock useSSE — no-op in tests (SSEProvider not mounted)
-vi.mock('@/lib/SSEProvider', () => ({
+vi.mock('@/lib/useSSE', () => ({
   useSSE: vi.fn(),
 }))
 

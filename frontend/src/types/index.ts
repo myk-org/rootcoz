@@ -371,7 +371,8 @@ export interface AiModel {
   id: string
   name: string
   provider: string
-  /** acpx | cli | api — catalog metadata only; not sent on analyze */
+  /** acpx | cli | api | snapshot — catalog metadata only; not sent on analyze.
+   *  `snapshot` means the ID came from a bundled fallback catalog, not a live listing. */
   source?: string
   credential_sources?: Array<'user' | 'server'>
   verified?: boolean
@@ -479,6 +480,8 @@ export interface TokenUsageSummary {
   total_cache_read_tokens: number
   total_cache_write_tokens: number
   total_tokens: number
+  /** Floor of the total spend: unpriced calls count as $0, so a figure is
+   *  always present. `cost_partial` says whether calls were excluded. */
   total_cost_usd: number | null
   total_duration_ms: number
   total_calls: number
@@ -487,7 +490,7 @@ export interface TokenUsageSummary {
 
 export interface TokenUsagePeriod {
   calls: number
-  /** Calls with a known price; below `calls` means `cost_usd` is a lower bound. */
+  /** Calls with a recorded price; below `calls` means `cost_usd` is a lower bound. */
   priced_calls: number
   /** True when some recorded call's cost covers only some turns. */
   cost_partial: boolean

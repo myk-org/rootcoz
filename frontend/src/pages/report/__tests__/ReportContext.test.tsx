@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { useEffect } from 'react'
-import { ReportProvider, reviewKey, useReportDispatch, useReportState } from '../ReportContext'
+import { useReportDispatch, useReportState } from '@/pages/report/reportState'
+import { ReportProvider } from '../ReportContext'
+import { reviewKey } from '@/lib/reviewKey'
 import type { AnalysisResult } from '@/types'
 
 describe('reviewKey', () => {

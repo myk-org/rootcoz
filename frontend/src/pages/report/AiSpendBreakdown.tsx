@@ -14,13 +14,14 @@ import {
   type StageUsage,
 } from './aiSpend'
 
-/** Cost or token total that may be unavailable — never render those as zero. */
-function cost(value: number | null): string {
-  return value == null ? 'Unavailable' : formatCost(value)
+/** A cost total is always shown: unpriced calls count as $0 and `partial`
+ *  marks the figure as a floor. */
+function cost(value: number | null | undefined): string {
+  return formatCost(value ?? 0)
 }
 
-function Cost({ value }: { value: number | null }) {
-  return <span className={value == null ? 'italic text-text-tertiary' : ''}>{cost(value)}</span>
+function Cost({ value }: { value: number | null | undefined }) {
+  return <span>{cost(value)}</span>
 }
 
 /** Keyboard-focusable tooltip trigger — plain spans hide the explanation from keyboard users. */
@@ -123,7 +124,8 @@ function PeerGroupRow({ group }: { group: PeerGroup }) {
           ))}
         </ul>
       </td>
-      <td className="py-1 text-right font-mono text-xs"><Cost value={group.costUsd} /></td>
+      <td className="py-1 text-right font-mono text-xs"><Cost value={group.costUsd} />
+        {group.partial && <span className="text-text-tertiary"> (lower bound)</span>}</td>
     </tr>
   )
 }
@@ -155,9 +157,9 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
 
   const failedStages = stages.filter(s => s.failedCalls > 0)
   const failedCalls = failedStages.reduce((sum, s) => sum + s.failedCalls, 0)
-  const wastedCost = failedStages.some(s => s.failedCostUsd == null)
-    ? null
-    : failedStages.reduce((sum, s) => sum + s.failedCostUsd!, 0)
+  // Unpriced failed calls count as $0, so this is the spend we can prove.
+  const wastedCost = failedStages.reduce((sum, s) => sum + s.failedCostUsd, 0)
+  const wastedPartial = failedStages.some(s => s.partial)
   // Any stage can hold legacy calls with no recorded outcome, so the failed-call
   // count is a lower bound whenever a single stage's outcomes are unknown.
   const outcomeUnknown = stages.some(s => !s.outcomeKnown)
@@ -211,6 +213,7 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
                     {failedCalls} failed call{failedCalls === 1 ? '' : 's'}
                     {outcomeUnknown && ' (lower bound — some calls have no recorded outcome)'}
                     {' · '}cost wasted: <Cost value={wastedCost} />
+                    {wastedPartial && <span className="text-text-tertiary"> (lower bound)</span>}
                     {' · '}{failedStages.map(s => s.callType).join(', ')}
                   </span>
                 </p>

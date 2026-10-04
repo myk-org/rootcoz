@@ -18,7 +18,7 @@ import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
 import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews } from '@/types'
 import { getGithubToken, getJiraToken, getJiraEmail } from '@/lib/cookies'
-import { useReportDispatch, useRefreshEnrichments } from './ReportContext'
+import { useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
 import { useAiSelection } from './useAiSelection'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
@@ -27,6 +27,12 @@ import { useAuth } from '@/lib/auth'
 
 type BugTarget = 'github' | 'jira'
 type Phase = 'idle' | 'loading-prompt' | 'prompt' | 'loading' | 'preview' | 'creating' | 'success' | 'error'
+
+type JiraProject = { key: string; name: string }
+type JiraSecurityLevel = { id: string; name: string; description: string }
+
+const EMPTY_PROJECTS: JiraProject[] = []
+const EMPTY_SECURITY_LEVELS: JiraSecurityLevel[] = []
 
 
 
@@ -69,7 +75,15 @@ export function BugCreationDialog({
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
   const { providers, providerStatus } = useProviderCatalog()
   const [phase, setPhase] = useState<Phase>('idle')
-  const [issuePrompt, setIssuePrompt] = useState('')
+  // The issue prompt belongs to the dialog session (open + job) that requested
+  // it; keying it means a stale prompt is never carried into another job.
+  const promptKey = `${open}|${jobId}`
+  const [promptState, setPromptState] = useState<{ key: string; prompt: string } | null>(null)
+  const issuePrompt = promptState?.key === promptKey ? promptState.prompt : ''
+  // While the prompt request is still in flight the dialog shows the loading
+  // phase; once it settles the stored phase takes over. Deriving it keeps the
+  // "set loading, then fetch" step out of the effect body.
+  const promptPhase: Phase = open && phase === 'idle' && promptState?.key !== promptKey ? 'loading-prompt' : phase
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
   const [similar, setSimilar] = useState<SimilarIssue[]>([])
@@ -78,11 +92,16 @@ export function BugCreationDialog({
   const [selectedRepo, setSelectedRepo] = useState(availableRepos?.[0]?.url ?? '')
   const [jiraProjectKey, setJiraProjectKey] = useState(defaultProjectKey || '')
   const [confirmedProjectKey, setConfirmedProjectKey] = useState(defaultProjectKey || '')
-  const [jiraProjects, setJiraProjects] = useState<Array<{key: string; name: string}>>([])
+  // Project search results belong to the query they were fetched for.
+  const [projectSearch, setProjectSearch] = useState<{ query: string; projects: JiraProject[] } | null>(null)
+  const jiraProjects = projectSearch?.query === jiraProjectKey ? projectSearch.projects : EMPTY_PROJECTS
   const [jiraSecurityLevel, setJiraSecurityLevel] = useState('')
   const [showProjectDropdown, setShowProjectDropdown] = useState(false)
   const [showSecurityDropdown, setShowSecurityDropdown] = useState(false)
-  const [securityLevels, setSecurityLevels] = useState<Array<{id: string; name: string; description: string}>>([])
+  // Security levels belong to the open dialog + target + confirmed project.
+  const securityLevelsKey = `${open}|${target}|${confirmedProjectKey}`
+  const [securityLevelResult, setSecurityLevelResult] = useState<{ key: string; levels: JiraSecurityLevel[] } | null>(null)
+  const securityLevels = securityLevelResult?.key === securityLevelsKey ? securityLevelResult.levels : EMPTY_SECURITY_LEVELS
   const [jiraIssueType, setJiraIssueType] = useState('Bug')
   const [customIssueType, setCustomIssueType] = useState('')
 
@@ -112,18 +131,16 @@ export function BugCreationDialog({
   useEffect(() => {
     let ignore = false
     if (!open || target !== 'jira') return
-    if (jiraProjectKey.length < 2) {
-      setJiraProjects([])
-      setShowProjectDropdown(false)
-      return
-    }
+    // Below the 2-character minimum there is nothing to search for; the keyed
+    // `jiraProjects` lookup already yields an empty list for such a query.
+    if (jiraProjectKey.length < 2) return
     const timer = setTimeout(() => {
-      api.post<Array<{key: string; name: string}>>('/api/jira-projects', {
+      api.post<JiraProject[]>('/api/jira-projects', {
         jira_token: getJiraToken(),
         jira_email: getJiraEmail(),
         query: jiraProjectKey,
       })
-        .then((data) => { if (!ignore) setJiraProjects(data) })
+        .then((data) => { if (!ignore) setProjectSearch({ query: jiraProjectKey, projects: data }) })
         .catch((err) => console.warn('Failed to fetch Jira projects:', err))
     }, 300)
     return () => { ignore = true; clearTimeout(timer) }
@@ -132,41 +149,37 @@ export function BugCreationDialog({
   // Fetch security levels only after user confirms a project selection
   useEffect(() => {
     let ignore = false
-    if (!open || target !== 'jira' || !confirmedProjectKey) {
-      setSecurityLevels([])
-      return
-    }
-    api.post<Array<{id: string; name: string; description: string}>>('/api/jira-security-levels', {
+    if (!open || target !== 'jira' || !confirmedProjectKey) return
+    api.post<JiraSecurityLevel[]>('/api/jira-security-levels', {
       jira_token: getJiraToken(),
       jira_email: getJiraEmail(),
       project_key: confirmedProjectKey,
     })
-      .then((data) => { if (!ignore) setSecurityLevels(data) })
+      .then((data) => { if (!ignore) setSecurityLevelResult({ key: securityLevelsKey, levels: data }) })
       .catch((err) => console.warn('Failed to fetch security levels:', err))
     return () => { ignore = true }
-  }, [open, target, confirmedProjectKey])
+  }, [open, target, confirmedProjectKey, securityLevelsKey])
 
   // Fetch default issue prompt when dialog opens
   useEffect(() => {
     if (!open || phase !== 'idle') return
     let ignore = false
-    setPhase('loading-prompt')
     api
       .get<{ prompt?: string; issue_prompt?: string }>(`/results/${jobId}/issue-prompt`)
       .then((res) => {
         if (ignore) return
-        setIssuePrompt(res.issue_prompt ?? res.prompt ?? '')
+        setPromptState({ key: promptKey, prompt: res.issue_prompt ?? res.prompt ?? '' })
         setPhase('prompt')
       })
       .catch(() => {
         if (ignore) return
-        setIssuePrompt('')
+        setPromptState({ key: promptKey, prompt: '' })
         setPhase('prompt')
       })
     return () => {
       ignore = true
     }
-  }, [open, jobId])
+  }, [open, jobId, phase, promptKey])
 
   function handleContinueFromPrompt() {
     setPhase('loading')
@@ -221,12 +234,12 @@ export function BugCreationDialog({
     }
   }
 
-  const isBusy = phase === 'loading-prompt' || phase === 'loading' || phase === 'prompt' || phase === 'preview' || phase === 'creating'
+  const isBusy = promptPhase === 'loading-prompt' || promptPhase === 'loading' || promptPhase === 'prompt' || promptPhase === 'preview' || promptPhase === 'creating'
 
   function resetState() {
     setTimeout(() => {
       setPhase('idle')
-      setIssuePrompt('')
+      setPromptState(null)
       setTitle('')
       setBody('')
       setSimilar([])
@@ -235,9 +248,9 @@ export function BugCreationDialog({
       setSelectedRepo(availableRepos?.[0]?.url ?? '')
       setJiraProjectKey(defaultProjectKey || '')
       setConfirmedProjectKey(defaultProjectKey || '')
-      setJiraProjects([])
+      setProjectSearch(null)
       setJiraSecurityLevel('')
-      setSecurityLevels([])
+      setSecurityLevelResult(null)
       setShowProjectDropdown(false)
       setShowSecurityDropdown(false)
       setJiraIssueType('Bug')
@@ -261,12 +274,12 @@ export function BugCreationDialog({
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent hideCloseButton={isBusy} className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{phase === 'success' ? `${label} Created` : `Create ${label}`}</DialogTitle>
-          {phase === 'preview' && <DialogDescription>Review and edit before creating.</DialogDescription>}
+          <DialogTitle>{promptPhase === 'success' ? `${label} Created` : `Create ${label}`}</DialogTitle>
+          {promptPhase === 'preview' && <DialogDescription>Review and edit before creating.</DialogDescription>}
         </DialogHeader>
 
         {/* Loading prompt */}
-        {phase === 'loading-prompt' && (
+        {promptPhase === 'loading-prompt' && (
           <div className="flex flex-col items-center gap-4 py-8">
             <LoadingSpinner size="lg" />
             <p className="text-sm text-text-secondary">Loading issue prompt...</p>
@@ -274,7 +287,7 @@ export function BugCreationDialog({
         )}
 
         {/* Prompt */}
-        {phase === 'prompt' && (
+        {promptPhase === 'prompt' && (
           <div className="space-y-4">
             {/* AI for issue generation */}
             <div className="space-y-2">
@@ -304,7 +317,7 @@ export function BugCreationDialog({
               <Textarea
                 id="bug-issue-prompt"
                 value={issuePrompt}
-                onChange={(e) => setIssuePrompt(e.target.value)}
+                onChange={(e) => setPromptState({ key: promptKey, prompt: e.target.value })}
                 rows={20}
                 placeholder="Enter a prompt to guide issue generation..."
                 className="font-mono text-xs"
@@ -314,7 +327,7 @@ export function BugCreationDialog({
         )}
 
         {/* Loading */}
-        {phase === 'loading' && (
+        {promptPhase === 'loading' && (
           <div className="flex flex-col items-center gap-4 py-8">
             <LoadingSpinner size="lg" />
             <p className="text-sm text-text-secondary">Generating preview...</p>
@@ -322,7 +335,7 @@ export function BugCreationDialog({
         )}
 
         {/* Preview */}
-        {phase === 'preview' && (
+        {promptPhase === 'preview' && (
           <div className="space-y-4">
             {target === 'github' && availableRepos && availableRepos.length > 1 && (
               <div className="space-y-2">
@@ -354,7 +367,7 @@ export function BugCreationDialog({
                       if (val !== confirmedProjectKey) {
                         setConfirmedProjectKey('')
                         setJiraSecurityLevel('')
-                        setSecurityLevels([])
+                        setSecurityLevelResult(null)
                       }
                     }}
                     onFocus={() => setShowProjectDropdown(true)}
@@ -496,7 +509,7 @@ export function BugCreationDialog({
         )}
 
         {/* Creating */}
-        {phase === 'creating' && (
+        {promptPhase === 'creating' && (
           <div className="flex flex-col items-center gap-4 py-8">
             <LoadingSpinner size="lg" />
             <p className="text-sm text-text-secondary">Creating {label.toLowerCase()}...</p>
@@ -504,7 +517,7 @@ export function BugCreationDialog({
         )}
 
         {/* Success */}
-        {phase === 'success' && (
+        {promptPhase === 'success' && (
           <div className="flex flex-col items-center gap-4 py-8 animate-scale-in">
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-signal-green/15">
               <CheckCircle2 className="h-8 w-8 text-signal-green" />
@@ -522,7 +535,7 @@ export function BugCreationDialog({
         )}
 
         {/* Error */}
-        {phase === 'error' && (
+        {promptPhase === 'error' && (
           <div className="flex flex-col items-center gap-4 py-8">
             <p className="text-sm text-signal-red">{errorMsg}</p>
             {errorMsg.toLowerCase().includes('token') && (
@@ -531,24 +544,24 @@ export function BugCreationDialog({
           </div>
         )}
 
-        {phase === 'preview' && !hasToken && (
+        {promptPhase === 'preview' && !hasToken && (
           <TokenRequiredBanner provider={target === 'github' ? 'GitHub' : 'Jira'} />
         )}
 
         <DialogFooter className="flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
-          {phase === 'preview' && (
+          {promptPhase === 'preview' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
               <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
             </div>
           )}
-          {phase === 'prompt' && (
+          {promptPhase === 'prompt' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
               <Button onClick={handleContinueFromPrompt} disabled={aiUnavailable}>Continue</Button>
             </div>
           )}
-          {(phase === 'success' || phase === 'error') && (
+          {(promptPhase === 'success' || promptPhase === 'error') && (
             <Button variant="outline" onClick={() => handleCancel()} className="sm:ml-auto">Close</Button>
           )}
         </DialogFooter>

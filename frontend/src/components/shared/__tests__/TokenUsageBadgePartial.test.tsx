@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { vi } from 'vitest'
 import { TokenUsageBadge } from '../TokenUsageBadge'
-import { CostCell } from '@/pages/TokenUsagePage'
+import { CostCell } from '@/components/shared/TokenUsageCostCell'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { TokenUsageSummary } from '@/types'
 
@@ -28,26 +28,33 @@ describe('TokenUsageBadge partial cost', () => {
     expect(screen.getByText(/100 in \/ 50 out/)).toHaveTextContent('$0.25+')
   })
 
-  it('never renders a partial marker on an unavailable cost', () => {
-    // "Unavailable+" and "Unavailable (partial)" would both mean nothing
+  it('renders an unavailable cost as a $0.00 floor, still marked', () => {
     renderBadge(usage({ total_cost_usd: null, cost_partial: true }))
     const badge = screen.getByText(/in \/ .* out/)
-    expect(badge).toHaveTextContent('Unavailable')
-    expect(badge.textContent).not.toContain('+')
-    expect(badge.textContent).not.toContain('partial')
+    expect(badge).toHaveTextContent('$0.00+')
+    expect(badge.textContent).not.toContain('Unavailable')
   })
 
   it('shows no marker for a complete cost', () => {
     renderBadge(usage({ cost_partial: false }))
     expect(screen.getByText(/100 in \/ 50 out/)).toHaveTextContent('$0.25')
+    expect(screen.getByText(/100 in \/ 50 out/).textContent).not.toContain('+')
+  })
+
+  it('shows a genuine free-model zero as a complete $0.00', () => {
+    // pi-sidecar reports cost_usd 0 with cost_partial false for a free model
+    renderBadge(usage({ total_cost_usd: 0, cost_partial: false }))
+    const badge = screen.getByText(/100 in \/ 50 out/)
+    expect(badge).toHaveTextContent('$0.00')
+    expect(badge.textContent).not.toContain('+')
   })
 })
 
 describe('CostCell lower-bound marker', () => {
-  const renderCell = (cost: number | null, partial: boolean | number) =>
+  const renderCell = (cost: number | null, partial: boolean | number, priced?: number, total?: number) =>
     render(
       <TooltipProvider>
-        <CostCell cost={cost} partial={partial} />
+        <CostCell cost={cost} partial={partial} pricedCalls={priced} totalCalls={total} />
       </TooltipProvider>,
     )
 
@@ -62,10 +69,16 @@ describe('CostCell lower-bound marker', () => {
     expect(screen.getByRole('button', { name: /lower bound/i })).toBeInTheDocument()
   })
 
-  it('never marks an unavailable cost as a lower bound', () => {
-    renderCell(null, true)
-    expect(screen.queryByRole('button', { name: /lower bound/i })).toBeNull()
-    expect(screen.getByText('Unavailable')).toBeInTheDocument()
+  it('renders an unavailable cost as a marked $0.00 floor', () => {
+    renderCell(null, true, 1, 3)
+    expect(screen.getByRole('button', { name: /lower bound/i })).toBeInTheDocument()
+    expect(screen.getByText('$0.00')).toBeInTheDocument()
+  })
+
+  it('explains how many calls were excluded from the floor', async () => {
+    renderCell(0.25, true, 2, 3)
+    fireEvent.focus(screen.getByRole('button', { name: /lower bound/i }))
+    expect((await screen.findAllByText(/2 of 3 calls had no recorded price/)).length).toBeGreaterThan(0)
   })
 
   it('shows no marker for a complete numeric cost', () => {

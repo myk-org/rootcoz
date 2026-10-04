@@ -73,17 +73,20 @@ describe('stageBreakdown', () => {
     expect(stageBreakdown(usageSummary([one, one, one]))[0].calls).toBe(3)
   })
 
-  it('reports stage cost as unavailable when any call cost is unknown', () => {
+  it('reports stage cost as a lower bound when any call cost is unknown', () => {
     const [stage] = stageBreakdown(usageSummary([
       call({ cost_usd: 0.02 }),
       call({ cost_usd: null }),
     ]))
-    expect(stage.costUsd).toBeNull()
+    // The unpriced call counts as $0 but is disclosed, not discarded.
+    expect(stage.costUsd).toBeCloseTo(0.02)
+    expect(stage.partial).toBe(true)
   })
 
   it('keeps a genuine zero cost as zero', () => {
     const [stage] = stageBreakdown(usageSummary([call({ cost_usd: 0 })]))
     expect(stage.costUsd).toBe(0)
+    expect(stage.partial).toBe(false)
   })
 
   it('attributes failed-call waste and flags unknown outcomes', () => {
@@ -100,7 +103,7 @@ describe('stageBreakdown', () => {
     ]))
     expect(missingOutcome.failedCalls).toBe(0)
     expect(missingOutcome.outcomeKnown).toBe(false)
-    expect(missingOutcome.failedCostUsd).toBeNull()
+    expect(missingOutcome.failedCostUsd).toBe(0)
   })
 
   it('marks a stage whose cost is a lower bound', () => {
@@ -255,21 +258,22 @@ describe('peerGroups', () => {
     }))
     expect(groups).toHaveLength(1)
     expect(groups[0].siblingCount).toBe(1)
-    // the shared debate's round-2 peer has no usage, so no total is claimed
-    expect(groups[0].costUsd).toBeNull()
+    // the shared debate's round-2 peer has no usage, so the total is a floor
+    expect(groups[0].partial).toBe(true)
   })
 
-  it('reports unavailable cost when an attributable round cost is unknown', () => {
+  it('reports a lower bound when an attributable round cost is unknown', () => {
     const rounds = debate().rounds.map(r => ({ ...r, token_usage: r.token_usage ? { ...r.token_usage, cost_usd: null } : r.token_usage }))
     const [group] = peerGroups(result({ failures: [failure({ peer_debate: { ...debate(), rounds } })] }))
-    expect(group.costUsd).toBeNull()
+    expect(group.costUsd).toBe(0)
+    expect(group.partial).toBe(true)
   })
 
-  it('is unavailable when an attempted round has no usage at all', () => {
+  it('is a marked floor when an attempted round has no usage at all', () => {
     // the round-2 peer keeps no usage after a failed call, so the debate total is partial
     const [group] = peerGroups(result({ failures: [failure({ peer_debate: debate() })] }))
     expect(group.rounds[4].usage).toBeNull()
-    expect(group.costUsd).toBeNull()
+    expect(group.partial).toBe(true)
   })
 
   it('keeps a debate cost when only the round-1 orchestrator lacks usage', () => {

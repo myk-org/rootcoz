@@ -7,7 +7,7 @@ import type { ResultResponse } from '@/types'
 
 const { onRefresh } = vi.hoisted(() => ({ onRefresh: { current: undefined as (() => Promise<void>) | undefined } }))
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), post: vi.fn() } }))
-vi.mock('@/lib/SSEProvider', () => ({ useSSE: (topic: string, handlers: Record<string, () => Promise<void>>) => {
+vi.mock('@/lib/useSSE', () => ({ useSSE: (topic: string, handlers: Record<string, () => Promise<void>>) => {
   if (topic.startsWith('results:')) onRefresh.current = handlers['status-changed']
 } }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ role: 'viewer', isOperator: false }) }))

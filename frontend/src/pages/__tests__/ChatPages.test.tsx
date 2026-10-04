@@ -9,7 +9,7 @@ const get = vi.fn()
 const post = vi.fn().mockResolvedValue({})
 vi.mock('@/lib/api', () => ({ api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args), delete: vi.fn() } }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: true, authenticated: true, canUseServerProviders: true }) }))
-vi.mock('@/lib/SSEProvider', () => ({ useSSE: vi.fn() }))
+vi.mock('@/lib/useSSE', () => ({ useSSE: vi.fn() }))
 HTMLElement.prototype.scrollIntoView = () => {}
 afterEach(() => { cleanup(); act(() => resetProviderCatalogCache()); get.mockReset(); post.mockClear() })
 

@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent, type KeyboardEvent } from 'react'
 import { api, ApiError } from '@/lib/api'
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
-import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { Toggle } from '@/components/shared/Toggle'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog, useCursorAuthStatus } from '@/lib/useProviderOptions'
@@ -549,17 +549,21 @@ export function ChatUI({
               <span className="text-xs text-text-secondary">{sessionChoice
                 ? `${sessionChoice.provider} / ${sessionChoice.model}${sessionChoice.forceServer ? ' · Server' : ' · User'}`
                 : 'Existing session · selection pinned by server'}</span>
-            ) : <>
-              <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} /></div>
-              <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} /></div>
-              <div className="flex items-center gap-2 text-xs text-text-secondary">
-                <span>Use server credentials</span>
-                <Toggle checked={effectiveForceServer} onChange={setForceServer} label="Use server credentials" disabled={!canUseServerProviders} />
+            ) : <div className="flex flex-col items-end gap-1">
+              <div className="flex items-center gap-3">
+                <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} /></div>
+                <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} hideNotice /></div>
+                <div className="flex items-center gap-2 text-xs text-text-secondary">
+                  <span>Use server credentials</span>
+                  <Toggle checked={effectiveForceServer} onChange={setForceServer} label="Use server credentials" disabled={!canUseServerProviders} />
+                </div>
+                <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
+                  {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
+                </Button>
               </div>
-              <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
-                {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
-              </Button>
-            </>}
+              {/* Below the whole provider+model row, so it cannot distort the controls. */}
+              <AnalysisModelNotice provider={aiProvider} forceServer={effectiveForceServer} />
+            </div>}
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button

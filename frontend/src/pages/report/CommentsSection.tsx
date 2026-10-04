@@ -4,7 +4,7 @@ import { formatTimestamp } from '@/lib/utils'
 import { isCommentInScope } from '@/lib/grouping'
 import { getUsername } from '@/lib/cookies'
 import { useAuth } from '@/lib/auth'
-import { useReportState, useReportDispatch, useRefreshEnrichments } from './ReportContext'
+import { useReportState, useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { LinkedText } from '@/components/shared/LinkedText'
@@ -12,7 +12,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { MentionTextarea } from './MentionTextarea'
 import { useReviewSuggestion } from './useReviewSuggestion'
 import { useAiSelection } from './useAiSelection'
-import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Trash2, MessageSquare } from 'lucide-react'
 import type { Comment } from '@/types'
@@ -276,9 +276,11 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
               <AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} label="AI Provider for comment intent" />
             </div>
             <div className="w-[240px]">
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model)} forceServer={false} label="AI Model for comment intent" />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model)} forceServer={false} label="AI Model for comment intent" hideNotice />
             </div>
           </div>
+          {/* Below the whole provider+model row, so it cannot distort the controls. */}
+          <AnalysisModelNotice provider={aiProvider} forceServer={false} />
           {submitError && (
             <span role="alert" className="text-signal-red text-xs">
               {submitError}

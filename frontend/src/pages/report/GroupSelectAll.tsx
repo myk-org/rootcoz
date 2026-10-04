@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { GroupedFailure } from '@/types'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
 import { useAuth } from '@/lib/auth'
-import { useReportDispatch, useReportState } from './ReportContext'
+import { useReportDispatch, useReportState } from '@/pages/report/reportState'
 import { scopeKey } from './failureUpdates'
 
 /** Build the selection payloads for every group of a listed section. */

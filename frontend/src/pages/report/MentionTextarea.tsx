@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, type KeyboardEvent, type ChangeEvent } from 'react'
 import { Textarea } from '@/components/ui/textarea'
-import { api } from '@/lib/api'
+import { fetchMentionableUsers, cachedUsers } from './mentionUsers'
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -19,35 +19,6 @@ interface MentionQuery {
   start: number
   /** The partial username typed so far (after `@`). */
   query: string
-}
-
-/* ------------------------------------------------------------------ */
-/*  Module-level cache for mentionable users                           */
-/* ------------------------------------------------------------------ */
-
-let cachedUsers: string[] | null = null
-let fetchPromise: Promise<string[]> | null = null
-
-async function fetchMentionableUsers(): Promise<string[]> {
-  if (cachedUsers) return cachedUsers
-  if (fetchPromise) return fetchPromise
-  fetchPromise = api
-    .get<{ usernames: string[] }>('/api/users/mentionable')
-    .then((res) => {
-      cachedUsers = res.usernames ?? []
-      return cachedUsers
-    })
-    .catch(() => {
-      fetchPromise = null
-      return []
-    })
-  return fetchPromise
-}
-
-/** Exported for testing only — resets the module-level cache. */
-export function _resetMentionCache() {
-  cachedUsers = null
-  fetchPromise = null
 }
 
 /* ------------------------------------------------------------------ */
@@ -81,7 +52,21 @@ export function MentionTextarea({ value, onChange, onSubmit, placeholder, disabl
   const dropdownRef = useRef<HTMLDivElement>(null)
   const [allUsers, setAllUsers] = useState<string[]>(cachedUsers ?? [])
   const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null)
-  const [selectedIdx, setSelectedIdx] = useState(0)
+  // The highlighted row belongs to the current mention query: typing a new
+  // query resets it to the first row, which is derived here instead of being
+  // pushed through an effect.
+  const mentionKey = mentionQuery?.query ?? ''
+  const [highlight, setHighlight] = useState<{ key: string; index: number }>({ key: mentionKey, index: 0 })
+  const selectedIdx = highlight.key === mentionKey ? highlight.index : 0
+  const setSelectedIdx = useCallback(
+    (next: number | ((prev: number) => number)) => {
+      setHighlight((prev) => {
+        const current = prev.key === mentionKey ? prev.index : 0
+        return { key: mentionKey, index: typeof next === 'function' ? next(current) : next }
+      })
+    },
+    [mentionKey],
+  )
 
   // Fetch users on mount (cached after first successful call)
   useEffect(() => {
@@ -94,11 +79,6 @@ export function MentionTextarea({ value, onChange, onSubmit, placeholder, disabl
   const filtered = mentionQuery
     ? allUsers.filter((u) => u.toLowerCase().startsWith(mentionQuery.query.toLowerCase()))
     : []
-
-  // Keep selectedIdx in bounds
-  useEffect(() => {
-    setSelectedIdx(0)
-  }, [mentionQuery?.query])
 
   /** Update the mention query state whenever the cursor moves or text changes. */
   const syncMentionQuery = useCallback(() => {

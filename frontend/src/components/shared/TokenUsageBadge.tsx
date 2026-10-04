@@ -25,11 +25,17 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
     )
   }
 
-  const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
-  // Only a numeric cost can be a lower bound; "Unavailable+" would mean nothing.
-  const showPartial = usage.cost_partial === true && usage.total_cost_usd != null
-  const partialNote = showPartial
-    && 'Partial: some AI turns had no catalog price, so this is a lower bound.'
+  // A total is always shown: unpriced calls count as $0, so this figure is the
+  // spend we can prove. `cost_partial` says whether calls were excluded.
+  const cost = formatCost(usage.total_cost_usd ?? 0)
+  const showPartial = usage.cost_partial === true
+  const pricedCalls = usage.calls.filter(c => c.cost_usd != null).length
+  const unpriced = usage.calls.length - pricedCalls
+  const partialNote = showPartial && (
+    unpriced > 0
+      ? `${unpriced} of ${usage.calls.length} calls had no recorded price and were counted as $0, so this is a lower bound.`
+      : 'Partial: some AI turns had no catalog price, so this is a lower bound.'
+  )
   const summedDuration = formatSummedDuration(usage.total_duration_ms)
   const sources = new Set(usage.calls.map(call => call.credential_source))
   const source = usage.credential_source ?? (sources.has('user') && sources.has('server') ? 'mixed'

@@ -6211,7 +6211,8 @@ class TestLiveResultTokenUsage:
             ]
             assert current["total_calls"] == index
             assert current["calls"] == []
-            assert current["total_cost_usd"] == (0.05 if index < 3 else None)
+            # An unpriced call counts as $0 rather than discarding the priced spend.
+            assert current["total_cost_usd"] == pytest.approx(0.05)
         with patch(
             "rootcoz.storage.get_token_usage_for_job",
             side_effect=AssertionError("loaded calls"),
@@ -6223,14 +6224,16 @@ class TestLiveResultTokenUsage:
         assert usage["total_tokens"] == 360
         assert usage["total_input_tokens"] == 300
         assert usage["total_output_tokens"] == 60
-        assert usage["total_cost_usd"] is None
+        assert usage["total_cost_usd"] == pytest.approx(0.05)
+        assert usage["cost_partial"] is True
         assert usage["calls"] == []
         await storage.save_result("usage-live", "", "failed", {"summary": "analysis"})
         terminal = test_client.get("/results/usage-live").json()["result"][
             "token_usage"
         ]
         assert len(terminal["calls"]) == 3
-        assert terminal["total_cost_usd"] is None
+        assert terminal["total_cost_usd"] == pytest.approx(0.05)
+        assert terminal["cost_partial"] is True
 
     @pytest.mark.asyncio
     async def test_usage_write_notifies_only_its_job_without_progress(
@@ -6306,7 +6309,7 @@ class TestLiveResultTokenUsage:
         assert response.json()["result"]["token_usage"]["total_tokens"] == 120
 
     @pytest.mark.asyncio
-    async def test_result_preserves_unavailable_cost_and_empty_usage(self, test_client):
+    async def test_result_reports_unpriced_cost_as_a_floor(self, test_client):
         await storage.save_result(
             "unknown-cost", "", "running", {"summary": "analysis"}
         )
@@ -6328,8 +6331,10 @@ class TestLiveResultTokenUsage:
             prompt_chars=0,
             response_chars=0,
         )
-        response = test_client.get("/results/unknown-cost")
-        assert response.json()["result"]["token_usage"]["total_cost_usd"] is None
+        usage = test_client.get("/results/unknown-cost").json()["result"]["token_usage"]
+        assert usage["total_cost_usd"] == pytest.approx(0.0)
+        # Nothing was priced, so the figure is a floor rather than a real $0 spend.
+        assert usage["cost_partial"] is True
 
 
 class TestGetFailureByUUID:

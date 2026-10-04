@@ -1,6 +1,6 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip } from '@/components/shared/CredentialSourceLabel'
+import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip, UnverifiedModelsWarning } from '@/components/shared/CredentialSourceLabel'
 import { useId } from 'react'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { useAuth } from '@/lib/auth'
@@ -43,18 +43,29 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
   )
 }
 
-export function AnalysisModelSelect({ provider, value, onChange, forceServer, label = 'AI Model' }: {
+/** Resolve whether a provider's model list is unverified for the current key. */
+export function AnalysisModelNotice({ provider, forceServer }: { provider: string; forceServer: boolean }) {
+  const { providerStatus } = useProviderCatalog(forceServer)
+  return <UnverifiedModelsWarning show={allowsUnverified(providerStatus, provider, forceServer)} />
+}
+
+export function AnalysisModelSelect({ provider, value, onChange, forceServer, label = 'AI Model', hideNotice = false }: {
   provider: string
   value: string
   onChange: (value: string) => void
   forceServer: boolean
   label?: string
+  /** Row layouts render the notice themselves, below the whole provider+model row. */
+  hideNotice?: boolean
 }) {
   const { providers, providerStatus } = useProviderCatalog(forceServer)
   const { canUseServerProviders } = useAuth()
   const unverified = allowsUnverified(providerStatus, provider, forceServer)
-  return <>
+  // A single wrapper: the notice must stay under the model picker. Returning a
+  // fragment would let the caller lay the notice out as its own flex/grid item,
+  // which is what pushed it beside the picker and into the next grid cell.
+  return <div className="space-y-1">
     <ModelCombobox value={value} onChange={onChange} options={visibleModels(providers, provider, forceServer, providerStatus, canUseServerProviders)} ariaLabel={label} forceServer={forceServer} canUseServer={canUseServerProviders} placeholder={unverified ? 'Enter model ID' : 'Default model'} />
-    {unverified && <p className="mt-1 text-xs text-text-tertiary">Models are not verified for this key. Suggestions are unverified; enter a model ID at your own risk.</p>}
-  </>
+    {!hideNotice && <UnverifiedModelsWarning show={unverified} />}
+  </div>
 }
