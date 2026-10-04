@@ -70,3 +70,22 @@ repos:
         args: [--fix]
         additional_dependencies:
           - eslint@9.38.0
+
+  # The mirrors-eslint hook above installs a bare eslint in its own venv, so it
+  # cannot resolve the typescript-eslint / react-hooks / react-refresh plugins
+  # that frontend/eslint.config.js loads from frontend/node_modules — and it
+  # excludes ^frontend/ outright, leaving every .ts/.tsx file unlinted. This hook
+  # runs the project's own eslint against the project's own config instead.
+  #
+  # pre-commit passes only the changed files, so this blocks new lint problems
+  # without forcing a cleanup of the existing ones. It is a no-op when the
+  # frontend dependencies are not installed (fresh clone, CI without a build
+  # step), so it never blocks a commit on a missing toolchain.
+  - repo: local
+    hooks:
+      - id: eslint-frontend
+        name: eslint (frontend ts/tsx)
+        entry: frontend/scripts/eslint-changed.sh
+        language: script
+        files: ^frontend/src/.*\.(ts|tsx)$
+        require_serial: true

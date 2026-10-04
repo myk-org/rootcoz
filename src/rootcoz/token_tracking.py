@@ -310,6 +310,7 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
     total_cache_write = 0
     total_cost: float | None = 0.0
     total_duration = 0
+    excluded_unknown_price = False
 
     for rec in records:
         calls.append(
@@ -337,12 +338,17 @@ def summarize_token_usage(records: list[dict[str, Any]]) -> TokenUsageSummary:
             if total_cost is not None:
                 total_cost += rec["cost_usd"]
         else:
-            total_cost = None  # If any call lacks cost, total is None
+            # Unknown price: count the call as $0 so the group still reports a
+            # total, and let cost_partial mark it as a floor. Nulling the whole
+            # total would discard real spend from the priced calls alongside it.
+            if total_cost is None:
+                total_cost = 0.0
+            excluded_unknown_price = True
         if rec["duration_ms"] is not None:
             total_duration += rec["duration_ms"]
 
     sources = {rec.get("credential_source") or "unknown" for rec in records}
-    partial = any(rec.get("cost_partial") for rec in records)
+    partial = any(rec.get("cost_partial") for rec in records) or excluded_unknown_price
     if {"user", "server"} <= sources:
         credential_source = "mixed"
     elif sources == {"user"}:

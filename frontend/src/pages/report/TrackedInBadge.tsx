@@ -13,17 +13,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { isSafeHref } from '@/lib/autoLink'
-import { useReportDispatch } from './ReportContext'
+import { useReportDispatch } from '@/pages/report/reportState'
 import { putTrackedIn, getTrackedIn, trackedInUrlError } from './failureUpdates'
+import { detectTrackerType } from './trackerType'
 import { ExternalLink, Link2 } from 'lucide-react'
-
-/** Detect tracker type from URL string patterns (no HTTP requests). */
-export function detectTrackerType(url: string): string {
-  const lower = url.toLowerCase()
-  if (lower.includes('github.com')) return 'github'
-  if (lower.includes('jira') || lower.includes('atlassian')) return 'jira'
-  return ''
-}
 
 export function TrackerIcon({ type }: { type: string }) {
   if (type === 'github') {

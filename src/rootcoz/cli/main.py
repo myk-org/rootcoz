@@ -3373,33 +3373,47 @@ def _date_offset(days: int = 0) -> str:
 
 
 def _format_cost(value: float | None, precision: int = 2) -> str:
-    """Format a USD cost value, returning 'N/A' when absent."""
+    """Format a USD cost. Unpriced calls count as $0, so a total is always shown."""
     if value is None:
-        return "N/A"
+        value = 0.0
     return f"${value:.{precision}f}"
 
 
-def _partial_note(row: dict[str, Any]) -> str:
-    """Mark a NUMERIC cost that is only a lower bound.
+def _format_call_cost(record: dict[str, Any]) -> str:
+    """Format ONE recorded call's cost.
 
-    An unavailable cost is already labelled N/A, so describing it as a partial
-    dollar total would misrepresent unknown spend as a number.
+    A missing price is unknown, not free, so a per-call line must say which it is.
+    Only aggregate totals coerce unpriced calls to $0, and those carry
+    ``_partial_note`` to disclose it.
+    """
+    value = record.get("cost_usd")
+    if value is None:
+        return "$0.0000 (no recorded price)"
+    return _format_cost(value, precision=4)
+
+
+def _partial_note(row: dict[str, Any]) -> str:
+    """Mark a total that is a floor rather than a complete sum.
+
+    Two reasons a total can be incomplete: pi-sidecar flagged a prompt that
+    covered only some turns, or calls with no recorded price were counted as $0.
     """
     if not row.get("cost_partial"):
         return ""
-    cost = row.get("cost_usd", row.get("total_cost_usd"))
-    if cost is None:
-        return ""
+    priced = row.get("priced_calls")
+    total = row.get("total_calls", row.get("calls"))
+    if priced is not None and total is not None and priced < total:
+        return f"  (lower bound: {total - priced} of {total} calls had no recorded price and were counted as $0)"
     return "  (partial: some AI turns had no catalog price, so this is a lower bound)"
 
 
 def _priced_note(row: dict[str, Any]) -> str:
-    """Explain a cost that is unavailable because some calls had no known price."""
+    """Disclose how many calls contributed a real price to a total."""
     priced = row.get("priced_calls")
     total = row.get("total_calls", row.get("calls"))
     if priced is None or total is None or priced >= total:
         return ""
-    return f"  ({priced}/{total} calls have a known price)"
+    return f"  ({priced}/{total} calls have a recorded price)"
 
 
 def _print_token_summary(data: dict[str, Any]) -> None:
@@ -3470,7 +3484,7 @@ def _print_job_token_usage(data: dict[str, Any]) -> None:
             f"Output: {rec.get('output_tokens', 0):,}"
         )
         typer.echo(
-            f"    Cost: {_format_cost(rec.get('cost_usd'), precision=4)}  Duration: {rec.get('duration_ms', 0)}ms"
+            f"    Cost: {_format_call_cost(rec)}  Duration: {rec.get('duration_ms', 0)}ms"
         )
 
 

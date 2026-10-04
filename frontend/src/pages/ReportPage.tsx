@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 import { api } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
 import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId } from '@/lib/utils'
@@ -8,7 +8,9 @@ import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import type { ResultResponse, CommentsAndReviews, AiModelsResponse } from '@/types'
-import { ReportProvider, useReportState, useReportDispatch, useRefreshEnrichments } from './report/ReportContext'
+import { useReportState, useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
+import { reviewKey } from '@/lib/reviewKey'
+import { ReportProvider } from './report/ReportContext'
 import { FailureCard } from './report/FailureCard'
 import { BulkUpdateBar } from './report/BulkUpdateBar'
 import { GroupSelectAll } from './report/GroupSelectAll'
@@ -33,7 +35,6 @@ import { ReportPortalButton } from './report/ReportPortalButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
-import { reviewKey } from './report/ReportContext'
 import { useAuth } from '@/lib/auth'
 
 
@@ -259,7 +260,7 @@ function ReportContent() {
         // best-effort refresh
       }
     },
-  }), [jobId])
+  }), [jobId, dispatch])
 
   useSSE(jobId ? `results:${jobId}` : null, resultEvents)
 

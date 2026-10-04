@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { MentionTextarea, _resetMentionCache } from '../MentionTextarea'
+import { MentionTextarea } from '../MentionTextarea'
+import { _resetMentionCache } from '../mentionUsers'
 
 /* ------------------------------------------------------------------ */
 /*  Mocks                                                              */

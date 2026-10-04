@@ -16,7 +16,7 @@ import {
 import { api } from '@/lib/api'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { ReportPortalPushResult } from '@/types'
-import { useReportState } from './ReportContext'
+import { useReportState } from '@/pages/report/reportState'
 
 interface RPPushMetadataProps {
   project?: string

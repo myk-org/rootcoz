@@ -28,6 +28,35 @@ const renderSection = (r: AnalysisResult) =>
   render(<TooltipProvider><AiSpendBreakdown result={r} /></TooltipProvider>)
 
 describe('AiSpendBreakdown', () => {
+  it('does not toggle the spend panel when the lower-bound explanation is clicked', () => {
+    // The trigger used to be nested inside the expansion button, so reading the
+    // explanation also expanded the panel. It now lives outside the button.
+    renderSection(result({
+      token_usage: summary([call({ cost_usd: 0.02 }), call({ cost_usd: null })], {
+        total_cost_usd: 0.02, cost_partial: true,
+      }),
+      failures: [{ id: 'f1', test_name: 'test_a', error: '', analysis: {} as never, error_signature: 'sig' }],
+    }))
+    const trigger = screen.getByRole('button', { name: /why this cost is a lower bound/i })
+    fireEvent.click(trigger)
+    expect(screen.queryByRole('button', { name: /by stage/i })).toBeNull()
+    expect(screen.getByRole('button', { name: /ai spend/i })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('renders the lower-bound trigger as a sibling of the expansion button', () => {
+    const { container } = renderSection(result({
+      token_usage: summary([call({ cost_usd: 0.02 }), call({ cost_usd: null })], {
+        total_cost_usd: 0.02, cost_partial: true,
+      }),
+    }))
+    const trigger = screen.getByRole('button', { name: /why this cost is a lower bound/i })
+    const toggle = screen.getByRole('button', { name: /ai spend/i })
+    // No button may be nested inside another button — invalid markup, and a click
+    // on the inner one would fire the outer handler.
+    expect(toggle.contains(trigger)).toBe(false)
+    expect(container.querySelectorAll('button button')).toHaveLength(0)
+  })
+
   it('breaks usage down by stage and reports failed-call waste', () => {
     renderSection(result({
       token_usage: summary([
@@ -48,11 +77,12 @@ describe('AiSpendBreakdown', () => {
     expect(screen.getByText(/not wall-clock/)).toBeInTheDocument()
   })
 
-  it('shows N/A averages for a zero-failure job and unavailable costs without inventing zeroes', () => {
-    renderSection(result({ token_usage: summary([call({ cost_usd: null, success: null })], { total_cost_usd: null }) }))
+  it('shows a $0.00 floor for unpriced costs without inventing a spend', () => {
+    renderSection(result({ token_usage: summary([call({ cost_usd: null, success: null })], { total_cost_usd: 0, cost_partial: true }) }))
     expand()
-    expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(2)
-    expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    expect(screen.getAllByText('N/A').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText(/\$0\.00/).length).toBeGreaterThan(0)
     // legacy rows have no recorded outcome, so zero failures is not proof of success
     expect(screen.getByText(/Some calls predate outcome tracking/)).toBeInTheDocument()
   })

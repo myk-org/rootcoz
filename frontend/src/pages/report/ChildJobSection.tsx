@@ -12,7 +12,7 @@ import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons
 import { ChevronDown, ChevronRight, ExternalLink, GitFork } from 'lucide-react'
 import { ReportPortalButton } from './ReportPortalButton'
 import { TestListSection } from './TestListSection'
-import { useReportState } from './ReportContext'
+import { useReportState } from '@/pages/report/reportState'
 
 interface ChildJobSectionProps {
   child: ChildJobAnalysis
@@ -67,7 +67,7 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
     }
   }, [expanded, setExpanded, hashId])
 
-  const failures = child.failures ?? []
+  const failures = useMemo(() => child.failures ?? [], [child.failures])
   const failedChildren = child.failed_children ?? []
 
   const groups = useMemo(

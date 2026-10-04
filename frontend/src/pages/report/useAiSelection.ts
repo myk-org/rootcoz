@@ -1,4 +1,4 @@
-import { useReportDispatch, useReportState } from './ReportContext'
+import { useReportDispatch, useReportState } from '@/pages/report/reportState'
 
 /**
  * One AI pair per report page, shared by every AI-assisted surface (issue creation,

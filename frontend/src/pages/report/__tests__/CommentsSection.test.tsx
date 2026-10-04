@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { useEffect } from 'react'
 import { CommentsSection, MENTION_RE } from '../CommentsSection'
-import { ReportProvider, useReportDispatch } from '../ReportContext'
+import { useReportDispatch } from '@/pages/report/reportState'
+import { ReportProvider } from '../ReportContext'
 import type { Comment } from '@/types'
 
 /* ------------------------------------------------------------------ */
@@ -86,7 +87,7 @@ beforeEach(async () => {
   mockPost.mockResolvedValue({ enrichments: {} })
   mockGet.mockResolvedValue({ users: [] })
   // Reset mention cache between tests
-  const { _resetMentionCache } = await import('../MentionTextarea')
+  const { _resetMentionCache } = await import('../mentionUsers')
   _resetMentionCache()
 })
 

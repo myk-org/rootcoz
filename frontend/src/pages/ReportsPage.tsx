@@ -16,7 +16,8 @@ import {
 } from '@/components/ui/table'
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible'
 import { TooltipProvider } from '@/components/ui/tooltip'
-import { useMetadataOptions, MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
@@ -363,13 +364,15 @@ function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpand
   const [pageByGroup, setPageByGroup] = useState<Record<string, number>>({})
 
   const q = search.toLowerCase()
+  const { details, groups } = data
+  const allGroups = groups
   const filteredDetails = useMemo(() => q
-    ? data.details.filter(d => d.test_name.toLowerCase().includes(q) || d.job_name.toLowerCase().includes(q))
-    : data.details,
-  [data.details, q])
+    ? details.filter(d => d.test_name.toLowerCase().includes(q) || d.job_name.toLowerCase().includes(q))
+    : details,
+  [details, q])
 
   const detailsByGroup = useMemo(() => {
-    const map: Record<string, typeof data.details> = {}
+    const map: Record<string, typeof details> = {}
     for (const d of filteredDetails) {
       const key = `${d.from_classification} → ${d.to_classification}`
       ;(map[key] ??= []).push(d)
@@ -377,9 +380,10 @@ function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpand
     return map
   }, [filteredDetails])
 
+
   /** When searching, derive groups from filtered details so counts match. */
   const filteredGroups = useMemo(() => {
-    if (!q) return data.groups
+    if (!q) return allGroups
     const counts: Record<string, { from: string; to: string; count: number }> = {}
     for (const d of filteredDetails) {
       const key = `${d.from_classification} → ${d.to_classification}`
@@ -387,7 +391,7 @@ function OverridesReport({ data, search, expandedGroups, onToggleGroup, onExpand
       counts[key].count++
     }
     return Object.values(counts)
-  }, [data.groups, filteredDetails, q])
+  }, [allGroups, filteredDetails, q])
 
   const allGroupKeys = useMemo(() => filteredGroups.map(g => `${g.from} → ${g.to}`), [filteredGroups])
 

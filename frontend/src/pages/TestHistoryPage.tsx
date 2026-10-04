@@ -15,21 +15,26 @@ function safeDecode(s: string): string {
 export function TestHistoryPage() {
   const { testName } = useParams<{ testName: string }>()
   const decoded = testName ? safeDecode(testName) : ''
-  const [data, setData] = useState<TestHistory | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  type LoadState =
+    | { key: string; status: 'done'; data: TestHistory }
+    | { key: string; status: 'error'; error: string }
+  const [state, setState] = useState<LoadState | null>(null)
 
   useEffect(() => {
     if (!decoded) return
     let active = true
-    setLoading(true)
-    setError('')
     api.get<TestHistory>(`/history/test/${encodeURIComponent(decoded)}`)
-      .then((data) => { if (active) setData(data) })
-      .catch((err) => { if (active) setError(err instanceof Error ? err.message : 'Failed to load') })
-      .finally(() => { if (active) setLoading(false) })
+      .then((data) => { if (active) setState({ key: decoded, status: 'done', data }) })
+      .catch((err) => { if (active) setState({ key: decoded, status: 'error', error: err instanceof Error ? err.message : 'Failed to load' }) })
     return () => { active = false }
-  }, [decoded])
+  }, [decoded, setState])
+
+  // Results belong to a single test name; until the request for the current
+  // one lands the page stays in its loading state.
+  const current = state?.key === decoded ? state : null
+  const data = current?.status === 'done' ? current.data : null
+  const error = current?.status === 'error' ? current.error : ''
+  const loading = current === null
 
   if (loading) return <div className="space-y-4"><Skeleton className="h-8 w-96" /><Skeleton className="h-48 w-full" /></div>
   if (error) return <p className="text-signal-red text-sm py-10 text-center">{error}</p>

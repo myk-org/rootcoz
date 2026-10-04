@@ -8,7 +8,7 @@ import {
 } from '@/components/ui/select'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip } from '@/components/shared/CredentialSourceLabel'
+import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip, UnverifiedModelsWarning } from '@/components/shared/CredentialSourceLabel'
 import { useId } from 'react'
 import type { ModelOption } from '@/components/shared/ModelCombobox'
 import { useProviderOptions, useProviderCatalog } from '@/lib/useProviderOptions'
@@ -105,7 +105,7 @@ export function PeerConfigList({
               ariaLabel={`Peer ${i + 1} model`}
               placeholder={strict && allowsUnverified(providerStatus, peer.ai_provider, forceServer) ? 'Enter model ID' : 'Model'}
             />
-            {strict && allowsUnverified(providerStatus, peer.ai_provider, forceServer) && <p className="text-xs text-text-tertiary">Models are not verified for this key. Suggestions are unverified; enter a model ID at your own risk.</p>}
+            {strict && <UnverifiedModelsWarning show={allowsUnverified(providerStatus, peer.ai_provider, forceServer)} />}
           </div>
         ))}
       </div>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/lib/api'
 import { collectAllTestKeys } from '@/lib/failureKeys'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
-import { useReportState } from './ReportContext'
+import { useReportState } from '@/pages/report/reportState'
 
 interface AllReviewedPromptProps {
   jobId: string

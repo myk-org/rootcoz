@@ -876,8 +876,8 @@ class TestGetTokenUsageSummary:
         assert summary["total_cost_usd"] == pytest.approx(0.09)
 
     @pytest.mark.asyncio
-    async def test_unknown_only_cost_is_unavailable_not_zero(self, _storage) -> None:
-        """Spend on a model with unknown price is unavailable, never a real $0."""
+    async def test_unknown_only_cost_is_a_floor_not_zero(self, _storage) -> None:
+        """All-unpriced spend still reports a total, flagged as a floor."""
         await storage.record_token_usage(
             job_id="job-1",
             ai_provider="gemini",
@@ -889,15 +889,19 @@ class TestGetTokenUsageSummary:
             duration_ms=1000,
         )
         summary = await storage.get_token_usage_summary()
-        assert summary["total_cost_usd"] is None
+        assert summary["total_cost_usd"] == pytest.approx(0.0)
         assert summary["priced_calls"] == 0
         assert summary["total_calls"] == 1
+        # Nothing was priced, so the $0 total is a floor, not a complete spend.
+        assert summary["cost_partial"] == 1
         # token columns are NOT NULL and still total normally
         assert summary["total_input_tokens"] == 100
 
     @pytest.mark.asyncio
-    async def test_mixed_priced_and_unknown_cost_is_unavailable(self, _storage) -> None:
-        """A partial sum over unknown rows is a floor, so it is not reported as the total."""
+    async def test_mixed_priced_and_unknown_cost_keeps_the_known_spend(
+        self, _storage
+    ) -> None:
+        """One unpriced call must not discard the priced spend beside it."""
         await self._insert_test_records()
         await storage.record_token_usage(
             job_id="job-3",
@@ -910,15 +914,17 @@ class TestGetTokenUsageSummary:
             duration_ms=100,
         )
         summary = await storage.get_token_usage_summary()
-        assert summary["total_cost_usd"] is None
+        assert summary["total_cost_usd"] == pytest.approx(0.09)
         assert summary["priced_calls"] == 3
         assert summary["total_calls"] == 4
+        # The total excludes an unpriced call, so it is a floor.
+        assert summary["cost_partial"] == 1
 
     @pytest.mark.asyncio
     async def test_breakdown_marks_unpriced_groups_and_sorts_them_last(
         self, _storage
     ) -> None:
-        """Group rows expose priced/total calls and never price an unknown group at zero."""
+        """Group rows expose priced/total calls and flag an unpriced group as a floor."""
         await self._insert_test_records()
         await storage.record_token_usage(
             job_id="job-3",
@@ -932,17 +938,43 @@ class TestGetTokenUsageSummary:
         summary = await storage.get_token_usage_summary(group_by="model")
         rows = {row["group_key"]: row for row in summary["breakdown"]}
         unknown = rows["gemini / key-discovered"]
-        assert unknown["cost_usd"] is None
+        assert unknown["cost_usd"] == pytest.approx(0.0)
         assert unknown["priced_calls"] == 0
         assert unknown["call_count"] == 1
-        # complete groups rank ahead of unknown ones regardless of token volume
+        assert unknown["cost_partial"] == 1
+        # complete groups rank ahead of unpriced ones regardless of token volume
         assert list(rows).index("gemini / key-discovered") == len(rows) - 1
 
     @pytest.mark.asyncio
-    async def test_dashboard_period_reports_unknown_cost_as_unavailable(
+    async def test_free_model_is_a_complete_zero_not_a_floor(self, _storage) -> None:
+        """A model billed at $0.00 is priced, so its total is exact, not a floor.
+
+        pi-sidecar reports a real cost_usd of 0 for free models; only a missing
+        price is unknown. That distinction must survive the aggregation.
+        """
+        await storage.record_token_usage(
+            job_id="job-1",
+            ai_provider="openrouter",
+            ai_model="free-model",
+            call_type="analysis",
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.0,
+            duration_ms=1000,
+        )
+        summary = await storage.get_token_usage_summary()
+        assert summary["total_cost_usd"] == pytest.approx(0.0)
+        assert summary["priced_calls"] == 1
+        assert summary["cost_partial"] == 0
+        dashboard = await storage.get_token_usage_dashboard_summary()
+        assert dashboard["today"]["cost_usd"] == pytest.approx(0.0)
+        assert dashboard["today"]["cost_partial"] == 0
+
+    @pytest.mark.asyncio
+    async def test_dashboard_period_reports_unknown_cost_as_a_floor(
         self, _storage
     ) -> None:
-        """Period cards must not present unknown spend as a complete total."""
+        """Period cards always show a dollar total, flagged when incomplete."""
         await storage.record_token_usage(
             job_id="job-1",
             ai_provider="gemini",
@@ -954,13 +986,15 @@ class TestGetTokenUsageSummary:
             duration_ms=1000,
         )
         result = await storage.get_token_usage_dashboard_summary()
-        assert result["today"]["cost_usd"] is None
+        assert result["today"]["cost_usd"] == pytest.approx(0.0)
         assert result["today"]["priced_calls"] == 0
         assert result["today"]["calls"] == 1
+        assert result["today"]["cost_partial"] == 1
         top_model = next(
             m for m in result["top_models"] if m["model"] == "gemini / key-discovered"
         )
-        assert top_model["cost_usd"] is None
+        assert top_model["cost_usd"] == pytest.approx(0.0)
+        assert top_model["cost_partial"] == 1
 
     @pytest.mark.asyncio
     async def test_admin_aggregates_surface_partial_flag(self, _storage) -> None:

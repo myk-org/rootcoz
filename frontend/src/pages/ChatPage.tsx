@@ -35,22 +35,22 @@ function analysisAiDefaults(job: JobInfo | null): { provider: string; model: str
 
 export function ChatPage() {
   const { jobId } = useParams<{ jobId: string }>()
-  const [jobInfo, setJobInfo] = useState<JobInfo | null>(null)
-  const [jobLoaded, setJobLoaded] = useState(false)
+  // Job info is loaded asynchronously; tag it with the job it belongs to so a
+  // result for a previously visited job is never shown for the current one.
+  const [jobState, setJobState] = useState<{ jobId: string; info: JobInfo | null } | null>(null)
 
   useEffect(() => {
     if (!jobId) return
     let ignore = false
-    setJobLoaded(false)
     api
       .get<{ result: JobInfo }>(`/results/${jobId}`)
       .then((res) => {
         if (ignore) return
-        if (res.result) setJobInfo(res.result)
+        setJobState({ jobId, info: res.result ?? null })
       })
-      .catch(() => {})
-      .finally(() => {
-        if (!ignore) setJobLoaded(true)
+      .catch(() => {
+        if (ignore) return
+        setJobState({ jobId, info: null })
       })
     return () => {
       ignore = true
@@ -58,6 +58,10 @@ export function ChatPage() {
   }, [jobId])
 
   if (!jobId) return null
+
+  const currentJobState = jobState?.jobId === jobId ? jobState : null
+  const jobInfo = currentJobState?.info ?? null
+  const jobLoaded = currentJobState !== null
 
   const { provider, model } = analysisAiDefaults(jobInfo)
   const buildDisplayId = resolveBuildDisplayId(jobInfo ?? undefined)

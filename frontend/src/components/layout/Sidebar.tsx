@@ -101,12 +101,13 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
   // ─── Server version ─────────────────────────────────────────────
   const [version, setVersion] = useState('')
+  // While auth is still resolving the version is meaningless; derive it instead
+  // of clearing it from an effect so no stale value is ever rendered.
+  const showVersion = !loading && authenticated
+  const shownVersion = showVersion ? version : ''
 
   useEffect(() => {
-    if (loading || !authenticated) {
-      setVersion('')
-      return
-    }
+    if (!showVersion) return
 
     const controller = new AbortController()
 
@@ -123,7 +124,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
     fetchVersion()
     return () => { controller.abort() }
-  }, [loading, authenticated])
+  }, [showVersion])
 
   // ─── Drag resize ────────────────────────────────────────────────
   const [isDragging, setIsDragging] = useState(false)
@@ -235,9 +236,9 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     </nav>
   )
 
-  const isValidVersion = Boolean(version && version !== 'unknown')
+  const isValidVersion = Boolean(shownVersion && shownVersion !== 'unknown')
   const releaseUrl = isValidVersion
-    ? `https://github.com/myk-org/rootcoz/releases/tag/v${encodeURIComponent(version)}`
+    ? `https://github.com/myk-org/rootcoz/releases/tag/v${encodeURIComponent(shownVersion)}`
     : undefined
 
   const versionLink = (
@@ -250,7 +251,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
         collapsed && 'gap-1',
       )}
     >
-      {collapsed ? 'v' : <span className="font-semibold">RootCoz v{version}</span>}
+      {collapsed ? 'v' : <span className="font-semibold">RootCoz v{shownVersion}</span>}
     </a>
   )
 
@@ -259,7 +260,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
       {collapsed ? (
         <Tooltip>
           <TooltipTrigger asChild>{versionLink}</TooltipTrigger>
-          <TooltipContent side="right">rootcoz v{version}</TooltipContent>
+          <TooltipContent side="right">rootcoz v{shownVersion}</TooltipContent>
         </Tooltip>
       ) : (
         versionLink

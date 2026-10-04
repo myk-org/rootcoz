@@ -4642,24 +4642,32 @@ class TestTokenUsageCommand:
         assert "claude-sonnet" in result.output
         mock_client.get_token_usage_summary.assert_called_once()
 
-    def test_token_usage_reports_unknown_pricing_not_zero(self, mock_client):
-        """Unknown spend prints N/A with its priced-calls disclosure, never $0.00."""
+    def test_token_usage_reports_unknown_pricing_as_a_floor(self, mock_client):
+        """Unpriced spend prints a $0.00 floor with its disclosure, never N/A."""
         mock_client.get_token_usage_summary.return_value = {
-            "today": {"calls": 3, "tokens": 900, "cost_usd": None, "priced_calls": 0},
+            "today": {
+                "calls": 3,
+                "tokens": 900,
+                "cost_usd": 0.0,
+                "priced_calls": 0,
+                "cost_partial": 1,
+            },
             "top_models": [
                 {
                     "model": "key-discovered",
                     "calls": 3,
-                    "cost_usd": None,
+                    "cost_usd": 0.0,
                     "priced_calls": 0,
+                    "cost_partial": 1,
                 },
             ],
         }
         result = runner.invoke(app, ["admin", "token-usage"])
         assert result.exit_code == 0
-        assert "N/A" in result.output
-        assert "$0.00" not in result.output
-        assert "0/3 calls have a known price" in result.output
+        assert "N/A" not in result.output
+        assert "$0.00" in result.output
+        assert "0/3 calls have a recorded price" in result.output
+        assert "lower bound" in result.output
 
     def test_token_usage_marks_partial_prompt_cost(self, mock_client):
         """A cost covering only some turns is labelled a lower bound."""
@@ -4706,21 +4714,21 @@ class TestTokenUsageCommand:
         assert result.exit_code == 0
         assert "lower bound" in result.output
 
-    def test_token_usage_does_not_call_unavailable_cost_partial(self, mock_client):
-        """Unknown-only spend stays N/A — never described as a partial dollar total."""
+    def test_token_usage_labels_unpriced_floor_as_lower_bound(self, mock_client):
+        """Unpriced-only spend is a $0.00 floor, disclosed as a lower bound."""
         mock_client.get_token_usage_summary.return_value = {
             "today": {
                 "calls": 3,
                 "tokens": 900,
-                "cost_usd": None,
+                "cost_usd": 0.0,
                 "priced_calls": 0,
                 "cost_partial": 1,
             },
         }
         result = runner.invoke(app, ["admin", "token-usage"])
         assert result.exit_code == 0
-        assert "lower bound" not in result.output
-        assert "N/A" in result.output
+        assert "N/A" not in result.output
+        assert "lower bound" in result.output
 
     def test_token_usage_summary_json(self, mock_client):
         mock_client.get_token_usage_summary.return_value = {
@@ -4812,6 +4820,73 @@ class TestTokenUsageCommand:
         assert "claude" in result.output
         mock_client.get_token_usage_for_job.assert_called_once_with("abc-123")
 
+    def test_token_usage_job_discloses_an_unpriced_call(self, mock_client):
+        """A per-call NULL price is unknown, not free, so the line must say so.
+
+        Only aggregate totals coerce unpriced calls to $0, and those carry a
+        partial note. A per-call line has no such disclosure, so it states it.
+        """
+        mock_client.get_token_usage_for_job.return_value = {
+            "job_id": "abc-123",
+            "records": [
+                {
+                    "call_type": "analysis",
+                    "ai_provider": "openrouter",
+                    "ai_model": "key-discovered",
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cost_usd": None,
+                    "duration_ms": 1200,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--job-id", "abc-123"])
+        assert result.exit_code == 0
+        assert "(no recorded price)" in result.output
+
+    def test_token_usage_job_keeps_a_priced_call_undisclosed(self, mock_client):
+        """A priced call prints its figure with no unpriced-call caveat."""
+        mock_client.get_token_usage_for_job.return_value = {
+            "job_id": "abc-123",
+            "records": [
+                {
+                    "call_type": "analysis",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet",
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cost_usd": 0.01,
+                    "duration_ms": 1200,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--job-id", "abc-123"])
+        assert result.exit_code == 0
+        assert "$0.0100" in result.output
+        assert "(no recorded price)" not in result.output
+
+    def test_token_usage_job_discloses_a_free_zero_call(self, mock_client):
+        """A numeric $0 from a free model is a complete figure, not an unknown one."""
+        mock_client.get_token_usage_for_job.return_value = {
+            "job_id": "abc-123",
+            "records": [
+                {
+                    "call_type": "analysis",
+                    "ai_provider": "openrouter",
+                    "ai_model": "stealth/space-bunny-alpha",
+                    "input_tokens": 1000,
+                    "output_tokens": 500,
+                    "cost_usd": 0,
+                    "cost_partial": False,
+                    "duration_ms": 1200,
+                },
+            ],
+        }
+        result = runner.invoke(app, ["admin", "token-usage", "--job-id", "abc-123"])
+        assert result.exit_code == 0
+        assert "$0.0000" in result.output
+        assert "(no recorded price)" not in result.output
+
     def test_token_usage_job_id_json(self, mock_client):
         mock_client.get_token_usage_for_job.return_value = {
             "job_id": "abc-123",
@@ -4865,7 +4940,7 @@ class TestTokenUsageCommand:
         assert call_kwargs["ai_provider"] == "claude"
 
     def test_token_usage_job_cost_none(self, mock_client):
-        """cost_usd=None should display as N/A."""
+        """cost_usd=None is counted as $0 in the per-job total, not dropped."""
         mock_client.get_token_usage_for_job.return_value = {
             "job_id": "x",
             "records": [
@@ -4882,7 +4957,8 @@ class TestTokenUsageCommand:
         }
         result = runner.invoke(app, ["admin", "token-usage", "--job-id", "x"])
         assert result.exit_code == 0
-        assert "N/A" in result.output
+        assert "N/A" not in result.output
+        assert "$0.0000" in result.output
 
 
 class TestAnalyzeCommentIntentCommand:

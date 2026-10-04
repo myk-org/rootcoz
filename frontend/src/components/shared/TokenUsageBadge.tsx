@@ -1,6 +1,12 @@
 import { Zap } from 'lucide-react'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { formatCompactNumber, formatCost, formatSummedDuration } from '@/lib/format'
+import { formatCompactNumber, formatSummedDuration } from '@/lib/format'
+import {
+  formatResolvedCost,
+  lowerBoundSentence,
+  LOWER_BOUND_FALLBACK_NOTE,
+  resolveUsageCost,
+} from '@/lib/usageCost'
 import type { TokenUsageSummary } from '@/types'
 
 type TokenUsageBadgeProps =
@@ -25,11 +31,16 @@ export function TokenUsageBadge({ usage, graftEstimatedTokensSaved }: TokenUsage
     )
   }
 
-  const cost = usage.total_cost_usd == null ? 'Unavailable' : formatCost(usage.total_cost_usd)
-  // Only a numeric cost can be a lower bound; "Unavailable+" would mean nothing.
-  const showPartial = usage.cost_partial === true && usage.total_cost_usd != null
-  const partialNote = showPartial
-    && 'Partial: some AI turns had no catalog price, so this is a lower bound.'
+  // A recorded total is authoritative; a legacy null is *unavailable*, not free, so
+  // it falls back to the floor its own calls support. `partial` says whether calls
+  // were excluded from that figure.
+  const resolved = resolveUsageCost(usage)
+  const cost = formatResolvedCost(resolved)
+  const showPartial = resolved.partial
+  const pricedCalls = usage.calls.filter(c => c.cost_usd != null).length
+  const partialNote = showPartial && (
+    lowerBoundSentence(usage.calls.length, pricedCalls) ?? LOWER_BOUND_FALLBACK_NOTE
+  )
   const summedDuration = formatSummedDuration(usage.total_duration_ms)
   const sources = new Set(usage.calls.map(call => call.credential_source))
   const source = usage.credential_source ?? (sources.has('user') && sources.has('server') ? 'mixed'

@@ -1,28 +1,17 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useSyncExternalStore, type ReactNode } from 'react'
 import { useAuth } from '@/lib/auth'
+import {
+  SSEContext,
+  getSSEManagerSnapshot,
+  setCurrentSSEManager,
+  subscribeToSSEManager,
+  type SSEManager,
+  type Subscription,
+} from '@/lib/sseManager'
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/** Callback invoked when an SSE event arrives for a subscribed topic. */
-type EventHandler = (data: string) => void
-
-/** A subscription registered by a useSSE consumer. */
-interface Subscription {
-  id: number
-  topic: string
-  /** Map of event-name → handler. */
-  events: Record<string, EventHandler>
-  /** Called when the underlying EventSource reconnects (optional). */
-  onReconnect?: () => void
-}
-
-/** Internal manager that coordinates subscriptions, EventSource, and BroadcastChannel. */
-interface SSEManager {
-  subscribe(sub: Subscription): void
-  unsubscribe(id: number): void
-}
 
 // ---------------------------------------------------------------------------
 // BroadcastChannel protocol
@@ -572,104 +561,33 @@ function createFallbackManager(): SSEManager & { destroy(): void } {
 }
 
 // ---------------------------------------------------------------------------
-// React context
+// SSEProvider component
 // ---------------------------------------------------------------------------
-
-const SSEContext = createContext<SSEManager | null>(null)
-
-let nextSubId = 1
 
 export function SSEProvider({ children }: { children: ReactNode }) {
   const { authenticated } = useAuth()
-  const [manager, setManager] = useState<(SSEManager & { destroy(): void }) | null>(null)
 
-  // Create/destroy manager based on authentication state.
+  // Create/destroy the manager based on authentication state.
   // When the user logs out, the manager is destroyed so a logged-out
   // leader tab doesn't keep sending heartbeats and failing /api/stream
   // calls with 401 — blocking other tabs from taking over.
-  // Uses useState (not useRef) so the context value triggers a rerender
-  // when the manager is created after login.
+  // The manager is published through the module-level store (not React state)
+  // so publishing it never cascades a synchronous render from the effect.
   useEffect(() => {
-    if (authenticated) {
-      const m = typeof BroadcastChannel !== 'undefined'
-        ? createSSEManager()
-        : createFallbackManager()
-      setManager(m)
-      return () => { m.destroy() }
-    } else {
-      setManager(null)
+    if (!authenticated) return
+    const manager = typeof BroadcastChannel !== 'undefined'
+      ? createSSEManager()
+      : createFallbackManager()
+    setCurrentSSEManager(manager)
+    return () => {
+      setCurrentSSEManager(null)
+      manager.destroy()
     }
   }, [authenticated])
+
+  const manager = useSyncExternalStore(subscribeToSSEManager, getSSEManagerSnapshot, getSSEManagerSnapshot)
 
   const value = authenticated ? manager : null
 
   return <SSEContext.Provider value={value}>{children}</SSEContext.Provider>
-}
-
-// ---------------------------------------------------------------------------
-// useSSE hook
-// ---------------------------------------------------------------------------
-
-/**
- * Subscribe to a multiplexed SSE topic.
- *
- * All `useSSE` hooks share a single EventSource connection via the
- * `SSEProvider`. The provider aggregates subscribed topics and connects
- * to `GET /api/stream?topics=...`. Events arrive prefixed with the topic
- * (e.g., `navbar:active-count`) and are dispatched to the matching hook.
- *
- * @param topic  Topic to subscribe to (e.g., `'navbar'`, `'results:abc123'`).
- *               Pass `null` to disable the subscription (conditional SSE).
- * @param events Map of event-name → handler callback.
- * @param options.onReconnect Called when the underlying EventSource reconnects.
- *
- * @example
- * useSSE('navbar', {
- *   'active-count': (data) => setActiveCount(parseInt(data, 10)),
- *   'unread-count': (data) => setUnreadCount(parseInt(data, 10)),
- * })
- *
- * @example
- * // Conditional subscription — null topic means no connection
- * useSSE(isActive ? `results:${jobId}` : null, {
- *   'status-changed': () => refetch(),
- * })
- */
-export function useSSE(
-  topic: string | null,
-  events: Record<string, EventHandler>,
-  options?: { onReconnect?: () => void },
-): void {
-  const manager = useContext(SSEContext)
-  const eventsRef = useRef(events)
-  eventsRef.current = events
-  const onReconnectRef = useRef(options?.onReconnect)
-  onReconnectRef.current = options?.onReconnect
-
-  // Stable subscription ID per hook instance
-  const subIdRef = useRef(nextSubId++)
-
-  useEffect(() => {
-    if (!manager || !topic) return
-
-    const sub: Subscription = {
-      id: subIdRef.current,
-      topic,
-      // Wrap in getters so the manager always calls the latest callbacks
-      get events() {
-        return Object.fromEntries(
-          Object.keys(eventsRef.current).map((k) => [
-            k,
-            (data: string) => eventsRef.current[k]?.(data),
-          ]),
-        )
-      },
-      get onReconnect() {
-        return onReconnectRef.current
-      },
-    }
-
-    manager.subscribe(sub)
-    return () => manager.unsubscribe(sub.id)
-  }, [manager, topic])
 }

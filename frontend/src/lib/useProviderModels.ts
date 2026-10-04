@@ -17,18 +17,23 @@ export async function fetchModelsForProvider(provider: string): Promise<ModelOpt
 }
 
 export function useProviderModels(provider: string): ModelOption[] {
-  const [models, setModels] = useState<ModelOption[]>([])
   const normalized = normalizeProvider(provider)
+  // Models are stored together with the provider they were fetched for, so a
+  // provider switch (including clearing it) empties the list synchronously
+  // rather than showing the previous provider's models until the fetch lands.
+  const [result, setResult] = useState<{ provider: string; models: ModelOption[] }>({ provider: '', models: [] })
+  if (result.provider !== normalized) {
+    setResult({ provider: normalized, models: [] })
+  }
 
   useEffect(() => {
-    if (!normalized) { setModels([]); return }
+    if (!normalized) return
     let ignore = false
-    setModels([])
     fetchModelsForProvider(normalized)
-      .then(m => { if (!ignore) setModels(m) })
-      .catch(() => { if (!ignore) setModels([]) })
+      .then(m => { if (!ignore) setResult({ provider: normalized, models: m }) })
+      .catch(() => { if (!ignore) setResult({ provider: normalized, models: [] }) })
     return () => { ignore = true }
   }, [normalized])
 
-  return models
+  return result.models
 }

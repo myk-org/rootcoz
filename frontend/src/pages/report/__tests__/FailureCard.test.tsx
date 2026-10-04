@@ -82,10 +82,10 @@ describe('FailureCard primary usage', () => {
     expect(screen.queryByText('Usage unavailable')).not.toBeInTheDocument()
   })
 
-  it('does not show a cost of zero when cost is unavailable', () => {
-    showCard(1, { ...usage, total_cost_usd: null })
-    expect(screen.getByText(/Unavailable/)).toBeTruthy()
-    expect(screen.queryByText(/\$0.00/)).toBeNull()
+  it('shows a $0.00 floor, marked as a lower bound, when cost is unpriced', () => {
+    showCard(1, { ...usage, total_cost_usd: null, cost_partial: true })
+    expect(screen.queryByText(/Unavailable/)).toBeNull()
+    expect(screen.getAllByText(/\$0.00/).length).toBeGreaterThan(0)
   })
 
   it('no longer renders the bare provider/model inputs on the card', () => {

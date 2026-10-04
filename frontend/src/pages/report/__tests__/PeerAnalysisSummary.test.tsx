@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { getPeerAiLabels } from '../PeerAnalysisSummary'
+import { getPeerAiLabels } from '../peerAiLabels'
 import type { PeerDebate } from '@/types'
 
 function debate(ai_configs: PeerDebate['ai_configs']): { debate: PeerDebate } {

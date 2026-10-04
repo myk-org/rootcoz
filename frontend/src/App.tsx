@@ -1,6 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 
-import { AuthProvider } from '@/lib/auth'
+import { AuthProvider } from '@/lib/AuthProvider'
 import { SSEProvider } from '@/lib/SSEProvider'
 import { Layout } from '@/components/layout/Layout'
 import { ProtectedRoute } from '@/components/shared/ProtectedRoute'

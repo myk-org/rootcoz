@@ -4,6 +4,16 @@ import type { AnalysisResult } from '@/types'
 import { formatCost, formatCompactNumber, formatSummedDuration } from '@/lib/format'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
+  formatCostCell,
+  formatResolvedCost,
+  lowerBoundSentence,
+  LOWER_BOUND_FALLBACK_NOTE,
+  pricedCallCount,
+  resolveUsageCost,
+  UNAVAILABLE_COST,
+  type UsageCost,
+} from '@/lib/usageCost'
+import {
   analyzedFailingTests,
   peerGroups,
   primaryGroups,
@@ -14,16 +24,37 @@ import {
   type StageUsage,
 } from './aiSpend'
 
-/** Cost or token total that may be unavailable — never render those as zero. */
-function cost(value: number | null): string {
-  return value == null ? 'Unavailable' : formatCost(value)
+/** A plain numeric figure. A `null` figure is *unavailable* and must not read as a
+ *  free $0 — that is the state this reporting removed. */
+function CostFigure({ value }: { value: number | null }) {
+  return <span>{value == null ? UNAVAILABLE_COST : formatCost(value)}</span>
 }
 
-function Cost({ value }: { value: number | null }) {
-  return <span className={value == null ? 'italic text-text-tertiary' : ''}>{cost(value)}</span>
+/** A recorded usage summary's cost, with its floor disclosure.
+ *
+ *  A recorded total is authoritative. A legacy `null` means *unavailable*, so it
+ *  renders as unavailable unless the summary's own calls support a floor. */
+function Cost({ usage }: { usage: UsageCost | null | undefined }) {
+  const resolved = resolveUsageCost(usage)
+  const calls = usage?.calls ?? []
+  return (
+    <span>
+      {formatResolvedCost(resolved)}
+      {resolved.partial && (
+        <Hint
+          label="Why this cost is a lower bound"
+          trigger="lower bound"
+          content={lowerBoundSentence(calls.length, pricedCallCount(usage)) ?? LOWER_BOUND_FALLBACK_NOTE}
+        />
+      )}
+    </span>
+  )
 }
 
-/** Keyboard-focusable tooltip trigger — plain spans hide the explanation from keyboard users. */
+/** Keyboard-focusable tooltip trigger — plain spans hide the explanation from keyboard users.
+ *
+ *  Rendered as a SIBLING of any enclosing button, never inside one: a nested button
+ *  is invalid markup, and clicking the explanation would also fire the parent. */
 function Hint({ label, trigger, content }: { label: string; trigger: string; content: string }) {
   return (
     <Tooltip>
@@ -51,7 +82,7 @@ function StageRow({ stage }: { stage: StageUsage }) {
       </td>
       <td className="py-1 pr-2 text-right font-mono text-xs">{formatCompactNumber(stage.totalTokens)}</td>
       <td className="py-1 text-right font-mono text-xs">
-        <Cost value={stage.costUsd} />
+        <CostFigure value={stage.costUsd} />
         {stage.partial && <span className="text-text-tertiary"> (lower bound)</span>}
       </td>
     </tr>
@@ -99,7 +130,7 @@ function PrimaryGroupRow({ group }: { group: PrimaryGroup }) {
         {group.childLabel || 'top-level'} · shared by {group.failureCount} test{group.failureCount === 1 ? '' : 's'}
       </td>
       <td className="py-1 text-right font-mono text-xs">
-        <Cost value={group.usage?.total_cost_usd ?? null} />
+        <Cost usage={group.usage} />
       </td>
     </tr>
   )
@@ -117,18 +148,19 @@ function PeerGroupRow({ group }: { group: PeerGroup }) {
             <li key={`${row.round}-${row.agentLabel}-${i}`} className="font-mono">
               R{row.round} {row.agentLabel} · {row.agent}:{' '}
               {row.usage
-                ? `${formatCompactNumber(row.usage.total_tokens)} tokens · ${cost(row.usage.cost_usd)}`
+                ? `${formatCompactNumber(row.usage.total_tokens)} tokens · ${formatCostCell(row.usage.cost_usd)}`
                 : <span className="italic">usage unavailable</span>}
             </li>
           ))}
         </ul>
       </td>
-      <td className="py-1 text-right font-mono text-xs"><Cost value={group.costUsd} /></td>
+      <td className="py-1 text-right font-mono text-xs"><CostFigure value={group.costUsd} />
+        {group.partial && <span className="text-text-tertiary"> (lower bound)</span>}</td>
     </tr>
   )
 }
 
-function AverageRow({ label, hint, value }: { label: string; hint: string; value: number | null }) {
+function AverageRow({ label, hint, value, partial }: { label: string; hint: string; value: number | null; partial?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-4 text-xs">
       <span className="flex items-center gap-1 text-text-tertiary">
@@ -138,6 +170,11 @@ function AverageRow({ label, hint, value }: { label: string; hint: string; value
       {value == null
         ? <span className="font-mono italic text-text-tertiary">N/A</span>
         : <span className="font-mono">{formatCost(value)}</span>}
+      {/* The numerator is a floor, so the mean inherits that — marking it keeps the
+          row honest instead of presenting a partial sum as an exact average. */}
+      {partial && value != null && (
+        <span className="ml-auto font-mono text-[10px] text-text-tertiary">lower bound</span>
+      )}
     </div>
   )
 }
@@ -149,15 +186,18 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
   const groups = useMemo(() => primaryGroups(result), [result])
   const peers = useMemo(() => peerGroups(result), [result])
   const averages = useMemo(
-    () => spendAverages(result.token_usage?.total_cost_usd, analyzedFailingTests(result), groups, peers),
+    () => spendAverages(result.token_usage, analyzedFailingTests(result), groups, peers),
     [result, groups, peers],
   )
 
   const failedStages = stages.filter(s => s.failedCalls > 0)
   const failedCalls = failedStages.reduce((sum, s) => sum + s.failedCalls, 0)
-  const wastedCost = failedStages.some(s => s.failedCostUsd == null)
-    ? null
-    : failedStages.reduce((sum, s) => sum + s.failedCostUsd!, 0)
+  // Unpriced failed calls count as $0, so this is the spend we can prove — and it
+  // is a floor only when a FAILED call is unpriced. A stage whose unpriced calls
+  // all succeeded has a complete failed-spend figure, so stage-wide partialness
+  // must not flag it.
+  const wastedCost = failedStages.reduce((sum, s) => sum + s.failedCostUsd, 0)
+  const wastedPartial = failedStages.some(s => s.failedPartial)
   // Any stage can hold legacy calls with no recorded outcome, so the failed-call
   // count is a lower bound whenever a single stage's outcomes are unknown.
   const outcomeUnknown = stages.some(s => !s.outcomeKnown)
@@ -167,19 +207,24 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
 
   return (
     <div className="rounded-lg border border-border-muted animate-slide-up">
-      <button
-        type="button"
-        className="flex w-full items-center gap-3 p-4 text-left"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-      >
-        {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />}
-        <Coins className="h-4 w-4 shrink-0 text-signal-green" />
-        <h2 className="text-xs font-display uppercase tracking-widest text-text-tertiary">AI Spend</h2>
-        <span className="ml-auto font-mono text-xs text-text-secondary">
-          {stages.reduce((sum, s) => sum + s.calls, 0)} calls · <Cost value={result.token_usage?.total_cost_usd ?? null} />
+      {/* The header is a flex ROW of siblings: the cost block sits OUTSIDE the
+          expansion button, because a tooltip trigger nested inside it is invalid
+          markup and its click would toggle the panel. */}
+      <div className="flex w-full items-center gap-3 p-4">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+        >
+          {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />}
+          <Coins className="h-4 w-4 shrink-0 text-signal-green" />
+          <h2 className="text-xs font-display uppercase tracking-widest text-text-tertiary">AI Spend</h2>
+        </button>
+        <span className="shrink-0 font-mono text-xs text-text-secondary">
+          {stages.reduce((sum, s) => sum + s.calls, 0)} calls · <Cost usage={result.token_usage} />
         </span>
-      </button>
+      </div>
 
       {expanded && (
         <div className="space-y-5 border-t border-border-muted p-4">
@@ -210,7 +255,8 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
                   <span>
                     {failedCalls} failed call{failedCalls === 1 ? '' : 's'}
                     {outcomeUnknown && ' (lower bound — some calls have no recorded outcome)'}
-                    {' · '}cost wasted: <Cost value={wastedCost} />
+                    {' · '}cost wasted: <CostFigure value={wastedCost} />
+                    {wastedPartial && <span className="text-text-tertiary"> (lower bound)</span>}
                     {' · '}{failedStages.map(s => s.callType).join(', ')}
                   </span>
                 </p>
@@ -248,17 +294,18 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
             <h3 className="text-[10px] font-display uppercase tracking-widest text-text-tertiary">Averages</h3>
             <AverageRow
               label="Cost per failing test"
-              hint="Job total cost / analyzed failed tests. Includes shared job overhead (clone, cross-failure, agent routing) and may include peer usage."
+              hint={`Job total cost / analyzed failed tests. Includes shared job overhead (clone, cross-failure, agent routing) and may include peer usage.${averages.costPerFailingTestPartial ? ' The job total is a lower bound because a call had no recorded price, so this average is one too.' : ''}`}
               value={averages.costPerFailingTest}
+              partial={averages.costPerFailingTestPartial}
             />
             <AverageRow
               label="Cost per unique failure group"
-              hint={`Sum of attributable primary group costs / ${averages.groupsWithKnownCost} of ${averages.totalGroups} groups with a known cost. Groups with unavailable cost are excluded from both sides.`}
+              hint={`Sum of attributable primary group costs / ${averages.groupsWithKnownCost} of ${averages.totalGroups} groups with a completely priced cost.${averages.groupsWithFloorCost > 0 ? ` ${averages.groupsWithFloorCost} group(s) are excluded because their cost is a lower bound.` : ''} Groups with unavailable cost are excluded from both sides.`}
               value={averages.costPerUniqueGroup}
             />
             <AverageRow
               label="Peer cost per debated group"
-              hint={`Sum of known peer debate costs / ${averages.peersWithKnownCost} of ${averages.debatedGroups} debated group(s) with a known cost; the rest are excluded from both sides.`}
+              hint={`Sum of known peer debate costs / ${averages.peersWithKnownCost} of ${averages.debatedGroups} debated group(s) with a completely priced cost; the rest are excluded from both sides.${averages.peersWithFloorCost > 0 ? ` ${averages.peersWithFloorCost} debate(s) are excluded because their cost is a lower bound.` : ''}`}
               value={averages.peerCostPerDebatedGroup}
             />
           </section>

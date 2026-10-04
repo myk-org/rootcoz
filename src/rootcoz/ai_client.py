@@ -181,6 +181,10 @@ def _source_for_sidecar(provider: str) -> str:
     return "api"
 
 
+# Marks model IDs taken from the bundled snapshot rather than a live listing.
+_SNAPSHOT_SOURCE = "snapshot"
+
+
 def is_cursor_provider(provider: str) -> bool:
     """Whether a sidecar provider uses Cursor diagnostics."""
     return provider == "cursor" or provider.endswith("-cursor")
@@ -239,7 +243,14 @@ async def list_models(provider: str = "") -> list[dict[str, Any]]:
     ]
 
 
-# Snapshot of @mariozechner/pi-ai 0.84.4 generated model IDs; never key-verified.
+# Fallback model IDs, used only when the sidecar cannot list a provider for a
+# user's own key (pi-sidecar#892: a multi-API builtin like OpenRouter is refused
+# outright). This is a frozen copy of the pi-ai generated catalog at pi-ai 0.84.4
+# — it is NOT refreshed at runtime, so it can lag real models badly. A
+# model added upstream after that version is simply absent, which reads as "this
+# model does not exist" even though typing it by hand works. Entries derived from
+# it are therefore tagged `snapshot` so the UI can say so, and never presented as
+# a verified or current listing. Refresh the file and this comment together.
 _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
     Path(__file__).with_name("pi_model_suggestions.json").read_text()
 )
@@ -403,11 +414,20 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 continue
             listing = discovery["modelListingSupported"]
             status[provider] = {"has_api_key": True, "modelListingSupported": listing}
+            # Without a listing the only IDs we can offer come from the frozen
+            # snapshot, so tag them as such. `api`/`cli`/`acpx` would claim these
+            # came from a live source and hide how old they are.
             entries = (
                 discovery["models"]
                 if listing
                 else [
-                    {"provider": provider, "id": model, "name": model}
+                    {
+                        "provider": provider,
+                        "id": model,
+                        "name": model,
+                        "source": _SNAPSHOT_SOURCE,
+                        "verified": False,
+                    }
                     for model in _PI_MODEL_SUGGESTIONS.get(provider, ())
                 ]
             )
@@ -444,7 +464,9 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                         "provider": provider,
                         "id": entry["id"],
                         "name": entry.get("name") or entry["id"],
-                        "source": _source_for_sidecar(provider),
+                        "source": _source_for_sidecar(provider)
+                        if listing
+                        else _SNAPSHOT_SOURCE,
                         "credential_sources": ["user"],
                         "can_use_server_providers": allowed,
                         "verified": listing,

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from '@/lib/auth'
-import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { useReportState, useReportDispatch } from '@/pages/report/reportState'
+import { reviewKey } from '@/lib/reviewKey'
 import {
   type FailureScope,
   type SelectedGroup,
@@ -16,7 +17,7 @@ import {
   trackedInUrlError,
   widenToSignatureGroups,
 } from './failureUpdates'
-import { detectTrackerType } from './TrackedInBadge'
+import { detectTrackerType } from './trackerType'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

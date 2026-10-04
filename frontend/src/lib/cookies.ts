@@ -18,7 +18,28 @@ const ENCODED_PATTERN = /%[0-9A-Fa-f]{2}/
  * Note: @ (0x40) and + (0x2B) are valid cookie-octet characters,
  * so email-style usernames like user@example.com need no encoding.
  */
-const RFC6265_INVALID = /[\x00-\x1f\x7f\x20",;\\]/g
+function isInvalidCookieOctet(code: number): boolean {
+  return (
+    code <= 0x20 || // CTL 0x00-0x1F and SP 0x20
+    code === 0x7f || // DEL
+    code === 0x22 || // DQUOTE
+    code === 0x2c || // comma
+    code === 0x3b || // semicolon
+    code === 0x5c // backslash
+  )
+}
+
+/** Percent-encode every RFC 6265 invalid character in `value`. */
+function encodeCookieValue(value: string): string {
+  let out = ''
+  for (const ch of value) {
+    const code = ch.codePointAt(0) as number
+    out += isInvalidCookieOctet(code)
+      ? `%${code.toString(16).padStart(2, '0').toUpperCase()}`
+      : ch
+  }
+  return out
+}
 
 export function looksUrlEncoded(value: string): boolean {
   return ENCODED_PATTERN.test(value)
@@ -42,9 +63,7 @@ export function setUsername(username: string): void {
     throw new Error(`Username "${trimmed}" looks URL-encoded. Use the raw value.`)
   }
   // Percent-encode only RFC 6265 invalid characters for safe cookie storage
-  const safe = trimmed.replace(RFC6265_INVALID, (ch) =>
-    `%${ch.charCodeAt(0).toString(16).padStart(2, '0').toUpperCase()}`
-  )
+  const safe = encodeCookieValue(trimmed)
   document.cookie = `${COOKIE_NAME}=${safe}; path=/; max-age=${365 * 24 * 60 * 60}; SameSite=Lax`
 }
 

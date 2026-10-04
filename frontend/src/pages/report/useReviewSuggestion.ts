@@ -2,7 +2,8 @@ import { useState, useCallback, useRef } from 'react'
 import { api } from '@/lib/api'
 import { completeAiPairOverride } from '@/lib/analysisAi'
 import { getUsername } from '@/lib/cookies'
-import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { useReportState, useReportDispatch } from '@/pages/report/reportState'
+import { reviewKey } from '@/lib/reviewKey'
 import { useAiSelection } from './useAiSelection'
 
 /* ------------------------------------------------------------------ */

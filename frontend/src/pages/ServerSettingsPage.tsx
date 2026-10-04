@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { api, ApiError } from '@/lib/api'
 import { useLatestRef } from '@/lib/useLatestRef'
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 import { useAuth } from '@/lib/auth'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -164,8 +164,9 @@ function reducer(state: PageState, action: PageAction): PageState {
     case 'HIDE_VALUE': {
       const nextKeys = new Set(state.revealedKeys)
       nextKeys.delete(action.key)
-      const { [action.key]: _, ...restValues } = state.revealedValues
-      return { ...state, revealedKeys: nextKeys, revealedValues: restValues }
+      const revealedValues = { ...state.revealedValues }
+      delete revealedValues[action.key]
+      return { ...state, revealedKeys: nextKeys, revealedValues }
     }
     case 'EXPAND_ALL':
       return { ...state, collapsedCategories: new Set<string>() }
@@ -392,7 +393,7 @@ export function ServerSettingsPage() {
     'settings-changed': () => {
       fetchSettingsRef.current()
     },
-  }), [])
+  }), [fetchSettingsRef])
 
   useSSE('settings', settingsEvents)
 

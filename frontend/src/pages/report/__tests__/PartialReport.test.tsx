@@ -6,7 +6,7 @@ import { api } from '@/lib/api'
 import type { ResultResponse } from '@/types'
 
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), post: vi.fn() } }))
-vi.mock('@/lib/SSEProvider', () => ({ useSSE: vi.fn() }))
+vi.mock('@/lib/useSSE', () => ({ useSSE: vi.fn() }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ role: 'viewer', isOperator: false }) }))
 
 function showReport(childOnly = false) {

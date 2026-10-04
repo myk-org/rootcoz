@@ -9,7 +9,8 @@ import { api, extractApiDetail } from '@/lib/api'
 import { useSessionState } from '@/lib/useSessionState'
 import { unescapeCodeContent } from '@/lib/format'
 import { formatRelativeTime } from '@/lib/utils'
-import { useReportState, useReportDispatch, reviewKey } from './ReportContext'
+import { useReportState, useReportDispatch } from '@/pages/report/reportState'
+import { reviewKey } from '@/lib/reviewKey'
 import { getTrackedIn, notifyReviewChanged, putReviewed, runBatched, scopeKey, scopedReviewState } from './failureUpdates'
 import { BULK_SELECT_CHECKBOX_CLASS } from '@/lib/constants'
 import { Card, CardContent } from '@/components/ui/card'
@@ -211,7 +212,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     if (activeHash !== group.id) {
       expandedByHashRef.current = false
     }
-  }, [activeHash, group.id])
+  }, [activeHash, group.id, expanded, setExpanded])
   const [bugTarget, setBugTarget] = useState<'github' | 'jira' | null>(null)
   const [trackInOpen, setTrackInOpen] = useState(false)
   const [trackedLinkError, setTrackedLinkError] = useState<string | null>(null)
@@ -266,7 +267,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     if (commentsInScope.some((c) => String(c.id) === targetCommentId)) {
       setExpanded(true)
     }
-  }, [location.search])
+  }, [location.search, commentsInScope, expanded, setExpanded])
 
   // Review-all: check how many tests in group are reviewed
   const reviewedCount = group.tests.filter((t) => {

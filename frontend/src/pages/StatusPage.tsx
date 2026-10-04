@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useSSE } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
 import { api, ApiError } from '@/lib/api'
 import { isSafeHref } from '@/lib/autoLink'
 import { formatTimestamp, isAnalysisTimeout, INVALID_DATE_FALLBACK, ciSourceLabel, resolveBuildUrl, resolveBuildDisplayId, sanitizeHttpHref } from '@/lib/utils'

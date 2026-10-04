@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useReportDispatch } from './ReportContext'
+import { useReportDispatch } from '@/pages/report/reportState'
 import { putOverridePattern } from './failureUpdates'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PATTERNS } from '@/constants/classifications'

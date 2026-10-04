@@ -10,7 +10,7 @@ Element.prototype.scrollIntoView = vi.fn()
 
 const { onStatusChanged } = vi.hoisted(() => ({ onStatusChanged: { current: undefined as (() => void) | undefined } }))
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), post: vi.fn() }, ApiError: class extends Error {} }))
-vi.mock('@/lib/SSEProvider', () => ({ useSSE: (_topic: string, handlers: Record<string, () => void>) => { onStatusChanged.current = handlers['status-changed'] } }))
+vi.mock('@/lib/useSSE', () => ({ useSSE: (_topic: string, handlers: Record<string, () => void>) => { onStatusChanged.current = handlers['status-changed'] } }))
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ isAdmin: false, isOperator: false, username: 'viewer' }) }))
 
 const usage: TokenUsageSummary = {
@@ -93,13 +93,19 @@ describe('StatusPage usage', () => {
     await waitFor(() => expect(screen.getByText(/100 in \/ 20 out · \$0.00/)).toBeInTheDocument())
   })
 
-  it('shows Unavailable for unknown cost, not zero', async () => {
-    get.mockResolvedValue(result('running', { ...usage, total_cost_usd: null }))
+  it('shows a $0.00 floor for unknown cost, disclosed as a lower bound', async () => {
+    get.mockResolvedValue(result('running', {
+      ...usage,
+      total_cost_usd: null,
+      cost_partial: true,
+      calls: [
+        { provider: 'gemini', model: 'test', call_type: 'analysis', credential_source: 'user', input_tokens: 100, output_tokens: 20, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: 120, cost_usd: null, duration_ms: 100 },
+      ],
+    }))
     renderPage()
-    const badge = await screen.findByText(/100 in \/ 20 out · Unavailable/)
-    expect(screen.queryByText(/\$0.00/)).not.toBeInTheDocument()
+    const badge = await screen.findByText(/100 in \/ 20 out · \$0.00\+/)
     fireEvent.focus(badge)
-    expect(screen.getAllByText('Credential source: Unknown')[0]).toBeInTheDocument()
+    expect(screen.getAllByText(/1 of 1 calls had no recorded price/).length).toBeGreaterThan(0)
     expect(screen.queryByText(/estimate versus reading whole/)).not.toBeInTheDocument()
   })
 
