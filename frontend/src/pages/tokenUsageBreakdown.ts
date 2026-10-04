@@ -1,4 +1,4 @@
-import { formatCost } from '@/lib/format'
+import { isPartial } from '@/lib/usageCost'
 
 export interface BreakdownRow {
   group: string
@@ -89,79 +89,4 @@ function compareNumbers(a: BreakdownRow, b: BreakdownRow, key: string): number |
     case 'cost_usd': return (a.cost_usd ?? 0) - (b.cost_usd ?? 0)
     default: return null
   }
-}
-
-/** A cost summary as stored on a usage record. */
-export interface UsageCost {
-  total_cost_usd?: number | null
-  cost_partial?: boolean | number
-  calls?: { cost_usd: number | null; cost_partial?: boolean | number }[]
-}
-
-/** A cost the UI can actually show, and whether it is only a floor. */
-export interface ResolvedCost {
-  /** null means *unavailable* — no figure may be shown, not even $0. */
-  value: number | null
-  partial: boolean
-}
-
-/** Resolve a stored usage summary into a displayable cost.
- *
- *  A present `total_cost_usd` is authoritative: the backend sums the priced calls,
- *  counts unpriced ones as $0, and flags the result `cost_partial`.
- *
- *  Legacy rows predate that contract and stored `NULL`, which means *unavailable*
- *  and must never read as a free $0 — that is the exact state this reporting
- *  removed. Those rows still carry their per-call records, so the floor is
- *  derivable from them. With no recorded calls there is nothing to derive and the
- *  figure stays unavailable. */
-export function resolveUsageCost(usage: UsageCost | null | undefined): ResolvedCost {
-  if (!usage) return { value: null, partial: false }
-  if (usage.total_cost_usd != null) {
-    return { value: usage.total_cost_usd, partial: isPartial(usage.cost_partial) }
-  }
-  const calls = usage.calls ?? []
-  if (calls.length === 0) return { value: null, partial: false }
-  let total = 0
-  for (const call of calls) {
-    if (call.cost_usd != null) total += call.cost_usd
-  }
-  return {
-    value: total,
-    partial: calls.some(call => isPartial(call.cost_partial) || call.cost_usd == null),
-  }
-}
-
-/** An unavailable figure has no honest dollar rendering — it is not $0. */
-export const UNAVAILABLE_COST = 'Unavailable'
-
-/** Render a resolved cost. A numeric floor is always shown; an unavailable figure
- *  stays unavailable rather than masquerading as a free $0. */
-export function formatResolvedCost(resolved: ResolvedCost): string {
-  return resolved.value == null ? UNAVAILABLE_COST : formatCost(resolved.value)
-}
-
-/** Used when the priced/total split is unknown, so no call count can be quoted. */
-export const LOWER_BOUND_FALLBACK_NOTE =
-  'Partial: some AI turns had no catalog price, so this is a lower bound.'
-
-/** The sentence explaining a numeric cost floor, or null when the split is unknown.
- *
- *  `pricedCalls` counts the calls that contributed a real price, so the calls that
- *  were *excluded* are the difference — reporting the priced count as the unpriced
- *  one inverts the disclosure entirely. */
-export function lowerBoundSentence(totalCalls?: number | null, pricedCalls?: number | null): string | null {
-  if (totalCalls == null || pricedCalls == null || pricedCalls >= totalCalls) return null
-  return `${totalCalls - pricedCalls} of ${totalCalls} calls had no recorded price and were counted as $0, so this is a lower bound.`
-}
-
-/** A cost total from an aggregate: always a number, `null` only for a legacy row
- *  that recorded no spend at all. Genuine zero renders as $0.00, not a dash. */
-export function formatCostCell(cost: number | null | undefined): string {
-  return cost == null ? UNAVAILABLE_COST : formatCost(cost)
-}
-
-/** SQLite stores the flag as 0/1, so treat both truthy encodings as partial. */
-export function isPartial(flag: boolean | number | undefined): boolean {
-  return flag === true || flag === 1
 }

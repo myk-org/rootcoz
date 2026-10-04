@@ -8,10 +8,11 @@ import {
   formatResolvedCost,
   lowerBoundSentence,
   LOWER_BOUND_FALLBACK_NOTE,
+  pricedCallCount,
   resolveUsageCost,
   UNAVAILABLE_COST,
   type UsageCost,
-} from '@/pages/tokenUsageBreakdown'
+} from '@/lib/usageCost'
 import {
   analyzedFailingTests,
   peerGroups,
@@ -43,14 +44,17 @@ function Cost({ usage }: { usage: UsageCost | null | undefined }) {
         <Hint
           label="Why this cost is a lower bound"
           trigger="lower bound"
-          content={lowerBoundSentence(calls.length, calls.filter(c => c.cost_usd != null).length) ?? LOWER_BOUND_FALLBACK_NOTE}
+          content={lowerBoundSentence(calls.length, pricedCallCount(usage)) ?? LOWER_BOUND_FALLBACK_NOTE}
         />
       )}
     </span>
   )
 }
 
-/** Keyboard-focusable tooltip trigger — plain spans hide the explanation from keyboard users. */
+/** Keyboard-focusable tooltip trigger — plain spans hide the explanation from keyboard users.
+ *
+ *  Rendered as a SIBLING of any enclosing button, never inside one: a nested button
+ *  is invalid markup, and clicking the explanation would also fire the parent. */
 function Hint({ label, trigger, content }: { label: string; trigger: string; content: string }) {
   return (
     <Tooltip>
@@ -156,7 +160,7 @@ function PeerGroupRow({ group }: { group: PeerGroup }) {
   )
 }
 
-function AverageRow({ label, hint, value }: { label: string; hint: string; value: number | null }) {
+function AverageRow({ label, hint, value, partial }: { label: string; hint: string; value: number | null; partial?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-4 text-xs">
       <span className="flex items-center gap-1 text-text-tertiary">
@@ -166,6 +170,11 @@ function AverageRow({ label, hint, value }: { label: string; hint: string; value
       {value == null
         ? <span className="font-mono italic text-text-tertiary">N/A</span>
         : <span className="font-mono">{formatCost(value)}</span>}
+      {/* The numerator is a floor, so the mean inherits that — marking it keeps the
+          row honest instead of presenting a partial sum as an exact average. */}
+      {partial && value != null && (
+        <span className="ml-auto font-mono text-[10px] text-text-tertiary">lower bound</span>
+      )}
     </div>
   )
 }
@@ -177,7 +186,7 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
   const groups = useMemo(() => primaryGroups(result), [result])
   const peers = useMemo(() => peerGroups(result), [result])
   const averages = useMemo(
-    () => spendAverages(result.token_usage?.total_cost_usd, analyzedFailingTests(result), groups, peers),
+    () => spendAverages(result.token_usage, analyzedFailingTests(result), groups, peers),
     [result, groups, peers],
   )
 
@@ -198,19 +207,24 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
 
   return (
     <div className="rounded-lg border border-border-muted animate-slide-up">
-      <button
-        type="button"
-        className="flex w-full items-center gap-3 p-4 text-left"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-      >
-        {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />}
-        <Coins className="h-4 w-4 shrink-0 text-signal-green" />
-        <h2 className="text-xs font-display uppercase tracking-widest text-text-tertiary">AI Spend</h2>
-        <span className="ml-auto font-mono text-xs text-text-secondary">
+      {/* The header is a flex ROW of siblings: the cost block sits OUTSIDE the
+          expansion button, because a tooltip trigger nested inside it is invalid
+          markup and its click would toggle the panel. */}
+      <div className="flex w-full items-center gap-3 p-4">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+        >
+          {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" /> : <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />}
+          <Coins className="h-4 w-4 shrink-0 text-signal-green" />
+          <h2 className="text-xs font-display uppercase tracking-widest text-text-tertiary">AI Spend</h2>
+        </button>
+        <span className="shrink-0 font-mono text-xs text-text-secondary">
           {stages.reduce((sum, s) => sum + s.calls, 0)} calls · <Cost usage={result.token_usage} />
         </span>
-      </button>
+      </div>
 
       {expanded && (
         <div className="space-y-5 border-t border-border-muted p-4">
@@ -280,8 +294,9 @@ export function AiSpendBreakdown({ result }: { result: AnalysisResult }) {
             <h3 className="text-[10px] font-display uppercase tracking-widest text-text-tertiary">Averages</h3>
             <AverageRow
               label="Cost per failing test"
-              hint="Job total cost / analyzed failed tests. Includes shared job overhead (clone, cross-failure, agent routing) and may include peer usage."
+              hint={`Job total cost / analyzed failed tests. Includes shared job overhead (clone, cross-failure, agent routing) and may include peer usage.${averages.costPerFailingTestPartial ? ' The job total is a lower bound because a call had no recorded price, so this average is one too.' : ''}`}
               value={averages.costPerFailingTest}
+              partial={averages.costPerFailingTestPartial}
             />
             <AverageRow
               label="Cost per unique failure group"

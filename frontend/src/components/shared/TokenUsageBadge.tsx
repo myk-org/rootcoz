@@ -6,7 +6,7 @@ import {
   lowerBoundSentence,
   LOWER_BOUND_FALLBACK_NOTE,
   resolveUsageCost,
-} from '@/pages/tokenUsageBreakdown'
+} from '@/lib/usageCost'
 import type { TokenUsageSummary } from '@/types'
 
 type TokenUsageBadgeProps =

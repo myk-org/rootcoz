@@ -181,7 +181,7 @@ describe('primaryGroups', () => {
     expect(groups[0].usage?.total_cost_usd).toBe(0.7)
     // one debate, one spend row — not two rows repeating the same cost
     expect(peerGroups(job)).toHaveLength(0)
-    const averages = spendAverages(1.4, 2, groups, [])
+    const averages = spendAverages({ total_cost_usd: 1.4 }, 2, groups, [])
     expect(averages.totalGroups).toBe(1)
     expect(averages.costPerUniqueGroup).toBeCloseTo(0.7)
   })
@@ -218,7 +218,7 @@ describe('primaryGroups', () => {
       failures: [failure({ usage_attempt: 'attempt-1', token_usage: summary({ total_cost_usd: 9 }) })],
     }))
     expect(groups[0].usage).toBeNull()
-    expect(spendAverages(0.5, 1, groups, []).costPerUniqueGroup).toBeNull()
+    expect(spendAverages({ total_cost_usd: 0.5 }, 1, groups, []).costPerUniqueGroup).toBeNull()
   })
 })
 
@@ -358,7 +358,7 @@ describe('peerGroups', () => {
   it('excludes a debate with unattributed rounds from the peer cost average', () => {
     const [group] = peerGroups(result({ failures: [failure({ peer_debate: debate() })] }))
     expect(group.partial).toBe(true)
-    const averages = spendAverages(1.0, 1, [], [group])
+    const averages = spendAverages({ total_cost_usd: 1.0 }, 1, [], [group])
     expect(averages.peerCostPerDebatedGroup).toBeNull()
     expect(averages.peersWithKnownCost).toBe(0)
     expect(averages.peersWithFloorCost).toBe(1)
@@ -368,7 +368,7 @@ describe('peerGroups', () => {
   it('averages a fully priced debate and counts it in the denominator', () => {
     const [group] = peerGroups(result({ failures: [failure({ peer_debate: complete(debate()) })] }))
     expect(group.partial).toBe(false)
-    const averages = spendAverages(2.0, 1, [], [group])
+    const averages = spendAverages({ total_cost_usd: 2.0 }, 1, [], [group])
     expect(averages.peersWithKnownCost).toBe(1)
     expect(averages.peersWithFloorCost).toBe(0)
     expect(averages.peerCostPerDebatedGroup).toBeCloseTo(group.costUsd)
@@ -383,18 +383,18 @@ describe('spendAverages', () => {
   }))
 
   it('divides job cost by analyzed failing tests', () => {
-    const averages = spendAverages(0.5, 4, groups, [])
+    const averages = spendAverages({ total_cost_usd: 0.5 }, 4, groups, [])
     expect(averages.costPerFailingTest).toBeCloseTo(0.125)
     expect(averages.totalGroups).toBe(2)
   })
 
   it('is N/A with zero analyzed failures or unknown total cost', () => {
-    expect(spendAverages(0.5, 0, groups, []).costPerFailingTest).toBeNull()
+    expect(spendAverages({ total_cost_usd: 0.5 }, 0, groups, []).costPerFailingTest).toBeNull()
     expect(spendAverages(null, 4, groups, []).costPerFailingTest).toBeNull()
   })
 
   it('keeps the unique-group denominator honest when cost is unavailable', () => {
-    const averages = spendAverages(0.5, 2, groups, [])
+    const averages = spendAverages({ total_cost_usd: 0.5 }, 2, groups, [])
     expect(averages.groupsWithKnownCost).toBe(1)
     expect(averages.totalGroups).toBe(2)
     expect(averages.costPerUniqueGroup).toBeCloseTo(0.2)
@@ -402,7 +402,7 @@ describe('spendAverages', () => {
 
   it('is N/A when no group has a known cost', () => {
     const unknown = primaryGroups(result({ failures: [failure()] }))
-    expect(spendAverages(0.5, 1, unknown, []).costPerUniqueGroup).toBeNull()
+    expect(spendAverages({ total_cost_usd: 0.5 }, 1, unknown, []).costPerUniqueGroup).toBeNull()
   })
 
   it('averages peer cost only over debates with a known cost', () => {
@@ -410,7 +410,7 @@ describe('spendAverages', () => {
       consensus_reached: true, rounds_used: 1, max_rounds: 1, ai_configs: [],
       rounds: [{ round: 1, ai_provider: 'g', ai_model: 'p', role: 'orchestrator', classification: '', pattern: '', details: '', agrees_with_orchestrator: true, token_usage: call({ cost_usd: 0.4 }) }],
     } })] }))
-    const averages = spendAverages(0.5, 1, groups, peer)
+    const averages = spendAverages({ total_cost_usd: 0.5 }, 1, groups, peer)
     expect(averages.debatedGroups).toBe(1)
     expect(averages.peerCostPerDebatedGroup).toBeCloseTo(0.4)
     expect(averages.debatedGroups).toBe(1)
@@ -429,7 +429,7 @@ describe('spendAverages', () => {
         { round: 1, ai_provider: 'g', ai_model: 'p', role: 'peer', classification: '', pattern: '', details: '', agrees_with_orchestrator: null, token_usage: null },
       ],
     } })] }))
-    const averages = spendAverages(0.9, 2, groups, [...known, ...unavailable])
+    const averages = spendAverages({ total_cost_usd: 0.9 }, 2, groups, [...known, ...unavailable])
     expect(averages.debatedGroups).toBe(2)
     expect(averages.peersWithKnownCost).toBe(1)
     expect(averages.peerCostPerDebatedGroup).toBeCloseTo(0.4)
@@ -492,7 +492,7 @@ describe('spendAverages excludes floor-only costs from known-cost averages', () 
   }))
 
   it('excludes a partial group rather than averaging its floor as known spend', () => {
-    const averages = spendAverages(0.7, 2, [...exactGroup, ...floorGroup], [])
+    const averages = spendAverages({ total_cost_usd: 0.7 }, 2, [...exactGroup, ...floorGroup], [])
     // Only the exact group counts, so the mean is 0.2 — not (0.2 + 0.5) / 2.
     expect(averages.costPerUniqueGroup).toBeCloseTo(0.2)
     expect(averages.groupsWithKnownCost).toBe(1)
@@ -507,12 +507,51 @@ describe('spendAverages excludes floor-only costs from known-cost averages', () 
         token_usage: summary({ total_cost_usd: 0.9, cost_partial: false, calls: [call({ cost_usd: null })] }),
       })],
     }))
-    const averages = spendAverages(0.9, 1, unpricedCallGroup, [])
+    const averages = spendAverages({ total_cost_usd: 0.9 }, 1, unpricedCallGroup, [])
     expect(averages.costPerUniqueGroup).toBeNull()
     expect(averages.groupsWithFloorCost).toBe(1)
   })
 
   it('reports N/A when every priced group is a floor', () => {
-    expect(spendAverages(0.5, 1, floorGroup, []).costPerUniqueGroup).toBeNull()
+    expect(spendAverages({ total_cost_usd: 0.5 }, 1, floorGroup, []).costPerUniqueGroup).toBeNull()
+  })
+})
+
+describe('costPerFailingTest inherits the job total disclosure', () => {
+  it('marks the average a lower bound when the job total is a floor', () => {
+    const usage = summary({
+      total_cost_usd: 0.03,
+      cost_partial: true,
+      calls: [call({ cost_usd: 0.03 }), call({ cost_usd: null })],
+    })
+    const averages = spendAverages(usage, 2, [], [])
+    expect(averages.costPerFailingTest).toBeCloseTo(0.015)
+    expect(averages.costPerFailingTestPartial).toBe(true)
+  })
+
+  it('leaves a completely priced job total unmarked', () => {
+    const usage = summary({ total_cost_usd: 0.4, cost_partial: false, calls: [call({ cost_usd: 0.4 })] })
+    expect(spendAverages(usage, 2, [], []).costPerFailingTestPartial).toBe(false)
+  })
+
+  it('flags a free $0 as complete, not as a floor', () => {
+    const usage = summary({ total_cost_usd: 0, cost_partial: false, calls: [call({ cost_usd: 0 })] })
+    expect(spendAverages(usage, 1, [], []).costPerFailingTestPartial).toBe(false)
+  })
+
+  it('recovers a legacy null total from the surviving calls instead of blanking', () => {
+    // The header resolves the same figure; the average must not stay N/A while the
+    // header shows a real dollar amount.
+    const usage = summary({
+      total_cost_usd: null,
+      calls: [call({ cost_usd: 0.4 }), call({ cost_usd: 0.2 })],
+    })
+    const averages = spendAverages(usage, 2, [], [])
+    expect(averages.costPerFailingTest).toBeCloseTo(0.3)
+  })
+
+  it('keeps the average N/A when there is nothing to recover from', () => {
+    expect(spendAverages({ total_cost_usd: null, calls: [] }, 2, [], []).costPerFailingTest).toBeNull()
+    expect(spendAverages(null, 2, [], []).costPerFailingTest).toBeNull()
   })
 })

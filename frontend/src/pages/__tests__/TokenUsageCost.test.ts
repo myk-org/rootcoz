@@ -2,14 +2,18 @@ import { describe, expect, it } from 'vitest'
 import {
   aggregateJobCallTypes,
   compareBreakdownRows,
-  formatCostCell,
-  formatResolvedCost,
-  lowerBoundSentence,
-  LOWER_BOUND_FALLBACK_NOTE,
-  resolveUsageCost,
-  UNAVAILABLE_COST,
   type JobUsageRecord,
 } from '../tokenUsageBreakdown'
+import {
+  formatCostCell,
+  formatResolvedCost,
+  isFloorUsage,
+  lowerBoundSentence,
+  LOWER_BOUND_FALLBACK_NOTE,
+  pricedCallCount,
+  resolveUsageCost,
+  UNAVAILABLE_COST,
+} from '@/lib/usageCost'
 
 const row = (over: Partial<Parameters<typeof compareBreakdownRows>[0]> = {}) => ({
   group: 'g',
@@ -180,5 +184,26 @@ describe('lowerBoundSentence', () => {
 
   it('exposes a generic note for when no split can be quoted', () => {
     expect(LOWER_BOUND_FALLBACK_NOTE).toContain('lower bound')
+  })
+})
+
+describe('shared cost helpers live in lib, not a page module', () => {
+  it('counts the calls that carry a real price', () => {
+    expect(pricedCallCount({ total_cost_usd: 1, calls: [{ cost_usd: 0.5 }, { cost_usd: null }] })).toBe(1)
+    expect(pricedCallCount({ total_cost_usd: 1, calls: [] })).toBe(0)
+    expect(pricedCallCount(null)).toBe(0)
+  })
+
+  it('treats a floor or an absent summary as a floor', () => {
+    expect(isFloorUsage({ total_cost_usd: 1, cost_partial: true })).toBe(true)
+    // Stricter than display: an unpriced call inside a numeric total still makes the
+    // figure unusable as a complete sum in an average.
+    expect(isFloorUsage({ total_cost_usd: 1, calls: [{ cost_usd: null }] })).toBe(true)
+    expect(isFloorUsage({ total_cost_usd: 1, cost_partial: false, calls: [{ cost_usd: 1 }] })).toBe(false)
+    // No summary at all means nothing is known about the figure.
+    expect(isFloorUsage(null)).toBe(true)
+    // Display still trusts the stored total, which is the whole point of it.
+    expect(resolveUsageCost({ total_cost_usd: 1, calls: [{ cost_usd: null }] })).toEqual({ value: 1, partial: false })
+    expect(resolveUsageCost(null).value).toBeNull()
   })
 })

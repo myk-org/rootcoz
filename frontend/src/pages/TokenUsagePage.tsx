@@ -27,12 +27,14 @@ import { CostCell } from '@/components/shared/TokenUsageCostCell'
 import {
   aggregateJobCallTypes,
   compareBreakdownRows,
+  type BreakdownRow,
+} from '@/pages/tokenUsageBreakdown'
+import {
   formatCostCell,
   isPartial,
   lowerBoundSentence,
   LOWER_BOUND_FALLBACK_NOTE,
-  type BreakdownRow,
-} from '@/pages/tokenUsageBreakdown'
+} from '@/lib/usageCost'
 import { useTableSort } from '@/lib/useTableSort'
 import type { TokenUsageDashboard } from '@/types'
 import { Zap, TrendingUp, Calendar, DollarSign, Info, ChevronRight, Loader2 } from 'lucide-react'

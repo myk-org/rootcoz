@@ -1,5 +1,6 @@
 import type { AnalysisResult, TokenUsageEntry, TokenUsageSummary } from '@/types'
 import { walkChildTree } from '@/lib/failureKeys'
+import { isFloorUsage, resolveUsageCost, type UsageCost } from '@/lib/usageCost'
 import { groupingKey } from '@/lib/grouping'
 import { groupPeerRounds } from '@/lib/peerDebate'
 
@@ -44,14 +45,6 @@ function sumKnownCost(calls: TokenUsageEntry[]): number {
     if (call.cost_usd != null) total += call.cost_usd
   }
   return total
-}
-
-  /** A usage summary whose cost is a floor rather than a complete sum: pi-sidecar
-   *  flagged it, or one of its calls carries no recorded price. */
-function isFloorUsage(usage: TokenUsageSummary | null | undefined): boolean {
-  if (!usage) return true
-  if (usage.cost_partial) return true
-  return (usage.calls ?? []).some(call => call.cost_partial || call.cost_usd == null)
 }
 
 /** Breakdown of the job summary by recorded `call_type`. */
@@ -249,6 +242,8 @@ export function analyzedFailingTests(result: TreeNode): number {
 export interface SpendAverages {
   /** job total cost / analyzed failed tests; null when cost or failures are unknown. */
   costPerFailingTest: number | null
+  /** True when that job total is a floor, so the average inherits the disclosure. */
+  costPerFailingTestPartial: boolean
   /** Sum of attributable group costs / groups whose cost is a complete sum. */
   costPerUniqueGroup: number | null
   /** Unique groups in the job, including those with no usable usage. */
@@ -267,11 +262,14 @@ export interface SpendAverages {
 }
 
 export function spendAverages(
-  totalCostUsd: number | null | undefined,
+  usage: UsageCost | null | undefined,
   failedTests: number,
   groups: PrimaryGroup[],
   peers: PeerGroup[],
 ): SpendAverages {
+  // The job total is resolved once, so a legacy null total recovers the same figure
+  // the header shows instead of silently blanking the average.
+  const jobCost = resolveUsageCost(usage).value
   // An average is only as trustworthy as its weakest member, so a group whose cost
   // is a FLOOR cannot be averaged in as a complete sum — that both drags the mean
   // down and presents the result as known spend. Floors are counted, then excluded
@@ -284,7 +282,10 @@ export function spendAverages(
   const peerCost = peersWithCost.reduce((sum, p) => sum + p.costUsd, 0)
   return {
     costPerFailingTest:
-      totalCostUsd != null && failedTests > 0 ? totalCostUsd / failedTests : null,
+      jobCost != null && failedTests > 0 ? jobCost / failedTests : null,
+    // The job total is itself a floor when any call was unpriced, so this average
+    // inherits that and must be disclosed rather than shown as an exact mean.
+    costPerFailingTestPartial: isFloorUsage(usage),
     costPerUniqueGroup: withCost.length > 0 ? groupCost / withCost.length : null,
     totalGroups: groups.length,
     groupsWithKnownCost: withCost.length,
