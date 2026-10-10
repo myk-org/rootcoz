@@ -222,6 +222,31 @@ async def test_server_session_collision_does_not_delete_existing_sidecar_session
 
 
 @pytest.mark.asyncio
+async def test_session_ownership_survives_provider_case_drift(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session stored under one provider capitalization stays usable after the
+    catalog refreshes with another — ownership compares provider IDs
+    case-insensitively, while a genuinely different provider still rejects."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "case-drift.db")
+    await storage.init_db()
+    await storage.save_ai_session_source(
+        "drift-session", "admin", "EnMaaS", "server", bootstrap_admin=True
+    )
+    # Catalog drifted to lowercase — the session must remain usable.
+    assert (
+        await storage.get_ai_session_source("drift-session", "admin", "enmaas")
+        == "server"
+    )
+    # A different provider is still rejected.
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("drift-session", "admin", "other")
+    # A different user is still rejected.
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("drift-session", "mallory", "EnMaaS")
+
+
+@pytest.mark.asyncio
 async def test_resolve_catalog_pair_maps_unambiguous_legacy_gemini(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

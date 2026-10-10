@@ -6383,7 +6383,14 @@ async def revoke_ai_session_source(
 
 
 async def get_ai_session_source(session_id: str, username: str, provider: str) -> str:
-    """Reject a known session owned by another user or provider."""
+    """Reject a known session owned by another user or provider.
+
+    Provider IDs are compared case-insensitively: a custom agent-dir provider
+    may change capitalization between catalog refreshes, and a session stored
+    under the old spelling must stay usable with the catalog's current exact
+    spelling. The credential-generation lookup uses the stored spelling — the
+    JSON key the generation was recorded under at session creation.
+    """
     async with _connect_db() as db:
         row = await (
             await db.execute(
@@ -6392,15 +6399,18 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
                 (session_id,),
             )
         ).fetchone()
-        generation = await (
-            await db.execute(
-                "SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(:provider)), 0) "
-                "FROM users WHERE username = :username",
-                {"username": username, "provider": provider},
-            )
-        ).fetchone()
+        generation = None
+        if row and row[0] == username:
+            generation = await (
+                await db.execute(
+                    "SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(:provider)), 0) "
+                    "FROM users WHERE username = :username",
+                    {"username": username, "provider": row[1]},
+                )
+            ).fetchone()
     if row and (
-        (row[0], row[1]) != (username, provider)
+        row[0] != username
+        or row[1].lower() != provider.lower()
         or row[2] in ("revoked", "deleting", "deleted")
         or (
             row[2] == "user"
