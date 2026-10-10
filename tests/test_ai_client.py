@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import httpx
@@ -274,6 +275,107 @@ async def test_key_rotation_revokes_session_across_provider_case_drift(
         await storage.get_ai_session_source("drifted-session", "alice", "mygateway")
     with pytest.raises(ValueError, match="another user or provider"):
         await storage.get_ai_session_source("drifted-session", "alice", "MyGateway")
+
+
+@pytest.mark.asyncio
+async def test_new_session_valid_after_provider_case_drift_rotation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh session created under the current spelling stays valid even
+    though the provider previously reached higher generations under a former
+    spelling — the exact-key generation check must not compare against
+    obsolete case variants."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "new-session-drift.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    # Two rotations under the old spelling: generation 2.
+    await storage.update_user_ai_credential("alice", "MyGateway", "key-1")
+    await storage.update_user_ai_credential("alice", "MyGateway", "key-2")
+    await storage.save_ai_session_source("old-session", "alice", "MyGateway", "user")
+    # Catalog drifts; the key is replaced under the new spelling, consolidating
+    # the old spelling's counter history (generation 3).
+    assert await storage.update_user_ai_credential("alice", "mygateway", "key-3") == [
+        "old-session"
+    ]
+    # A NEW session created with the current credential must verify.
+    await storage.save_ai_session_source("new-session", "alice", "mygateway", "user")
+    assert (
+        await storage.get_ai_session_source("new-session", "alice", "mygateway")
+        == "user"
+    )
+    # The pre-drift session stays revoked.
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("old-session", "alice", "mygateway")
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_provider_case_drift_revokes_session(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider matching must use one Unicode-consistent rule: SQLite
+    COLLATE NOCASE folds ASCII only, so a non-ASCII drift (ÄGateway → ägateway)
+    must still revoke the old session and accept a new one."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "nonascii-drift.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "ÄGateway", "old-key")
+    await storage.save_ai_session_source("unicode-session", "alice", "ÄGateway", "user")
+    assert (
+        await storage.get_ai_session_source("unicode-session", "alice", "ÄGateway")
+        == "user"
+    )
+    assert await storage.update_user_ai_credential("alice", "ägateway", "new-key") == [
+        "unicode-session"
+    ]
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("unicode-session", "alice", "ägateway")
+    await storage.save_ai_session_source("unicode-new", "alice", "ägateway", "user")
+    assert (
+        await storage.get_ai_session_source("unicode-new", "alice", "ägateway")
+        == "user"
+    )
+
+
+@pytest.mark.asyncio
+async def test_case_distinct_providers_not_conflated(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When case-distinct provider IDs coexist as separate credentials,
+    rotating one must not revoke the other's sessions."""
+    import aiosqlite
+
+    from rootcoz.storage import encrypt_value
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "case-distinct.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    # Seed both spellings as separate credentials directly — the public API
+    # consolidates a lone case variant, so the coexistence state is reachable
+    # only out-of-band (this exercises the ambiguity guard).
+    async with aiosqlite.connect(storage.DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET ai_credentials_enc = ?, ai_credential_generations = ? "
+            "WHERE username = ?",
+            (
+                encrypt_value(json.dumps({"Foo": "foo-key", "foo": "foo-lower-key"})),
+                json.dumps({"Foo": 1, "foo": 1}),
+                "alice",
+            ),
+        )
+        await db.commit()
+    await storage.save_ai_session_source("upper-session", "alice", "Foo", "user")
+    await storage.save_ai_session_source("lower-session", "alice", "foo", "user")
+    # Rotate the lowercase spelling.
+    assert await storage.update_user_ai_credential("alice", "foo", "new-lower-key") == [
+        "lower-session"
+    ]
+    # The lowercase session is revoked...
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("lower-session", "alice", "foo")
+    # ...but the distinct uppercase provider's session is untouched.
+    assert (
+        await storage.get_ai_session_source("upper-session", "alice", "Foo") == "user"
+    )
 
 
 @pytest.mark.asyncio
