@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Configuration Reference - rootcoz</title>
     <meta name="description" content="AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML">
-    <link rel="stylesheet" href="assets/style.css?v=5a6efa51d2">
+    <link rel="stylesheet" href="assets/style.css?v=66bf87bdd9">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
     <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
     <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
@@ -1010,11 +1010,19 @@ SECURE_COOKIES=false
 <td>unset</td>
 <td>Comma-separated providers exposed through the local CLI agents</td>
 </tr>
+<tr>
+<td><code>PI_SIDECAR_AGENT_DIR</code></td>
+<td>unset</td>
+<td>Sidecar agent dir for custom providers and settings (see below)</td>
+</tr>
 </tbody>
 </table></div>
 <p><code>gemini</code> resolves to the <code>google</code> provider, and <code>GEMINI_API_KEY</code> is the credential RootCoz documents and charts for it (<code>ai.provider=gemini</code> pairs with <code>ai.geminiApiKey</code>). <code>gemini auth login</code> is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — <code>cli-gemini</code>, the canonical form of the legacy <code>gemini-cli</code> name — not under <code>google</code>, so it is not a substitute for <code>GEMINI_API_KEY</code> on the <code>gemini</code> alias. For <code>claude</code>, see the resolution rules above: the alias maps to <code>google-vertex-claude</code>, so <code>ANTHROPIC_API_KEY</code> on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.</p>
 <p>RootCoz does not read the Vertex trio itself — <code>config.py</code> documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting <code>ai.vertex.enabled</code> writes <code>CLAUDE_CODE_USE_VERTEX=1</code>, <code>CLOUD_ML_REGION</code>, and <code>ANTHROPIC_VERTEX_PROJECT_ID</code>, and separately mounts <code>ai.vertex.serviceAccountKey</code> and points <code>GOOGLE_APPLICATION_CREDENTIALS</code> at the mounted <code>application_default_credentials.json</code>. Install fails outright if <code>ai.vertex.enabled</code> is set without <code>ai.vertex.projectId</code> or <code>ai.vertex.serviceAccountKey</code>, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.</p>
 <p>Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and the Anthropic Vertex tooling, not here. For the authoritative credential requirements, follow the Anthropic Claude Code on Vertex AI documentation rather than treating the trio as self-sufficient. This matters for <code>AI_PROVIDER=claude</code> in particular, because that alias resolves to the <code>google-vertex-claude</code> provider — so Vertex is the path on which <code>claude</code> is expected to resolve at all.</p>
+<h3 id="sidecar-custom-providers-agent-dir">Sidecar custom providers (agent dir)</h3>
+<p>Pi-sidecar &gt;=4.8.5 reads an <strong>agent dir</strong> at process start: <code>models.json</code> registers custom pi providers (listed by <code>GET /api/ai-models</code>, usable as <code>AI_PROVIDER</code>/<code>AI_MODEL</code>), <code>auth.json</code> supplies provider credentials, and <code>settings.json</code> seeds the sidecar's in-memory settings store. Point the sidecar at a persistent dir with <code>PI_SIDECAR_AGENT_DIR</code> (unset means an ephemeral scratch dir, i.e. no custom providers). A <code>models.json</code> <code>apiKey</code> may reference an environment variable — <code>"$ENMAAS_API_KEY"</code> resolves against the sidecar process environment, so the variable must be exported on the same container.</p>
+<p>Two operational rules follow from "read at process start": changing any file requires a sidecar restart (the Helm chart handles this with a checksum-annotated rolling restart; in Docker Compose restart the container), and <code>rootcoz ai-models</code> refresh does not re-read the directory. There is no provider allowlist on the RootCoz side — any exact provider/model pair present in the sidecar catalogue is accepted, so a custom provider is selected the same way as a built-in one.</p>
 <blockquote>
 <p><strong>Warning:</strong> <code>ROOTCOZ_ENCRYPTION_KEY</code> is the one variable worth getting right before you have real data. Rotating it invalidates every encrypted stored token <em>and</em> every stored API key hash, so all keys must be re-issued afterwards. Existing sessions use plain SHA-256 hashing and survive. If you do not set it, RootCoz generates a file under <code>$XDG_DATA_HOME/rootcoz/.encryption_key</code> and warns you in the health endpoint.</p>
 </blockquote>
@@ -1047,6 +1055,10 @@ SECURE_COOKIES=false
 <tr>
 <td><code>ai.cursor.apiKey</code>, <code>ai.cursor.authJson</code></td>
 <td><code>CURSOR_API_KEY</code> and the mounted Cursor <code>auth.json</code></td>
+</tr>
+<tr>
+<td><code>sidecar.agentDir.modelsJson</code>, <code>sidecar.agentDir.authJson</code>, <code>sidecar.agentDir.settingsJson</code></td>
+<td><code>PI_SIDECAR_AGENT_DIR</code> pointing at a read-only Secret mount at <code>/etc/pi-sidecar-agent</code>; <code>sidecar.agentDir.env</code> adds Secret-backed env vars for <code>"$VAR"</code> API key references in <code>models.json</code></td>
 </tr>
 <tr>
 <td><code>admin.key</code></td>
@@ -1193,6 +1205,7 @@ SECURE_COOKIES=false
 <li><a href="#quick-example">Quick Example</a></li>
 <li><a href="#step-by-step">Step-by-Step</a><ul>
 <li><a href="#variables-that-never-reach-the-server-settings-ui">Variables that never reach the Server Settings UI</a></li>
+<li><a href="#sidecar-custom-providers-agent-dir">Sidecar custom providers (agent dir)</a></li>
 <li><a href="#helm-chart-coverage">Helm chart coverage</a></li>
 </ul>
 </li>
@@ -1218,14 +1231,14 @@ SECURE_COOKIES=false
 
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-    <script src="assets/theme.js?v=5a6efa51d2"></script>
+    <script src="assets/theme.js?v=66bf87bdd9"></script>
 
-    <script src="assets/search.js?v=5a6efa51d2"></script>
-    <script src="assets/copy.js?v=5a6efa51d2"></script>
-    <script src="assets/callouts.js?v=5a6efa51d2"></script>
-    <script src="assets/scrollspy.js?v=5a6efa51d2"></script>
-    <script src="assets/codelabels.js?v=5a6efa51d2"></script>
-    <script src="assets/github.js?v=5a6efa51d2"></script>
+    <script src="assets/search.js?v=66bf87bdd9"></script>
+    <script src="assets/copy.js?v=66bf87bdd9"></script>
+    <script src="assets/callouts.js?v=66bf87bdd9"></script>
+    <script src="assets/scrollspy.js?v=66bf87bdd9"></script>
+    <script src="assets/codelabels.js?v=66bf87bdd9"></script>
+    <script src="assets/github.js?v=66bf87bdd9"></script>
     <script>
 (function() {
     var toggle = document.getElementById('sidebar-toggle');

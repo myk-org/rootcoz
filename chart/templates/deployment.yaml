@@ -1,6 +1,7 @@
 {{- include "rootcoz.validate" . -}}
 {{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
 {{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
+{{- $sidecarAgent := include "rootcoz.sidecarAgentSecretData" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,13 +27,16 @@ spec:
       annotations:
         checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
         {{- /* Salt with Release.Name: constant across upgrades, unique per installation. */}}
-        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey .Release.Name | sha256sum }}
+        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey (.Values.sidecar.agentDir.env | toJson) .Release.Name | sha256sum }}
         checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
         {{- end }}
         {{- if $cursorAuth }}
         checksum/cursor-auth: {{ $cursorAuth | sha256sum }}
+        {{- end }}
+        {{- if $sidecarAgent }}
+        checksum/sidecar-agent: {{ $sidecarAgent | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -70,6 +74,10 @@ spec:
               value: /gcloud-credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /gcloud-credentials/application_default_credentials.json
+            {{- end }}
+            {{- if $sidecarAgent }}
+            - name: PI_SIDECAR_AGENT_DIR
+              value: /etc/pi-sidecar-agent
             {{- end }}
           envFrom:
             - configMapRef:
@@ -127,6 +135,11 @@ spec:
               mountPath: /home/appuser/.cursor-auth
               readOnly: true
             {{- end }}
+            {{- if $sidecarAgent }}
+            - name: sidecar-agent
+              mountPath: /etc/pi-sidecar-agent
+              readOnly: true
+            {{- end }}
       volumes:
         {{- if .Values.persistence.enabled }}
         - name: data
@@ -145,6 +158,11 @@ spec:
         - name: cursor-auth
           secret:
             secretName: {{ include "rootcoz.cursorAuthSecretName" . }}
+        {{- end }}
+        {{- if $sidecarAgent }}
+        - name: sidecar-agent
+          secret:
+            secretName: {{ include "rootcoz.sidecarAgentSecretName" . }}
         {{- end }}
       terminationGracePeriodSeconds: 30
       {{- with .Values.nodeSelector }}

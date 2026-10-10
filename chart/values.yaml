@@ -63,6 +63,24 @@ ai:
     # Cursor auth.json content (secret, mounted at /home/appuser/.cursor-auth/auth.json)
     authJson: ""
 
+# Pi SDK sidecar custom providers/settings (pi-sidecar >=4.8.5) via a persistent
+# agent dir. Files are read once at sidecar start; changing them rolls the
+# Deployment (checksum-tracked) so the sidecar restarts with the new content.
+sidecar:
+  agentDir:
+    # models.json content — custom pi providers (string or YAML object),
+    # mounted at /etc/pi-sidecar-agent/models.json
+    modelsJson: ""
+    # auth.json content — provider credentials (string or YAML object),
+    # mounted at /etc/pi-sidecar-agent/auth.json
+    authJson: ""
+    # settings.json content — seeded into the sidecar's in-memory settings
+    # store (string or YAML object), mounted at /etc/pi-sidecar-agent/settings.json
+    settingsJson: ""
+    # Secret env vars for API keys referenced as "$VAR" in models.json,
+    # e.g. env: { ENMAAS_API_KEY: "..." } → container env var ENMAAS_API_KEY.
+    env: {}
+
 # Bootstrap admin API key → ADMIN_KEY (secret). Required by scripts/helm-setup.py;
 # auto-generated on first install if empty (manual helm installs only).
 admin:

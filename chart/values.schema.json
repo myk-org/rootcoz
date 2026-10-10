@@ -78,6 +78,23 @@
         }
       }
     },
+    "sidecar": {
+      "type": "object",
+      "properties": {
+        "agentDir": {
+          "type": "object",
+          "properties": {
+            "modelsJson": { "type": ["string", "object"] },
+            "authJson": { "type": ["string", "object"] },
+            "settingsJson": { "type": ["string", "object"] },
+            "env": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "admin": {
       "type": "object",
       "properties": {

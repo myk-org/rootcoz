@@ -208,12 +208,19 @@ These are read straight from the process environment and have no `Settings` fiel
 | `ANTHROPIC_VERTEX_PROJECT_ID` | unset | Vertex project, used with `CLAUDE_CODE_USE_VERTEX` |
 | `ACPX_AGENTS` | unset | Comma-separated providers exposed through the Cursor ACPX bridge |
 | `CLI_AGENTS` | unset | Comma-separated providers exposed through the local CLI agents |
+| `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
 
 `gemini` resolves to the `google` provider, and `GEMINI_API_KEY` is the credential RootCoz documents and charts for it (`ai.provider=gemini` pairs with `ai.geminiApiKey`). `gemini auth login` is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — `cli-gemini`, the canonical form of the legacy `gemini-cli` name — not under `google`, so it is not a substitute for `GEMINI_API_KEY` on the `gemini` alias. For `claude`, see the resolution rules above: the alias maps to `google-vertex-claude`, so `ANTHROPIC_API_KEY` on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.
 
 RootCoz does not read the Vertex trio itself — `config.py` documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting `ai.vertex.enabled` writes `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`, and separately mounts `ai.vertex.serviceAccountKey` and points `GOOGLE_APPLICATION_CREDENTIALS` at the mounted `application_default_credentials.json`. Install fails outright if `ai.vertex.enabled` is set without `ai.vertex.projectId` or `ai.vertex.serviceAccountKey`, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.
 
 Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and the Anthropic Vertex tooling, not here. For the authoritative credential requirements, follow the Anthropic Claude Code on Vertex AI documentation rather than treating the trio as self-sufficient. This matters for `AI_PROVIDER=claude` in particular, because that alias resolves to the `google-vertex-claude` provider — so Vertex is the path on which `claude` is expected to resolve at all.
+
+### Sidecar custom providers (agent dir)
+
+Pi-sidecar >=4.8.5 reads an **agent dir** at process start: `models.json` registers custom pi providers (listed by `GET /api/ai-models`, usable as `AI_PROVIDER`/`AI_MODEL`), `auth.json` supplies provider credentials, and `settings.json` seeds the sidecar's in-memory settings store. Point the sidecar at a persistent dir with `PI_SIDECAR_AGENT_DIR` (unset means an ephemeral scratch dir, i.e. no custom providers). A `models.json` `apiKey` may reference an environment variable — `"$ENMAAS_API_KEY"` resolves against the sidecar process environment, so the variable must be exported on the same container.
+
+Two operational rules follow from "read at process start": changing any file requires a sidecar restart (the Helm chart handles this with a checksum-annotated rolling restart; in Docker Compose restart the container), and `rootcoz ai-models` refresh does not re-read the directory. There is no provider allowlist on the RootCoz side — any exact provider/model pair present in the sidecar catalogue is accepted, so a custom provider is selected the same way as a built-in one.
 
 > **Warning:** `ROOTCOZ_ENCRYPTION_KEY` is the one variable worth getting right before you have real data. Rotating it invalidates every encrypted stored token *and* every stored API key hash, so all keys must be re-issued afterwards. Existing sessions use plain SHA-256 hashing and survive. If you do not set it, RootCoz generates a file under `$XDG_DATA_HOME/rootcoz/.encryption_key` and warns you in the health endpoint.
 
@@ -228,6 +235,7 @@ The Helm chart exists for the bootstrap-only variables, since those cannot be se
 | `ai.anthropicApiKey` | `ANTHROPIC_API_KEY` |
 | `ai.vertex.enabled`, `ai.vertex.projectId`, `ai.vertex.region`, `ai.vertex.serviceAccountKey` | `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, plus `GOOGLE_APPLICATION_CREDENTIALS` pointing at the mounted GCP key |
 | `ai.cursor.apiKey`, `ai.cursor.authJson` | `CURSOR_API_KEY` and the mounted Cursor `auth.json` |
+| `sidecar.agentDir.modelsJson`, `sidecar.agentDir.authJson`, `sidecar.agentDir.settingsJson` | `PI_SIDECAR_AGENT_DIR` pointing at a read-only Secret mount at `/etc/pi-sidecar-agent`; `sidecar.agentDir.env` adds Secret-backed env vars for `"$VAR"` API key references in `models.json` |
 | `admin.key` | `ADMIN_KEY` |
 | `encryptionKey` | `ROOTCOZ_ENCRYPTION_KEY` |
 | `env.xdgDataHome`, `env.xdgConfigHome` | `XDG_DATA_HOME`, `XDG_CONFIG_HOME` |

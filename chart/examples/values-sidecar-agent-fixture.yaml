@@ -1,0 +1,21 @@
+# Tox/helm template fixture — sidecar agent dir custom provider (not for production).
+ai:
+  provider: gemini
+  model: gemini-2.5-flash
+  geminiApiKey: test-key  # pragma: allowlist secret
+admin:
+  key: test-admin-key
+encryptionKey: test-encryption-key-for-helm-template-render
+sidecar:
+  agentDir:
+    modelsJson:
+      providers:
+        enmaas:
+          baseUrl: https://enmaas.example.com/v1
+          api: openai-completions
+          apiKey: $ENMAAS_API_KEY
+          models:
+            - id: enmaas/gpt-4o
+              name: GPT-4o via EnMaaS
+    env:
+      ENMAAS_API_KEY: test-enmaas-key  # pragma: allowlist secret

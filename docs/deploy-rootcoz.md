@@ -41,6 +41,8 @@ This uses the repo’s `docker-compose.yaml`, builds the local image, and keeps 
 
 > **Note:** This `.env` leaves the shipped defaults for access control in place: `REQUIRE_APPROVAL` is `true` and `DEFAULT_USER_ROLE` is `reviewer`. Add `REQUIRE_APPROVAL=false` and `DEFAULT_USER_ROLE=operator` if you want to register and submit without an admin in the loop.
 
+> **Note:** To register custom pi providers for the sidecar (pi-sidecar >=4.8.5), mount an agent dir with `models.json` / `auth.json` / `settings.json` into the container and add `PI_SIDECAR_AGENT_DIR=/path/to/dir` plus any `"$VAR"` API key variables to `.env` — the sidecar reads the dir once at start, so recreate the container after changing it. On Helm, use `sidecar.agentDir.*` values instead; see the [Configuration Reference](configuration-reference.html#sidecar-custom-providers-agent-dir).
+
 ## Bootstrap a shared cluster interactively
 
 Use the setup script to generate safe Helm values files outside the repo and install the chart in one pass.

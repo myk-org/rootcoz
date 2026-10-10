@@ -68,6 +68,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-cursor-auth" (include "rootcoz.fullname" .) }}
 {{- end }}
 
+{{- define "rootcoz.sidecarAgentSecretName" -}}
+{{- printf "%s-sidecar-agent" (include "rootcoz.fullname" .) }}
+{{- end }}
+
 {{- define "rootcoz.pvcName" -}}
 {{- printf "%s-data" (include "rootcoz.fullname" .) }}
 {{- end }}
@@ -230,6 +234,17 @@ ANTHROPIC_API_KEY: {{ $anthropic | b64enc | quote }}
 {{- if $cursor }}
 CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
 {{- end -}}
+{{- /* Sidecar agent-dir env vars (API keys referenced as "$VAR" in models.json):
+       values override, else preserve existing secret key on upgrade. */ -}}
+{{- range $name, $value := .Values.sidecar.agentDir.env -}}
+{{- $envValue := $value -}}
+{{- if and (not $envValue) $existing (index $existing.data $name) -}}
+{{- $envValue = index $existing.data $name | b64dec -}}
+{{- end -}}
+{{- if $envValue }}
+{{ $name }}: {{ $envValue | b64enc | quote }}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -268,6 +283,24 @@ Resolve Cursor auth.json: values override, else preserve existing secret on upgr
 */}}
 {{- define "rootcoz.cursorAuthJson" -}}
 {{- include "rootcoz.resolveSecretPayload" (dict "value" .Values.ai.cursor.authJson "secretName" (include "rootcoz.cursorAuthSecretName" .) "secretKey" "auth.json" "Release" .Release) -}}
+{{- end }}
+
+{{/*
+Sidecar agent dir secret data: models.json / auth.json / settings.json payloads
+(values override, string or YAML object, → existing secret fallback) as `data:`
+lines. Empty when no file is configured — the Deployment gates
+PI_SIDECAR_AGENT_DIR and the volume mount on this being non-empty.
+*/}}
+{{- define "rootcoz.sidecarAgentSecretData" -}}
+{{- $secretName := include "rootcoz.sidecarAgentSecretName" . -}}
+{{- $files := list "models.json" "auth.json" "settings.json" -}}
+{{- $sources := dict "models.json" .Values.sidecar.agentDir.modelsJson "auth.json" .Values.sidecar.agentDir.authJson "settings.json" .Values.sidecar.agentDir.settingsJson -}}
+{{- range $file := $files -}}
+{{- $payload := include "rootcoz.resolveSecretPayload" (dict "value" (index $sources $file) "secretName" $secretName "secretKey" $file "Release" $.Release) -}}
+{{- if $payload }}
+{{ $file }}: {{ $payload | b64enc | quote }}
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/*
