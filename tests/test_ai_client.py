@@ -379,6 +379,76 @@ async def test_case_distinct_providers_not_conflated(
 
 
 @pytest.mark.asyncio
+async def test_registered_providers_prevent_variant_consolidation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the sidecar registers both spellings as distinct provider IDs,
+    adding a key for one must not absorb the other's credential."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "registered-distinct.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential(
+        "alice", "Foo", "foo-key", registered_providers={"Foo"}
+    )
+    # Both spellings registered as distinct providers: credentials stay separate.
+    await storage.update_user_ai_credential(
+        "alice", "foo", "foo-lower-key", registered_providers={"Foo", "foo"}
+    )
+    assert await storage.get_user_ai_credentials("alice") == {
+        "Foo": "foo-key",
+        "foo": "foo-lower-key",
+    }
+    await storage.save_ai_session_source("upper-session", "alice", "Foo", "user")
+    await storage.save_ai_session_source("lower-session", "alice", "foo", "user")
+    assert await storage.update_user_ai_credential(
+        "alice", "foo", "new-lower-key", registered_providers={"Foo", "foo"}
+    ) == ["lower-session"]
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("lower-session", "alice", "foo")
+    assert (
+        await storage.get_ai_session_source("upper-session", "alice", "Foo") == "user"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unregistered_variant_consolidates(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A case-variant whose spelling is no longer registered is a drifted
+    spelling of the same provider and consolidates into the requested one."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "registered-drift.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential(
+        "alice", "MyGateway", "old-key", registered_providers={"MyGateway"}
+    )
+    # Catalog drifted: only the lowercase spelling is registered now.
+    await storage.update_user_ai_credential(
+        "alice", "mygateway", "new-key", registered_providers={"mygateway"}
+    )
+    assert await storage.get_user_ai_credentials("alice") == {"mygateway": "new-key"}
+
+
+@pytest.mark.asyncio
+async def test_revocation_discovery_indexes_exist(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Revocation discovery runs inside a write transaction — its lookup
+    predicates must be indexed so unrelated history is not table-scanned."""
+    import aiosqlite
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "revocation-indexes.db")
+    await storage.init_db()
+    async with aiosqlite.connect(storage.DB_PATH) as db:
+        rows = await (
+            await db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        ).fetchall()
+    names = {r[0] for r in rows}
+    assert "idx_chat_messages_user_provider_session" in names
+    assert "idx_ai_session_sources_user" in names
+
+
+@pytest.mark.asyncio
 async def test_resolve_catalog_pair_maps_unambiguous_legacy_gemini(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
