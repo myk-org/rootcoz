@@ -400,6 +400,62 @@ async def test_resolve_catalog_pair_mixed_case_alias_still_maps_legacy(
     )
 
 
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_refresh_reevaluates_mixed_case_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model missing from the cached catalog resolves after refresh, even when
+    the spelling adopted from the cache differs from the refreshed catalog's.
+
+    The cached catalog registers ``EnMaaS`` without the new model; the refresh
+    spells the provider ``enmaas`` and carries the model. Spelling adoption must
+    compare normalized forms on every call — including after refresh — or the
+    pair check rejects the valid pair.
+    """
+    ai_client.update_model_catalog([{"provider": "EnMaaS", "id": "enmaas/gpt-4o"}])
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(
+            return_value=[
+                {"provider": "enmaas", "id": "enmaas/gpt-4o"},
+                {"provider": "enmaas", "id": "enmaas/new-model"},
+            ]
+        ),
+    )
+
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    assert await ai_client.resolve_catalog_pair("enmaas", "enmaas/new-model") == (
+        "enmaas",
+        "enmaas/new-model",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_refresh_finds_new_model_same_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model missing from the cached catalog resolves after refresh with the
+    same mixed-case spelling in both catalogs."""
+    ai_client.update_model_catalog([{"provider": "EnMaaS", "id": "enmaas/gpt-4o"}])
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(
+            return_value=[
+                {"provider": "EnMaaS", "id": "enmaas/gpt-4o"},
+                {"provider": "EnMaaS", "id": "enmaas/new-model"},
+            ]
+        ),
+    )
+
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    assert await ai_client.resolve_catalog_pair("enmaas", "enmaas/new-model") == (
+        "EnMaaS",
+        "enmaas/new-model",
+    )
+
+
 def test_format_chat_ai_user_error_session_url_not_expired() -> None:
     msg = ai_client.format_chat_ai_user_error(
         "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'",

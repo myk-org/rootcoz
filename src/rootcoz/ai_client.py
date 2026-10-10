@@ -180,12 +180,15 @@ def _catalog_provider_spelling(provider_ids: Any, provider: str) -> str:
     provider may be registered with mixed case (e.g. ``EnMaaS``). Matching
     case-insensitively and returning the catalog's spelling keeps sessions
     working with the exact ID the sidecar registered while built-in alias
-    normalization stays intact. Zero or ambiguous matches (two providers
-    differing only in case) fall through unchanged and fail the exact pair
-    check downstream.
+    normalization stays intact. The comparison normalizes both sides: the input
+    may already carry a spelling adopted from a cached catalog, and the
+    refreshed catalog may spell the same provider differently. Zero or
+    ambiguous matches (two providers differing only in case) fall through
+    unchanged and fail the exact pair check downstream.
     """
+    wanted = provider.lower()
     matches = {
-        p for p in provider_ids if isinstance(p, str) and p and p.lower() == provider
+        p for p in provider_ids if isinstance(p, str) and p and p.lower() == wanted
     }
     return next(iter(matches)) if len(matches) == 1 else provider
 
