@@ -1354,6 +1354,17 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_chat_messages_job_user_status "
             "ON chat_messages (job_id, username, status)"
         )
+        # Covers credential-rotation revocation discovery: the provider-spelling
+        # scan and the per-provider session fetch run inside a write
+        # transaction, so they must not read unrelated history from the table.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_user_provider_session "
+            "ON chat_messages (username, ai_provider, session_id)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_session_sources_user "
+            "ON ai_session_sources (username, credential_source, provider, session_id)"
+        )
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS test_entries (
@@ -6076,9 +6087,18 @@ async def get_user_ai_credential_generation(username: str, provider: str) -> int
 
 
 async def update_user_ai_credential(
-    username: str, provider: str, key: str | None
+    username: str,
+    provider: str,
+    key: str | None,
+    registered_providers: set[str] | None = None,
 ) -> list[str]:
-    """Save a credential and invalidate its chat sessions; refuse unreadable maps."""
+    """Save a credential and invalidate its chat sessions; refuse unreadable maps.
+
+    ``registered_providers`` is the set of exact provider IDs the sidecar
+    currently registers, when known. A lone case-variant credential is
+    consolidated as a drifted spelling only when that variant is no longer
+    registered — if both spellings are registered as distinct providers, they
+    are kept separate and rotation touches only the exact spelling."""
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         row = await (
@@ -6090,16 +6110,52 @@ async def update_user_ai_credential(
         if row is None:
             raise LookupError("User has no credential store")
         credentials = _decode_ai_credentials(row[0])
-        if credentials.get(provider) == key or (
-            key is None and provider not in credentials
+        generations = json.loads(row[1])
+        # Case-variant spellings of this provider already in the credential
+        # map. A lone variant is the same provider under a drifted (re-
+        # capitalized) spelling and is consolidated into the requested one;
+        # multiple variants mean case-distinct providers coexist as separate
+        # credentials, and drift matching must not conflate them.
+        variants = [
+            k
+            for k in credentials
+            if isinstance(k, str) and k.lower() == provider.lower()
+        ]
+        unambiguous = len(variants) <= 1
+        if (
+            unambiguous
+            and variants
+            and variants[0] != provider
+            and registered_providers is not None
+            and variants[0] in registered_providers
         ):
+            # Both spellings are registered as distinct provider IDs — keep the
+            # credentials separate and rotate only the exact spelling.
+            unambiguous = False
+        affected = {*variants, provider} if unambiguous else {provider}
+        if key is None:
+            unchanged = all(k not in credentials for k in affected)
+        else:
+            unchanged = bool(affected) and all(
+                credentials.get(k) == key for k in affected
+            )
+        if unchanged:
             await db.commit()
             return []
+        # Consolidate a lone old spelling into the requested one so an
+        # obsolete case-variant generation can never invalidate fresh
+        # sessions: the merged counter carries the variant's history forward.
+        if unambiguous:
+            for variant in variants:
+                if variant != provider:
+                    credentials.pop(variant, None)
+                    generations[provider] = max(
+                        generations.get(provider, 0), generations.pop(variant, 0)
+                    )
         if key is None:
-            credentials.pop(provider)
+            credentials.pop(provider, None)
         else:
             credentials[provider] = key
-        generations = json.loads(row[1])
         generations[provider] = generations.get(provider, 0) + 1
         await db.execute(
             "UPDATE users SET ai_credentials_enc = ?, ai_credential_generations = ?, "
@@ -6107,43 +6163,116 @@ async def update_user_ai_credential(
             (encrypt_value(json.dumps(credentials)), json.dumps(generations), username),
         )
         # A session retains its creation-time key in the sidecar. Drop references
-        # atomically with the credential so later turns start fresh.
-        sessions = await (
+        # atomically with the credential so later turns start fresh. Provider
+        # matching happens in Python with Unicode lowercasing — SQLite
+        # COLLATE NOCASE folds ASCII only, while the ownership check
+        # lowercases in Python, so both sides must agree for non-ASCII provider
+        # IDs. Drift matching extends only to the unambiguous spellings
+        # computed above, never across case-distinct credentials.
+        wanted_lower = {a.lower() for a in affected}
+
+        def _spell_match(spelling: Any) -> bool:
+            # Unambiguous drift matches case-insensitively; when case-distinct
+            # credentials coexist, only the exact spelling is this provider.
+            if not isinstance(spelling, str):
+                return False
+            if unambiguous:
+                return spelling.lower() in wanted_lower
+            return spelling in affected
+
+        # Revocation discovery stays narrow while the write transaction is
+        # held: an index-only DISTINCT scan lists the user's provider
+        # spellings, and only spellings that can belong to this provider are
+        # fetched back with their session IDs.
+        distinct_rows = await (
             await db.execute(
-                "SELECT DISTINCT chat_messages.session_id FROM chat_messages "
-                "LEFT JOIN ai_session_sources ON ai_session_sources.session_id = chat_messages.session_id "
-                "WHERE chat_messages.username = ? AND chat_messages.ai_provider = ? "
-                "AND chat_messages.session_id != '' AND ("
-                "(ai_session_sources.username = chat_messages.username "
-                "AND ai_session_sources.provider = chat_messages.ai_provider "
-                "AND ai_session_sources.credential_source = 'user') "
-                "OR ai_session_sources.session_id IS NULL)",
-                (username, provider),
+                "SELECT DISTINCT ai_provider FROM chat_messages "
+                "WHERE username = ? AND session_id != ''",
+                (username,),
             )
         ).fetchall()
+        msg_spellings = sorted({r[0] for r in distinct_rows if _spell_match(r[0])})
+        msg_rows: list[Any] = []
+        for start in range(0, len(msg_spellings), 500):
+            spelling_chunk = msg_spellings[start : start + 500]
+            msg_rows.extend(
+                await (
+                    await db.execute(
+                        "SELECT session_id, ai_provider FROM chat_messages "
+                        "WHERE username = ? AND session_id != '' "
+                        f"AND ai_provider IN ({','.join('?' * len(spelling_chunk))})",
+                        [username, *spelling_chunk],
+                    )
+                ).fetchall()
+            )
+        # Source rows for the candidate session IDs regardless of owner: the
+        # join must see other users' rows so a foreign session record is never
+        # mistaken for an untracked one.
+        src_by_sid: dict[str, Any] = {}
+        sids = sorted({sid for sid, _ in msg_rows})
+        for start in range(0, len(sids), 500):
+            chunk = sids[start : start + 500]
+            rows = await (
+                await db.execute(
+                    "SELECT session_id, username, provider, credential_source "
+                    f"FROM ai_session_sources WHERE session_id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                )
+            ).fetchall()
+            src_by_sid.update({r[0]: r for r in rows})
+        own_distinct = await (
+            await db.execute(
+                "SELECT DISTINCT provider FROM ai_session_sources "
+                "WHERE username = ? AND credential_source = 'user'",
+                (username,),
+            )
+        ).fetchall()
+        own_spellings = sorted({r[0] for r in own_distinct if _spell_match(r[0])})
+        own_rows: list[Any] = []
+        for start in range(0, len(own_spellings), 500):
+            spelling_chunk = own_spellings[start : start + 500]
+            own_rows.extend(
+                await (
+                    await db.execute(
+                        "SELECT session_id, provider FROM ai_session_sources "
+                        "WHERE username = ? AND credential_source = 'user' "
+                        f"AND provider IN ({','.join('?' * len(spelling_chunk))})",
+                        [username, *spelling_chunk],
+                    )
+                ).fetchall()
+            )
+
+        sessions = {
+            sid
+            for sid, msg_provider in msg_rows
+            if _spell_match(msg_provider)
+            and (
+                sid not in src_by_sid
+                or (
+                    src_by_sid[sid][1] == username
+                    and src_by_sid[sid][3] == "user"
+                    and _spell_match(src_by_sid[sid][2])
+                )
+            )
+        }
+        keyed = [r[0] for r in own_rows if _spell_match(r[1])]
+        revoked_ids = sorted(sessions | set(keyed))
         await db.executemany(
             "INSERT OR IGNORE INTO ai_session_sources "
             "(session_id, username, provider, credential_source) VALUES (?, ?, ?, 'revoked')",
-            [(row[0], username, provider) for row in sessions],
+            [(sid, username, provider) for sid in sessions],
         )
         await db.executemany(
             "UPDATE chat_messages SET session_id = '', session_revoked = 1 "
-            "WHERE username = ? AND ai_provider = ? AND session_id = ?",
-            [(username, provider, row[0]) for row in sessions],
+            "WHERE username = ? AND session_id = ?",
+            [(username, sid) for sid in sessions],
         )
         # Keep tombstones if sidecar deletion fails: an old keyed session must
         # never become an unowned (legacy) session that can be resumed.
-        keyed = await (
-            await db.execute(
-                "SELECT session_id FROM ai_session_sources "
-                "WHERE username = ? AND provider = ? AND credential_source = 'user'",
-                (username, provider),
-            )
-        ).fetchall()
-        await db.execute(
+        await db.executemany(
             "UPDATE ai_session_sources SET credential_source = 'revoked' "
-            "WHERE username = ? AND provider = ? AND credential_source = 'user'",
-            (username, provider),
+            "WHERE username = ? AND session_id = ? AND credential_source = 'user'",
+            [(username, sid) for sid in revoked_ids],
         )
         await db.commit()
     logger.info(
@@ -6151,7 +6280,7 @@ async def update_user_ai_credential(
         username,
         provider,
     )
-    return list({row[0] for row in [*sessions, *keyed]})
+    return revoked_ids
 
 
 async def create_ai_session_with_source(
@@ -6382,8 +6511,40 @@ async def revoke_ai_session_source(
         return bool(cursor.rowcount)
 
 
+def _generation_rotated(
+    generations: dict[str, int], stored_provider: str, recorded: int
+) -> bool:
+    """Whether a user-credential session's generation no longer matches.
+
+    The generations map is keyed by exact provider spelling. When it contains
+    the session's stored spelling, compare against that entry alone — a fresh
+    session created under the current spelling must not be invalidated by an
+    obsolete counter left under a former spelling. Only when the exact key is
+    absent (the spelling was consolidated away or the credential removed) do
+    case-variant keys provide the fallback, failing closed when any differs.
+    No variant key means generation 0, matching the previous ``json_extract``
+    COALESCE default.
+    """
+    if stored_provider in generations:
+        return generations[stored_provider] != recorded
+    variants = [
+        value
+        for key, value in generations.items()
+        if isinstance(key, str) and key.lower() == stored_provider.lower()
+    ]
+    current = variants or [0]
+    return any(value != recorded for value in current)
+
+
 async def get_ai_session_source(session_id: str, username: str, provider: str) -> str:
-    """Reject a known session owned by another user or provider."""
+    """Reject a known session owned by another user or provider.
+
+    Provider IDs are compared case-insensitively: a custom agent-dir provider
+    may change capitalization between catalog refreshes, and a session stored
+    under the old spelling must stay usable with the catalog's current exact
+    spelling. The credential-generation lookup uses the stored spelling — the
+    JSON key the generation was recorded under at session creation.
+    """
     async with _connect_db() as db:
         row = await (
             await db.execute(
@@ -6392,20 +6553,26 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
                 (session_id,),
             )
         ).fetchone()
-        generation = await (
-            await db.execute(
-                "SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(:provider)), 0) "
-                "FROM users WHERE username = :username",
-                {"username": username, "provider": provider},
-            )
-        ).fetchone()
+        generations: dict[str, int] = {}
+        if row and row[0] == username:
+            gen_row = await (
+                await db.execute(
+                    "SELECT ai_credential_generations FROM users WHERE username = ?",
+                    (username,),
+                )
+            ).fetchone()
+            if gen_row:
+                parsed = json.loads(gen_row[0])
+                if isinstance(parsed, dict):
+                    generations = parsed
     if row and (
-        (row[0], row[1]) != (username, provider)
+        row[0] != username
+        or row[1].lower() != provider.lower()
         or row[2] in ("revoked", "deleting", "deleted")
         or (
             row[2] == "user"
             and row[3] is not None
-            and (not generation or row[3] != generation[0])
+            and _generation_rotated(generations, row[1], row[3])
         )
     ):
         raise ValueError(

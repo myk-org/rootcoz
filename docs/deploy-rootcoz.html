@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Deploying RootCoz - rootcoz</title>
     <meta name="description" content="AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML">
-    <link rel="stylesheet" href="assets/style.css?v=5a6efa51d2">
+    <link rel="stylesheet" href="assets/style.css?v=66bf87bdd9">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
     <link rel="alternate" type="text/plain" title="LLM Documentation Index" href="llms.txt">
     <link rel="alternate" type="text/plain" title="LLM Full Documentation" href="llms-full.txt">
@@ -255,6 +255,7 @@ curl<span class="w"> </span>http://localhost:8000/health
 </ul>
 <blockquote>
 <p><strong>Note:</strong> This <code>.env</code> leaves the shipped defaults for access control in place: <code>REQUIRE_APPROVAL</code> is <code>true</code> and <code>DEFAULT_USER_ROLE</code> is <code>reviewer</code>. Add <code>REQUIRE_APPROVAL=false</code> and <code>DEFAULT_USER_ROLE=operator</code> if you want to register and submit without an admin in the loop.</p>
+<p><strong>Note:</strong> To register custom pi providers for the sidecar (pi-sidecar &gt;=4.8.5), mount an agent dir with <code>models.json</code> / <code>auth.json</code> / <code>settings.json</code> into the container and add <code>PI_SIDECAR_AGENT_DIR=/path/to/dir</code> plus any <code>"$VAR"</code> API key variables to <code>.env</code> — the sidecar reads the dir once at start, so recreate the container after changing it. On Helm, use <code>sidecar.agentDir.*</code> values instead; see the <a href="configuration-reference.html#sidecar-custom-providers-agent-dir">Configuration Reference</a>.</p>
 </blockquote>
 <h2 id="bootstrap-a-shared-cluster-interactively">Bootstrap a shared cluster interactively</h2>
 <p>Use the setup script to generate safe Helm values files outside the repo and install the chart in one pass.</p>
@@ -510,14 +511,14 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 
     <div class="sidebar-overlay" id="sidebar-overlay"></div>
 
-    <script src="assets/theme.js?v=5a6efa51d2"></script>
+    <script src="assets/theme.js?v=66bf87bdd9"></script>
 
-    <script src="assets/search.js?v=5a6efa51d2"></script>
-    <script src="assets/copy.js?v=5a6efa51d2"></script>
-    <script src="assets/callouts.js?v=5a6efa51d2"></script>
-    <script src="assets/scrollspy.js?v=5a6efa51d2"></script>
-    <script src="assets/codelabels.js?v=5a6efa51d2"></script>
-    <script src="assets/github.js?v=5a6efa51d2"></script>
+    <script src="assets/search.js?v=66bf87bdd9"></script>
+    <script src="assets/copy.js?v=66bf87bdd9"></script>
+    <script src="assets/callouts.js?v=66bf87bdd9"></script>
+    <script src="assets/scrollspy.js?v=66bf87bdd9"></script>
+    <script src="assets/codelabels.js?v=66bf87bdd9"></script>
+    <script src="assets/github.js?v=66bf87bdd9"></script>
     <script>
 (function() {
     var toggle = document.getElementById('sidebar-toggle');

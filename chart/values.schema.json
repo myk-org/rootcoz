@@ -54,8 +54,7 @@
       "type": "object",
       "properties": {
         "provider": {
-          "type": "string",
-          "enum": ["", "gemini", "claude", "cursor"]
+          "type": "string"
         },
         "model": { "type": "string" },
         "geminiApiKey": { "type": "string" },
@@ -74,6 +73,26 @@
           "properties": {
             "apiKey": { "type": "string" },
             "authJson": { "type": ["string", "object"] }
+          }
+        }
+      }
+    },
+    "sidecar": {
+      "type": "object",
+      "properties": {
+        "agentDir": {
+          "type": "object",
+          "properties": {
+            "modelsJson": { "type": ["string", "object"] },
+            "authJson": { "type": ["string", "object"] },
+            "settingsJson": { "type": ["string", "object"] },
+            "env": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
+              "additionalProperties": { "type": "string" }
+            }
           }
         }
       }

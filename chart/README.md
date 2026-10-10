@@ -96,7 +96,7 @@ imagePullSecrets:
 
 | Value | Env var | Notes |
 |-------|---------|-------|
-| `ai.provider` | `AI_PROVIDER` | `gemini`, `claude`, or `cursor` |
+| `ai.provider` | `AI_PROVIDER` | Any sidecar provider ID: `gemini`, `claude`, `cursor`, or a custom provider registered via the agent dir |
 | `ai.model` | `AI_MODEL` | Model name for the provider |
 | Provider credential | see below | Required for AI analysis |
 
@@ -110,6 +110,40 @@ Provider credentials (typically in `~/.config/rootcoz/helm/values.secrets.yaml`)
 | Claude (API) | `ai.anthropicApiKey` | `ANTHROPIC_API_KEY` |
 | Claude (Vertex) | `ai.vertex.serviceAccountKey` + `ai.vertex.projectId` | mounted SA JSON |
 | Cursor | `ai.cursor.apiKey` and/or `ai.cursor.authJson` | `CURSOR_API_KEY` + auth mount |
+| Custom (sidecar agent dir) | `sidecar.agentDir.modelsJson` etc. | `PI_SIDECAR_AGENT_DIR` + agent-dir mount |
+
+### Sidecar custom providers (agent dir)
+
+pi-sidecar >=4.8.5 can register custom pi providers from a persistent agent dir.
+Set any of `sidecar.agentDir.modelsJson` / `authJson` / `settingsJson` (string or
+YAML object) — the chart stores them in a Secret, mounts it read-only at
+`/etc/pi-sidecar-agent`, and sets `PI_SIDECAR_AGENT_DIR` accordingly. API keys
+referenced as `"$VAR"` inside `models.json` come from `sidecar.agentDir.env`
+(e.g. `env: { MYGATEWAY_API_KEY: "..." }`). Env keys use tombstone semantics:
+omitting a key preserves its stored Secret value on upgrade (Helm `lookup`),
+while setting it to `""` removes it. Keys matching chart-managed variable
+names (`AI_PROVIDER`, `SECURE_COOKIES`, `ADMIN_KEY`, …) are rejected at render
+time. Files are read once at sidecar start;
+changes roll the Deployment via checksum annotations. Example:
+
+```yaml
+sidecar:
+  agentDir:
+    modelsJson:
+      providers:
+        mygateway:
+          baseUrl: https://mygateway.example.com/v1
+          api: openai-completions
+          apiKey: $MYGATEWAY_API_KEY
+          models:
+            - id: mygateway/gpt-4o
+              name: GPT-4o via MyGateway
+    env:
+      MYGATEWAY_API_KEY: "..."
+```
+
+Custom providers appear in the model catalog (`GET /api/ai-models`, or `rootcoz ai-models`)
+and are selectable as `ai.provider` / `ai.model` like any built-in provider.
 
 ## Bootstrap Secrets
 
@@ -126,7 +160,7 @@ Login: username `admin`, password = API key above.
 
 **Warning:** Do not delete the encryption secret (`rootcoz-encryption-key`) independently — the database becomes unreadable.
 
-AI API keys, Vertex SA JSON, and Cursor `auth.json` supplied via values are stored in Kubernetes Secrets **and** in the Helm release Secret (`sh.helm.release.v1.*`). For stricter environments, inject credentials with External Secrets / Sealed Secrets and omit plaintext keys from Helm values where possible. On upgrade, omitting a previously set AI key / mount credential preserves the existing Secret via Helm `lookup`.
+AI API keys, Vertex SA JSON, Cursor `auth.json`, and sidecar agent-dir files supplied via values are stored in Kubernetes Secrets **and** in the Helm release Secret (`sh.helm.release.v1.*`). For stricter environments, inject credentials with External Secrets / Sealed Secrets and omit plaintext keys from Helm values where possible. On upgrade, omitting a previously set AI key / mount credential preserves the existing Secret via Helm `lookup`.
 
 ## Production Sizing
 

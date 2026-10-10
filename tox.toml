@@ -129,6 +129,43 @@ commands = [
     "chart/",
     "-f",
     "chart/examples/values-openshift.yaml",
+    "-f",
+    "chart/examples/values-sidecar-agent-fixture.yaml",
+    "--set",
+    "ai.geminiApiKey=test-key",  # pragma: allowlist secret
+    "--set",
+    "admin.key=test-admin-key",  # pragma: allowlist secret
+    "--set",
+    "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "OUT=/tmp/rootcoz-sidecar-agent-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT 2>&1 && grep -q 'PI_SIDECAR_AGENT_DIR' $OUT && grep -q '/etc/pi-sidecar-agent' $OUT && grep -A2 'mountPath: /etc/pi-sidecar-agent' $OUT | grep -q 'readOnly: true' && grep -q 'MYGATEWAY_API_KEY' $OUT && grep -q 'AI_PROVIDER: \"mygateway\"' $OUT && rm -f $OUT && ! helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'PI_SIDECAR_AGENT_DIR'",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set sidecar.agentDir.env.BAD-KEY=x --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'sidecar.agentDir.env: Property name of \"BAD-KEY\" does not match'",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set sidecar.agentDir.env.ADMIN_KEY=x --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'collides with a chart-managed environment variable' && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set sidecar.agentDir.env.CURSOR_API_KEY=x --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'collides with a chart-managed environment variable' && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set sidecar.agentDir.env.AI_PROVIDER=x --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'collides with a chart-managed environment variable' && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set sidecar.agentDir.env.SIDECAR_PORT=x --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'collides with a chart-managed environment variable'",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.provider=GEMINI --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'ai.geminiApiKey is required when ai.provider is gemini'",  # pragma: allowlist secret
+  ],
+
+  [
+    "helm",
+    "template",
+    "rootcoz",
+    "chart/",
+    "-f",
+    "chart/examples/values-openshift.yaml",
     "--set",
     "imageStream.enabled=true",
     "--set",

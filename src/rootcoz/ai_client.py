@@ -173,6 +173,26 @@ def normalize_provider(provider: str) -> str:
     return _LEGACY_PROVIDER_ALIASES.get(p, p)
 
 
+def _catalog_provider_spelling(provider_ids: Any, provider: str) -> str:
+    """Adopt the catalog's exact spelling for a provider ID, case-insensitively.
+
+    ``normalize_provider()`` lowercases built-in aliases, but a custom agent-dir
+    provider may be registered with mixed case (e.g. ``MyGateway``). Matching
+    case-insensitively and returning the catalog's spelling keeps sessions
+    working with the exact ID the sidecar registered while built-in alias
+    normalization stays intact. The comparison normalizes both sides: the input
+    may already carry a spelling adopted from a cached catalog, and the
+    refreshed catalog may spell the same provider differently. Zero or
+    ambiguous matches (two providers differing only in case) fall through
+    unchanged and fail the exact pair check downstream.
+    """
+    wanted = provider.lower()
+    matches = {
+        p for p in provider_ids if isinstance(p, str) and p and p.lower() == wanted
+    }
+    return next(iter(matches)) if len(matches) == 1 else provider
+
+
 def _source_for_sidecar(provider: str) -> str:
     if provider.startswith("cli-"):
         return "cli"
@@ -232,6 +252,26 @@ def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
     global _model_catalog_cache, _model_catalog_generation
     _model_catalog_generation += 1
     _model_catalog_cache = models
+
+
+async def registered_provider_ids() -> set[str] | None:
+    """Exact provider IDs the sidecar currently registers, or None if unavailable.
+
+    Freshness matters: credential rotation uses this to decide whether a
+    case-variant spelling is still a registered, distinct provider (keep the
+    credentials separate) or a drifted spelling of the same one (consolidate).
+    """
+    try:
+        catalog = await _get_model_catalog(refresh=True)
+    except httpx.HTTPError, OSError, RuntimeError, ValueError:
+        try:
+            catalog = await _get_model_catalog()
+        except httpx.HTTPError, OSError, RuntimeError, ValueError:
+            logger.warning("Unable to list registered providers for credential update")
+            return None
+    return {
+        entry["provider"] for entry in catalog if isinstance(entry.get("provider"), str)
+    }
 
 
 async def list_models(provider: str = "") -> list[dict[str, Any]]:
@@ -489,6 +529,9 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     if ai_username.get():
         scoped = await scoped_models()
         status = model_listing_status.get() or {}
+        provider = _catalog_provider_spelling(
+            (*scoped.keys(), *status.keys()), provider
+        )
         if (
             status.get(provider, {}).get("unavailable")
             and not force_server_credentials.get()
@@ -528,6 +571,9 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
             return provider, model
         raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
     catalog = await _get_model_catalog()
+    provider = _catalog_provider_spelling(
+        {entry.get("provider") for entry in catalog}, provider
+    )
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
         await require_server_provider_grant()
@@ -537,6 +583,9 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     # A stale catalog may not yet contain a newly discovered pair. Refresh once;
     # a warm catalog remains usable if that refresh is temporarily unavailable.
     catalog = await _get_model_catalog(refresh=True)
+    provider = _catalog_provider_spelling(
+        {entry.get("provider") for entry in catalog}, provider
+    )
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
         await require_server_provider_grant()
@@ -547,7 +596,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     # precisely one catalog provider has this model prevents google/Vertex guesses.
     targets = _LEGACY_PROVIDER_TARGETS.get(provider)
     providers_for_model = {p for p, m in pairs if p and m == model}
-    matches = [p for p in providers_for_model if targets and p in targets]
+    matches = [p for p in providers_for_model if targets and p.lower() in targets]
     if len(providers_for_model) == 1 and len(matches) == 1:
         await require_server_provider_grant()
         _selected_credential_source.set("server")
