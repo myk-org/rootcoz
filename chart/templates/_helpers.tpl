@@ -73,12 +73,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-Chart-managed environment variable names that sidecar.agentDir.env entries must
-not shadow (comma-separated; splitList in consumers). Shared by validation
-(rootcoz.validate) and the credentials Secret merge in rootcoz.credentialsSecretData.
+Environment variable names that sidecar.agentDir.env entries must not shadow
+(comma-separated; splitList in consumers). Covers every variable the chart
+manages directly (Secrets, ConfigMap, Deployment env) plus sidecar/app control
+variables — the credentials Secret is imported via envFrom after the ConfigMap,
+so an unchecked entry would override chart-managed configuration. Shared by
+validation (rootcoz.validate) and the credentials Secret merge in
+rootcoz.credentialsSecretData.
 */}}
 {{- define "rootcoz.reservedEnvKeys" -}}
-ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,ROOTCOZ_ENCRYPTION_KEY,PI_SIDECAR_AGENT_DIR
+ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,ROOTCOZ_ENCRYPTION_KEY,AI_PROVIDER,AI_MODEL,PUBLIC_BASE_URL,SECURE_COOKIES,LOG_LEVEL,METADATA_RULES_FILE,XDG_CONFIG_HOME,XDG_DATA_HOME,CLAUDE_CODE_USE_VERTEX,CLOUD_ML_REGION,ANTHROPIC_VERTEX_PROJECT_ID,CLOUDSDK_CONFIG,GOOGLE_APPLICATION_CREDENTIALS,PI_SIDECAR_AGENT_DIR,SIDECAR_PORT,DEV_MODE,PORT
 {{- end }}
 
 {{- define "rootcoz.pvcName" -}}
@@ -108,11 +112,15 @@ Validate chart values: routing, AI config.
 {{- end -}}
 {{- end -}}
 {{- if .Release.IsInstall -}}
-{{- if eq .Values.ai.provider "gemini" -}}
+{{- /* Lowercase before the built-in alias checks: the application lowercases
+       AI_PROVIDER on load, so an uppercase alias must not bypass the
+       install-time credential requirements. Custom provider IDs pass through. */ -}}
+{{- $aiProvider := lower .Values.ai.provider -}}
+{{- if eq $aiProvider "gemini" -}}
 {{- if not .Values.ai.geminiApiKey -}}
 {{- fail "ai.geminiApiKey is required when ai.provider is gemini" -}}
 {{- end -}}
-{{- else if eq .Values.ai.provider "claude" -}}
+{{- else if eq $aiProvider "claude" -}}
 {{- if and (not .Values.ai.anthropicApiKey) (not .Values.ai.vertex.enabled) -}}
 {{- fail "ai.anthropicApiKey or ai.vertex.enabled is required when ai.provider is claude" -}}
 {{- end -}}
@@ -122,7 +130,7 @@ Validate chart values: routing, AI config.
 {{- if and .Values.ai.vertex.enabled (not .Values.ai.vertex.serviceAccountKey) -}}
 {{- fail "ai.vertex.serviceAccountKey is required when ai.vertex.enabled is true" -}}
 {{- end -}}
-{{- else if eq .Values.ai.provider "cursor" -}}
+{{- else if eq $aiProvider "cursor" -}}
 {{- if and (not .Values.ai.cursor.apiKey) (not .Values.ai.cursor.authJson) -}}
 {{- fail "ai.cursor.apiKey or ai.cursor.authJson is required when ai.provider is cursor" -}}
 {{- end -}}
@@ -250,18 +258,18 @@ ANTHROPIC_API_KEY: {{ $anthropic | b64enc | quote }}
 {{- if $cursor }}
 CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
 {{- end -}}
-{{- /* Sidecar agent-dir env vars (API keys referenced as "$VAR" in models.json):
-       values override, else preserve existing Secret key on upgrade. Keys present
-       in the existing Secret but absent from current values are also preserved —
-       dropping the map on upgrade must not orphan a models.json that still
-       references one of its keys. Chart-managed keys are excluded; collisions
-       with them fail early in rootcoz.validate. */ -}}
+{{- /* Sidecar agent-dir env vars (API keys referenced as "$VAR" in models.json).
+       Values override existing Secret keys; keys present in the existing Secret
+       but absent from current values are preserved on upgrade (dropping the map
+       must not orphan a models.json that still references one of its keys).
+       A key set to an empty string in values is a tombstone: the key is removed
+       from the Secret instead of being restored from the existing one.
+       Chart-managed keys are excluded; collisions with them fail early in
+       rootcoz.validate. */ -}}
 {{- $reserved := splitList "," (include "rootcoz.reservedEnvKeys" .) -}}
 {{- $envMap := dict -}}
 {{- range $name, $value := .Values.sidecar.agentDir.env -}}
-{{- if $value -}}
 {{- $_ := set $envMap $name $value -}}
-{{- end -}}
 {{- end -}}
 {{- if $existing -}}
 {{- range $name, $existingValue := $existing.data -}}
@@ -271,7 +279,9 @@ CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
 {{- end -}}
 {{- end -}}
 {{- range $name, $value := $envMap }}
+{{- if $value }}
 {{ $name }}: {{ $value | b64enc | quote }}
+{{- end }}
 {{- end -}}
 {{- end }}
 

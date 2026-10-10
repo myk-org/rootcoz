@@ -79,6 +79,8 @@ sidecar:
     settingsJson: ""
     # Secret env vars for API keys referenced as "$VAR" in models.json,
     # e.g. env: { ENMAAS_API_KEY: "..." } → container env var ENMAAS_API_KEY.
+    # A key set to "" removes it (tombstone); omitting the key preserves the
+    # existing Secret value on upgrade. Chart-managed variable names are rejected.
     env: {}
 
 # Bootstrap admin API key → ADMIN_KEY (secret). Required by scripts/helm-setup.py;

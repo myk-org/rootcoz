@@ -119,7 +119,11 @@ Set any of `sidecar.agentDir.modelsJson` / `authJson` / `settingsJson` (string o
 YAML object) — the chart stores them in a Secret, mounts it read-only at
 `/etc/pi-sidecar-agent`, and sets `PI_SIDECAR_AGENT_DIR` accordingly. API keys
 referenced as `"$VAR"` inside `models.json` come from `sidecar.agentDir.env`
-(e.g. `env: { ENMAAS_API_KEY: "..." }`). Files are read once at sidecar start;
+(e.g. `env: { ENMAAS_API_KEY: "..." }`). Env keys use tombstone semantics:
+omitting a key preserves its stored Secret value on upgrade (Helm `lookup`),
+while setting it to `""` removes it. Keys matching chart-managed variable
+names (`AI_PROVIDER`, `SECURE_COOKIES`, `ADMIN_KEY`, …) are rejected at render
+time. Files are read once at sidecar start;
 changes roll the Deployment via checksum annotations. Example:
 
 ```yaml

@@ -235,7 +235,7 @@ The Helm chart exists for the bootstrap-only variables, since those cannot be se
 | `ai.anthropicApiKey` | `ANTHROPIC_API_KEY` |
 | `ai.vertex.enabled`, `ai.vertex.projectId`, `ai.vertex.region`, `ai.vertex.serviceAccountKey` | `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, plus `GOOGLE_APPLICATION_CREDENTIALS` pointing at the mounted GCP key |
 | `ai.cursor.apiKey`, `ai.cursor.authJson` | `CURSOR_API_KEY` and the mounted Cursor `auth.json` |
-| `sidecar.agentDir.modelsJson`, `sidecar.agentDir.authJson`, `sidecar.agentDir.settingsJson` | `PI_SIDECAR_AGENT_DIR` pointing at a read-only Secret mount at `/etc/pi-sidecar-agent`; `sidecar.agentDir.env` adds Secret-backed env vars for `"$VAR"` API key references in `models.json` |
+| `sidecar.agentDir.modelsJson`, `sidecar.agentDir.authJson`, `sidecar.agentDir.settingsJson` | `PI_SIDECAR_AGENT_DIR` pointing at a read-only Secret mount at `/etc/pi-sidecar-agent`; `sidecar.agentDir.env` adds Secret-backed env vars for `"$VAR"` API key references in `models.json` (omitting a key preserves its stored value on upgrade, `""` removes it; chart-managed variable names are rejected) |
 | `admin.key` | `ADMIN_KEY` |
 | `encryptionKey` | `ROOTCOZ_ENCRYPTION_KEY` |
 | `env.xdgDataHome`, `env.xdgConfigHome` | `XDG_DATA_HOME`, `XDG_CONFIG_HOME` |

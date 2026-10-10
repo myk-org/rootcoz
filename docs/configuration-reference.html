@@ -1058,7 +1058,7 @@ SECURE_COOKIES=false
 </tr>
 <tr>
 <td><code>sidecar.agentDir.modelsJson</code>, <code>sidecar.agentDir.authJson</code>, <code>sidecar.agentDir.settingsJson</code></td>
-<td><code>PI_SIDECAR_AGENT_DIR</code> pointing at a read-only Secret mount at <code>/etc/pi-sidecar-agent</code>; <code>sidecar.agentDir.env</code> adds Secret-backed env vars for <code>"$VAR"</code> API key references in <code>models.json</code></td>
+<td><code>PI_SIDECAR_AGENT_DIR</code> pointing at a read-only Secret mount at <code>/etc/pi-sidecar-agent</code>; <code>sidecar.agentDir.env</code> adds Secret-backed env vars for <code>"$VAR"</code> API key references in <code>models.json</code> (omitting a key preserves its stored value on upgrade, <code>""</code> removes it; chart-managed variable names are rejected)</td>
 </tr>
 <tr>
 <td><code>admin.key</code></td>

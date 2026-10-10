@@ -360,6 +360,46 @@ async def test_resolve_catalog_pair_rejects_model_from_another_provider(
         await ai_client.resolve_catalog_pair("openai", "cursor-only-model")
 
 
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_adopts_mixed_case_catalog_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom agent-dir provider registered with mixed case resolves from any
+    input spelling and returns the catalog's exact ID for POST /sessions."""
+    ai_client.update_model_catalog(None)
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(return_value=[{"provider": "EnMaaS", "id": "enmaas/gpt-4o"}]),
+    )
+
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    for requested in ("enmaas", "EnMaaS", "ENMAAS"):
+        assert await ai_client.resolve_catalog_pair(requested, "enmaas/gpt-4o") == (
+            "EnMaaS",
+            "enmaas/gpt-4o",
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_catalog_pair_mixed_case_alias_still_maps_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Case-insensitive spelling adoption must not break legacy alias mapping."""
+    ai_client.update_model_catalog(None)
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(return_value=[{"provider": "google", "id": "gemini-2.5"}]),
+    )
+
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    assert await ai_client.resolve_catalog_pair("GEMINI", "gemini-2.5") == (
+        "google",
+        "gemini-2.5",
+    )
+
+
 def test_format_chat_ai_user_error_session_url_not_expired() -> None:
     msg = ai_client.format_chat_ai_user_error(
         "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'",
