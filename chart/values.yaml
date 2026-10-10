@@ -78,7 +78,7 @@ sidecar:
     # store (string or YAML object), mounted at /etc/pi-sidecar-agent/settings.json
     settingsJson: ""
     # Secret env vars for API keys referenced as "$VAR" in models.json,
-    # e.g. env: { ENMAAS_API_KEY: "..." } → container env var ENMAAS_API_KEY.
+    # e.g. env: { MYGATEWAY_API_KEY: "..." } → container env var MYGATEWAY_API_KEY.
     # A key set to "" removes it (tombstone); omitting the key preserves the
     # existing Secret value on upgrade. Chart-managed variable names are rejected.
     env: {}

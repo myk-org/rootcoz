@@ -141,7 +141,7 @@ commands = [
   [
     "sh",
     "-c",
-    "OUT=/tmp/rootcoz-sidecar-agent-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT 2>&1 && grep -q 'PI_SIDECAR_AGENT_DIR' $OUT && grep -q '/etc/pi-sidecar-agent' $OUT && grep -A2 'mountPath: /etc/pi-sidecar-agent' $OUT | grep -q 'readOnly: true' && grep -q 'ENMAAS_API_KEY' $OUT && grep -q 'AI_PROVIDER: \"enmaas\"' $OUT && rm -f $OUT && ! helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'PI_SIDECAR_AGENT_DIR'",  # pragma: allowlist secret
+    "OUT=/tmp/rootcoz-sidecar-agent-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT 2>&1 && grep -q 'PI_SIDECAR_AGENT_DIR' $OUT && grep -q '/etc/pi-sidecar-agent' $OUT && grep -A2 'mountPath: /etc/pi-sidecar-agent' $OUT | grep -q 'readOnly: true' && grep -q 'MYGATEWAY_API_KEY' $OUT && grep -q 'AI_PROVIDER: \"mygateway\"' $OUT && rm -f $OUT && ! helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'PI_SIDECAR_AGENT_DIR'",  # pragma: allowlist secret
   ],
   [
     "sh",

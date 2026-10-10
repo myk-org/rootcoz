@@ -231,11 +231,11 @@ async def test_session_ownership_survives_provider_case_drift(
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "case-drift.db")
     await storage.init_db()
     await storage.save_ai_session_source(
-        "drift-session", "admin", "EnMaaS", "server", bootstrap_admin=True
+        "drift-session", "admin", "MyGateway", "server", bootstrap_admin=True
     )
     # Catalog drifted to lowercase — the session must remain usable.
     assert (
-        await storage.get_ai_session_source("drift-session", "admin", "enmaas")
+        await storage.get_ai_session_source("drift-session", "admin", "mygateway")
         == "server"
     )
     # A different provider is still rejected.
@@ -243,7 +243,37 @@ async def test_session_ownership_survives_provider_case_drift(
         await storage.get_ai_session_source("drift-session", "admin", "other")
     # A different user is still rejected.
     with pytest.raises(ValueError, match="another user or provider"):
-        await storage.get_ai_session_source("drift-session", "mallory", "EnMaaS")
+        await storage.get_ai_session_source("drift-session", "mallory", "MyGateway")
+
+
+@pytest.mark.asyncio
+async def test_key_rotation_revokes_session_across_provider_case_drift(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing a key under a drifted (re-capitalized) provider spelling must
+    revoke sessions stored under the old spelling — the sidecar retains the
+    creation-time key, so the old session must never resume."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "rotation-drift.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    # Session created while the catalog spelled the provider "MyGateway".
+    await storage.update_user_ai_credential("alice", "MyGateway", "old-key")
+    await storage.save_ai_session_source(
+        "drifted-session", "alice", "MyGateway", "user"
+    )
+    assert (
+        await storage.get_ai_session_source("drifted-session", "alice", "MyGateway")
+        == "user"
+    )
+    # Catalog drifts to lowercase; the user replaces the key under the new
+    # spelling. The old-spelling session must be revoked, not resumable.
+    assert await storage.update_user_ai_credential("alice", "mygateway", "new-key") == [
+        "drifted-session"
+    ]
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("drifted-session", "alice", "mygateway")
+    with pytest.raises(ValueError, match="another user or provider"):
+        await storage.get_ai_session_source("drifted-session", "alice", "MyGateway")
 
 
 @pytest.mark.asyncio
@@ -395,14 +425,14 @@ async def test_resolve_catalog_pair_adopts_mixed_case_catalog_spelling(
     monkeypatch.setattr(
         ai_client,
         "_list_models_raw",
-        AsyncMock(return_value=[{"provider": "EnMaaS", "id": "enmaas/gpt-4o"}]),
+        AsyncMock(return_value=[{"provider": "MyGateway", "id": "mygateway/gpt-4o"}]),
     )
 
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
-    for requested in ("enmaas", "EnMaaS", "ENMAAS"):
-        assert await ai_client.resolve_catalog_pair(requested, "enmaas/gpt-4o") == (
-            "EnMaaS",
-            "enmaas/gpt-4o",
+    for requested in ("mygateway", "MyGateway", "MYGATEWAY"):
+        assert await ai_client.resolve_catalog_pair(requested, "mygateway/gpt-4o") == (
+            "MyGateway",
+            "mygateway/gpt-4o",
         )
 
 
@@ -432,27 +462,29 @@ async def test_resolve_catalog_pair_refresh_reevaluates_mixed_case_provider(
     """A model missing from the cached catalog resolves after refresh, even when
     the spelling adopted from the cache differs from the refreshed catalog's.
 
-    The cached catalog registers ``EnMaaS`` without the new model; the refresh
-    spells the provider ``enmaas`` and carries the model. Spelling adoption must
+    The cached catalog registers ``MyGateway`` without the new model; the refresh
+    spells the provider ``mygateway`` and carries the model. Spelling adoption must
     compare normalized forms on every call — including after refresh — or the
     pair check rejects the valid pair.
     """
-    ai_client.update_model_catalog([{"provider": "EnMaaS", "id": "enmaas/gpt-4o"}])
+    ai_client.update_model_catalog(
+        [{"provider": "MyGateway", "id": "mygateway/gpt-4o"}]
+    )
     monkeypatch.setattr(
         ai_client,
         "_list_models_raw",
         AsyncMock(
             return_value=[
-                {"provider": "enmaas", "id": "enmaas/gpt-4o"},
-                {"provider": "enmaas", "id": "enmaas/new-model"},
+                {"provider": "mygateway", "id": "mygateway/gpt-4o"},
+                {"provider": "mygateway", "id": "mygateway/new-model"},
             ]
         ),
     )
 
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
-    assert await ai_client.resolve_catalog_pair("enmaas", "enmaas/new-model") == (
-        "enmaas",
-        "enmaas/new-model",
+    assert await ai_client.resolve_catalog_pair("mygateway", "mygateway/new-model") == (
+        "mygateway",
+        "mygateway/new-model",
     )
 
 
@@ -462,22 +494,24 @@ async def test_resolve_catalog_pair_refresh_finds_new_model_same_spelling(
 ) -> None:
     """A model missing from the cached catalog resolves after refresh with the
     same mixed-case spelling in both catalogs."""
-    ai_client.update_model_catalog([{"provider": "EnMaaS", "id": "enmaas/gpt-4o"}])
+    ai_client.update_model_catalog(
+        [{"provider": "MyGateway", "id": "mygateway/gpt-4o"}]
+    )
     monkeypatch.setattr(
         ai_client,
         "_list_models_raw",
         AsyncMock(
             return_value=[
-                {"provider": "EnMaaS", "id": "enmaas/gpt-4o"},
-                {"provider": "EnMaaS", "id": "enmaas/new-model"},
+                {"provider": "MyGateway", "id": "mygateway/gpt-4o"},
+                {"provider": "MyGateway", "id": "mygateway/new-model"},
             ]
         ),
     )
 
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
-    assert await ai_client.resolve_catalog_pair("enmaas", "enmaas/new-model") == (
-        "EnMaaS",
-        "enmaas/new-model",
+    assert await ai_client.resolve_catalog_pair("mygateway", "mygateway/new-model") == (
+        "MyGateway",
+        "mygateway/new-model",
     )
 
 

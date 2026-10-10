@@ -119,7 +119,7 @@ Set any of `sidecar.agentDir.modelsJson` / `authJson` / `settingsJson` (string o
 YAML object) — the chart stores them in a Secret, mounts it read-only at
 `/etc/pi-sidecar-agent`, and sets `PI_SIDECAR_AGENT_DIR` accordingly. API keys
 referenced as `"$VAR"` inside `models.json` come from `sidecar.agentDir.env`
-(e.g. `env: { ENMAAS_API_KEY: "..." }`). Env keys use tombstone semantics:
+(e.g. `env: { MYGATEWAY_API_KEY: "..." }`). Env keys use tombstone semantics:
 omitting a key preserves its stored Secret value on upgrade (Helm `lookup`),
 while setting it to `""` removes it. Keys matching chart-managed variable
 names (`AI_PROVIDER`, `SECURE_COOKIES`, `ADMIN_KEY`, …) are rejected at render
@@ -131,15 +131,15 @@ sidecar:
   agentDir:
     modelsJson:
       providers:
-        enmaas:
-          baseUrl: https://enmaas.example.com/v1
+        mygateway:
+          baseUrl: https://mygateway.example.com/v1
           api: openai-completions
-          apiKey: $ENMAAS_API_KEY
+          apiKey: $MYGATEWAY_API_KEY
           models:
-            - id: enmaas/gpt-4o
-              name: GPT-4o via EnMaaS
+            - id: mygateway/gpt-4o
+              name: GPT-4o via MyGateway
     env:
-      ENMAAS_API_KEY: "..."
+      MYGATEWAY_API_KEY: "..."
 ```
 
 Custom providers appear in the model catalog (`GET /api/ai-models`, or `rootcoz ai-models`)

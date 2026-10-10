@@ -177,7 +177,7 @@ def _catalog_provider_spelling(provider_ids: Any, provider: str) -> str:
     """Adopt the catalog's exact spelling for a provider ID, case-insensitively.
 
     ``normalize_provider()`` lowercases built-in aliases, but a custom agent-dir
-    provider may be registered with mixed case (e.g. ``EnMaaS``). Matching
+    provider may be registered with mixed case (e.g. ``MyGateway``). Matching
     case-insensitively and returning the catalog's spelling keeps sessions
     working with the exact ID the sidecar registered while built-in alias
     normalization stays intact. The comparison normalizes both sides: the input

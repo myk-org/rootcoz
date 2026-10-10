@@ -6107,15 +6107,20 @@ async def update_user_ai_credential(
             (encrypt_value(json.dumps(credentials)), json.dumps(generations), username),
         )
         # A session retains its creation-time key in the sidecar. Drop references
-        # atomically with the credential so later turns start fresh.
+        # atomically with the credential so later turns start fresh. Provider
+        # matching is case-insensitive: a catalog refresh may change a custom
+        # provider's capitalization, and replacing the key must still revoke
+        # sessions stored under the old spelling. The credential map itself
+        # stays keyed by the exact spelling, so distinct catalog providers are
+        # never conflated.
         sessions = await (
             await db.execute(
                 "SELECT DISTINCT chat_messages.session_id FROM chat_messages "
                 "LEFT JOIN ai_session_sources ON ai_session_sources.session_id = chat_messages.session_id "
-                "WHERE chat_messages.username = ? AND chat_messages.ai_provider = ? "
+                "WHERE chat_messages.username = ? AND chat_messages.ai_provider = ? COLLATE NOCASE "
                 "AND chat_messages.session_id != '' AND ("
                 "(ai_session_sources.username = chat_messages.username "
-                "AND ai_session_sources.provider = chat_messages.ai_provider "
+                "AND ai_session_sources.provider = chat_messages.ai_provider COLLATE NOCASE "
                 "AND ai_session_sources.credential_source = 'user') "
                 "OR ai_session_sources.session_id IS NULL)",
                 (username, provider),
@@ -6128,7 +6133,7 @@ async def update_user_ai_credential(
         )
         await db.executemany(
             "UPDATE chat_messages SET session_id = '', session_revoked = 1 "
-            "WHERE username = ? AND ai_provider = ? AND session_id = ?",
+            "WHERE username = ? AND ai_provider = ? COLLATE NOCASE AND session_id = ?",
             [(username, provider, row[0]) for row in sessions],
         )
         # Keep tombstones if sidecar deletion fails: an old keyed session must
@@ -6136,13 +6141,13 @@ async def update_user_ai_credential(
         keyed = await (
             await db.execute(
                 "SELECT session_id FROM ai_session_sources "
-                "WHERE username = ? AND provider = ? AND credential_source = 'user'",
+                "WHERE username = ? AND provider = ? COLLATE NOCASE AND credential_source = 'user'",
                 (username, provider),
             )
         ).fetchall()
         await db.execute(
             "UPDATE ai_session_sources SET credential_source = 'revoked' "
-            "WHERE username = ? AND provider = ? AND credential_source = 'user'",
+            "WHERE username = ? AND provider = ? COLLATE NOCASE AND credential_source = 'user'",
             (username, provider),
         )
         await db.commit()
@@ -6382,6 +6387,27 @@ async def revoke_ai_session_source(
         return bool(cursor.rowcount)
 
 
+def _generation_rotated(
+    generations: dict[str, int], stored_provider: str, recorded: int
+) -> bool:
+    """Whether a user-credential session's generation no longer matches.
+
+    The generations map is keyed by exact provider spelling, but a custom
+    provider may change capitalization between catalog refreshes: the session
+    was recorded under the old spelling while a key replacement increments the
+    generation under the new one. Compare the recorded generation against
+    every case-variant key — fail closed when any differs. No variant key means
+    generation 0, matching the previous ``json_extract`` COALESCE default.
+    """
+    variants = [
+        value
+        for key, value in generations.items()
+        if isinstance(key, str) and key.lower() == stored_provider.lower()
+    ]
+    current = variants or [0]
+    return any(value != recorded for value in current)
+
+
 async def get_ai_session_source(session_id: str, username: str, provider: str) -> str:
     """Reject a known session owned by another user or provider.
 
@@ -6399,15 +6425,18 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
                 (session_id,),
             )
         ).fetchone()
-        generation = None
+        generations: dict[str, int] = {}
         if row and row[0] == username:
-            generation = await (
+            gen_row = await (
                 await db.execute(
-                    "SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(:provider)), 0) "
-                    "FROM users WHERE username = :username",
-                    {"username": username, "provider": row[1]},
+                    "SELECT ai_credential_generations FROM users WHERE username = ?",
+                    (username,),
                 )
             ).fetchone()
+            if gen_row:
+                parsed = json.loads(gen_row[0])
+                if isinstance(parsed, dict):
+                    generations = parsed
     if row and (
         row[0] != username
         or row[1].lower() != provider.lower()
@@ -6415,7 +6444,7 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
         or (
             row[2] == "user"
             and row[3] is not None
-            and (not generation or row[3] != generation[0])
+            and _generation_rotated(generations, row[1], row[3])
         )
     ):
         raise ValueError(

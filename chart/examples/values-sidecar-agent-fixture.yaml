@@ -2,8 +2,8 @@
 ai:
   # Custom provider from the agent dir — exercises the schema's unrestricted
   # ai.provider (no built-in-alias enum) and the install-time credential rules.
-  provider: enmaas
-  model: enmaas/gpt-4o
+  provider: mygateway
+  model: mygateway/gpt-4o
 admin:
   key: test-admin-key
 encryptionKey: test-encryption-key-for-helm-template-render
@@ -11,12 +11,12 @@ sidecar:
   agentDir:
     modelsJson:
       providers:
-        enmaas:
-          baseUrl: https://enmaas.example.com/v1
+        mygateway:
+          baseUrl: https://mygateway.example.com/v1
           api: openai-completions
-          apiKey: $ENMAAS_API_KEY
+          apiKey: $MYGATEWAY_API_KEY
           models:
-            - id: enmaas/gpt-4o
-              name: GPT-4o via EnMaaS
+            - id: mygateway/gpt-4o
+              name: GPT-4o via MyGateway
     env:
-      ENMAAS_API_KEY: test-enmaas-key  # pragma: allowlist secret
+      MYGATEWAY_API_KEY: test-mygateway-key  # pragma: allowlist secret
