@@ -96,7 +96,7 @@ imagePullSecrets:
 
 | Value | Env var | Notes |
 |-------|---------|-------|
-| `ai.provider` | `AI_PROVIDER` | `gemini`, `claude`, or `cursor` |
+| `ai.provider` | `AI_PROVIDER` | Any sidecar provider ID: `gemini`, `claude`, `cursor`, or a custom provider registered via the agent dir |
 | `ai.model` | `AI_MODEL` | Model name for the provider |
 | Provider credential | see below | Required for AI analysis |
 
@@ -138,8 +138,8 @@ sidecar:
       ENMAAS_API_KEY: "..."
 ```
 
-Custom providers appear in the model catalog (`GET /models`) and are selectable
-as `ai.provider` / `ai.model` like any built-in provider.
+Custom providers appear in the model catalog (`GET /api/ai-models`, or `rootcoz ai-models`)
+and are selectable as `ai.provider` / `ai.model` like any built-in provider.
 
 ## Bootstrap Secrets
 

@@ -72,6 +72,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-sidecar-agent" (include "rootcoz.fullname" .) }}
 {{- end }}
 
+{{/*
+Chart-managed environment variable names that sidecar.agentDir.env entries must
+not shadow (comma-separated; splitList in consumers). Shared by validation
+(rootcoz.validate) and the credentials Secret merge in rootcoz.credentialsSecretData.
+*/}}
+{{- define "rootcoz.reservedEnvKeys" -}}
+ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,ROOTCOZ_ENCRYPTION_KEY,PI_SIDECAR_AGENT_DIR
+{{- end }}
+
 {{- define "rootcoz.pvcName" -}}
 {{- printf "%s-data" (include "rootcoz.fullname" .) }}
 {{- end }}
@@ -89,6 +98,13 @@ Validate chart values: routing, AI config.
 {{- if .Release.IsInstall -}}
 {{- if or (not .Values.ai.provider) (not .Values.ai.model) -}}
 {{- fail "ai.provider and ai.model are required for install" -}}
+{{- end -}}
+{{- end -}}
+{{- /* Agent-dir env keys must not shadow chart-managed variables (they land in the
+       same credentials Secret via envFrom). */ -}}
+{{- range $name, $value := .Values.sidecar.agentDir.env -}}
+{{- if has $name (splitList "," (include "rootcoz.reservedEnvKeys" $)) -}}
+{{- fail (printf "sidecar.agentDir.env key %q collides with a chart-managed environment variable" $name) -}}
 {{- end -}}
 {{- end -}}
 {{- if .Release.IsInstall -}}
@@ -235,15 +251,27 @@ ANTHROPIC_API_KEY: {{ $anthropic | b64enc | quote }}
 CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
 {{- end -}}
 {{- /* Sidecar agent-dir env vars (API keys referenced as "$VAR" in models.json):
-       values override, else preserve existing secret key on upgrade. */ -}}
+       values override, else preserve existing Secret key on upgrade. Keys present
+       in the existing Secret but absent from current values are also preserved —
+       dropping the map on upgrade must not orphan a models.json that still
+       references one of its keys. Chart-managed keys are excluded; collisions
+       with them fail early in rootcoz.validate. */ -}}
+{{- $reserved := splitList "," (include "rootcoz.reservedEnvKeys" .) -}}
+{{- $envMap := dict -}}
 {{- range $name, $value := .Values.sidecar.agentDir.env -}}
-{{- $envValue := $value -}}
-{{- if and (not $envValue) $existing (index $existing.data $name) -}}
-{{- $envValue = index $existing.data $name | b64dec -}}
+{{- if $value -}}
+{{- $_ := set $envMap $name $value -}}
 {{- end -}}
-{{- if $envValue }}
-{{ $name }}: {{ $envValue | b64enc | quote }}
 {{- end -}}
+{{- if $existing -}}
+{{- range $name, $existingValue := $existing.data -}}
+{{- if and (not (has $name $reserved)) (not (hasKey $envMap $name)) -}}
+{{- $_ := set $envMap $name ($existingValue | b64dec) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $name, $value := $envMap }}
+{{ $name }}: {{ $value | b64enc | quote }}
 {{- end -}}
 {{- end }}
 

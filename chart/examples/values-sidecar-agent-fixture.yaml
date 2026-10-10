@@ -1,8 +1,9 @@
 # Tox/helm template fixture — sidecar agent dir custom provider (not for production).
 ai:
-  provider: gemini
-  model: gemini-2.5-flash
-  geminiApiKey: test-key  # pragma: allowlist secret
+  # Custom provider from the agent dir — exercises the schema's unrestricted
+  # ai.provider (no built-in-alias enum) and the install-time credential rules.
+  provider: enmaas
+  model: enmaas/gpt-4o
 admin:
   key: test-admin-key
 encryptionKey: test-encryption-key-for-helm-template-render
