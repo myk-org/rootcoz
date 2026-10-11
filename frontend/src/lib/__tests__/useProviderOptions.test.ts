@@ -95,6 +95,24 @@ describe('useProviderCatalog shared fetch', () => {
     expect(result.current.enabled).toEqual(['enmaas', 'openai'])
   })
 
+  it('drops case-distinct provider variants instead of overwriting one with the other', async () => {
+    getMock.mockImplementation(async () => ({
+      providers: {
+        Foo: [{ id: 'foo-model', credential_sources: ['server'], verified: true }],
+        foo: [{ id: 'other-model', credential_sources: ['server'], verified: true }],
+        openai: [{ id: 'gpt-5', credential_sources: ['server'], verified: true }],
+      },
+      provider_status: { Foo: { ok: true }, foo: { ok: false } },
+    }))
+    const { result } = renderHook(() => useProviderCatalog())
+    // Ambiguous case-variant IDs are unusable downstream (the backend
+    // refuses ambiguous case-insensitive matches) — hide both rather than
+    // letting one silently win.
+    await waitFor(() => expect(result.current.providerKeys).toEqual(['openai']))
+    expect(result.current.providers.foo).toBeUndefined()
+    expect(result.current.providerStatus.foo).toBeUndefined()
+  })
+
   it('reads the Cursor banner status from the same catalog mode as the caller', async () => {
     getMock.mockImplementation(async (path: string) => (path.endsWith('=true')
       ? { providers: {}, provider_status: { cursor: { ok: true } } }

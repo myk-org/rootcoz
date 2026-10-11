@@ -61,12 +61,26 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "rootcoz.containerSecurityContext" . | nindent 12 }}
+          resources:
+            # Small but explicit: quota-enforced namespaces (LimitRange /
+            # ResourceQuota without defaults) reject containers without
+            # requests.
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
           command:
             - /bin/sh
             - -c
+            # Plain cp (not -a: the Secret's root-owned metadata cannot be
+            # preserved by a non-root copier) and chmod scoped to the copied
+            # files — the emptyDir root is root-owned, so chmod -R on it
+            # would fail and stall the pod.
             - >-
-              cp -a /etc/pi-sidecar-agent-src/. /etc/pi-sidecar-agent/
-              && chmod -R u+w /etc/pi-sidecar-agent
+              cp /etc/pi-sidecar-agent-src/* /etc/pi-sidecar-agent/
+              && chmod u+w /etc/pi-sidecar-agent/*
           volumeMounts:
             - name: sidecar-agent-src
               mountPath: /etc/pi-sidecar-agent-src
