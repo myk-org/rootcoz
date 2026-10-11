@@ -29,10 +29,6 @@ import { Switch } from '@/components/ui/switch'
 import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
 import type { AdminUser, CreateUserRequest, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse, UserRole } from '@/types'
 import { useAuth } from '@/lib/auth'
-import { useProviderCatalog } from '@/lib/useProviderOptions'
-import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { buildProviderOptions, normalizeProvider } from '@/lib/aiProviders'
-import { Card, CardContent } from '@/components/ui/card'
 
 function CopyableKey({ label, value }: { label: string; value: string }) {
   const { isCopied, copy } = useClipboard()
@@ -99,22 +95,6 @@ export function UsersPage() {
   // Action error
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const { providers: catalog } = useProviderCatalog()
-  const [freeModels, setFreeModels] = useState<Array<{ provider: string; model: string }>>([])
-  const [freeModelsError, setFreeModelsError] = useState('')
-  const [freeModelsBusy, setFreeModelsBusy] = useState(false)
-  const [freeProvider, setFreeProvider] = useState('')
-  const [freeModel, setFreeModel] = useState('')
-
-  const fetchFreeModels = useCallback(async () => {
-    try {
-      const result = await api.get<{ models: Array<{ provider: string; model: string }> }>('/api/admin/free-models')
-      setFreeModels(result.models ?? [])
-      setFreeModelsError('')
-    } catch {
-      setFreeModelsError('Could not load free models')
-    }
-  }, [])
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -129,7 +109,6 @@ export function UsersPage() {
   }, [])
 
   useEffect(() => { fetchUsers() }, [fetchUsers])
-  useEffect(() => { fetchFreeModels() }, [fetchFreeModels])
 
   async function handleCreate() {
     const trimmed = newUsername.trim()
@@ -297,36 +276,6 @@ export function UsersPage() {
     } finally {
       setGrantToggleInProgress(null)
     }
-  }
-
-  async function saveFreeModels(next: Array<{ provider: string; model: string }>) {
-    setFreeModelsBusy(true)
-    setFreeModelsError('')
-    try {
-      const result = await api.put<{ models: Array<{ provider: string; model: string }> }>('/api/admin/free-models', { models: next })
-      setFreeModels(result.models ?? [])
-    } catch (err) {
-      const detail = err instanceof ApiError ? (err.body as { detail?: { unknown?: Array<{ provider: string; model: string }> } | string })?.detail : null
-      if (detail && typeof detail !== 'string' && detail.unknown?.length) {
-        setFreeModelsError(`Not in catalog: ${detail.unknown.map((p) => `${p.provider}/${p.model}`).join(', ')}`)
-      } else {
-        setFreeModelsError(typeof detail === 'string' ? detail : 'Failed to save free models')
-      }
-    } finally {
-      setFreeModelsBusy(false)
-    }
-  }
-
-  async function handleAddFreeModel() {
-    if (!freeProvider || !freeModel.trim()) return
-    const next = [...freeModels, { provider: freeProvider, model: freeModel.trim() }]
-    await saveFreeModels(next)
-    setFreeProvider('')
-    setFreeModel('')
-  }
-
-  async function handleRemoveFreeModel(provider: string, model: string) {
-    await saveFreeModels(freeModels.filter((p) => !(p.provider === provider && p.model === model)))
   }
 
   async function handleToggleCanViewReports(username: string, canViewReports: boolean) {
@@ -607,55 +556,6 @@ export function UsersPage() {
           </TableBody>
         </Table>
       )}
-
-      {/* Free AI models — admin-declared provider+model pairs usable with
-          server credentials via the free-providers grant. */}
-      <Card className="border-border-muted">
-        <CardContent className="space-y-4 p-5">
-          <div>
-            <h2 className="font-display text-sm font-semibold text-text-primary">Free AI models</h2>
-            <p className="mt-1 text-xs text-text-tertiary">
-              Provider+model pairs every user may run on server credentials while the
-              {' '}<span className="font-medium">Enable free models</span> server setting is on. &quot;Free&quot; is this list — never the
-              catalog&apos;s cost fields.
-            </p>
-          </div>
-          {freeModelsError && <p role="alert" className="text-xs text-signal-red">{freeModelsError}</p>}
-          {freeModels.length > 0 ? (
-            <ul aria-label="Free AI model pairs" className="divide-y divide-border-muted border-t border-border-muted">
-              {freeModels.map((pair) => (
-                <li key={`${pair.provider}/${pair.model}`} className="flex flex-wrap items-center gap-2 py-2.5">
-                  <span className="mr-auto font-mono text-sm text-text-primary break-all">{pair.provider} / {pair.model}</span>
-                  <Button variant="outline" size="sm" disabled={freeModelsBusy} onClick={() => handleRemoveFreeModel(pair.provider, pair.model)} aria-label={`Remove ${pair.provider}/${pair.model} from free models`}>Remove</Button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-sm text-text-tertiary">No free models declared.</p>
-          )}
-          <div className="grid gap-3 border-t border-border-muted pt-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
-            <Select value={freeProvider || undefined} onValueChange={(value) => { setFreeProvider(value); setFreeModel('') }}>
-              <SelectTrigger aria-label="Free model provider">
-                <SelectValue placeholder="Provider..." />
-              </SelectTrigger>
-              <SelectContent>
-                {buildProviderOptions(Object.keys(catalog)).map((option) => (
-                  <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <ModelCombobox
-              value={freeModel}
-              onChange={setFreeModel}
-              options={catalog[normalizeProvider(freeProvider)] ?? []}
-              ariaLabel="Free model"
-              placeholder="Select model..."
-              disabled={!freeProvider}
-            />
-            <Button size="sm" onClick={handleAddFreeModel} disabled={freeModelsBusy || !freeProvider || !freeModel.trim()}>Add</Button>
-          </div>
-        </CardContent>
-      </Card>
 
       {/* Create Admin Dialog */}
       <Dialog open={createOpen} onOpenChange={(open) => { if (!open) closeCreateDialog() }}>

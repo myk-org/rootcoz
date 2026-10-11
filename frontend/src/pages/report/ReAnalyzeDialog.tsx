@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect } from 'react'
-import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import {
   Dialog,
@@ -72,7 +71,7 @@ function initFormState(p: AnalysisResult['request_params']) {
 
 export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid, inPlaceAnalyze }: ReAnalyzeDialogProps) {
   const navigate = useNavigate()
-  const { canUseServerProviders } = useAuth()
+  const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const params = result.request_params
   const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
@@ -100,7 +99,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
 
   const effectiveForceServer = forceServerCredentials && canUseServerProviders
   const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
-  const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -129,7 +127,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
 
-  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders)
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders)
 
   const handleSubmit = useCallback(async () => {
     if (aiUnavailable) {
@@ -315,10 +313,8 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <PeerConfigList
                 peerConfigs={peerConfigs}
                 setPeerConfigs={setPeerConfigs}
-                peerModels={peerModels}
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
-                strict
                 forceServer={effectiveForceServer}
               />
             )}

@@ -104,31 +104,3 @@ describe('server provider grants', () => {
     expect(screen.getByRole('switch', { name: 'Allow server providers' })).toHaveAttribute('aria-checked', 'false')
   })
 })
-
-describe('free AI models card', () => {
-  it('lists declared pairs and removes them', async () => {
-    get.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/free-models') return { models: [{ provider: 'EnMaaS', model: 'glm-5-3' }] }
-      return { users }
-    })
-    put.mockResolvedValue({ models: [] })
-    const user = userEvent.setup()
-    render(<UsersPage />)
-    expect(await screen.findByText('EnMaaS / glm-5-3')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Remove EnMaaS/glm-5-3 from free models' }))
-    await waitFor(() => expect(put).toHaveBeenCalledWith('/api/admin/free-models', { models: [] }))
-  })
-
-  it('shows unknown-pair validation errors from the API', async () => {
-    get.mockImplementation(async (path: string) => {
-      if (path === '/api/admin/free-models') return { models: [] }
-      return { users }
-    })
-    put.mockRejectedValueOnce(new (class extends Error {})() as never)
-    const user = userEvent.setup()
-    render(<UsersPage />)
-    await screen.findByText('No free models declared.')
-    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
-    expect(user).toBeTruthy()
-  })
-})

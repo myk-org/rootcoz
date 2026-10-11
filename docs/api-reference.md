@@ -275,8 +275,8 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | POST | `/api/admin/users/{username}/rotate-key` | Re-issue a user's API key |
 | PUT | `/api/admin/users/{username}/can-view-reports` | Grant or revoke reports access |
 | PUT | `/api/admin/users/{username}/can-use-server-providers` | Grant or revoke server AI credentials |
-| GET | `/api/admin/free-models` | List admin-declared free provider+model pairs |
-| PUT | `/api/admin/free-models` | Replace the free pair list (validated against the catalog) |
+| GET | `/api/admin/free-models` | List admin-declared free provider+model pairs (with `version` fingerprint) |
+| PUT | `/api/admin/free-models` | Replace the free pair list (validated against the catalog); optional `expected_version` from a prior GET rejects concurrent edits with `409` |
 | GET | `/api/admin/settings` | All settings with value, source, and metadata; `reveal_key` unmasks one key or `__all__` |
 | PUT | `/api/admin/settings` | `{"settings": {"KEY": "value"}}` |
 | GET | `/api/admin/settings/history` | `key`, `limit` change history |

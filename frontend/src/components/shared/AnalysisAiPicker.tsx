@@ -65,7 +65,7 @@ export function AnalysisModelSelect({ provider, value, onChange, forceServer, la
   // fragment would let the caller lay the notice out as its own flex/grid item,
   // which is what pushed it beside the picker and into the next grid cell.
   return <div className="space-y-1">
-    <ModelCombobox value={value} onChange={onChange} options={visibleModels(providers, provider, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders)} ariaLabel={label} forceServer={forceServer} canUseServer={canUseServerProviders} placeholder={unverified ? 'Enter model ID' : 'Default model'} />
+    <ModelCombobox value={value} onChange={onChange} options={visibleModels(providers, provider, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders)} ariaLabel={label} forceServer={forceServer} canUseServer={canUseServerProviders} canUseFree={canUseFreeProviders} placeholder={unverified ? 'Enter model ID' : 'Default model'} />
     {!hideNotice && <UnverifiedModelsWarning show={unverified} />}
   </div>
 }

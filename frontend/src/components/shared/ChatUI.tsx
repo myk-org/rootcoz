@@ -111,9 +111,14 @@ export function ChatUI({
   const [aiModel, setAiModel] = useState(defaultModel)
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const [forceServer, setForceServer] = useState(defaultForceServer)
-  const effectiveForceServer = forceServer && canUseServerProviders
-  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
-  const cursorAuthStatus = useCursorAuthStatus(effectiveForceServer)
+  const { providers, providerStatus } = useProviderCatalog(forceServer && canUseServerProviders)
+  const cursorAuthStatus = useCursorAuthStatus(forceServer && canUseServerProviders)
+  const selectedModel = providers[aiProvider]?.find(model => model.id === aiModel)
+  // An admin-declared free pair runs on server credentials without the
+  // (for this user disabled) server toggle: the backend admits the exact
+  // free pair on the free grant, but only with force_server_credentials.
+  const freeServerModel = !!selectedModel?.free && canUseFreeProviders
+  const effectiveForceServer = (forceServer && canUseServerProviders) || freeServerModel
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)
@@ -159,8 +164,7 @@ export function ChatUI({
   const prepStatus = prepPhase && initStepIndex === 0
     ? `${PREP_STEPS[prepActiveIndex]?.label ?? INIT_STEPS[0]}${prepPhase.detail ? `: ${prepPhase.detail}` : ''}...`
     : INIT_STEPS[initStepIndex]
-  const selectedModel = providers[aiProvider]?.find(model => model.id === aiModel)
-  const needsServerToggle = !effectiveForceServer && !!selectedModel && !selectedModel.credential_sources?.includes('user') && selectedModel.credential_sources?.includes('server')
+  const needsServerToggle = !effectiveForceServer && !!selectedModel && !selectedModel.credential_sources?.includes('user') && selectedModel.credential_sources?.includes('server') && !freeServerModel
   const validPair = !needsServerToggle && isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders, canUseFreeProviders)
   const canSend = Boolean(sessionStarted && !clearing && input.trim() && !sendBusy)
   const sendBlockedReason = clearing ? 'Clearing chat session'
@@ -597,7 +601,7 @@ export function ChatUI({
           </div>
         )}
 
-        {!canUseServerProviders && !sessionStarted && (
+        {!canUseServerProviders && !canUseFreeProviders && !sessionStarted && (
           <div className="px-6 pt-2">
             <CredentialAccessNotice />
           </div>

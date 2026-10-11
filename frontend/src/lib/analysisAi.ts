@@ -57,8 +57,8 @@ export function isAnalysisAiAvailable(providers: Record<string, AiModel[]>, stat
 export function isAnalysisFormAiUnavailable(
   providers: Record<string, AiModel[]>, status: Record<string, ProviderStatus>,
   primary: { ai_provider: string; ai_model: string }, peers: { ai_provider: string; ai_model: string }[],
-  enablePeers: boolean, forceServer: boolean, canUseServer: boolean, deferPrimary = false,
+  enablePeers: boolean, forceServer: boolean, canUseServer: boolean, canUseFree = false, deferPrimary = false,
 ): boolean {
-  return (!deferPrimary && !isAnalysisAiAvailable(providers, status, primary.ai_provider, primary.ai_model, forceServer, canUseServer)) ||
-    (enablePeers && (peers.length === 0 || peers.some((peer) => !isAnalysisAiAvailable(providers, status, peer.ai_provider, peer.ai_model, forceServer, canUseServer))))
+  return (!deferPrimary && !isAnalysisAiAvailable(providers, status, primary.ai_provider, primary.ai_model, forceServer, canUseServer, canUseFree)) ||
+    (enablePeers && (peers.length === 0 || peers.some((peer) => !isAnalysisAiAvailable(providers, status, peer.ai_provider, peer.ai_model, forceServer, canUseServer, canUseFree))))
 }

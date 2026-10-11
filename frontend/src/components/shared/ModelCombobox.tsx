@@ -27,6 +27,8 @@ interface ModelComboboxProps {
   disabled?: boolean
   forceServer?: boolean
   canUseServer?: boolean
+  /** Free-granted users may use admin-declared free server models. */
+  canUseFree?: boolean
 }
 
 interface DropdownCoords {
@@ -45,6 +47,7 @@ export function ModelCombobox({
   disabled = false,
   forceServer = false,
   canUseServer = true,
+  canUseFree = false,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState<{ key: string; index: number }>({ key: '', index: -1 })
@@ -53,7 +56,7 @@ export function ModelCombobox({
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
   const listboxId = useId()
-  const hasDeniedServer = !canUseServer && options.some((model) => model.credential_sources?.includes('server'))
+  const hasDeniedServer = !canUseServer && options.some((model) => model.credential_sources?.includes('server') && !(canUseFree && model.free))
 
   // Fuzzy filter: case-insensitive substring match on id or name. When the
   // current value matches nothing (a stale stored model, or the user typing a
@@ -215,7 +218,7 @@ export function ModelCombobox({
             className="z-[200] max-h-56 w-max max-w-[min(90vw,48rem)] overflow-y-auto overflow-x-hidden rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
           >
             {filtered.map((model, i) => (
-              <ServerAccessTooltip key={model.id} show={!canUseServer && !!model.credential_sources?.includes('server')}>
+              <ServerAccessTooltip key={model.id} show={!canUseServer && !(canUseFree && model.free) && !!model.credential_sources?.includes('server')}>
               <li
                 id={`${listboxId}-opt-${i}`}
                 role="option"

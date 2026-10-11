@@ -30,12 +30,12 @@ import {
 } from 'lucide-react'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
-import { usePeerModels } from '@/lib/usePeerModels'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
 import { useCursorAuthStatus } from '@/lib/useProviderOptions'
+import { FreeModelsCard } from '@/components/shared/FreeModelsCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 
@@ -341,7 +341,6 @@ export function ServerSettingsPage() {
   const [peerConfigs, setPeerConfigs] = useState<PeerConfigWithId[]>([])
   const [peerMaxRounds, setPeerMaxRounds] = useState(3)
   const [peerEditing, setPeerEditing] = useState(false)
-  const peerModels = usePeerModels(peerConfigs, peerEditing)
 
   // AI default provider/model editing
   const [aiProviderEditing, setAiProviderEditing] = useState(false)
@@ -807,7 +806,6 @@ export function ServerSettingsPage() {
                                     <PeerConfigList
                                       peerConfigs={peerConfigs}
                                       setPeerConfigs={setPeerConfigs}
-                                      peerModels={peerModels}
                                       maxRounds={peerMaxRounds}
                                       setMaxRounds={setPeerMaxRounds}
                                     />
@@ -977,6 +975,7 @@ export function ServerSettingsPage() {
                           )
                         })}
                       </div>
+                      {category === 'AI' && <FreeModelsCard />}
                     </CardContent>
                   )}
                 </Card>

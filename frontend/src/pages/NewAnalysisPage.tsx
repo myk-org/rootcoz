@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
-import { usePeerModels } from '@/lib/usePeerModels'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,7 +22,7 @@ import { useAuth } from '@/lib/auth'
 
 export function NewAnalysisPage() {
   const navigate = useNavigate()
-  const { canUseServerProviders } = useAuth()
+  const { canUseServerProviders, canUseFreeProviders } = useAuth()
 
   // Input mode
   const [inputMode, setInputMode] = useState<'jenkins' | 'prow' | 'paste' | 'upload'>('jenkins')
@@ -150,7 +149,6 @@ export function NewAnalysisPage() {
 
   const effectiveForceServer = forceServerCredentials === true && canUseServerProviders
   const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
-  const peerModels = usePeerModels(peerConfigs, enablePeers)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -163,7 +161,7 @@ export function NewAnalysisPage() {
       : rawXml.trim() !== ''
 
   const deferAiToTestsRepo = !!testsRepoUrl.trim() && !aiProvider && !aiModel
-  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, deferAiToTestsRepo)
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders, deferAiToTestsRepo)
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')
@@ -582,7 +580,7 @@ export function NewAnalysisPage() {
               <span className="text-sm text-text-secondary">Use server credentials</span>
               <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
             </div>
-            {!canUseServerProviders && <CredentialAccessNotice className="mt-2" />}
+            {!canUseServerProviders && !canUseFreeProviders && <CredentialAccessNotice className="mt-2" />}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea
@@ -611,10 +609,8 @@ export function NewAnalysisPage() {
               <PeerConfigList
                 peerConfigs={peerConfigs}
                 setPeerConfigs={setPeerConfigs}
-                peerModels={peerModels}
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
-                strict
                 forceServer={effectiveForceServer}
               />
             )}

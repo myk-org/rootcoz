@@ -232,9 +232,21 @@ class RootCozClient:
         """List admin-declared free provider+model pairs."""
         return self._request("GET", "/api/admin/free-models")
 
-    def admin_set_free_models(self, models: list[dict[str, str]]) -> dict[str, Any]:
-        """Replace the free provider+model pair list."""
-        return self._request("PUT", "/api/admin/free-models", json={"models": models})
+    def admin_set_free_models(
+        self,
+        models: list[dict[str, str]],
+        expected_version: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace the free provider+model pair list.
+
+        ``expected_version`` is the fingerprint from the caller's list
+        read; a mismatch rejects the write (409) instead of silently
+        erasing a concurrent admin's change.
+        """
+        body: dict[str, Any] = {"models": models}
+        if expected_version is not None:
+            body["expected_version"] = expected_version
+        return self._request("PUT", "/api/admin/free-models", json=body)
 
     def admin_delete_user(self, username: str) -> dict[str, Any]:
         """Delete an admin user. DELETE /api/admin/users/{username}"""

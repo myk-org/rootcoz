@@ -4452,7 +4452,10 @@ def test_admin_models_free_list(mock_client):
 
 
 def test_admin_models_free_add(mock_client):
-    mock_client.admin_list_free_models.return_value = {"models": []}
+    mock_client.admin_list_free_models.return_value = {
+        "models": [],
+        "version": "v1",
+    }
     mock_client.admin_set_free_models.return_value = {
         "models": [{"provider": "EnMaaS", "model": "glm-5-3"}]
     }
@@ -4469,8 +4472,10 @@ def test_admin_models_free_add(mock_client):
         ],
     )
     assert result.exit_code == 0
+    # The list fingerprint from the read guards the write against a
+    # concurrent admin's change (409 instead of a silent lost update).
     mock_client.admin_set_free_models.assert_called_once_with(
-        [{"provider": "EnMaaS", "model": "glm-5-3"}]
+        [{"provider": "EnMaaS", "model": "glm-5-3"}], "v1"
     )
 
 
@@ -4494,12 +4499,40 @@ def test_admin_models_free_add_existing_is_idempotent(mock_client):
     mock_client.admin_set_free_models.assert_not_called()
 
 
+def test_admin_models_free_add_json_emits_single_document(mock_client):
+    import json as _json
+
+    mock_client.admin_list_free_models.return_value = {"models": []}
+    mock_client.admin_set_free_models.return_value = {
+        "models": [{"provider": "EnMaaS", "model": "glm-5-3"}]
+    }
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "models",
+            "free-add",
+            "--provider",
+            "EnMaaS",
+            "--model",
+            "glm-5-3",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0
+    # The read-modify-write GET must stay silent: stdout parses as exactly
+    # one JSON document (two concatenated documents would raise).
+    parsed = _json.loads(result.stdout)
+    assert parsed["models"][0]["provider"] == "EnMaaS"
+
+
 def test_admin_models_free_remove(mock_client):
     mock_client.admin_list_free_models.return_value = {
         "models": [
             {"provider": "EnMaaS", "model": "glm-5-3"},
             {"provider": "openai", "model": "gpt-5"},
-        ]
+        ],
+        "version": "v2",
     }
     mock_client.admin_set_free_models.return_value = {
         "models": [{"provider": "openai", "model": "gpt-5"}]
@@ -4518,7 +4551,7 @@ def test_admin_models_free_remove(mock_client):
     )
     assert result.exit_code == 0
     mock_client.admin_set_free_models.assert_called_once_with(
-        [{"provider": "openai", "model": "gpt-5"}]
+        [{"provider": "openai", "model": "gpt-5"}], "v2"
     )
 
 

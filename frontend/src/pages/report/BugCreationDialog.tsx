@@ -71,7 +71,7 @@ export function BugCreationDialog({
 }: BugCreationDialogProps) {
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
-  const { canUseServerProviders } = useAuth()
+  const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
   const { providers, providerStatus } = useProviderCatalog()
   const [phase, setPhase] = useState<Phase>('idle')
@@ -108,7 +108,7 @@ export function BugCreationDialog({
   const JIRA_ISSUE_TYPES = ['Bug', 'Task', 'Story', 'Epic', 'Sub-task']
 
   /** No provider selected = server default (resolved server-side), so only gate an explicit pair. */
-  const aiUnavailable = aiProvider.trim() !== '' && !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, false, canUseServerProviders)
+  const aiUnavailable = aiProvider.trim() !== '' && !isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, false, canUseServerProviders, canUseFreeProviders)
 
   const previewPath = target === 'github' ? 'preview-github-issue' : 'preview-jira-bug'
   const createPath = target === 'github' ? 'create-github-issue' : 'create-jira-bug'

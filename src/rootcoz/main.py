@@ -9586,6 +9586,14 @@ async def list_ai_models(
         listing_status = model_listing_status.get() or {}
         if provider:
             provider = normalize_provider(provider)
+            # Custom providers may be registered with mixed case (e.g.
+            # "EnMaaS"): resolve the query case-insensitively and adopt the
+            # catalog's exact spelling so per-provider consumers (settings
+            # page pickers) see the models and persist the right ID.
+            if provider not in scoped:
+                exact = next((k for k in scoped if k.lower() == provider), None)
+                if exact is not None:
+                    provider = exact
             models = scoped.get(provider, [])
             if not models and provider not in listing_status:
                 raise HTTPException(
@@ -9985,7 +9993,9 @@ async def login(request: Request) -> JSONResponse:
                 is_admin, bool(user.get("can_view_reports"))
             )
             can_use_server_providers = bool(user.get("can_use_server_providers"))
-            can_use_free_providers = bool(user.get("can_use_free_providers"))
+            # Effective free access — same rule as /api/auth/me (toggle,
+            # role admin, server grant); get_user_by_key has no free column.
+            can_use_free_providers = await storage.can_user_use_free_providers(username)
 
     if not authenticated:
         logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
@@ -10956,25 +10966,33 @@ async def set_user_can_use_server_providers(
     )
 
 
-@app.get("/api/admin/free-models", operation_id="listFreeAiModels")
+@app.get("/api/admin/free-models", operation_id="listFreeAiModelsEndpoint")
 async def list_free_ai_models_endpoint(request: Request) -> dict[str, Any]:
     """List admin-declared free provider+model pairs (admin only)."""
     _require_admin(request)
-    return {"models": await storage.list_free_ai_models()}
+    models = await storage.list_free_ai_models()
+    return {"models": models, "version": storage.free_models_version(models)}
 
 
-@app.put("/api/admin/free-models", operation_id="setFreeAiModels")
+@app.put("/api/admin/free-models", operation_id="setFreeAiModelsEndpoint")
 async def set_free_ai_models_endpoint(
     request: Request, body: SetFreeAiModelsRequest
 ) -> dict[str, Any]:
     """Replace the free provider+model list (admin only).
 
-    Every pair is validated against the current sidecar catalog (provider
+    New pairs are validated against the current sidecar catalog (provider
     case-insensitively, model id exactly) so typos cannot silently create
-    free entries that never match anything. Stale pairs that disappear
-    from the catalog later are ignored gracefully at runtime.
+    free entries that never match anything. Pairs already stored are
+    passed through unvalidated: their model may have left the catalog
+    since they were saved, and a stale survivor must not block unrelated
+    edits — the CLI and Users page resubmit the existing list for every
+    add/remove. Stale pairs are ignored gracefully at runtime.
     """
     _require_admin(request)
+    existing = {
+        (row["provider"].lower(), row["model"])
+        for row in await storage.list_free_ai_models()
+    }
     catalog = await _get_model_catalog()
     catalog_pairs = {
         (str(entry.get("provider") or "").lower(), str(entry.get("id") or ""))
@@ -10982,6 +11000,8 @@ async def set_free_ai_models_endpoint(
     }
     unknown: list[dict[str, str]] = []
     for entry in body.models:
+        if (entry.provider.lower(), entry.model) in existing:
+            continue
         if (entry.provider.lower(), entry.model) not in catalog_pairs:
             unknown.append({"provider": entry.provider, "model": entry.model})
     if unknown:
@@ -10992,16 +11012,33 @@ async def set_free_ai_models_endpoint(
                 "unknown": unknown,
             },
         )
-    stored = await storage.set_free_ai_models(
-        [(entry.provider, entry.model) for entry in body.models],
-        request.state.username,
-    )
+    try:
+        stored = await storage.set_free_ai_models(
+            [(entry.provider, entry.model) for entry in body.models],
+            request.state.username,
+            expected_version=body.expected_version,
+        )
+    except storage.FreeModelsConflict as exc:
+        # Surface the current list so the losing client can re-merge
+        # instead of guessing what changed underneath it.
+        current = await storage.list_free_ai_models()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": str(exc),
+                "models": current,
+                "version": storage.free_models_version(current),
+            },
+        ) from exc
     logger.info(
         "[AUDIT] Admin '%s' set free AI models: %d pair(s)",
         request.state.username,
         len(stored),
     )
-    return {"models": stored}
+    return {
+        "models": stored,
+        "version": storage.free_models_version(stored),
+    }
 
 
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
@@ -12305,7 +12342,12 @@ async def _available_chat_session(
             active["session_id"], username, active["ai_provider"]
         )
         if source == "server":
-            if not await storage.can_user_use_server_providers(username):
+            allowed = await storage.can_user_use_server_providers(username)
+            if not allowed:
+                # Free-pair grant also authorizes server-backed sessions —
+                # same rule _validate_chat_selection applies on Start.
+                allowed = await storage.can_user_use_free_providers(username)
+            if not allowed:
                 return None
         elif source == "user":
             from pi_sidecar_client import _validate_api_key

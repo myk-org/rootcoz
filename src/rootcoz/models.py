@@ -1572,6 +1572,10 @@ class SetFreeAiModelsRequest(BaseModel):
     """Admin PUT /api/admin/free-models body — replaces the full list."""
 
     models: list[FreeAiModelEntry]
+    # Fingerprint from the caller's GET; mismatch rejects the write (409)
+    # instead of silently erasing a concurrent admin's change. Omitted
+    # keeps last-write-wins for callers that did not read first.
+    expected_version: str | None = None
 
 
 class SetCanViewReportsRequest(BaseModel):

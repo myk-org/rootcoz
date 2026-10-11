@@ -160,7 +160,7 @@ describe('analysis credential-scoped pickers', () => {
   it('restricts peer provider and model to the selected credential source', async () => {
     setup()
     const user = userEvent.setup()
-    render(<MemoryRouter><PeerConfigList peerConfigs={[{ id: 'peer', ai_provider: 'openrouter', ai_model: 'suggested' }]} setPeerConfigs={() => {}} peerModels={{}} maxRounds={1} setMaxRounds={() => {}} strict forceServer /></MemoryRouter>)
+    render(<MemoryRouter><PeerConfigList peerConfigs={[{ id: 'peer', ai_provider: 'openrouter', ai_model: 'suggested' }]} setPeerConfigs={() => {}} maxRounds={1} setMaxRounds={() => {}} forceServer /></MemoryRouter>)
     const provider = await screen.findByRole('combobox', { name: 'Peer 1 provider' })
     expect(provider).toHaveTextContent('openrouter (unavailable)')
     // The model input stays a real combobox: raw value, never decorated, so the
