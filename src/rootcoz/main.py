@@ -68,6 +68,7 @@ from rootcoz.ai_client import (
     model_listing_status,
     normalize_provider,
     probe_cursor_auth,
+    registered_provider_ids,
     resolve_catalog_pair,
     scoped_models,
     supported_key_providers,
@@ -10408,7 +10409,12 @@ async def set_user_ai_credential(
     outcome = await verify_ai_key(provider, model, key)
     if outcome == "accepted":
         try:
-            sessions = await storage.update_user_ai_credential(username, provider, key)
+            sessions = await storage.update_user_ai_credential(
+                username,
+                provider,
+                key,
+                registered_providers=await registered_provider_ids(),
+            )
         except storage.UnreadableAiCredentialsError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         await _revoke_ai_sessions(sessions)
@@ -10443,7 +10449,12 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
     _require_reviewer(request)
     username = await _credential_user(request)
     try:
-        sessions = await storage.update_user_ai_credential(username, provider, None)
+        sessions = await storage.update_user_ai_credential(
+            username,
+            provider,
+            None,
+            registered_providers=await registered_provider_ids(),
+        )
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _revoke_ai_sessions(sessions)

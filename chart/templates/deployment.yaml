@@ -1,6 +1,7 @@
 {{- include "rootcoz.validate" . -}}
 {{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
 {{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
+{{- $sidecarAgent := include "rootcoz.sidecarAgentSecretData" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,13 +27,16 @@ spec:
       annotations:
         checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
         {{- /* Salt with Release.Name: constant across upgrades, unique per installation. */}}
-        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey .Release.Name | sha256sum }}
+        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey (.Values.sidecar.agentDir.env | toJson) .Release.Name | sha256sum }}
         checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
         {{- end }}
         {{- if $cursorAuth }}
         checksum/cursor-auth: {{ $cursorAuth | sha256sum }}
+        {{- end }}
+        {{- if $sidecarAgent }}
+        checksum/sidecar-agent: {{ $sidecarAgent | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -46,6 +50,44 @@ spec:
       {{- end }}
       securityContext:
         {{- include "rootcoz.podSecurityContext" . | nindent 8 }}
+      {{- if $sidecarAgent }}
+      initContainers:
+        # Secret volumes are read-only, but pi writes models-store.json (and
+        # auth.json when absent) into PI_SIDECAR_AGENT_DIR — copy the staged
+        # files into a writable emptyDir so provider availability refreshes
+        # do not fail with EROFS.
+        - name: copy-sidecar-agent
+          image: {{ include "rootcoz.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "rootcoz.containerSecurityContext" . | nindent 12 }}
+          resources:
+            # Small but explicit: quota-enforced namespaces (LimitRange /
+            # ResourceQuota without defaults) reject containers without
+            # requests.
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          command:
+            - /bin/sh
+            - -c
+            # Plain cp (not -a: the Secret's root-owned metadata cannot be
+            # preserved by a non-root copier) and chmod scoped to the copied
+            # files — the emptyDir root is root-owned, so chmod -R on it
+            # would fail and stall the pod.
+            - >-
+              cp /etc/pi-sidecar-agent-src/* /etc/pi-sidecar-agent/
+              && chmod u+w /etc/pi-sidecar-agent/*
+          volumeMounts:
+            - name: sidecar-agent-src
+              mountPath: /etc/pi-sidecar-agent-src
+              readOnly: true
+            - name: sidecar-agent
+              mountPath: /etc/pi-sidecar-agent
+      {{- end }}
       containers:
         - name: {{ include "rootcoz.name" . }}
           image: {{ include "rootcoz.image" . | quote }}
@@ -70,6 +112,10 @@ spec:
               value: /gcloud-credentials
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /gcloud-credentials/application_default_credentials.json
+            {{- end }}
+            {{- if $sidecarAgent }}
+            - name: PI_SIDECAR_AGENT_DIR
+              value: /etc/pi-sidecar-agent
             {{- end }}
           envFrom:
             - configMapRef:
@@ -127,6 +173,10 @@ spec:
               mountPath: /home/appuser/.cursor-auth
               readOnly: true
             {{- end }}
+            {{- if $sidecarAgent }}
+            - name: sidecar-agent
+              mountPath: /etc/pi-sidecar-agent
+            {{- end }}
       volumes:
         {{- if .Values.persistence.enabled }}
         - name: data
@@ -145,6 +195,13 @@ spec:
         - name: cursor-auth
           secret:
             secretName: {{ include "rootcoz.cursorAuthSecretName" . }}
+        {{- end }}
+        {{- if $sidecarAgent }}
+        - name: sidecar-agent
+          emptyDir: {}
+        - name: sidecar-agent-src
+          secret:
+            secretName: {{ include "rootcoz.sidecarAgentSecretName" . }}
         {{- end }}
       terminationGracePeriodSeconds: 30
       {{- with .Values.nodeSelector }}
