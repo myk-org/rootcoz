@@ -45,6 +45,9 @@ export function FreeModelsCard() {
   // is known would replace the whole list built from an empty snapshot —
   // with no version to guard it, one Add could wipe every declared pair.
   const [listLoaded, setListLoaded] = useState(false)
+  // Bumped by the Retry button: a transient load failure must not lock
+  // the editor until the page is remounted.
+  const [loadAttempt, setLoadAttempt] = useState(0)
   const [freeModelsBusy, setFreeModelsBusy] = useState(false)
   const [freeProvider, setFreeProvider] = useState('')
   const [freeModel, setFreeModel] = useState('')
@@ -58,15 +61,19 @@ export function FreeModelsCard() {
           setFreeModels(res.models ?? [])
           setFreeModelsVersion(res.version ?? '')
           setListLoaded(true)
+          setFreeModelsError('')
         }
       })
       .catch(() => {
-        if (!ignore) setFreeModelsError('Failed to load free models')
+        if (!ignore) {
+          setListLoaded(false)
+          setFreeModelsError('Failed to load free models')
+        }
       })
     return () => {
       ignore = true
     }
-  }, [])
+  }, [loadAttempt])
 
   async function saveFreeModels(next: FreePair[]) {
     setFreeModelsBusy(true)
@@ -153,9 +160,18 @@ export function FreeModelsCard() {
           <p role="alert" className="text-xs text-signal-red">{freeModelsError}</p>
         )}
         {!listLoaded && freeModelsError ? (
-          <p className="text-sm text-text-tertiary">
-            List not loaded — Add and Remove stay disabled until it loads.
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="text-sm text-text-tertiary">
+              List not loaded — Add and Remove stay disabled until it loads.
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setLoadAttempt((n) => n + 1)}
+            >
+              Retry
+            </Button>
+          </div>
         ) : freeModels.length > 0 ? (
           <ul
             aria-label="Free AI model pairs"

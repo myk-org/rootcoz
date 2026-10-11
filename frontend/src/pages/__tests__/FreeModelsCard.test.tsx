@@ -81,6 +81,22 @@ describe('FreeModelsCard', () => {
     expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
   })
 
+  it('recovers from a failed load via Retry', async () => {
+    get.mockRejectedValueOnce(new Error('boom') as never)
+    get.mockResolvedValueOnce({
+      models: [{ provider: 'EnMaaS', model: 'glm-5-3' }],
+      version: 'v1',
+    })
+    const user = userEvent.setup()
+    render(<FreeModelsCard />)
+    expect(await screen.findByText(/Failed to load free models/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    // The retried GET loads the list and re-enables editing.
+    expect(await screen.findByText('EnMaaS / glm-5-3')).toBeInTheDocument()
+    expect(screen.queryByText(/Failed to load free models/)).not.toBeInTheDocument()
+  })
+
   it('keeps Add and Remove disabled when the list failed to load', async () => {
     get.mockRejectedValueOnce(new Error('boom') as never)
     const user = userEvent.setup()

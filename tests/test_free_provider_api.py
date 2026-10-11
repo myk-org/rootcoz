@@ -421,6 +421,12 @@ def test_free_models_version_ignores_provider_casing():
     # A real change still moves the fingerprint.
     c = [{"provider": "enmaas", "model": "glm-5-3"}]
     assert free_models_version(a) != free_models_version(c)
+    # Naive "provider|model" concatenation lets distinct lists collide
+    # ((a, bc)+(d, e) vs (a, b)+(cd, e) hash the same bytes); the framed
+    # digest must tell them apart (4d6b23b2).
+    d = [{"provider": "a", "model": "bc"}, {"provider": "d", "model": "e"}]
+    e = [{"provider": "a", "model": "b"}, {"provider": "cd", "model": "e"}]
+    assert free_models_version(d) != free_models_version(e)
 
 
 def test_ai_models_provider_lookup_is_case_insensitive(client, monkeypatch):

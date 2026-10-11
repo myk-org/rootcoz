@@ -5643,7 +5643,10 @@ def free_models_version(rows: list[dict[str, Any]]) -> str:
     """
     digest = hashlib.sha256()
     for row in sorted(rows, key=lambda item: (item["provider"].lower(), item["model"])):
-        digest.update(f"{row['provider'].lower()}|{row['model']}".encode())
+        # JSON framing: naive "provider|model" concatenation lets distinct
+        # lists collide ((a, bc)+(d, e) vs (a, b)+(cd, e) hash the same
+        # bytes); quoted, escaped records cannot bleed into each other.
+        digest.update(json.dumps([row["provider"].lower(), row["model"]]).encode())
     return digest.hexdigest()
 
 
