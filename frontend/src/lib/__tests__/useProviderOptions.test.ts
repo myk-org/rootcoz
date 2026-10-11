@@ -79,6 +79,22 @@ describe('useProviderCatalog shared fetch', () => {
     c.unmount()
   })
 
+  it('normalizes mixed-case provider IDs so lookups via normalizeProvider resolve', async () => {
+    getMock.mockImplementation(async () => ({
+      providers: {
+        EnMaaS: [{ id: 'rits/zai-org/glm-5-3', name: 'GLM 5.3 (EnMaaS)', credential_sources: ['server'], verified: true }],
+        openai: [{ id: 'gpt-5', credential_sources: ['server'], verified: true }],
+      },
+      provider_status: {},
+    }))
+    const { result } = renderHook(() => useProviderCatalog())
+    await waitFor(() => expect(result.current.providerKeys).toEqual(['enmaas', 'openai']))
+    // Consumers look providers up lowercased (normalizeProvider); the catalog
+    // must be keyed to match or the provider is invisible in pickers.
+    expect(result.current.providers.enmaas).toHaveLength(1)
+    expect(result.current.enabled).toEqual(['enmaas', 'openai'])
+  })
+
   it('reads the Cursor banner status from the same catalog mode as the caller', async () => {
     getMock.mockImplementation(async (path: string) => (path.endsWith('=true')
       ? { providers: {}, provider_status: { cursor: { ok: true } } }

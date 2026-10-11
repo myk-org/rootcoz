@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import type { AiModelsResponse, ProviderStatus } from '@/types'
-import { buildProviderOptions, type AiProviderOption } from '@/lib/aiProviders'
+import { buildProviderOptions, normalizeProvider, type AiProviderOption } from '@/lib/aiProviders'
 
 export type { ProviderStatus }
 
@@ -37,13 +37,25 @@ function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<Ca
   const req = api
     .get<AiModelsResponse>(`/api/ai-models?force_server_credentials=${forceServer}`)
     .then((res) => {
-      const providers = res.providers ?? {}
+      // Provider IDs are case-sensitive in the sidecar (a custom agent-dir
+      // provider may be "EnMaaS"), but every consumer looks providers up
+      // through normalizeProvider (lowercase). Normalize keys once here so
+      // mixed-case IDs resolve everywhere; the backend re-adopts the exact
+      // catalog spelling when the selection is submitted.
+      const providers: CatalogState['providers'] = {}
+      for (const [key, models] of Object.entries(res.providers ?? {})) {
+        providers[normalizeProvider(key)] = models
+      }
+      const providerStatus: Record<string, ProviderStatus> = {}
+      for (const [key, value] of Object.entries(res.provider_status ?? {})) {
+        providerStatus[normalizeProvider(key)] = value
+      }
       const providerKeys = Object.keys(providers)
       const next: CatalogState = {
         providerKeys,
         providers,
         enabled: providerKeys.filter((p) => (providers[p] ?? []).length > 0),
-        providerStatus: res.provider_status ?? {},
+        providerStatus,
       }
       if (generation === catalogGeneration && catalogInflight.get(cacheKey) === req) {
         catalogCache.set(cacheKey, next)
