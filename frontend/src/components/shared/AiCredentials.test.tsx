@@ -18,6 +18,7 @@ vi.mock('@/lib/useProviderOptions', () => ({
   useProviderCatalog: () => ({ providers: {
     'openai/custom': [{ id: 'catalog-model', name: 'Catalog model' }],
     other: [],
+    enmaas: [{ id: 'catalog-model', name: 'Catalog model' }],
   }, providerStatus: catalogMocks.providerStatus }),
 }))
 
@@ -145,6 +146,30 @@ describe('AiCredentials', () => {
     await user.type(screen.getByLabelText('API key'), 'secret-key')
     expect(screen.getByRole('button', { name: '+ Add key' })).toBeDisabled()
     expect(put).not.toHaveBeenCalled()
+  })
+
+  it('offers folded catalog models for a mixed-case provider ID', async () => {
+    // The credentials endpoint returns exact sidecar IDs ("EnMaaS") while
+    // the catalog is keyed by the folded lowercase ID — the verification
+    // form must still find the provider's models.
+    const user = userEvent.setup()
+    get.mockResolvedValueOnce({ providers: [{ provider: 'EnMaaS', configured: false }] })
+    render(<AiCredentials />)
+    await user.click(await screen.findByRole('combobox', { name: 'AI provider' }))
+    await user.click(await screen.findByRole('option', { name: 'EnMaaS' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Verification model' }))
+    expect(await screen.findByRole('option', { name: /catalog-model/ })).toBeInTheDocument()
+  })
+
+  it('flags a starved mixed-case key via the folded status entry', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue({ providers: [{ provider: 'EnMaaS', configured: true }] })
+    catalogMocks.providerStatus = {
+      enmaas: { has_api_key: true, modelListingSupported: true, model_count: 0 },
+    }
+    render(<AiCredentials />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your EnMaaS key is saved, but it returned no usable models')
+    expect(user).toBeTruthy()
   })
 
   it.each(['rejected', 'inconclusive'] as const)('keeps the configured key after %s verification', async outcome => {

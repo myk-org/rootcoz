@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { api } from '@/lib/api'
 import { resetProviderCatalogCache, useProviderCatalog } from '@/lib/useProviderOptions'
+import { normalizeProvider } from '@/lib/aiProviders'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -44,11 +45,15 @@ export function AiCredentials() {
   // also reports zero, yet the user can still enter a model ID by hand.
   const starvedKeys = listed
     .filter(
-      (item) =>
-        item.configured &&
-        catalogStatus[item.provider]?.has_api_key === true &&
-        catalogStatus[item.provider]?.modelListingSupported === true &&
-        catalogStatus[item.provider]?.model_count === 0,
+      (item) => {
+        // The credentials endpoint returns exact sidecar provider IDs (e.g.
+        // "EnMaaS") while the catalog is keyed by the folded (lowercase) ID.
+        const status = catalogStatus[normalizeProvider(item.provider)]
+        return item.configured &&
+          status?.has_api_key === true &&
+          status?.modelListingSupported === true &&
+          status?.model_count === 0
+      },
     )
     .map((item) => item.provider)
 
@@ -148,7 +153,7 @@ export function AiCredentials() {
               )}
               <div className="space-y-1.5">
                 <span className="block text-xs text-text-tertiary">Model to verify against</span>
-                <ModelCombobox value={model} onChange={(value) => { setModel(value); setError('') }} options={catalog[provider ?? ''] ?? []} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !provider} />
+                <ModelCombobox value={model} onChange={(value) => { setModel(value); setError('') }} options={catalog[normalizeProvider(provider ?? '')] ?? []} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !provider} />
                 <p className="text-xs text-text-tertiary">If the model isn't listed, enter its ID manually.</p>
               </div>
               <div className="flex gap-2">
