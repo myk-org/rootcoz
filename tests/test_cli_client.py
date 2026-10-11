@@ -1900,6 +1900,29 @@ class TestRootCozClientAdminUsers:
         result = client.admin_create_user("newuser", role="reviewer")
         assert result["role"] == "reviewer"
 
+    def test_admin_free_models_list_and_set(self):
+        state = {"seen_put": None}
+
+        def handler(request):
+            if request.method == "GET":
+                assert request.url.path == "/api/admin/free-models"
+                return httpx.Response(
+                    200,
+                    json={"models": [{"provider": "EnMaaS", "model": "glm-5-3"}]},
+                )
+            state["seen_put"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={"models": [{"provider": "EnMaaS", "model": "glm-5-3"}]},
+            )
+
+        client = _make_client(handler)
+        assert client.admin_list_free_models()["models"][0]["provider"] == "EnMaaS"
+        client.admin_set_free_models([{"provider": "EnMaaS", "model": "glm-5-3"}])
+        assert state["seen_put"] == {
+            "models": [{"provider": "EnMaaS", "model": "glm-5-3"}]
+        }
+
     def test_admin_delete_user(self):
         def handler(request):
             assert request.method == "DELETE"

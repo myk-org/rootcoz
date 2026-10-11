@@ -80,6 +80,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `AI_PROVIDER` | empty | string | no | no | yes |
    | `AI_MODEL` | empty | string | no | no | yes |
    | `FORCE_SERVER_CREDENTIALS` | `false` | boolean | no | no | yes |
+   | `ENABLE_FREE_MODELS` | `false` | boolean | no | no | **no** |
    | `AI_CALL_TIMEOUT` | `10` | integer > 0 (minutes) | no | no | yes |
    | `MAX_CONCURRENT_AI_CALLS` | `3` | integer > 0 | no | no | yes |
    | `PEER_AI_CONFIGS` | empty | string | no | no | yes |
@@ -177,6 +178,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     `METADATA_RULES_FILE` points at a YAML or JSON file of name-based metadata rules. Rules load once and cache for the process lifetime, so edits need a restart. A broken rules file logs a warning and yields no rules rather than failing the server.
 
     `AUTO_PUSH_EXPORTERS` takes a comma-separated exporter list such as `reportportal`, and only applies when `ENABLE_AUTO_REVIEW` is also on.
+   
+   `ENABLE_FREE_MODELS` lets every user run the admin-declared free provider+model pairs (Users page → *Free AI models*) on server credentials; the free-providers grant is not needed for admins or users who already have `can_use_server_providers`.
 
 11. **Web Push category.**
 

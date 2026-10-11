@@ -22,6 +22,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isAdmin, setIsAdminState] = useState(getIsAdmin())
   const [canViewReports, setCanViewReports] = useState(false)
   const [canUseServerProviders, setCanUseServerProviders] = useState(false)
+  const [canUseFreeProviders, setCanUseFreeProviders] = useState(false)
   const [role, setRoleState] = useState('reviewer')
   const [loading, setLoading] = useState(true)
   const [authenticated, setAuthenticated] = useState(false)
@@ -36,6 +37,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsAdminState(false)
     setCanViewReports(false)
     setCanUseServerProviders(false)
+    setCanUseFreeProviders(false)
     serverGrant.current = null
     setRoleState('reviewer')
     setIsAdmin(false)
@@ -50,6 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const grant = user.is_admin || user.role === 'admin' || !!user.can_use_server_providers
     setCanUseServerProviders(grant)
     serverGrant.current = grant
+    setCanUseFreeProviders(grant || !!user.can_use_free_providers)
     setRoleState(user.role)
     setIsAdmin(user.is_admin)
     setRole(user.role)
@@ -204,6 +207,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isOperator: role === 'operator' || role === 'admin',
       canViewReports,
       canUseServerProviders,
+      canUseFreeProviders,
       role,
       loading,
       authenticated,

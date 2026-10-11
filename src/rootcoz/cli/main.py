@@ -361,6 +361,7 @@ def _run_client_command(
     columns: list[str] | None = None,
     labels: dict[str, str] | None = None,
     emit_output: bool = True,
+    quiet: bool = False,
 ) -> Any:
     """Execute a client request with standard json/table scaffolding.
 
@@ -369,13 +370,17 @@ def _run_client_command(
 
     When *emit_output* is ``False``, JSON output is still emitted (``--json``
     mode) but human-readable table output is suppressed so callers can print
-    bespoke messages instead.
+    bespoke messages instead.  When *quiet* is ``True`` nothing is emitted at
+    all — for internal reads (e.g. read-modify-write fetches) whose output
+    would otherwise produce a second top-level JSON document.
     """
     _set_json(json_output)
     try:
         data = request_fn(_get_client())
     except RootCozError as err:
         _handle_error(err)
+    if quiet:
+        return data
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
     elif emit_output:
@@ -3363,6 +3368,92 @@ def admin_models_refresh(
         lambda c: c.refresh_ai_models(),
         columns=["count"],
     )
+
+
+@admin_models_app.command("free-list")
+def admin_models_free_list(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List admin-declared free provider+model pairs."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_free_models(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        models = data.get("models", [])
+        if models:
+            print_output(
+                models,
+                columns=["provider", "model", "created_by"],
+                as_json=False,
+            )
+        else:
+            typer.echo("No free models declared.")
+
+
+@admin_models_app.command("free-add")
+def admin_models_free_add(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    model: str = typer.Option(..., "--model", help="Exact model ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Declare one provider+model pair as free (validated against the catalog)."""
+    current = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_free_models(),
+        quiet=True,
+    )
+    pairs = [
+        {"provider": entry["provider"], "model": entry["model"]}
+        for entry in current.get("models", [])
+        if entry.get("provider") and entry.get("model")
+    ]
+    if any(
+        entry["provider"].lower() == provider.lower() and entry["model"] == model
+        for entry in pairs
+    ):
+        if not _state.get("json", False):
+            typer.echo(f"{provider}/{model} is already declared free")
+        return
+    pairs.append({"provider": provider, "model": model})
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_free_models(pairs, current.get("version")),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Declared {provider}/{model} as free")
+
+
+@admin_models_app.command("free-remove")
+def admin_models_free_remove(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    model: str = typer.Option(..., "--model", help="Exact model ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Remove one provider+model pair from the free list."""
+    current = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_free_models(),
+        quiet=True,
+    )
+    pairs = [
+        {"provider": entry["provider"], "model": entry["model"]}
+        for entry in current.get("models", [])
+        if entry.get("provider")
+        and entry.get("model")
+        and not (
+            entry["provider"].lower() == provider.lower() and entry["model"] == model
+        )
+    ]
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_free_models(pairs, current.get("version")),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Removed {provider}/{model} from the free list")
 
 
 # -- Token Usage (Admin) ------------------------------------------------------

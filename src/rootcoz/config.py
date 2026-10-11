@@ -411,6 +411,20 @@ class Settings(BaseSettings):
     vapid_private_key: str = Field(default="", repr=False)
     vapid_claim_email: str = ""
 
+    # Free AI models: when enabled, every user may run admin-declared free
+    # provider+model pairs on server credentials (the free-pair list lives in
+    # the free_ai_models table; users with the server-providers grant already
+    # have the superset)
+    enable_free_models: bool = Field(
+        default=False,
+        description=(
+            "When enabled, all users may use the admin-declared free "
+            "provider+model pairs with server credentials. Free pairs are "
+            "managed on the Users page (Free AI models) or via "
+            "rootcoz admin models free-list."
+        ),
+    )
+
     # Auto-review: automatically mark failures as reviewed when they match
     # a previous human-reviewed failure with the same error signature
     enable_auto_review: bool = Field(

@@ -13,6 +13,8 @@ export interface ModelOption {
   credential_sources?: Array<'user' | 'server'>
   verified?: boolean
   serverLocked?: boolean
+  /** Admin-declared free pair (see AiModel.free). */
+  free?: boolean
 }
 
 interface ModelComboboxProps {
@@ -25,6 +27,8 @@ interface ModelComboboxProps {
   disabled?: boolean
   forceServer?: boolean
   canUseServer?: boolean
+  /** Free-granted users may use admin-declared free server models. */
+  canUseFree?: boolean
 }
 
 interface DropdownCoords {
@@ -43,6 +47,7 @@ export function ModelCombobox({
   disabled = false,
   forceServer = false,
   canUseServer = true,
+  canUseFree = false,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState<{ key: string; index: number }>({ key: '', index: -1 })
@@ -51,7 +56,7 @@ export function ModelCombobox({
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
   const listboxId = useId()
-  const hasDeniedServer = !canUseServer && options.some((model) => model.credential_sources?.includes('server'))
+  const hasDeniedServer = !canUseServer && options.some((model) => model.credential_sources?.includes('server') && !(canUseFree && model.free))
 
   // Fuzzy filter: case-insensitive substring match on id or name. When the
   // current value matches nothing (a stale stored model, or the user typing a
@@ -213,7 +218,7 @@ export function ModelCombobox({
             className="z-[200] max-h-56 w-max max-w-[min(90vw,48rem)] overflow-y-auto overflow-x-hidden rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
           >
             {filtered.map((model, i) => (
-              <ServerAccessTooltip key={model.id} show={!canUseServer && !!model.credential_sources?.includes('server')}>
+              <ServerAccessTooltip key={model.id} show={!canUseServer && !(canUseFree && model.free) && !!model.credential_sources?.includes('server')}>
               <li
                 id={`${listboxId}-opt-${i}`}
                 role="option"
@@ -236,6 +241,11 @@ export function ModelCombobox({
                 <span>{model.id}</span>
                 <span className="flex shrink-0 items-center gap-2">
                   {model.verified === false && <span className="text-xs text-signal-amber">UNVERIFIED</span>}
+                  {model.free === true && (
+                    <span className="rounded border border-signal-green px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-signal-green" title="Admin-declared free model">
+                      Free
+                    </span>
+                  )}
                   {model.verified !== false && model.credential_sources?.length ? (
                     <span className="text-xs text-text-secondary">
                       <CredentialSourceLabel label={credentialLabel([{ ...model, provider: '' }], false, forceServer)} canUseServer={canUseServer} />

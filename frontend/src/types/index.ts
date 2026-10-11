@@ -22,6 +22,7 @@ export interface AuthUser {
   /** Effective reports access (true for admins; otherwise the stored DB flag). */
   can_view_reports: boolean
   can_use_server_providers: boolean
+  can_use_free_providers: boolean
 }
 
 export interface AdminUser {
@@ -376,6 +377,9 @@ export interface AiModel {
   source?: string
   credential_sources?: Array<'user' | 'server'>
   verified?: boolean
+  /** Admin-declared free pair — usable via server credentials with the
+   *  free-providers grant even without the full server grant. */
+  free?: boolean
 }
 
 /** Response shape from GET /api/ai-models (no provider filter) */

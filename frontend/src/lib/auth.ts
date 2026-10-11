@@ -8,6 +8,8 @@ export interface AuthState {
   /** Effective reports access from /me (true for admins; otherwise stored flag). */
   canViewReports: boolean
   canUseServerProviders: boolean
+  /** Effective free-pair access (superset: admin role or server grant). */
+  canUseFreeProviders: boolean
   role: string
   loading: boolean
   authenticated: boolean

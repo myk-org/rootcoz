@@ -358,6 +358,11 @@
 <td>off</td>
 <td>Grants the <code>Use server credentials</code> toggle on <code>New Analysis</code>, which lets the user run analyses on the server's AI keys instead of their own. Admins always have it.</td>
 </tr>
+<tr>
+<td><code>ENABLE_FREE_MODELS</code> (server setting)</td>
+<td>off</td>
+<td>When on, every user may run analyses and chat on the server's keys for the admin-declared <strong>free provider+model pairs</strong>. Admins and users with the server-providers grant already cover it. Change it under Server Settings → AI, where the <em>Free AI models</em> card below the AI settings manages the pair list itself.</td>
+</tr>
 </tbody>
 </table></div>
 <blockquote>
@@ -653,6 +658,7 @@
 <li><strong>Audit trail.</strong> Logins, registrations, key rotations, approvals, role changes, report grants, and deletions are all written to the audit log with the acting admin's username, and both actions and log lines are visible on the <code>Logs</code> page.</li>
 <li><strong>Automate with the CLI.</strong> User creation, role changes, <code>can_view_reports</code>, and pending approvals are all available from the CLI (<code>admin users ...</code>). See <a href="cli-reference.html">CLI Command Reference</a> for details.</li>
 <li><strong>Give analysis more context.</strong> The <code>AI</code>, <code>GitHub</code>, and <code>Server</code> categories hold most of the knobs that change how much context an analysis gets. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</li>
+<li><strong>Declare free models.</strong> In Server Settings → AI, the <em>Free AI models</em> card below the settings rows manages the free provider+model pair list. Pick a provider and model from the server catalog and click <code>Add</code>; remove pairs with the per-row <code>Remove</code> button. "Free" is this list — never the catalog's cost fields — and every pair is validated against the server catalog at save time. The <code>ENABLE_FREE_MODELS</code> toggle above it decides whether the list is live. The CLI mirrors it: <code>admin models free-list</code> / <code>free-add</code> / <code>free-remove</code>.</li>
 <li><strong>Keep the bootstrap key reachable.</strong> <code>ADMIN_KEY</code> authenticates a superuser that lives outside the database. If you rotate it while signed in as a database admin, keep a copy of the new value or you can lock yourself out.</li>
 <li><strong>Encryption key rotation.</strong> <code>ROOTCOZ_ENCRYPTION_KEY</code> is not a server setting in the UI. Changing it re-derives both the Fernet key used for at-rest secrets and the HMAC secret used to hash API keys. Existing API key hashes stop matching, so every user must be given a new key; stored user tokens, AI credentials, and encrypted settings become undecryptable and must be re-entered. Sessions survive, because a session row stores only the username, admin flag, role, and expiry.</li>
 </ul>

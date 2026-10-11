@@ -1206,6 +1206,16 @@
 </tr>
 <tr>
 <td>GET</td>
+<td><code>/api/admin/free-models</code></td>
+<td>List admin-declared free provider+model pairs (with <code>version</code> fingerprint)</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/admin/free-models</code></td>
+<td>Replace the free pair list (validated against the catalog); optional <code>expected_version</code> from a prior GET rejects concurrent edits with <code>409</code></td>
+</tr>
+<tr>
+<td>GET</td>
 <td><code>/api/admin/settings</code></td>
 <td>All settings with value, source, and metadata; <code>reveal_key</code> unmasks one key or <code>__all__</code></td>
 </tr>

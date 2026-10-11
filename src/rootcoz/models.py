@@ -10,6 +10,7 @@ from pydantic import (
     Field,
     HttpUrl,
     Strict,
+    StringConstraints,
     field_validator,
     model_serializer,
     model_validator,
@@ -1558,6 +1559,23 @@ class SetCanUseServerProvidersRequest(BaseModel):
     """Admin grant for server AI credentials."""
 
     can_use_server_providers: Annotated[bool, Strict()]
+
+
+class FreeAiModelEntry(BaseModel):
+    """One admin-declared free pair; provider alone is never free."""
+
+    provider: Annotated[str, Strict(), StringConstraints(min_length=1)]
+    model: Annotated[str, Strict(), StringConstraints(min_length=1)]
+
+
+class SetFreeAiModelsRequest(BaseModel):
+    """Admin PUT /api/admin/free-models body — replaces the full list."""
+
+    models: list[FreeAiModelEntry]
+    # Fingerprint from the caller's GET; mismatch rejects the write (409)
+    # instead of silently erasing a concurrent admin's change. Omitted
+    # keeps last-write-wins for callers that did not read first.
+    expected_version: str | None = None
 
 
 class SetCanViewReportsRequest(BaseModel):

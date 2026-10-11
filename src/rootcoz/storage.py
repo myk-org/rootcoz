@@ -1317,6 +1317,20 @@ async def init_db() -> None:
             )
         """)
 
+        # Admin-declared free provider+model pairs. "Free" is an admin
+        # decision (never the catalog's cost fields); a pair is always
+        # provider+model — a provider alone is never free.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS free_ai_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(provider, model)
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5594,6 +5608,129 @@ async def can_user_use_server_providers(username: str) -> bool:
         return True
     user = await get_user_by_username(username)
     return bool(user and user["can_use_server_providers"])
+
+
+async def can_user_use_free_providers(username: str) -> bool:
+    """Effective free-pair access.
+
+    The gate is the server-level ``ENABLE_FREE_MODELS`` toggle: when on,
+    every user may run admin-declared free provider+model pairs on server
+    credentials. Bootstrap admins, role admins, and users holding the full
+    server grant already have the superset. A deleted account gets nothing,
+    even if a background worker still carries its username.
+    """
+    if username == "admin":
+        return True
+    user = await get_user_by_username(username)
+    if not user:
+        return False
+    if user["role"] == "admin" or user["can_use_server_providers"]:
+        return True
+    from rootcoz.config import get_settings
+
+    return get_settings().enable_free_models
+
+
+class FreeModelsConflict(ValueError):
+    """The free-pair list changed between the caller's read and write."""
+
+
+def free_models_version(rows: list[dict[str, Any]]) -> str:
+    """Fingerprint the free-pair list for optimistic concurrency checks.
+
+    Case-insensitive on the provider (matching the pair identity rules) so
+    a cosmetic respelling does not spuriously fail another admin's save.
+    """
+    digest = hashlib.sha256()
+    for row in sorted(rows, key=lambda item: (item["provider"].lower(), item["model"])):
+        # JSON framing: naive "provider|model" concatenation lets distinct
+        # lists collide ((a, bc)+(d, e) vs (a, b)+(cd, e) hash the same
+        # bytes); quoted, escaped records cannot bleed into each other.
+        digest.update(json.dumps([row["provider"].lower(), row["model"]]).encode())
+    return digest.hexdigest()
+
+
+async def list_free_ai_models() -> list[dict[str, Any]]:
+    """List admin-declared free provider+model pairs (exact stored spelling)."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT provider, model, created_by, created_at FROM free_ai_models"
+            " ORDER BY provider, model"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def set_free_ai_models(
+    pairs: list[tuple[str, str]],
+    updated_by: str,
+    expected_version: str | None = None,
+) -> list[dict[str, Any]]:
+    """Replace the full free-pair list in one transaction.
+
+    ``pairs`` holds exact ``(provider, model)`` spelling; duplicates that
+    differ only in provider case are collapsed to the first spelling.
+    Pairs that already exist keep their original ``created_by`` and
+    ``created_at`` so an add/remove does not rewrite history for the
+    survivors. Returns the stored list.
+
+    ``expected_version`` is the list fingerprint the caller read; when it
+    no longer matches, another admin won the race and the write is
+    rejected with :class:`FreeModelsConflict` instead of silently
+    erasing their change. ``None`` keeps last-write-wins for callers
+    that did not read first.
+    """
+    deduped: dict[tuple[str, str], tuple[str, str]] = {}
+    for provider, model in pairs:
+        if not provider or not model:
+            raise ValueError("Free model entries require both provider and model")
+        deduped.setdefault((provider.lower(), model), (provider, model))
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT provider, model, created_by, created_at FROM free_ai_models"
+        )
+        rows = await cursor.fetchall()
+        if expected_version is not None and expected_version != free_models_version(
+            [dict(row) for row in rows]
+        ):
+            raise FreeModelsConflict(
+                "Free model list changed concurrently; reload and retry"
+            )
+        previous = {
+            (row["provider"].lower(), row["model"]): (
+                row["created_by"],
+                row["created_at"],
+            )
+            for row in rows
+        }
+        await db.execute("DELETE FROM free_ai_models")
+        # Survivors keep their original creator/timestamp; new pairs take
+        # the current editor and the column default (so a NULL never
+        # overrides DEFAULT CURRENT_TIMESTAMP).
+        survivors = [
+            (p, m, *previous[(p.lower(), m)])
+            for _, (p, m) in deduped.items()
+            if (p.lower(), m) in previous
+        ]
+        additions = [
+            (p, m, updated_by)
+            for _, (p, m) in deduped.items()
+            if (p.lower(), m) not in previous
+        ]
+        if survivors:
+            await db.executemany(
+                "INSERT INTO free_ai_models (provider, model, created_by, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                survivors,
+            )
+        if additions:
+            await db.executemany(
+                "INSERT INTO free_ai_models (provider, model, created_by)"
+                " VALUES (?, ?, ?)",
+                additions,
+            )
+        await db.commit()
+    return await list_free_ai_models()
 
 
 async def track_user(username: str) -> None:

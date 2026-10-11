@@ -1,20 +1,9 @@
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectTrigger,
-  SelectContent,
-  SelectItem,
-  SelectValue,
-} from '@/components/ui/select'
 import { FieldLabel } from '@/components/shared/FieldLabel'
-import { ModelCombobox } from '@/components/shared/ModelCombobox'
-import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip, UnverifiedModelsWarning } from '@/components/shared/CredentialSourceLabel'
-import { useId } from 'react'
-import type { ModelOption } from '@/components/shared/ModelCombobox'
-import { useProviderOptions, useProviderCatalog } from '@/lib/useProviderOptions'
-import { usableModels, visibleModels, credentialLabel, allowsUnverified, analysisProviderIds } from '@/lib/analysisAi'
+import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { useProviderCatalog } from '@/lib/useProviderOptions'
+import { usableModels, allowsUnverified, analysisProviderIds } from '@/lib/analysisAi'
 import { useAuth } from '@/lib/auth'
-import { buildProviderOptions, normalizeProvider } from '@/lib/aiProviders'
 import { toIntInRange } from '@/lib/utils'
 import { Plus, Trash2 } from 'lucide-react'
 import type { AiConfig } from '@/types'
@@ -24,34 +13,31 @@ export type PeerConfigWithId = AiConfig & { id: string }
 interface PeerConfigListProps {
   peerConfigs: PeerConfigWithId[]
   setPeerConfigs: React.Dispatch<React.SetStateAction<PeerConfigWithId[]>>
-  peerModels: Record<string, ModelOption[]>
   maxRounds: number
   setMaxRounds: React.Dispatch<React.SetStateAction<number>>
   forceServer?: boolean
-  strict?: boolean
 }
 
 export function PeerConfigList({
   peerConfigs,
   setPeerConfigs,
-  peerModels,
   maxRounds,
   setMaxRounds,
   forceServer = false,
-  strict = false,
 }: PeerConfigListProps) {
-  const { canUseServerProviders } = useAuth()
-  const hintId = useId()
-  const legacyOptions = useProviderOptions(peerConfigs.map((p) => p.ai_provider))
+  const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const { providers, providerStatus } = useProviderCatalog(forceServer)
-  const providerOptions = strict
-    ? buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
-    : legacyOptions
-  const hasDeniedServer = strict && !canUseServerProviders && providerOptions.some((option) => credentialLabel(usableModels(providers, option.value, forceServer, providerStatus)).includes('Server'))
 
   const updatePeer = (id: string, patch: Partial<PeerConfigWithId>) => {
     setPeerConfigs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
   }
+
+  // Default a new peer to the first provider the pickers themselves offer.
+  const defaultProvider = analysisProviderIds(providers, providerStatus, forceServer)
+    .find((id) =>
+      usableModels(providers, id, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders).length > 0 ||
+      (!forceServer && allowsUnverified(providerStatus, id, false)),
+    ) ?? ''
 
   return (
     <>
@@ -62,29 +48,7 @@ export function PeerConfigList({
             className="bg-surface-elevated border border-border-default rounded-lg p-2.5 space-y-2"
           >
             <div className="flex items-center gap-2">
-              <Select
-                value={(!strict || providerOptions.some((option) => option.value === normalizeProvider(peer.ai_provider))) ? normalizeProvider(peer.ai_provider) || undefined : undefined}
-                onValueChange={(v) => updatePeer(peer.id, { ai_provider: v, ai_model: '' })}
-              >
-                {hasDeniedServer && <ServerAccessHint id={`${hintId}-${i}`} />}
-                <ServerAccessTooltip show={strict && !canUseServerProviders && credentialLabel(usableModels(providers, peer.ai_provider, forceServer, providerStatus)).includes('Server')}>
-                  <SelectTrigger className="w-[160px]" aria-label={`Peer ${i + 1} provider`} aria-describedby={hasDeniedServer ? `${hintId}-${i}` : undefined}>
-                    <SelectValue placeholder={peer.ai_provider ? `${peer.ai_provider} (unavailable)` : 'Select provider'} />
-                  </SelectTrigger>
-                </ServerAccessTooltip>
-                <SelectContent>
-                  {providerOptions.map((opt) => {
-                    const models = usableModels(providers, opt.value, forceServer, providerStatus)
-                    const available = !strict || !!usableModels(providers, opt.value, forceServer, providerStatus, canUseServerProviders).length || (!forceServer && allowsUnverified(providerStatus, opt.value, false))
-                    const source = credentialLabel(models, allowsUnverified(providerStatus, opt.value, forceServer), forceServer)
-                    return <ServerAccessTooltip key={opt.value} show={strict && !canUseServerProviders && source.includes('Server')} disabled={!available}>
-                      <SelectItem value={opt.value} disabled={!available}>
-                        {opt.label}{strict && <> · <CredentialSourceLabel label={source} canUseServer={canUseServerProviders} /></>}
-                      </SelectItem>
-                    </ServerAccessTooltip>
-                  })}
-                </SelectContent>
-              </Select>
+              <span className="text-xs font-medium text-text-secondary">Peer {i + 1}</span>
               <div className="flex-1" />
               <button
                 type="button"
@@ -95,17 +59,25 @@ export function PeerConfigList({
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </div>
-            <ModelCombobox
-              value={peer.ai_model}
-              onChange={(val) => updatePeer(peer.id, { ai_model: val })}
-              options={strict ? visibleModels(providers, peer.ai_provider, forceServer, providerStatus, canUseServerProviders) : peerModels[peer.id] ?? []}
-
-              forceServer={strict && forceServer}
-              canUseServer={canUseServerProviders}
-              ariaLabel={`Peer ${i + 1} model`}
-              placeholder={strict && allowsUnverified(providerStatus, peer.ai_provider, forceServer) ? 'Enter model ID' : 'Model'}
-            />
-            {strict && <UnverifiedModelsWarning show={allowsUnverified(providerStatus, peer.ai_provider, forceServer)} />}
+            <div className="space-y-1.5">
+              <FieldLabel>AI Provider</FieldLabel>
+              <AnalysisProviderSelect
+                value={peer.ai_provider}
+                onChange={(v) => updatePeer(peer.id, { ai_provider: v, ai_model: '' })}
+                forceServer={forceServer}
+                label={`Peer ${i + 1} provider`}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <FieldLabel>AI Model</FieldLabel>
+              <AnalysisModelSelect
+                provider={peer.ai_provider}
+                value={peer.ai_model}
+                onChange={(val) => updatePeer(peer.id, { ai_model: val })}
+                forceServer={forceServer}
+                label={`Peer ${i + 1} model`}
+              />
+            </div>
           </div>
         ))}
       </div>
@@ -115,7 +87,7 @@ export function PeerConfigList({
         onClick={() =>
           setPeerConfigs((prev) => [
             ...prev,
-            { id: crypto.randomUUID(), ai_provider: strict ? providerOptions.find((option) => usableModels(providers, option.value, forceServer, providerStatus, canUseServerProviders).length || (!forceServer && allowsUnverified(providerStatus, option.value, false)))?.value ?? '' : 'claude', ai_model: '' },
+            { id: crypto.randomUUID(), ai_provider: defaultProvider, ai_model: '' },
           ])
         }
       >

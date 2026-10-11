@@ -1253,7 +1253,7 @@ async def _create_chat_session(
         else:
             from rootcoz.ai_client import require_server_provider_grant
 
-            await require_server_provider_grant()
+            await require_server_provider_grant(sidecar_provider, sidecar_model)
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id

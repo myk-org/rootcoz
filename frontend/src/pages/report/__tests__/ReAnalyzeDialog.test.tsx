@@ -14,7 +14,6 @@ vi.mock('@/lib/api', async () => {
 vi.mock('react-router-dom', () => ({ useNavigate: () => vi.fn() }))
 
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ canUseServerProviders: true }) }))
-vi.mock('@/lib/usePeerModels', () => ({ usePeerModels: () => [] }))
 vi.mock('@/lib/useProviderOptions', () => ({
   useProviderCatalog: () => ({ providers: [], providerStatus: {} }),
 }))
