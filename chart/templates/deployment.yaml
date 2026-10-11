@@ -50,6 +50,30 @@ spec:
       {{- end }}
       securityContext:
         {{- include "rootcoz.podSecurityContext" . | nindent 8 }}
+      {{- if $sidecarAgent }}
+      initContainers:
+        # Secret volumes are read-only, but pi writes models-store.json (and
+        # auth.json when absent) into PI_SIDECAR_AGENT_DIR — copy the staged
+        # files into a writable emptyDir so provider availability refreshes
+        # do not fail with EROFS.
+        - name: copy-sidecar-agent
+          image: {{ include "rootcoz.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "rootcoz.containerSecurityContext" . | nindent 12 }}
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              cp -a /etc/pi-sidecar-agent-src/. /etc/pi-sidecar-agent/
+              && chmod -R u+w /etc/pi-sidecar-agent
+          volumeMounts:
+            - name: sidecar-agent-src
+              mountPath: /etc/pi-sidecar-agent-src
+              readOnly: true
+            - name: sidecar-agent
+              mountPath: /etc/pi-sidecar-agent
+      {{- end }}
       containers:
         - name: {{ include "rootcoz.name" . }}
           image: {{ include "rootcoz.image" . | quote }}
@@ -138,7 +162,6 @@ spec:
             {{- if $sidecarAgent }}
             - name: sidecar-agent
               mountPath: /etc/pi-sidecar-agent
-              readOnly: true
             {{- end }}
       volumes:
         {{- if .Values.persistence.enabled }}
@@ -161,6 +184,8 @@ spec:
         {{- end }}
         {{- if $sidecarAgent }}
         - name: sidecar-agent
+          emptyDir: {}
+        - name: sidecar-agent-src
           secret:
             secretName: {{ include "rootcoz.sidecarAgentSecretName" . }}
         {{- end }}

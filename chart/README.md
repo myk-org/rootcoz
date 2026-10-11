@@ -116,8 +116,11 @@ Provider credentials (typically in `~/.config/rootcoz/helm/values.secrets.yaml`)
 
 pi-sidecar >=4.8.5 can register custom pi providers from a persistent agent dir.
 Set any of `sidecar.agentDir.modelsJson` / `authJson` / `settingsJson` (string or
-YAML object) — the chart stores them in a Secret, mounts it read-only at
-`/etc/pi-sidecar-agent`, and sets `PI_SIDECAR_AGENT_DIR` accordingly. API keys
+YAML object) — the chart stores them in a Secret and copies them via an
+initContainer into a writable emptyDir mounted at `/etc/pi-sidecar-agent` (pi
+persists `models-store.json` next to `models.json`, so the agent dir must be
+writable — a direct read-only Secret mount breaks provider availability with
+EROFS), and sets `PI_SIDECAR_AGENT_DIR` accordingly. API keys
 referenced as `"$VAR"` inside `models.json` come from `sidecar.agentDir.env`
 (e.g. `env: { MYGATEWAY_API_KEY: "..." }`). Env keys use tombstone semantics:
 omitting a key preserves its stored Secret value on upgrade (Helm `lookup`),
