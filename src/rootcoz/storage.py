@@ -1317,6 +1317,20 @@ async def init_db() -> None:
             )
         """)
 
+        # Admin-declared free provider+model pairs. "Free" is an admin
+        # decision (never the catalog's cost fields); a pair is always
+        # provider+model — a provider alone is never free.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS free_ai_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                created_by TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(provider, model)
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5594,6 +5608,59 @@ async def can_user_use_server_providers(username: str) -> bool:
         return True
     user = await get_user_by_username(username)
     return bool(user and user["can_use_server_providers"])
+
+
+async def can_user_use_free_providers(username: str) -> bool:
+    """Effective free-pair access.
+
+    The gate is the server-level ``ENABLE_FREE_MODELS`` toggle: when on,
+    every user may run admin-declared free provider+model pairs on server
+    credentials. Bootstrap admins and users holding the full server grant
+    already have the superset.
+    """
+    if username == "admin":
+        return True
+    user = await get_user_by_username(username)
+    if user and user["can_use_server_providers"]:
+        return True
+    from rootcoz.config import get_settings
+
+    return get_settings().enable_free_models
+
+
+async def list_free_ai_models() -> list[dict[str, Any]]:
+    """List admin-declared free provider+model pairs (exact stored spelling)."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT provider, model, created_by, created_at FROM free_ai_models"
+            " ORDER BY provider, model"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def set_free_ai_models(
+    pairs: list[tuple[str, str]], updated_by: str
+) -> list[dict[str, Any]]:
+    """Replace the full free-pair list in one transaction.
+
+    ``pairs`` holds exact ``(provider, model)`` spelling; duplicates that
+    differ only in provider case are collapsed to the first spelling.
+    Returns the stored list.
+    """
+    deduped: dict[tuple[str, str], tuple[str, str]] = {}
+    for provider, model in pairs:
+        if not provider or not model:
+            raise ValueError("Free model entries require both provider and model")
+        deduped.setdefault((provider.lower(), model), (provider, model))
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute("DELETE FROM free_ai_models")
+        await db.executemany(
+            "INSERT INTO free_ai_models (provider, model, created_by) VALUES (?, ?, ?)",
+            [(p, m, updated_by) for _, (p, m) in deduped.items()],
+        )
+        await db.commit()
+    return await list_free_ai_models()
 
 
 async def track_user(username: str) -> None:

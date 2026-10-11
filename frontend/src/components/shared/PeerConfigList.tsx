@@ -40,14 +40,14 @@ export function PeerConfigList({
   forceServer = false,
   strict = false,
 }: PeerConfigListProps) {
-  const { canUseServerProviders } = useAuth()
+  const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const hintId = useId()
   const legacyOptions = useProviderOptions(peerConfigs.map((p) => p.ai_provider))
   const { providers, providerStatus } = useProviderCatalog(forceServer)
   const providerOptions = strict
     ? buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
     : legacyOptions
-  const hasDeniedServer = strict && !canUseServerProviders && providerOptions.some((option) => credentialLabel(usableModels(providers, option.value, forceServer, providerStatus)).includes('Server'))
+  const hasDeniedServer = strict && !canUseServerProviders && !canUseFreeProviders && providerOptions.some((option) => credentialLabel(usableModels(providers, option.value, forceServer, providerStatus)).includes('Server'))
 
   const updatePeer = (id: string, patch: Partial<PeerConfigWithId>) => {
     setPeerConfigs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
@@ -67,7 +67,7 @@ export function PeerConfigList({
                 onValueChange={(v) => updatePeer(peer.id, { ai_provider: v, ai_model: '' })}
               >
                 {hasDeniedServer && <ServerAccessHint id={`${hintId}-${i}`} />}
-                <ServerAccessTooltip show={strict && !canUseServerProviders && credentialLabel(usableModels(providers, peer.ai_provider, forceServer, providerStatus)).includes('Server')}>
+                <ServerAccessTooltip show={strict && !canUseServerProviders && !canUseFreeProviders && credentialLabel(usableModels(providers, peer.ai_provider, forceServer, providerStatus)).includes('Server')}>
                   <SelectTrigger className="w-[160px]" aria-label={`Peer ${i + 1} provider`} aria-describedby={hasDeniedServer ? `${hintId}-${i}` : undefined}>
                     <SelectValue placeholder={peer.ai_provider ? `${peer.ai_provider} (unavailable)` : 'Select provider'} />
                   </SelectTrigger>
@@ -75,7 +75,7 @@ export function PeerConfigList({
                 <SelectContent>
                   {providerOptions.map((opt) => {
                     const models = usableModels(providers, opt.value, forceServer, providerStatus)
-                    const available = !strict || !!usableModels(providers, opt.value, forceServer, providerStatus, canUseServerProviders).length || (!forceServer && allowsUnverified(providerStatus, opt.value, false))
+                    const available = !strict || !!usableModels(providers, opt.value, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders).length || (!forceServer && allowsUnverified(providerStatus, opt.value, false))
                     const source = credentialLabel(models, allowsUnverified(providerStatus, opt.value, forceServer), forceServer)
                     return <ServerAccessTooltip key={opt.value} show={strict && !canUseServerProviders && source.includes('Server')} disabled={!available}>
                       <SelectItem value={opt.value} disabled={!available}>
@@ -98,7 +98,7 @@ export function PeerConfigList({
             <ModelCombobox
               value={peer.ai_model}
               onChange={(val) => updatePeer(peer.id, { ai_model: val })}
-              options={strict ? visibleModels(providers, peer.ai_provider, forceServer, providerStatus, canUseServerProviders) : peerModels[peer.id] ?? []}
+              options={strict ? visibleModels(providers, peer.ai_provider, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders) : peerModels[peer.id] ?? []}
 
               forceServer={strict && forceServer}
               canUseServer={canUseServerProviders}
@@ -115,7 +115,7 @@ export function PeerConfigList({
         onClick={() =>
           setPeerConfigs((prev) => [
             ...prev,
-            { id: crypto.randomUUID(), ai_provider: strict ? providerOptions.find((option) => usableModels(providers, option.value, forceServer, providerStatus, canUseServerProviders).length || (!forceServer && allowsUnverified(providerStatus, option.value, false)))?.value ?? '' : 'claude', ai_model: '' },
+            { id: crypto.randomUUID(), ai_provider: strict ? providerOptions.find((option) => usableModels(providers, option.value, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders).length || (!forceServer && allowsUnverified(providerStatus, option.value, false)))?.value ?? '' : 'claude', ai_model: '' },
           ])
         }
       >

@@ -228,6 +228,14 @@ class RootCozClient:
             json={"can_use_server_providers": value},
         )
 
+    def admin_list_free_models(self) -> dict[str, Any]:
+        """List admin-declared free provider+model pairs."""
+        return self._request("GET", "/api/admin/free-models")
+
+    def admin_set_free_models(self, models: list[dict[str, str]]) -> dict[str, Any]:
+        """Replace the free provider+model pair list."""
+        return self._request("PUT", "/api/admin/free-models", json={"models": models})
+
     def admin_delete_user(self, username: str) -> dict[str, Any]:
         """Delete an admin user. DELETE /api/admin/users/{username}"""
         return self._request("DELETE", f"/api/admin/users/{username}")

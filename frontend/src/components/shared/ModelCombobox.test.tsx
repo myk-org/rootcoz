@@ -84,3 +84,17 @@ it('still offers the full list when the stored value matches nothing', async () 
   await user.click(screen.getByRole('combobox'))
   expect(screen.getAllByRole('option')).toHaveLength(2)
 })
+
+it('shows a Free badge on admin-declared free models only', async () => {
+  const user = userEvent.setup()
+  render(<ModelCombobox value="" onChange={() => {}} options={[{
+    id: 'glm-5-3', name: 'GLM 5.3', credential_sources: ['server'], free: true,
+  }, {
+    id: 'paid', name: 'Paid', credential_sources: ['server'],
+  }]} canUseServer />)
+  await user.keyboard('{Tab}{ArrowDown}{ArrowDown}')
+  const freeOption = screen.getByRole('option', { name: /glm-5-3/ })
+  expect(within(freeOption).getByText('Free')).toBeInTheDocument()
+  const paidOption = screen.getByRole('option', { name: /^paid/i })
+  expect(within(paidOption).queryByText('Free')).not.toBeInTheDocument()
+})

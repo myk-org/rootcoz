@@ -65,17 +65,51 @@ async def supported_key_providers() -> list[str]:
     )
 
 
-async def require_server_provider_grant() -> None:
-    """Recheck the initiator on every server AI operation, including resumed turns."""
-    from rootcoz.storage import can_user_use_server_providers
+async def require_server_provider_grant(provider: str = "", model: str = "") -> None:
+    """Recheck the initiator on every server AI operation, including resumed turns.
+
+    A user without the full server grant may still run one admin-declared
+    free provider+model pair when they hold the free-providers grant.
+    """
+    from rootcoz.storage import (
+        can_user_use_free_providers,
+        can_user_use_server_providers,
+    )
 
     username = ai_username.get()
     try:
         allowed = bool(username) and await can_user_use_server_providers(username)
     except Exception as exc:
         raise ValueError("Server provider access unavailable") from exc
-    if not allowed:
-        raise ValueError("Server provider access requires an administrator grant")
+    if allowed:
+        return
+    if provider and model:
+        try:
+            granted = bool(username) and await can_user_use_free_providers(username)
+        except Exception as exc:
+            raise ValueError("Server provider access unavailable") from exc
+        if granted and await is_free_ai_pair(provider, model):
+            return
+    raise ValueError("Server provider access requires an administrator grant")
+
+
+async def is_free_ai_pair(provider: str, model: str) -> bool:
+    """True when the admin declared this exact provider+model pair free.
+
+    Provider matching is case-insensitive (stored spelling may differ in
+    case from the catalog); the model id is exact.
+    """
+    from rootcoz.storage import list_free_ai_models
+
+    try:
+        rows = await list_free_ai_models()
+    except sqlite3.Error, OSError:
+        return False
+    wanted = (provider or "").lower()
+    return any(
+        (row["provider"] or "").lower() == wanted and row["model"] == model
+        for row in rows
+    )
 
 
 async def session_key(provider: str) -> str | None:
@@ -519,8 +553,22 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             # Report what the key actually yielded, so a key that stored fine but
             # surfaced no usable model is visible instead of silently looking ready.
             status[provider]["model_count"] = len(usable)
+    free_pairs: set[tuple[str, str]] = set()
+    try:
+        from rootcoz.storage import list_free_ai_models
+
+        free_pairs = {
+            (row["provider"].lower(), row["model"])
+            for row in await list_free_ai_models()
+        }
+    except sqlite3.Error, OSError:
+        logger.warning("Unable to load free model pairs")
     result: dict[str, list[dict[str, Any]]] = {}
     for (provider, model), entry in pairs.items():
+        # Admin-declared free pairs are flagged regardless of credential
+        # source so every consumer (badge, filters) sees one flag.
+        if (provider.lower(), model) in free_pairs:
+            entry["free"] = True
         bucket = result.setdefault(provider, [])
         if model:
             bucket.append(entry)
@@ -557,7 +605,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
                         f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
                     )
                 if source == "server":
-                    await require_server_provider_grant()
+                    await require_server_provider_grant(provider, model)
                 _selected_credential_source.set(source)
                 return provider, model
         if provider in status and status[provider]["modelListingSupported"]:
@@ -580,7 +628,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     )
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
-        await require_server_provider_grant()
+        await require_server_provider_grant(provider, model)
         _selected_credential_source.set("server")
         return provider, model
 
@@ -592,7 +640,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     )
     pairs = {(entry.get("provider"), entry.get("id")) for entry in catalog}
     if (provider, model) in pairs:
-        await require_server_provider_grant()
+        await require_server_provider_grant(provider, model)
         _selected_credential_source.set("server")
         return provider, model
 
@@ -602,7 +650,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     providers_for_model = {p for p, m in pairs if p and m == model}
     matches = [p for p in providers_for_model if targets and p.lower() in targets]
     if len(providers_for_model) == 1 and len(matches) == 1:
-        await require_server_provider_grant()
+        await require_server_provider_grant(matches[0], model)
         _selected_credential_source.set("server")
         return matches[0], model
     raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
@@ -1138,7 +1186,7 @@ async def call_ai(
                 error="Chat credential unavailable; Start a new chat",
             )
     if source == "server":
-        await require_server_provider_grant()
+        await require_server_provider_grant(provider, model)
     if not session_id and source == "server":
         from rootcoz.storage import get_user_by_username
 
@@ -1185,7 +1233,7 @@ async def call_ai(
             )
     if source == "server" and result.success and chat_session_source.get():
         try:
-            await require_server_provider_grant()
+            await require_server_provider_grant(provider, model)
         except ValueError:
             logger.info("Chat AI reply discarded after server grant changed")
             return AIResult(
@@ -1211,7 +1259,7 @@ async def call_ai_once(
         kwargs["api_key"] = key
     sidecar_call = _call_user_session if key is not None else _call_ai_once
     if key is None:
-        await require_server_provider_grant()
+        await require_server_provider_grant(provider, model)
     if key is not None:
         kwargs["once"] = True
     result = await _call_with_safe_error(

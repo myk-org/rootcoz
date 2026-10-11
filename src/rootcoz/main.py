@@ -57,6 +57,7 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import storage
 from rootcoz.ai_client import (
+    _get_model_catalog,
     _setup_usage_recorder,
     ai_username,
     call_ai_once,
@@ -173,6 +174,7 @@ from rootcoz.models import (
     ReportPortalPushResult,
     SetCanUseServerProvidersRequest,
     SetCanViewReportsRequest,
+    SetFreeAiModelsRequest,
     SetReviewedRequest,
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
@@ -343,6 +345,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "max_concurrent_ai_calls",
         "peer_ai_configs",
         "peer_analysis_max_rounds",
+        "enable_free_models",
     ],
     "Jira": [
         "jira_url",
@@ -1952,6 +1955,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             try:
                 request.state.can_use_server_providers = (
                     await storage.can_user_use_server_providers(username)
+                )
+                request.state.can_use_free_providers = (
+                    await storage.can_user_use_free_providers(username)
                 )
             except Exception:
                 logger.exception("Unable to load server provider grant", exc_info=False)
@@ -9953,6 +9959,7 @@ async def login(request: Request) -> JSONResponse:
     authenticated = False
     can_view_reports = False
     can_use_server_providers = False
+    can_use_free_providers = False
 
     # Check admin_key — username must be "admin"
     if (
@@ -9965,6 +9972,7 @@ async def login(request: Request) -> JSONResponse:
         authenticated = True
         can_view_reports = effective_can_view_reports(True)
         can_use_server_providers = True
+        can_use_free_providers = True
     else:
         # Check user API key
         user = await storage.get_user_by_key(api_key)
@@ -9977,6 +9985,7 @@ async def login(request: Request) -> JSONResponse:
                 is_admin, bool(user.get("can_view_reports"))
             )
             can_use_server_providers = bool(user.get("can_use_server_providers"))
+            can_use_free_providers = bool(user.get("can_use_free_providers"))
 
     if not authenticated:
         logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
@@ -10000,6 +10009,7 @@ async def login(request: Request) -> JSONResponse:
             "is_admin": is_admin,
             "can_view_reports": can_view_reports,
             "can_use_server_providers": can_use_server_providers,
+            "can_use_free_providers": can_use_free_providers,
         }
     )
     response.set_cookie(
@@ -10068,6 +10078,9 @@ async def auth_me(request: Request) -> JSONResponse:
             "can_view_reports": bool(getattr(request.state, "can_view_reports", False)),
             "can_use_server_providers": bool(
                 getattr(request.state, "can_use_server_providers", False)
+            ),
+            "can_use_free_providers": bool(
+                getattr(request.state, "can_use_free_providers", False)
             ),
         }
     )
@@ -10941,6 +10954,54 @@ async def set_user_can_use_server_providers(
             "can_use_server_providers": body.can_use_server_providers,
         }
     )
+
+
+@app.get("/api/admin/free-models", operation_id="listFreeAiModels")
+async def list_free_ai_models_endpoint(request: Request) -> dict[str, Any]:
+    """List admin-declared free provider+model pairs (admin only)."""
+    _require_admin(request)
+    return {"models": await storage.list_free_ai_models()}
+
+
+@app.put("/api/admin/free-models", operation_id="setFreeAiModels")
+async def set_free_ai_models_endpoint(
+    request: Request, body: SetFreeAiModelsRequest
+) -> dict[str, Any]:
+    """Replace the free provider+model list (admin only).
+
+    Every pair is validated against the current sidecar catalog (provider
+    case-insensitively, model id exactly) so typos cannot silently create
+    free entries that never match anything. Stale pairs that disappear
+    from the catalog later are ignored gracefully at runtime.
+    """
+    _require_admin(request)
+    catalog = await _get_model_catalog()
+    catalog_pairs = {
+        (str(entry.get("provider") or "").lower(), str(entry.get("id") or ""))
+        for entry in catalog
+    }
+    unknown: list[dict[str, str]] = []
+    for entry in body.models:
+        if (entry.provider.lower(), entry.model) not in catalog_pairs:
+            unknown.append({"provider": entry.provider, "model": entry.model})
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Unknown provider/model pairs in free-models list",
+                "unknown": unknown,
+            },
+        )
+    stored = await storage.set_free_ai_models(
+        [(entry.provider, entry.model) for entry in body.models],
+        request.state.username,
+    )
+    logger.info(
+        "[AUDIT] Admin '%s' set free AI models: %d pair(s)",
+        request.state.username,
+        len(stored),
+    )
+    return {"models": stored}
 
 
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
@@ -12201,7 +12262,7 @@ async def _validate_chat_selection(
         try:
             from rootcoz.ai_client import require_server_provider_grant
 
-            await require_server_provider_grant()
+            await require_server_provider_grant(provider, model)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:

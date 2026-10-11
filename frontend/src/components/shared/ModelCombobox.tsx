@@ -13,6 +13,8 @@ export interface ModelOption {
   credential_sources?: Array<'user' | 'server'>
   verified?: boolean
   serverLocked?: boolean
+  /** Admin-declared free pair (see AiModel.free). */
+  free?: boolean
 }
 
 interface ModelComboboxProps {
@@ -236,6 +238,11 @@ export function ModelCombobox({
                 <span>{model.id}</span>
                 <span className="flex shrink-0 items-center gap-2">
                   {model.verified === false && <span className="text-xs text-signal-amber">UNVERIFIED</span>}
+                  {model.free === true && (
+                    <span className="rounded border border-signal-green px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-signal-green" title="Admin-declared free model">
+                      Free
+                    </span>
+                  )}
                   {model.verified !== false && model.credential_sources?.length ? (
                     <span className="text-xs text-text-secondary">
                       <CredentialSourceLabel label={credentialLabel([{ ...model, provider: '' }], false, forceServer)} canUseServer={canUseServer} />

@@ -251,6 +251,9 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `settings history` | `--key`/`-k`, `--limit`/`-l` (50) | Change log. |
 | `settings reset KEY` | — | Drop the DB override and fall back to env or default. |
 | `models refresh` | — | Re-read the model list from the sidecar. |
+| `models free-list` | — | List admin-declared free provider+model pairs. |
+| `models free-add` | `--provider`, `--model` | Declare one provider+model pair as free (validated against the catalog). |
+| `models free-remove` | `--provider`, `--model` | Remove one pair from the free list. |
 
 See [Managing Users and Server Settings](manage-users-and-server-settings.html) for what these settings mean.
 

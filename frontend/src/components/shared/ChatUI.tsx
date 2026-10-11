@@ -109,7 +109,7 @@ export function ChatUI({
 
   const [aiProvider, setAiProvider] = useState(() => normalizeProvider(defaultProvider))
   const [aiModel, setAiModel] = useState(defaultModel)
-  const { canUseServerProviders } = useAuth()
+  const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const [forceServer, setForceServer] = useState(defaultForceServer)
   const effectiveForceServer = forceServer && canUseServerProviders
   const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
@@ -161,7 +161,7 @@ export function ChatUI({
     : INIT_STEPS[initStepIndex]
   const selectedModel = providers[aiProvider]?.find(model => model.id === aiModel)
   const needsServerToggle = !effectiveForceServer && !!selectedModel && !selectedModel.credential_sources?.includes('user') && selectedModel.credential_sources?.includes('server')
-  const validPair = !needsServerToggle && isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders)
+  const validPair = !needsServerToggle && isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders, canUseFreeProviders)
   const canSend = Boolean(sessionStarted && !clearing && input.trim() && !sendBusy)
   const sendBlockedReason = clearing ? 'Clearing chat session'
     : !sessionStarted

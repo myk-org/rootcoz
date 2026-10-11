@@ -3365,6 +3365,92 @@ def admin_models_refresh(
     )
 
 
+@admin_models_app.command("free-list")
+def admin_models_free_list(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List admin-declared free provider+model pairs."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_free_models(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        models = data.get("models", [])
+        if models:
+            print_output(
+                models,
+                columns=["provider", "model", "created_by"],
+                as_json=False,
+            )
+        else:
+            typer.echo("No free models declared.")
+
+
+@admin_models_app.command("free-add")
+def admin_models_free_add(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    model: str = typer.Option(..., "--model", help="Exact model ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Declare one provider+model pair as free (validated against the catalog)."""
+    current = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_free_models(),
+        emit_output=False,
+    )
+    pairs = [
+        {"provider": entry["provider"], "model": entry["model"]}
+        for entry in current.get("models", [])
+        if entry.get("provider") and entry.get("model")
+    ]
+    if any(
+        entry["provider"].lower() == provider.lower() and entry["model"] == model
+        for entry in pairs
+    ):
+        if not _state.get("json", False):
+            typer.echo(f"{provider}/{model} is already declared free")
+        return
+    pairs.append({"provider": provider, "model": model})
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_free_models(pairs),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Declared {provider}/{model} as free")
+
+
+@admin_models_app.command("free-remove")
+def admin_models_free_remove(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    model: str = typer.Option(..., "--model", help="Exact model ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Remove one provider+model pair from the free list."""
+    current = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_free_models(),
+        emit_output=False,
+    )
+    pairs = [
+        {"provider": entry["provider"], "model": entry["model"]}
+        for entry in current.get("models", [])
+        if entry.get("provider")
+        and entry.get("model")
+        and not (
+            entry["provider"].lower() == provider.lower() and entry["model"] == model
+        )
+    ]
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_free_models(pairs),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Removed {provider}/{model} from the free list")
+
+
 # -- Token Usage (Admin) ------------------------------------------------------
 
 

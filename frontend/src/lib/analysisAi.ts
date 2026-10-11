@@ -16,16 +16,20 @@ export function allowsUnverified(status: Record<string, ProviderStatus>, provide
   return !forceServer && state?.has_api_key === true && state.modelListingSupported === false
 }
 
-export function usableModels(providers: Record<string, AiModel[]>, provider: string, forceServer: boolean, status: Record<string, ProviderStatus> = {}, canUseServer = true): AiModel[] {
+export function usableModels(providers: Record<string, AiModel[]>, provider: string, forceServer: boolean, status: Record<string, ProviderStatus> = {}, canUseServer = true, canUseFree = false): AiModel[] {
+  // A user without the server grant may still use an admin-declared free
+  // pair when they hold the free-providers grant; free models pass the
+  // server-credential filter in both toggle states.
+  const serverAllowed = (model: AiModel) => canUseServer || (canUseFree && model.free === true)
   return (providers[normalizeProvider(provider)] ?? []).filter((model) =>
-    model.credential_sources?.some((source) => forceServer ? canUseServer && source === 'server' : source === 'user' || (canUseServer && source === 'server')) &&
+    model.credential_sources?.some((source) => forceServer ? serverAllowed(model) && source === 'server' : source === 'user' || (serverAllowed(model) && source === 'server')) &&
     (model.verified !== false || (forceServer && model.credential_sources?.includes('server')) || allowsUnverified(status, provider, forceServer)),
   ).map((model) => forceServer && model.verified === false && model.credential_sources?.includes('server')
     ? { ...model, verified: true } : model)
 }
 
-export function visibleModels(providers: Record<string, AiModel[]>, provider: string, forceServer: boolean, status: Record<string, ProviderStatus>, canUseServer: boolean) {
-  const available = usableModels(providers, provider, forceServer, status, canUseServer)
+export function visibleModels(providers: Record<string, AiModel[]>, provider: string, forceServer: boolean, status: Record<string, ProviderStatus>, canUseServer: boolean, canUseFree = false) {
+  const available = usableModels(providers, provider, forceServer, status, canUseServer, canUseFree)
   const all = usableModels(providers, provider, forceServer, status)
   return all.map((model) => ({ ...model, serverLocked: !available.some((item) => item.id === model.id) }))
 }
@@ -42,9 +46,9 @@ export function credentialLabel(models: AiModel[], manualUser = false, forceServ
   return sources.has('user') && sources.has('server') ? 'User + Server' : sources.has('user') ? 'User' : 'Server'
 }
 
-export function isAnalysisAiAvailable(providers: Record<string, AiModel[]>, status: Record<string, ProviderStatus>, provider: string, model: string, forceServer: boolean, canUseServer = true): boolean {
-  if (forceServer && !canUseServer) return false
-  const models = usableModels(providers, provider, forceServer, status, canUseServer)
+export function isAnalysisAiAvailable(providers: Record<string, AiModel[]>, status: Record<string, ProviderStatus>, provider: string, model: string, forceServer: boolean, canUseServer = true, canUseFree = false): boolean {
+  if (forceServer && !canUseServer && !canUseFree) return false
+  const models = usableModels(providers, provider, forceServer, status, canUseServer, canUseFree)
   if (!provider.trim() || !model.trim()) return false
   if (allowsUnverified(status, provider, forceServer)) return true
   return models.some((option) => option.id === model && option.verified !== false)
