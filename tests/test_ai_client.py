@@ -268,9 +268,9 @@ async def test_key_rotation_revokes_session_across_provider_case_drift(
     )
     # Catalog drifts to lowercase; the user replaces the key under the new
     # spelling. The old-spelling session must be revoked, not resumable.
-    assert await storage.update_user_ai_credential("alice", "mygateway", "new-key") == [
-        "drifted-session"
-    ]
+    assert await storage.update_user_ai_credential(
+        "alice", "mygateway", "new-key", registered_providers={"mygateway"}
+    ) == ["drifted-session"]
     with pytest.raises(ValueError, match="another user or provider"):
         await storage.get_ai_session_source("drifted-session", "alice", "mygateway")
     with pytest.raises(ValueError, match="another user or provider"):
@@ -294,9 +294,9 @@ async def test_new_session_valid_after_provider_case_drift_rotation(
     await storage.save_ai_session_source("old-session", "alice", "MyGateway", "user")
     # Catalog drifts; the key is replaced under the new spelling, consolidating
     # the old spelling's counter history (generation 3).
-    assert await storage.update_user_ai_credential("alice", "mygateway", "key-3") == [
-        "old-session"
-    ]
+    assert await storage.update_user_ai_credential(
+        "alice", "mygateway", "key-3", registered_providers={"mygateway"}
+    ) == ["old-session"]
     # A NEW session created with the current credential must verify.
     await storage.save_ai_session_source("new-session", "alice", "mygateway", "user")
     assert (
@@ -324,9 +324,9 @@ async def test_non_ascii_provider_case_drift_revokes_session(
         await storage.get_ai_session_source("unicode-session", "alice", "ÄGateway")
         == "user"
     )
-    assert await storage.update_user_ai_credential("alice", "ägateway", "new-key") == [
-        "unicode-session"
-    ]
+    assert await storage.update_user_ai_credential(
+        "alice", "ägateway", "new-key", registered_providers={"ägateway"}
+    ) == ["unicode-session"]
     with pytest.raises(ValueError, match="another user or provider"):
         await storage.get_ai_session_source("unicode-session", "alice", "ägateway")
     await storage.save_ai_session_source("unicode-new", "alice", "ägateway", "user")
@@ -427,6 +427,64 @@ async def test_unregistered_variant_consolidates(
         "alice", "mygateway", "new-key", registered_providers={"mygateway"}
     )
     assert await storage.get_user_ai_credentials("alice") == {"mygateway": "new-key"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_registration_keeps_variants_separate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When registration cannot be confirmed (sidecar unreachable, None), a
+    case-variant must NOT be treated as unregistered — no consolidation, and
+    rotation touches only the exact spelling."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "unknown-registration.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential(
+        "alice", "MyGateway", "old-key", registered_providers={"MyGateway"}
+    )
+    await storage.save_ai_session_source("old-session", "alice", "MyGateway", "user")
+    # Registration unknown: the spellings stay separate, nothing is absorbed.
+    await storage.update_user_ai_credential("alice", "mygateway", "new-key")
+    assert await storage.get_user_ai_credentials("alice") == {
+        "MyGateway": "old-key",
+        "mygateway": "new-key",
+    }
+    # Rotation under the new spelling leaves the old spelling's credential
+    # and session intact — each spelling behaves as its own provider.
+    assert (
+        await storage.get_ai_session_source("old-session", "alice", "MyGateway")
+        == "user"
+    )
+
+
+@pytest.mark.asyncio
+async def test_registered_provider_ids_uses_provider_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registered IDs come from the sidecar provider registry, not the model
+    catalog — a registered provider with no current models still counts."""
+
+    class FakeClient:
+        async def get_providers(self):
+            return [
+                {"provider": "Foo", "supportsSessionApiKey": True},
+                {"provider": "foo", "supportsSessionApiKey": False},
+            ]
+
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
+    assert await ai_client.registered_provider_ids() == {"Foo", "foo"}
+
+
+@pytest.mark.asyncio
+async def test_registered_provider_ids_unavailable_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        async def get_providers(self):
+            raise RuntimeError("sidecar down")
+
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
+    assert await ai_client.registered_provider_ids() is None
 
 
 @pytest.mark.asyncio

@@ -6096,9 +6096,11 @@ async def update_user_ai_credential(
 
     ``registered_providers`` is the set of exact provider IDs the sidecar
     currently registers, when known. A lone case-variant credential is
-    consolidated as a drifted spelling only when that variant is no longer
-    registered — if both spellings are registered as distinct providers, they
-    are kept separate and rotation touches only the exact spelling."""
+    consolidated as a drifted spelling only when a fresh registration result
+    proves that variant is no longer registered — if both spellings are
+    registered as distinct providers, or registration could not be confirmed
+    (``None``), the credentials are kept separate and rotation touches only
+    the exact spelling."""
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         row = await (
@@ -6121,17 +6123,19 @@ async def update_user_ai_credential(
             for k in credentials
             if isinstance(k, str) and k.lower() == provider.lower()
         ]
-        unambiguous = len(variants) <= 1
-        if (
-            unambiguous
-            and variants
-            and variants[0] != provider
-            and registered_providers is not None
-            and variants[0] in registered_providers
-        ):
-            # Both spellings are registered as distinct provider IDs — keep the
-            # credentials separate and rotate only the exact spelling.
-            unambiguous = False
+        # A lone case-variant consolidates as a drifted spelling only with a
+        # successful, fresh registration result proving the old spelling is no
+        # longer registered. Unknown registration (None) is never treated as
+        # evidence that a spelling is unregistered — the credentials stay
+        # separate and rotation touches only the exact spelling.
+        unambiguous = len(variants) <= 1 and (
+            not variants
+            or variants[0] == provider
+            or (
+                registered_providers is not None
+                and variants[0] not in registered_providers
+            )
+        )
         affected = {*variants, provider} if unambiguous else {provider}
         if key is None:
             unchanged = all(k not in credentials for k in affected)
@@ -6198,7 +6202,7 @@ async def update_user_ai_credential(
             msg_rows.extend(
                 await (
                     await db.execute(
-                        "SELECT session_id, ai_provider FROM chat_messages "
+                        "SELECT DISTINCT session_id, ai_provider FROM chat_messages "
                         "WHERE username = ? AND session_id != '' "
                         f"AND ai_provider IN ({','.join('?' * len(spelling_chunk))})",
                         [username, *spelling_chunk],

@@ -257,20 +257,24 @@ def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
 async def registered_provider_ids() -> set[str] | None:
     """Exact provider IDs the sidecar currently registers, or None if unavailable.
 
-    Freshness matters: credential rotation uses this to decide whether a
-    case-variant spelling is still a registered, distinct provider (keep the
-    credentials separate) or a drifted spelling of the same one (consolidate).
+    Uses the sidecar's provider registry (``GET /providers``), not the model
+    catalog: a registered provider with no current models is still registered,
+    and treating it as unregistered would wrongly consolidate a case-distinct
+    credential. Credential rotation uses this to decide whether a case-variant
+    spelling is a registered, distinct provider (keep the credentials separate)
+    or a drifted spelling of the same one (consolidate). A failed lookup
+    returns None — the caller must treat unknown registration as "keep
+    separate", never as evidence that a spelling is unregistered.
     """
     try:
-        catalog = await _get_model_catalog(refresh=True)
+        providers = await get_sidecar_client().get_providers()
     except httpx.HTTPError, OSError, RuntimeError, ValueError:
-        try:
-            catalog = await _get_model_catalog()
-        except httpx.HTTPError, OSError, RuntimeError, ValueError:
-            logger.warning("Unable to list registered providers for credential update")
-            return None
+        logger.warning("Unable to list registered providers for credential update")
+        return None
     return {
-        entry["provider"] for entry in catalog if isinstance(entry.get("provider"), str)
+        entry["provider"]
+        for entry in providers
+        if isinstance(entry.get("provider"), str)
     }
 
 
