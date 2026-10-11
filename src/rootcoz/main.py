@@ -12342,13 +12342,20 @@ async def _available_chat_session(
             active["session_id"], username, active["ai_provider"]
         )
         if source == "server":
-            allowed = await storage.can_user_use_server_providers(username)
-            if not allowed:
-                # Free-pair grant also authorizes server-backed sessions —
-                # same rule _validate_chat_selection applies on Start.
-                allowed = await storage.can_user_use_free_providers(username)
-            if not allowed:
+            # Same rule Start applies, rechecked per read: the full server
+            # grant, or the free grant for a pair that is still declared
+            # free (a removed pair retires its sessions too).
+            from rootcoz.ai_client import require_server_provider_grant
+
+            token = ai_username.set(username)
+            try:
+                await require_server_provider_grant(
+                    active["ai_provider"], active["ai_model"]
+                )
+            except ValueError:
                 return None
+            finally:
+                ai_username.reset(token)
         elif source == "user":
             from pi_sidecar_client import _validate_api_key
 

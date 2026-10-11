@@ -117,7 +117,11 @@ export function ChatUI({
   // An admin-declared free pair runs on server credentials without the
   // (for this user disabled) server toggle: the backend admits the exact
   // free pair on the free grant, but only with force_server_credentials.
+  // A pair the user's own key already covers keeps honoring the toggle
+  // (and the user-key catalog) — forcing server there would ignore keys
+  // the user explicitly has.
   const freeServerModel = !!selectedModel?.free && canUseFreeProviders
+    && !selectedModel.credential_sources?.includes('user')
   const effectiveForceServer = (forceServer && canUseServerProviders) || freeServerModel
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)

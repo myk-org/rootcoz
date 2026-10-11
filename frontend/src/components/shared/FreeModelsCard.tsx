@@ -41,6 +41,10 @@ export function FreeModelsCard() {
   // concurrent admin's change is rejected (409) instead of erased.
   const [freeModelsVersion, setFreeModelsVersion] = useState('')
   const [freeModelsError, setFreeModelsError] = useState('')
+  // False until the list GET succeeds. Adding or removing before the list
+  // is known would replace the whole list built from an empty snapshot —
+  // with no version to guard it, one Add could wipe every declared pair.
+  const [listLoaded, setListLoaded] = useState(false)
   const [freeModelsBusy, setFreeModelsBusy] = useState(false)
   const [freeProvider, setFreeProvider] = useState('')
   const [freeModel, setFreeModel] = useState('')
@@ -53,6 +57,7 @@ export function FreeModelsCard() {
         if (!ignore) {
           setFreeModels(res.models ?? [])
           setFreeModelsVersion(res.version ?? '')
+          setListLoaded(true)
         }
       })
       .catch(() => {
@@ -94,6 +99,7 @@ export function FreeModelsCard() {
         // next save is based on reality, and tell the admin to re-apply.
         setFreeModels(detail.models ?? [])
         setFreeModelsVersion(detail.version ?? '')
+        setListLoaded(true)
         resetProviderCatalogCache()
         setFreeModelsError(
           'Free models were changed by someone else — showing their list, please re-apply your change',
@@ -146,7 +152,11 @@ export function FreeModelsCard() {
         {freeModelsError && (
           <p role="alert" className="text-xs text-signal-red">{freeModelsError}</p>
         )}
-        {freeModels.length > 0 ? (
+        {!listLoaded && freeModelsError ? (
+          <p className="text-sm text-text-tertiary">
+            List not loaded — Add and Remove stay disabled until it loads.
+          </p>
+        ) : freeModels.length > 0 ? (
           <ul
             aria-label="Free AI model pairs"
             className="divide-y divide-border-muted border-t border-border-muted"
@@ -162,7 +172,7 @@ export function FreeModelsCard() {
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={freeModelsBusy}
+                  disabled={freeModelsBusy || !listLoaded}
                   onClick={() => handleRemoveFreeModel(pair.provider, pair.model)}
                   aria-label={`Remove ${pair.provider}/${pair.model} from free models`}
                 >
@@ -204,7 +214,7 @@ export function FreeModelsCard() {
           <Button
             size="sm"
             onClick={handleAddFreeModel}
-            disabled={freeModelsBusy || !freeProvider || !freeModel.trim()}
+            disabled={freeModelsBusy || !listLoaded || !freeProvider || !freeModel.trim()}
           >
             Add
           </Button>

@@ -30,6 +30,16 @@ def _admin_headers():
     return {"Authorization": "Bearer free-bootstrap-key"}
 
 
+def _set_free_toggle(monkeypatch, enabled: bool) -> None:
+    """Point get_settings at an object with ENABLE_FREE_MODELS set."""
+    from rootcoz import config
+
+    class _Settings:
+        enable_free_models = enabled
+
+    monkeypatch.setattr(config, "get_settings", lambda: _Settings())
+
+
 def _create_and_login(client, username):
     created = client.post(
         "/api/admin/users/create",
@@ -227,7 +237,7 @@ async def test_deleted_user_has_no_free_access(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "deleted-user.db"))
     get_settings.cache_clear()
     with TestClient(app) as _:
-        client_post = client  # noqa: F841 — keep the fixture name readable
+        pass
     from rootcoz.storage import can_user_use_free_providers
 
     assert await can_user_use_free_providers("ghost-user") is False
@@ -356,6 +366,61 @@ def test_free_models_optimistic_versioning(client, monkeypatch):
         json={"models": [{"provider": "google", "model": "gemini-2.5-pro"}]},
     )
     assert unguarded.status_code == 200
+
+
+@pytest.mark.anyio
+async def test_removed_free_pair_retires_server_chat_session(tmp_path, monkeypatch):
+    """A free-granted user's server session dies with its pair (dac13996)."""
+    from rootcoz.main import _available_chat_session
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "retire.db")
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "retire.db"))
+    get_settings.cache_clear()
+    await storage.init_db()
+    await storage.create_user("freechatter")
+    await storage.set_free_ai_models([("EnMaaS", "glm-5-3")], "admin")
+    _set_free_toggle(monkeypatch, True)
+
+    await storage.add_chat_message(
+        "job-1",
+        "assistant",
+        "started",
+        username="freechatter",
+        ai_provider="EnMaaS",
+        ai_model="glm-5-3",
+        session_id="sess-1",
+    )
+    await storage.save_ai_session_source("sess-1", "freechatter", "EnMaaS", "server")
+
+    # Pair still declared → session usable.
+    session = await _available_chat_session("job-1", "freechatter")
+    assert session == {
+        "ai_provider": "EnMaaS",
+        "ai_model": "glm-5-3",
+        "credential_source": "server",
+    }
+
+    # Admin drops the pair → the session must not survive on the free grant.
+    await storage.set_free_ai_models([], "admin")
+    assert await _available_chat_session("job-1", "freechatter") is None
+
+
+def test_free_models_version_ignores_provider_casing():
+    """A cosmetic provider respelling is not a list change (6d6020cb)."""
+    from rootcoz.storage import free_models_version
+
+    a = [
+        {"provider": "EnMaaS", "model": "glm-5-3"},
+        {"provider": "google", "model": "gemini"},
+    ]
+    b = [
+        {"provider": "google", "model": "gemini"},
+        {"provider": "enmaas", "model": "glm-5-3"},
+    ]
+    assert free_models_version(a) == free_models_version(b)
+    # A real change still moves the fingerprint.
+    c = [{"provider": "enmaas", "model": "glm-5-3"}]
+    assert free_models_version(a) != free_models_version(c)
 
 
 def test_ai_models_provider_lookup_is_case_insensitive(client, monkeypatch):

@@ -81,6 +81,25 @@ describe('FreeModelsCard', () => {
     expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
   })
 
+  it('keeps Add and Remove disabled when the list failed to load', async () => {
+    get.mockRejectedValueOnce(new Error('boom') as never)
+    const user = userEvent.setup()
+    render(<FreeModelsCard />)
+    expect(
+      await screen.findByText(/Failed to load free models/),
+    ).toBeInTheDocument()
+    // The pickers can still load from the catalog, but a blind Add built
+    // from an empty snapshot must not be able to wipe the stored list.
+    const providerTrigger = screen.getByRole('combobox', { name: 'Free model provider' })
+    await user.click(providerTrigger)
+    await user.click(await screen.findByText('Enmaas'))
+    const modelInput = screen.getByPlaceholderText('Select model...')
+    await user.click(modelInput)
+    await user.click(await screen.findByText('glm-5-3-air'))
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled()
+    expect(put).not.toHaveBeenCalled()
+  })
+
   it('adopts the winning list on a 409 conflict', async () => {
     get.mockResolvedValue({ models: [], version: 'stale' })
     put.mockRejectedValueOnce(

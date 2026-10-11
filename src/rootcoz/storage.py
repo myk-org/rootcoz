@@ -5643,7 +5643,7 @@ def free_models_version(rows: list[dict[str, Any]]) -> str:
     """
     digest = hashlib.sha256()
     for row in sorted(rows, key=lambda item: (item["provider"].lower(), item["model"])):
-        digest.update(f"{row['provider']}|{row['model']}".encode())
+        digest.update(f"{row['provider'].lower()}|{row['model']}".encode())
     return digest.hexdigest()
 
 
