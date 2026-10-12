@@ -114,7 +114,7 @@ Provider credentials (typically in `~/.config/rootcoz/helm/values.secrets.yaml`)
 
 ### Sidecar custom providers (agent dir)
 
-pi-sidecar >=4.8.5 can register custom pi providers from a persistent agent dir.
+pi-sidecar >=4.9.0 can register custom pi providers from a persistent agent dir.
 Set any of `sidecar.agentDir.modelsJson` / `authJson` / `settingsJson` (string or
 YAML object) — the chart stores them in a Secret and copies them via an
 initContainer into a writable emptyDir mounted at `/etc/pi-sidecar-agent` (pi
@@ -138,6 +138,7 @@ sidecar:
           baseUrl: https://mygateway.example.com/v1
           api: openai-completions
           apiKey: $MYGATEWAY_API_KEY
+          trustKeyScopedListing: true
           models:
             - id: mygateway/gpt-4o
               name: GPT-4o via MyGateway
