@@ -63,7 +63,7 @@ ai:
     # Cursor auth.json content (secret, mounted at /home/appuser/.cursor-auth/auth.json)
     authJson: ""
 
-# Pi SDK sidecar custom providers/settings (pi-sidecar >=4.8.5) via a persistent
+# Pi SDK sidecar custom providers/settings (pi-sidecar >=4.9.0) via a persistent
 # agent dir. Files are read once at sidecar start; changing them rolls the
 # Deployment (checksum-tracked) so the sidecar restarts with the new content.
 sidecar:

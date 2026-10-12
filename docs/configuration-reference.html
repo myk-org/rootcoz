@@ -1032,8 +1032,100 @@ SECURE_COOKIES=false
 <p>RootCoz does not read the Vertex trio itself — <code>config.py</code> documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting <code>ai.vertex.enabled</code> writes <code>CLAUDE_CODE_USE_VERTEX=1</code>, <code>CLOUD_ML_REGION</code>, and <code>ANTHROPIC_VERTEX_PROJECT_ID</code>, and separately mounts <code>ai.vertex.serviceAccountKey</code> and points <code>GOOGLE_APPLICATION_CREDENTIALS</code> at the mounted <code>application_default_credentials.json</code>. Install fails outright if <code>ai.vertex.enabled</code> is set without <code>ai.vertex.projectId</code> or <code>ai.vertex.serviceAccountKey</code>, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.</p>
 <p>Whether the provider ends up registered and usable, and what credentials it actually requires, is decided inside the Pi-sidecar and the Anthropic Vertex tooling, not here. For the authoritative credential requirements, follow the Anthropic Claude Code on Vertex AI documentation rather than treating the trio as self-sufficient. This matters for <code>AI_PROVIDER=claude</code> in particular, because that alias resolves to the <code>google-vertex-claude</code> provider — so Vertex is the path on which <code>claude</code> is expected to resolve at all.</p>
 <h3 id="sidecar-custom-providers-agent-dir">Sidecar custom providers (agent dir)</h3>
-<p>Pi-sidecar &gt;=4.8.5 reads an <strong>agent dir</strong> at process start: <code>models.json</code> registers custom pi providers (listed by <code>GET /api/ai-models</code>, usable as <code>AI_PROVIDER</code>/<code>AI_MODEL</code>), <code>auth.json</code> supplies provider credentials, and <code>settings.json</code> seeds the sidecar's in-memory settings store. Point the sidecar at a persistent dir with <code>PI_SIDECAR_AGENT_DIR</code> (unset means an ephemeral scratch dir, i.e. no custom providers). A <code>models.json</code> <code>apiKey</code> may reference an environment variable — <code>"$MYGATEWAY_API_KEY"</code> resolves against the sidecar process environment, so the variable must be exported on the same container.</p>
+<p>Pi-sidecar &gt;=4.9.0 reads an <strong>agent dir</strong> at process start: <code>models.json</code> registers custom pi providers (listed by <code>GET /api/ai-models</code>, usable as <code>AI_PROVIDER</code>/<code>AI_MODEL</code>), <code>auth.json</code> supplies provider credentials, and <code>settings.json</code> seeds the sidecar's in-memory settings store. Point the sidecar at a persistent dir with <code>PI_SIDECAR_AGENT_DIR</code> (unset means an ephemeral scratch dir, i.e. no custom providers). A <code>models.json</code> <code>apiKey</code> may reference an environment variable — <code>"$MYGATEWAY_API_KEY"</code> resolves against the sidecar process environment, so the variable must be exported on the same container.</p>
 <p>Two operational rules follow from "read at process start": changing any file requires a sidecar restart (the Helm chart handles this with a checksum-annotated rolling restart; in Docker Compose restart the container), and <code>rootcoz ai-models</code> refresh does not re-read the directory. There is no provider allowlist on the RootCoz side — any exact provider/model pair present in the sidecar catalogue is accepted, so a custom provider is selected the same way as a built-in one.</p>
+<h4 id="key-scoped-model-listing-trustkeyscopedlisting">Key-scoped model listing (<code>trustKeyScopedListing</code>)</h4>
+<p>By default the sidecar refuses to send a user's request-scoped key to any host that is not a provider-owned builtin endpoint or a loopback address, so custom providers return no per-key model list. A provider-level <code>trustKeyScopedListing</code> flag in <code>models.json</code> opts one provider into key-scoped model listing:</p>
+<ul>
+<li>Opt-in, per provider, boolean. Requires pi-sidecar &gt;=4.9.0.</li>
+<li>When <code>true</code>, the sidecar performs key-scoped model listing against that provider's configured <code>baseUrl</code> with a <strong>user's request-scoped key</strong> — the same trust boundary the manifest's server credential (<code>apiKey</code>) already crosses.</li>
+<li>Effect for RootCoz users: a user who stored their own key for that provider gets a <strong>live, per-key model list in the model pickers</strong> (like builtin providers such as <code>openai</code>) instead of hand-typing model IDs.</li>
+<li>Only useful when the gateway implements an OpenAI-compatible <code>/models</code> endpoint on its <code>baseUrl</code>.</li>
+<li>Security: the flag is honored <strong>only</strong> from the admin-controlled <code>models.json</code> manifest — request- or session-level input can never set it. The admin thereby declares exactly which hosts may receive user keys.</li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"providers"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"mygateway"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"baseUrl"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://mygateway.example.com/v1"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"api"</span><span class="p">:</span><span class="w"> </span><span class="s2">"openai-completions"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"apiKey"</span><span class="p">:</span><span class="w"> </span><span class="s2">"$MYGATEWAY_API_KEY"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"trustKeyScopedListing"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"models"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"mygateway/gpt-4o"</span><span class="p">,</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"GPT-4o via MyGateway"</span><span class="w"> </span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>For a flagged provider, the listing response is the union of the live gateway listing and the manifest-configured <code>models[]</code> — admin-declared models appear even when the gateway's <code>/models</code> endpoint does not list them. When the native listing fails, the flag has no effect.</p>
+<h4 id="adding-a-custom-provider">Adding a custom provider</h4>
+<p>An end-to-end walkthrough for registering a custom provider behind an OpenAI-compatible gateway. The <code>models.json</code> below registers the provider, wires its credential to an environment variable, and opts it into key-scoped listing in one snippet:</p>
+<p><strong>1. Write <code>models.json</code> into a persistent agent dir</strong> (e.g. <code>/etc/rootcoz/pi-sidecar-agent/models.json</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"providers"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"mygateway"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"baseUrl"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://mygateway.example.com/v1"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"api"</span><span class="p">:</span><span class="w"> </span><span class="s2">"openai-completions"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"apiKey"</span><span class="p">:</span><span class="w"> </span><span class="s2">"$MYGATEWAY_API_KEY"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"trustKeyScopedListing"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"models"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"mygateway/gpt-4o"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"GPT-4o via MyGateway"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"contextWindow"</span><span class="p">:</span><span class="w"> </span><span class="mi">128000</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"maxTokens"</span><span class="p">:</span><span class="w"> </span><span class="mi">16384</span>
+<span class="w">        </span><span class="p">},</span>
+<span class="w">        </span><span class="p">{</span>
+<span class="w">          </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"mygateway/llama-4"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Llama 4 via MyGateway"</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"contextWindow"</span><span class="p">:</span><span class="w"> </span><span class="mi">128000</span><span class="p">,</span>
+<span class="w">          </span><span class="nt">"maxTokens"</span><span class="p">:</span><span class="w"> </span><span class="mi">8192</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">      </span><span class="p">]</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><code>id</code> must be prefixed with the provider id (<code>mygateway/...</code>). <code>contextWindow</code> and <code>maxTokens</code> are optional and surface as the model's input/output token limits in the pickers.</p>
+<p><strong>2a. Docker Compose wiring.</strong> Mount the agent dir into the container, point the sidecar at it, and export the referenced key in <code>.env</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">services</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">rootcoz</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">./pi-sidecar-agent:/etc/rootcoz/pi-sidecar-agent:ro</span>
+<span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">PI_SIDECAR_AGENT_DIR</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/etc/rootcoz/pi-sidecar-agent</span>
+<span class="w">      </span><span class="nt">MYGATEWAY_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${MYGATEWAY_API_KEY}</span>
+</code></pre></div>
+
+<div class="highlight"><pre><span></span><code># .env
+MYGATEWAY_API_KEY=your-gateway-api-key
+</code></pre></div>
+
+<p>The <code>"$MYGATEWAY_API_KEY"</code> reference in <code>models.json</code> resolves against the sidecar process environment, so the variable must be exported on the same container.</p>
+<p><strong>2b. Helm wiring.</strong> Pass the same files as chart values — no manual volume management:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">sidecar</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">agentDir</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">modelsJson</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">providers</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">mygateway</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">baseUrl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">https://mygateway.example.com/v1</span>
+<span class="w">          </span><span class="nt">api</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai-completions</span>
+<span class="w">          </span><span class="nt">apiKey</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">$MYGATEWAY_API_KEY</span>
+<span class="w">          </span><span class="nt">trustKeyScopedListing</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">          </span><span class="nt">models</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mygateway/gpt-4o</span>
+<span class="w">              </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">GPT-4o via MyGateway</span>
+<span class="w">              </span><span class="nt">contextWindow</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">128000</span>
+<span class="w">              </span><span class="nt">maxTokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16384</span>
+<span class="w">    </span><span class="nt">env</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">MYGATEWAY_API_KEY</span><span class="p">:</span><span class="w"> </span><span class="s">"your-gateway-api-key"</span>
+</code></pre></div>
+
+<p>The chart stores the files in a Secret, copies them into a writable agent dir at <code>/etc/pi-sidecar-agent</code> via an initContainer, and sets <code>PI_SIDECAR_AGENT_DIR</code>. <code>sidecar.agentDir.env</code> supplies the Secret-backed env vars for every <code>"$VAR"</code> reference in <code>models.json</code>.</p>
+<p><strong>3. Restart the sidecar.</strong> The agent dir is read once at process start — restart the container (Compose) or upgrade the release (the chart's checksum annotation rolls the Deployment automatically).</p>
+<p><strong>4. Verify.</strong> Run <code>rootcoz ai-models</code> (or <code>GET /api/ai-models</code>): the provider's models appear in the catalogue, and <code>mygateway</code> is selectable as <code>AI_PROVIDER</code>/<code>AI_MODEL</code> like any built-in provider.</p>
 <blockquote>
 <p><strong>Warning:</strong> <code>ROOTCOZ_ENCRYPTION_KEY</code> is the one variable worth getting right before you have real data. Rotating it invalidates every encrypted stored token <em>and</em> every stored API key hash, so all keys must be re-issued afterwards. Existing sessions use plain SHA-256 hashing and survive. If you do not set it, RootCoz generates a file under <code>$XDG_DATA_HOME/rootcoz/.encryption_key</code> and warns you in the health endpoint.</p>
 </blockquote>

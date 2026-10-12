@@ -221,9 +221,118 @@ Whether the provider ends up registered and usable, and what credentials it actu
 
 ### Sidecar custom providers (agent dir)
 
-Pi-sidecar >=4.8.5 reads an **agent dir** at process start: `models.json` registers custom pi providers (listed by `GET /api/ai-models`, usable as `AI_PROVIDER`/`AI_MODEL`), `auth.json` supplies provider credentials, and `settings.json` seeds the sidecar's in-memory settings store. Point the sidecar at a persistent dir with `PI_SIDECAR_AGENT_DIR` (unset means an ephemeral scratch dir, i.e. no custom providers). A `models.json` `apiKey` may reference an environment variable — `"$MYGATEWAY_API_KEY"` resolves against the sidecar process environment, so the variable must be exported on the same container.
+Pi-sidecar >=4.9.0 reads an **agent dir** at process start: `models.json` registers custom pi providers (listed by `GET /api/ai-models`, usable as `AI_PROVIDER`/`AI_MODEL`), `auth.json` supplies provider credentials, and `settings.json` seeds the sidecar's in-memory settings store. Point the sidecar at a persistent dir with `PI_SIDECAR_AGENT_DIR` (unset means an ephemeral scratch dir, i.e. no custom providers). A `models.json` `apiKey` may reference an environment variable — `"$MYGATEWAY_API_KEY"` resolves against the sidecar process environment, so the variable must be exported on the same container.
 
 Two operational rules follow from "read at process start": changing any file requires a sidecar restart (the Helm chart handles this with a checksum-annotated rolling restart; in Docker Compose restart the container), and `rootcoz ai-models` refresh does not re-read the directory. There is no provider allowlist on the RootCoz side — any exact provider/model pair present in the sidecar catalogue is accepted, so a custom provider is selected the same way as a built-in one.
+
+#### Key-scoped model listing (`trustKeyScopedListing`)
+
+By default the sidecar refuses to send a user's request-scoped key to any host that is not a provider-owned builtin endpoint or a loopback address, so custom providers return no per-key model list. A provider-level `trustKeyScopedListing` flag in `models.json` opts one provider into key-scoped model listing:
+
+- Opt-in, per provider, boolean. Requires pi-sidecar >=4.9.0.
+- When `true`, the sidecar performs key-scoped model listing against that provider's configured `baseUrl` with a **user's request-scoped key** — the same trust boundary the manifest's server credential (`apiKey`) already crosses.
+- Effect for RootCoz users: a user who stored their own key for that provider gets a **live, per-key model list in the model pickers** (like builtin providers such as `openai`) instead of hand-typing model IDs.
+- Only useful when the gateway implements an OpenAI-compatible `/models` endpoint on its `baseUrl`.
+- Security: the flag is honored **only** from the admin-controlled `models.json` manifest — request- or session-level input can never set it. The admin thereby declares exactly which hosts may receive user keys.
+
+```json
+{
+  "providers": {
+    "mygateway": {
+      "baseUrl": "https://mygateway.example.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$MYGATEWAY_API_KEY",
+      "trustKeyScopedListing": true,
+      "models": [
+        { "id": "mygateway/gpt-4o", "name": "GPT-4o via MyGateway" }
+      ]
+    }
+  }
+}
+```
+
+For a flagged provider, the listing response is the union of the live gateway listing and the manifest-configured `models[]` — admin-declared models appear even when the gateway's `/models` endpoint does not list them. When the native listing fails, the flag has no effect.
+
+#### Adding a custom provider
+
+An end-to-end walkthrough for registering a custom provider behind an OpenAI-compatible gateway. The `models.json` below registers the provider, wires its credential to an environment variable, and opts it into key-scoped listing in one snippet:
+
+**1. Write `models.json` into a persistent agent dir** (e.g. `/etc/rootcoz/pi-sidecar-agent/models.json`):
+
+```json
+{
+  "providers": {
+    "mygateway": {
+      "baseUrl": "https://mygateway.example.com/v1",
+      "api": "openai-completions",
+      "apiKey": "$MYGATEWAY_API_KEY",
+      "trustKeyScopedListing": true,
+      "models": [
+        {
+          "id": "mygateway/gpt-4o",
+          "name": "GPT-4o via MyGateway",
+          "contextWindow": 128000,
+          "maxTokens": 16384
+        },
+        {
+          "id": "mygateway/llama-4",
+          "name": "Llama 4 via MyGateway",
+          "contextWindow": 128000,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}
+```
+
+`id` must be prefixed with the provider id (`mygateway/...`). `contextWindow` and `maxTokens` are optional and surface as the model's input/output token limits in the pickers.
+
+**2a. Docker Compose wiring.** Mount the agent dir into the container, point the sidecar at it, and export the referenced key in `.env`:
+
+```yaml
+services:
+  rootcoz:
+    volumes:
+      - ./pi-sidecar-agent:/etc/rootcoz/pi-sidecar-agent:ro
+    environment:
+      PI_SIDECAR_AGENT_DIR: /etc/rootcoz/pi-sidecar-agent
+      MYGATEWAY_API_KEY: ${MYGATEWAY_API_KEY}
+```
+
+```dotenv
+# .env
+MYGATEWAY_API_KEY=your-gateway-api-key
+```
+
+The `"$MYGATEWAY_API_KEY"` reference in `models.json` resolves against the sidecar process environment, so the variable must be exported on the same container.
+
+**2b. Helm wiring.** Pass the same files as chart values — no manual volume management:
+
+```yaml
+sidecar:
+  agentDir:
+    modelsJson:
+      providers:
+        mygateway:
+          baseUrl: https://mygateway.example.com/v1
+          api: openai-completions
+          apiKey: $MYGATEWAY_API_KEY
+          trustKeyScopedListing: true
+          models:
+            - id: mygateway/gpt-4o
+              name: GPT-4o via MyGateway
+              contextWindow: 128000
+              maxTokens: 16384
+    env:
+      MYGATEWAY_API_KEY: "your-gateway-api-key"
+```
+
+The chart stores the files in a Secret, copies them into a writable agent dir at `/etc/pi-sidecar-agent` via an initContainer, and sets `PI_SIDECAR_AGENT_DIR`. `sidecar.agentDir.env` supplies the Secret-backed env vars for every `"$VAR"` reference in `models.json`.
+
+**3. Restart the sidecar.** The agent dir is read once at process start — restart the container (Compose) or upgrade the release (the chart's checksum annotation rolls the Deployment automatically).
+
+**4. Verify.** Run `rootcoz ai-models` (or `GET /api/ai-models`): the provider's models appear in the catalogue, and `mygateway` is selectable as `AI_PROVIDER`/`AI_MODEL` like any built-in provider.
 
 > **Warning:** `ROOTCOZ_ENCRYPTION_KEY` is the one variable worth getting right before you have real data. Rotating it invalidates every encrypted stored token *and* every stored API key hash, so all keys must be re-issued afterwards. Existing sessions use plain SHA-256 hashing and survive. If you do not set it, RootCoz generates a file under `$XDG_DATA_HOME/rootcoz/.encryption_key` and warns you in the health endpoint.
 
