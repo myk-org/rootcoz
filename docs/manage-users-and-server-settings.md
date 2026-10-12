@@ -122,6 +122,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Jira` | `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
+   | `Greenwave` | `greenwave_url`, `greenwave_api_token`, `greenwave_waiver_url`, `greenwave_waiver_token`, `greenwave_push_waivers`, `greenwave_waivable_classifications`, `greenwave_allow_ai_waivers`, `greenwave_outcome_map`, `greenwave_subject_type`, `greenwave_product_version`, `greenwave_verify_ssl`, `enable_greenwave` |
    | `Auth & Security` | `admin_key`, `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
    | `Prow` | `prow_url`, `gcs_bucket` |
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
@@ -137,13 +138,15 @@ That creates an active operator who can submit analyses, and one server setting 
    | Warning triangle next to the source | An environment variable is also set. The tooltip shows whether it matches the database override — if it does, the override is redundant. |
    | ⚠️ badge | The setting requires a server restart to take effect. |
 
+   Every `Greenwave` setting is editable here and applies immediately — none are server-only or restart-required. The per-push `subject_identifier` and `waiver_comment` are not settings at all: they are request parameters passed on each push via the CLI or API.
+
 10. **Understand masked and restart-required settings.**
 
    Some settings hold credentials and are never sent to the browser in cleartext. They display as `••••••••` until you use the reveal button, which asks the server for that one value on demand. Change history entries for those settings are masked too, and saving stores them encrypted.
 
    | Group | Settings |
    | --- | --- |
-   | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
+   | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `greenwave_api_token`, `greenwave_waiver_token`, `admin_key`, `vapid_private_key` |
    | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
 
    Most of those are also server-only, so the restart is not the operative constraint — the save is rejected outright. `vapid_private_key` is the only one here that this page can actually store; the rest must be set in the environment.

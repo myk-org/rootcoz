@@ -532,7 +532,32 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`).
 
-8. **Auth and Security category.**
+8. **Greenwave category.**
+
+   | Variable | Default | Type | Secret | Restart | After login |
+   | --- | --- | --- | --- | --- | --- |
+   | `ENABLE_GREENWAVE` | unset | boolean | no | no | yes |
+   | `GREENWAVE_URL` | unset | string | no | no | yes |
+   | `GREENWAVE_API_TOKEN` | unset | string | yes | no | yes |
+   | `GREENWAVE_WAIVER_URL` | unset | string | no | no | yes |
+   | `GREENWAVE_WAIVER_TOKEN` | unset | string | yes | no | yes |
+   | `GREENWAVE_PUSH_WAIVERS` | `false` | boolean | no | no | yes |
+   | `GREENWAVE_WAIVABLE_CLASSIFICATIONS` | `INFRASTRUCTURE` | string | no | no | yes |
+   | `GREENWAVE_ALLOW_AI_WAIVERS` | `false` | boolean | no | no | yes |
+   | `GREENWAVE_OUTCOME_MAP` | `PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO` | string | no | no | yes |
+   | `GREENWAVE_SUBJECT_TYPE` | `koji_build` | string | no | no | yes |
+   | `GREENWAVE_PRODUCT_VERSION` | unset | string | no | no | yes |
+   | `GREENWAVE_VERIFY_SSL` | `true` | boolean | no | no | yes |
+
+   Every Greenwave setting is editable at runtime through Server Settings — none are server-only or restart-required. With `ENABLE_GREENWAVE` unset, the exporter auto-enables when `GREENWAVE_URL` and `GREENWAVE_API_TOKEN` are both set.
+
+   Both URLs are validated at startup: they must be HTTPS with a hostname, and must not embed userinfo, a query string, or a fragment. A malformed or credential-bearing URL is a configuration error, not a silent skip.
+
+   `GREENWAVE_OUTCOME_MAP` maps RootCoz classifications to ResultsDB outcomes, one `CLASS:OUTCOME` pair per comma-separated entry. Valid outcomes are `PASSED`, `FAILED`, `INFO`, and `NEEDS_INSPECTION`; anything else fails startup. Failures whose classification is not in the map are skipped (not exported). `GREENWAVE_WAIVABLE_CLASSIFICATIONS` is a comma-separated list, matched case-insensitively; unrecognized names log a warning but do not fail.
+
+   Waiver submission needs more than the server settings: `GREENWAVE_PUSH_WAIVERS=true` also requires `GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, and `GREENWAVE_PRODUCT_VERSION`, plus a per-push `subject_identifier` (the artifact/build being gated) passed as a query parameter on the push request. Waivers are only submitted for failures reviewed by a human; failures reviewed only by `rootcoz-ai` are skipped unless `GREENWAVE_ALLOW_AI_WAIVERS=true`.
+
+9. **Auth and Security category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -550,7 +575,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `TRUST_PROXY_HEADERS=true` makes `X-Forwarded-User` a valid identity for every route, which means the proxy becomes the authentication boundary. Only enable it behind a proxy you control.
 
-9. **Prow category.**
+10. **Prow category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -559,7 +584,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Both are validated on load rather than transformed. `PROW_URL` must start with `https://`, must contain a hostname, and must not embed credentials (`prow_validation.normalize_prow_url`) — surrounding whitespace is trimmed, but a trailing slash is left in place, so `https://prow.example.com/` and `https://prow.example.com` are both accepted and stay as written. `GCS_BUCKET` must match `[a-z0-9][a-z0-9._-]*` after trimming (`normalize_gcs_bucket`), so a `gs://` prefix is **rejected** rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.
 
-10. **Server category.**
+11. **Server category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -581,7 +606,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `ENABLE_FREE_MODELS` lets every user run the admin-declared free provider+model pairs (Users page → *Free AI models*) on server credentials; the free-providers grant is not needed for admins or users who already have `can_use_server_providers`.
 
-11. **Web Push category.**
+12. **Web Push category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -778,9 +803,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `GREENWAVE_API_TOKEN`, `GREENWAVE_WAIVER_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only five of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only seven of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `REPORTPORTAL_API_TOKEN`, `GREENWAVE_API_TOKEN`, and `GREENWAVE_WAIVER_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.
@@ -1472,9 +1497,26 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    At least one of the three must be enabled or the push is refused.
 
+8. Push results to Greenwave/ResultsDB.
+
+   Greenwave pushes classified failures as ResultsDB results and, optionally, WaiverDB waivers. It is configured entirely server-side (Server Settings → `Greenwave`): the exporter is on when `GREENWAVE_URL` and `GREENWAVE_API_TOKEN` are set. Failures whose classification does not appear in the outcome map are skipped, so the pushed count can legitimately be smaller than the failure count.
+
+   Waiver submission is a separate layer on top: it needs `GREENWAVE_PUSH_WAIVERS=true` plus `GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, and `GREENWAVE_PRODUCT_VERSION`, and each push must pass an explicit `--subject-identifier` — the artifact or build Greenwave gates on. Without one, the push is refused with HTTP 422 rather than writing a waiver against a guessed subject. Waivers are only submitted for failures reviewed by a human; failures reviewed only by `rootcoz-ai` are skipped unless `GREENWAVE_ALLOW_AI_WAIVERS=true`.
+
+   Push from the CLI (per-server defaults for `--subject-identifier` and `--waiver-comment` can live in your CLI config file):
+
+   ```bash
+   rootcoz exporters
+   rootcoz push JOB_ID --plugin greenwave
+   rootcoz push JOB_ID --plugin greenwave \
+     --subject-identifier "pkg-1.0-1.el10" --waiver-comment "known flake"
+   ```
+
+   The auto-push path (`AUTO_PUSH_EXPORTERS=greenwave`) runs with no per-push input, so it submits results only and skips waivers when no subject identifier is available.
+
 ## Advanced Usage
 
-Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
+Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters, plus the Greenwave-specific query parameters `subject_identifier` and `waiver_comment`, and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
 
 Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
 
@@ -1515,6 +1557,15 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 
 - `Exporters` shows Report Portal as disabled.
   Run `rootcoz exporters` and check the reason: the integration is off, all three `RP_PUSH_*` toggles are off, or `PUBLIC_BASE_URL` is missing while `RP_PUSH_ROOTCOZ_URL` is on.
+
+- `Exporters` shows Greenwave as disabled.
+  The ResultsDB side is unconfigured (`GREENWAVE_URL` + `GREENWAVE_API_TOKEN`), or `GREENWAVE_PUSH_WAIVERS` is on without all three waiver prerequisites (`GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, `GREENWAVE_PRODUCT_VERSION`). The readiness check mirrors what the exporter itself requires, so a plugin advertised as enabled always constructs.
+
+- A Greenwave push returns `422` (`subject_identifier` / waiver prerequisites).
+  Waivers need an explicit subject: pass `--subject-identifier` (or set it in your CLI server profile), and check the waiver settings above. The push is refused before anything is written.
+
+- A Greenwave push returns `502`.
+  The server could not reach ResultsDB or WaiverDB — transport-level failure, not a configuration problem. Check the URLs, `GREENWAVE_VERIFY_SSL`, and network reachability from the server.
 
 - The push returns `Operator access required.`
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.
@@ -2066,6 +2117,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Jira` | `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
+   | `Greenwave` | `greenwave_url`, `greenwave_api_token`, `greenwave_waiver_url`, `greenwave_waiver_token`, `greenwave_push_waivers`, `greenwave_waivable_classifications`, `greenwave_allow_ai_waivers`, `greenwave_outcome_map`, `greenwave_subject_type`, `greenwave_product_version`, `greenwave_verify_ssl`, `enable_greenwave` |
    | `Auth & Security` | `admin_key`, `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
    | `Prow` | `prow_url`, `gcs_bucket` |
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
@@ -2081,13 +2133,15 @@ That creates an active operator who can submit analyses, and one server setting 
    | Warning triangle next to the source | An environment variable is also set. The tooltip shows whether it matches the database override — if it does, the override is redundant. |
    | ⚠️ badge | The setting requires a server restart to take effect. |
 
+   Every `Greenwave` setting is editable here and applies immediately — none are server-only or restart-required. The per-push `subject_identifier` and `waiver_comment` are not settings at all: they are request parameters passed on each push via the CLI or API.
+
 10. **Understand masked and restart-required settings.**
 
    Some settings hold credentials and are never sent to the browser in cleartext. They display as `••••••••` until you use the reveal button, which asks the server for that one value on demand. Change history entries for those settings are masked too, and saving stores them encrypted.
 
    | Group | Settings |
    | --- | --- |
-   | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
+   | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `greenwave_api_token`, `greenwave_waiver_token`, `admin_key`, `vapid_private_key` |
    | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
 
    Most of those are also server-only, so the restart is not the operative constraint — the save is rejected outright. `vapid_private_key` is the only one here that this page can actually store; the rest must be set in the environment.
@@ -2589,7 +2643,7 @@ Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin
 | `rootcoz config completion [bash\|zsh]` | Print the rc-file snippet that wires up completion. |
 | `rootcoz config defaults` | Server-side analysis defaults (non-sensitive). Requires a server. |
 
-Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. See [Configuration Reference](configuration-reference.html) for the full list.
+Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, `gcs_bucket`, `greenwave_subject_identifier`, and `greenwave_waiver_comment`. See [Configuration Reference](configuration-reference.html) for the full list.
 
 5. **Submit analyses.**
 
@@ -2717,7 +2771,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz exporters` | — | Available exporter plugins and their enabled state. |
-| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number` | Push results through a named exporter plugin. |
+| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number`, `--subject-identifier`, `--waiver-comment` | Push results through a named exporter plugin (`reportportal`, `greenwave`). The Greenwave-only options set the waiver subject and comment; they fall back to the CLI server profile. |
 | `rootcoz push-reportportal JOB_ID` | `--child-job-name`, `--child-build-number` | Report Portal shortcut; `push-rp` is a hidden alias. |
 
 13. **Chat with the analysis.**

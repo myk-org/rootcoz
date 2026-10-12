@@ -98,8 +98,9 @@ src/rootcoz/
     prow_validation.py      # Re-export shim of rootcoz.prow_validation for plugin imports
     registry.py             # CI source plugin registry: analysis_type → CISource class mapping
   exporters/                # Exporter plugins (push results to external systems)
-    base.py                 # Exporter ABC, ExportContext, ExporterResult
+    base.py                 # Exporter ABC, ExportContext, ExporterResult, ExporterPrerequisiteError
     reportportal.py         # Report Portal exporter: ReportPortalClient
+    greenwave_exporter.py   # Greenwave/ResultsDB exporter: GreenwaveExporter
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
   url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
@@ -313,6 +314,10 @@ Exporters push analysis results to external systems. Each exporter implements th
 
 When `ENABLE_REPORTPORTAL=true`, users can push test classifications back to Report Portal via the `push-reportportal` endpoint, the generic `push --plugin reportportal` CLI command, or the generic push endpoint.
 
+### Greenwave / ResultsDB Integration (Optional)
+
+When `GREENWAVE_URL` + `GREENWAVE_API_TOKEN` are configured, users can push analysis results to ResultsDB (`push --plugin greenwave`, endpoint `POST /results/{job_id}/push/greenwave`). Each push creates a ResultsDB group then one result per failure (testcase `rootcoz.{job_name}.{test_name}`, outcome from `GREENWAVE_OUTCOME_MAP`; unclassified/unmatched failures are skipped). Optional WaiverDB submission (behind `GREENWAVE_PUSH_WAIVERS=true` + `GREENWAVE_WAIVER_URL` + `GREENWAVE_WAIVER_TOKEN` OIDC bearer + `GREENWAVE_PRODUCT_VERSION`) files waivers for `GREENWAVE_WAIVABLE_CLASSIFICATIONS` failures; waivers require an explicit `subject_identifier` (no job_name fallback — refuses malformed gating writes; the auto-push path instead skips waivers and pushes results only) and by default skip failures reviewed only by `rootcoz-ai` (`GREENWAVE_ALLOW_AI_WAIVERS=false`). Missing waiver prerequisites return HTTP 422 (`ExporterPrerequisiteError`). Per-server push defaults (`greenwave_subject_identifier`, `greenwave_waiver_comment`) can be set in the CLI config file.
+
 ### Auto-Review
 
 After any completed analysis, each failure is checked against previous analyses of the same `job_name` for the same `test_name`. If the signatures match **and the previous failure was reviewed by a human** (not auto-reviewed by `rootcoz-ai`), the failure is auto-reviewed (marked reviewed by `rootcoz-ai`). This human-review gate prevents auto-review chains from cascading indefinitely without human validation. The auto-review comment includes a clickable link to the previous job when `PUBLIC_BASE_URL` is set.
@@ -414,6 +419,7 @@ Exceptions (server-level only, no payload equivalent):
 - `RP_PUSH_CLASSIFICATIONS` — server-only toggle for including classification (defect type mapping) in Report Portal pushes (default: True)
 - `RP_PUSH_ROOTCOZ_URL` — server-only toggle for including rootcoz analysis URL comment in Report Portal pushes (default: True)
 - `RP_PUSH_TRACKER_LINKS` — server-only toggle for including Jira/GitHub issue links as external system issues in Report Portal pushes (default: True)
+- `GREENWAVE_*` settings — Greenwave/ResultsDB exporter configuration (URLs, tokens, outcome map, waiver toggles; `GREENWAVE_API_TOKEN`/`GREENWAVE_WAIVER_TOKEN` sensitive). Editable at runtime via Server Settings (no restart required). Result pushes are per-request via `subject_identifier`/`waiver_comment` query params; no other request-tunable fields
 - `ENABLE_AUTO_REVIEW` — server capability toggle for auto-review of matching failures; when disabled, failures are never automatically marked as reviewed
 - `AUTO_PUSH_EXPORTERS` — server-only comma-separated list of exporter plugins to auto-push to when all failures are reviewed (e.g. `reportportal`); empty disables auto-push; requires `ENABLE_AUTO_REVIEW` to also be enabled
 - `ROOTCOZ_ENCRYPTION_KEY` — server-only secret for at-rest encryption AND HMAC secret for all API key hashes (admin and user); never expose via request payloads, CLI flags, or shared config files. **Rotating this key invalidates both encrypted data (tokens) and all stored API key hashes (admin and user)** — operators must re-issue all API keys after rotation. Stored sessions use plain SHA-256 hashing (no HMAC) and are NOT affected by key rotation.
@@ -445,7 +451,7 @@ Sensitive data (passwords, API tokens, credentials) must be:
 2. **Stripped from responses** — use `strip_sensitive_from_response()` before returning to API consumers
 3. **Never logged** — do not log passwords, tokens, or credentials at any log level
 
-Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `vapid_private_key`
+Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `greenwave_api_token`, `greenwave_waiver_token`, `vapid_private_key`
 
 Encryption uses Fernet (AES-128-CBC + HMAC-SHA256). Set `ROOTCOZ_ENCRYPTION_KEY` env var for production; falls back to an auto-generated file-based key under `$XDG_DATA_HOME/rootcoz/.encryption_key` (default: `~/.local/share/rootcoz/.encryption_key`) for development.
 

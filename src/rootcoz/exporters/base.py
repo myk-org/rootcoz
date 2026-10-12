@@ -31,6 +31,14 @@ class ExportContext:
         history_classifications: Mapping of test name to history classification.
         tracked_in_links: Mapping of test name to tracked-in link dicts.
         reviewed_by: Mapping of test name to reviewer username.
+        subject_identifier: Optional artifact identifier (e.g. build NVR)
+            used by gating exporters like Greenwave.  Exporters decide their
+            own fallback (e.g. ``job_name``) when unset.
+        waiver_comment: Optional comment recorded with submitted waivers.
+        skip_waivers: When ``True``, gating exporters skip waiver
+            submissions (pushing results only) instead of refusing the
+            push.  Used by the auto-push path, where no explicit subject
+            identifier is available.
     """
 
     job_id: str
@@ -45,6 +53,9 @@ class ExportContext:
     history_classifications: dict[str, str] = field(default_factory=dict)
     tracked_in_links: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     reviewed_by: dict[str, str] = field(default_factory=dict)
+    subject_identifier: str | None = None
+    waiver_comment: str | None = None
+    skip_waivers: bool = False
 
 
 @dataclass
@@ -60,6 +71,16 @@ class ExporterResult:
     success: bool
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+
+
+class ExporterPrerequisiteError(ValueError):
+    """A prerequisite for a gating write is missing.
+
+    Raised by exporters before performing writes to external gating
+    systems (e.g. Greenwave waivers) when a required identifier was not
+    supplied.  The push endpoint maps this to HTTP 422 so callers can
+    distinguish "missing input" from "bad input" (400).
+    """
 
 
 class Exporter(ABC):

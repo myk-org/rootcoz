@@ -67,7 +67,7 @@ Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin
 | `rootcoz config completion [bash\|zsh]` | Print the rc-file snippet that wires up completion. |
 | `rootcoz config defaults` | Server-side analysis defaults (non-sensitive). Requires a server. |
 
-Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. See [Configuration Reference](configuration-reference.html) for the full list.
+Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, `gcs_bucket`, `greenwave_subject_identifier`, and `greenwave_waiver_comment`. See [Configuration Reference](configuration-reference.html) for the full list.
 
 5. **Submit analyses.**
 
@@ -195,7 +195,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz exporters` | — | Available exporter plugins and their enabled state. |
-| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number` | Push results through a named exporter plugin. |
+| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number`, `--subject-identifier`, `--waiver-comment` | Push results through a named exporter plugin (`reportportal`, `greenwave`). The Greenwave-only options set the waiver subject and comment; they fall back to the CLI server profile. |
 | `rootcoz push-reportportal JOB_ID` | `--child-job-name`, `--child-build-number` | Report Portal shortcut; `push-rp` is a hidden alias. |
 
 13. **Chat with the analysis.**

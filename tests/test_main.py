@@ -8042,6 +8042,56 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 400
         assert "https://" in response.json()["detail"]
 
+    def test_put_settings_invalid_greenwave_url(self, test_client) -> None:
+        """PUT rejects non-HTTPS greenwave_url values."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_url": "http://resultsdb.example.com"}},
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_URL" in response.json()["detail"]
+
+    def test_put_settings_greenwave_url_with_credentials_rejected(
+        self, test_client
+    ) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_url": "https://user:pass@resultsdb.example.com",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_URL" in response.json()["detail"]
+
+    def test_put_settings_invalid_greenwave_waiver_url(self, test_client) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_waiver_url": "not-a-url"}},
+        )
+        assert response.status_code == 400
+        assert "GREENWAVE_WAIVER_URL" in response.json()["detail"]
+
+    def test_put_settings_invalid_greenwave_outcome_map(self, test_client) -> None:
+        """PUT rejects outcome maps with invalid ResultsDB outcomes."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"greenwave_outcome_map": "PRODUCT BUG:BOGUS"}},
+        )
+        assert response.status_code == 400
+        assert "outcome" in response.json()["detail"].lower()
+
+    def test_put_settings_valid_greenwave_url_accepted(self, test_client) -> None:
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"greenwave_url": "https://resultsdb.example.com/api/v2.0"}
+            },
+        )
+        assert response.status_code == 200
+        assert "greenwave_url" in response.json()["updated"]
+
     def test_put_settings_prow_url_with_credentials_rejected(self, test_client) -> None:
         response = test_client.put(
             "/api/admin/settings",
@@ -8497,9 +8547,9 @@ class TestSanitizeControlChars:
         ],
     )
     def test_sanitize_control_chars(self, input_val: str, expected: str) -> None:
-        from rootcoz.main import _sanitize_control_chars
+        from rootcoz.main import strip_control_chars
 
-        assert _sanitize_control_chars(input_val) == expected
+        assert strip_control_chars(input_val) == expected
 
 
 class TestRefreshAiModelsEndpoint:

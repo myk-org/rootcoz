@@ -3869,6 +3869,8 @@ class TestPushCommand:
             "reportportal",
             child_job_name=None,
             child_build_number=None,
+            subject_identifier=None,
+            waiver_comment=None,
         )
 
     def test_push_json(self, mock_client):
@@ -3918,6 +3920,108 @@ class TestPushCommand:
             "reportportal",
             child_job_name="my-child",
             child_build_number=42,
+            subject_identifier=None,
+            waiver_comment=None,
+        )
+
+    def test_push_greenwave_flags(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "skipped": 0,
+            "waived": 1,
+            "errors": [],
+            "message": "Pushed 1 result(s) to ResultsDB, 1 waiver(s)",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "push",
+                "job-123",
+                "--plugin",
+                "greenwave",
+                "--subject-identifier",
+                "pkg-1.0-1.el10",
+                "--waiver-comment",
+                "known flake",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Pushed 1 result(s) to ResultsDB" in result.output
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier="pkg-1.0-1.el10",
+            waiver_comment="known flake",
+        )
+
+    def test_push_greenwave_config_fallback(self, mock_client):
+        """ServerConfig greenwave defaults apply when CLI flags are absent."""
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 result(s) to ResultsDB",
+        }
+        with patch(
+            "rootcoz.cli.main.get_server_config",
+            return_value=ServerConfig(
+                url=_TEST_SERVER,
+                greenwave_subject_identifier="cfg-nvr-2.0",
+                greenwave_waiver_comment="cfg comment",
+            ),
+        ):
+            # Use a server NAME (not URL) so _resolve_server consults the config
+            result = runner.invoke(
+                app, ["--server", "mygw", "push", "job-123", "-p", "greenwave"]
+            )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier="cfg-nvr-2.0",
+            waiver_comment="cfg comment",
+        )
+
+    def test_push_greenwave_flags_override_config(self, mock_client):
+        """CLI flags win over ServerConfig greenwave defaults."""
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 result(s) to ResultsDB",
+        }
+        with patch(
+            "rootcoz.cli.main.get_server_config",
+            return_value=ServerConfig(
+                url=_TEST_SERVER,
+                greenwave_subject_identifier="cfg-nvr-2.0",
+                greenwave_waiver_comment="cfg comment",
+            ),
+        ):
+            # Use a server NAME (not URL) so _resolve_server consults the config
+            result = runner.invoke(
+                app,
+                [
+                    "--server",
+                    "mygw",
+                    "push",
+                    "job-123",
+                    "-p",
+                    "greenwave",
+                    "--subject-identifier",
+                    "flag-nvr-3.0",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier="flag-nvr-3.0",
+            waiver_comment="cfg comment",
         )
 
 

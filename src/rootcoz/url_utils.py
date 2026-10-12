@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse, urlunparse
+
+# URL userinfo ("scheme://user:pass@host") embedded anywhere in free text —  # pragma: allowlist secret
+# e.g. exception messages that quote a request URL.
+_EMBEDDED_USERINFO_RE = re.compile(
+    r"([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/@\s:]+(?::[^/@\s]*)?@)"
+)
+
+
+def redact_url_userinfo(text: str) -> str:
+    """Remove userinfo from URLs embedded anywhere in free text.
+
+    Unlike :func:`strip_url_userinfo`, which requires the whole string to be
+    a URL, this scans for embedded userinfo in scheme URLs (``user:pass@host``)
+    inside arbitrary text (exception messages, log lines) and strips the
+    ``user:pass@`` portion of each.
+    """
+    if not text:
+        return text
+    return _EMBEDDED_USERINFO_RE.sub(r"\1", text)
 
 
 def strip_url_userinfo(url: str) -> str:

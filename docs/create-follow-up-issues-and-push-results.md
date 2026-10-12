@@ -95,9 +95,26 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    At least one of the three must be enabled or the push is refused.
 
+8. Push results to Greenwave/ResultsDB.
+
+   Greenwave pushes classified failures as ResultsDB results and, optionally, WaiverDB waivers. It is configured entirely server-side (Server Settings → `Greenwave`): the exporter is on when `GREENWAVE_URL` and `GREENWAVE_API_TOKEN` are set. Failures whose classification does not appear in the outcome map are skipped, so the pushed count can legitimately be smaller than the failure count.
+
+   Waiver submission is a separate layer on top: it needs `GREENWAVE_PUSH_WAIVERS=true` plus `GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, and `GREENWAVE_PRODUCT_VERSION`, and each push must pass an explicit `--subject-identifier` — the artifact or build Greenwave gates on. Without one, the push is refused with HTTP 422 rather than writing a waiver against a guessed subject. Waivers are only submitted for failures reviewed by a human; failures reviewed only by `rootcoz-ai` are skipped unless `GREENWAVE_ALLOW_AI_WAIVERS=true`.
+
+   Push from the CLI (per-server defaults for `--subject-identifier` and `--waiver-comment` can live in your CLI config file):
+
+   ```bash
+   rootcoz exporters
+   rootcoz push JOB_ID --plugin greenwave
+   rootcoz push JOB_ID --plugin greenwave \
+     --subject-identifier "pkg-1.0-1.el10" --waiver-comment "known flake"
+   ```
+
+   The auto-push path (`AUTO_PUSH_EXPORTERS=greenwave`) runs with no per-push input, so it submits results only and skips waivers when no subject identifier is available.
+
 ## Advanced Usage
 
-Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
+Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters, plus the Greenwave-specific query parameters `subject_identifier` and `waiver_comment`, and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
 
 Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
 
@@ -138,6 +155,15 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 
 - `Exporters` shows Report Portal as disabled.  
   Run `rootcoz exporters` and check the reason: the integration is off, all three `RP_PUSH_*` toggles are off, or `PUBLIC_BASE_URL` is missing while `RP_PUSH_ROOTCOZ_URL` is on.
+
+- `Exporters` shows Greenwave as disabled.  
+  The ResultsDB side is unconfigured (`GREENWAVE_URL` + `GREENWAVE_API_TOKEN`), or `GREENWAVE_PUSH_WAIVERS` is on without all three waiver prerequisites (`GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, `GREENWAVE_PRODUCT_VERSION`). The readiness check mirrors what the exporter itself requires, so a plugin advertised as enabled always constructs.
+
+- A Greenwave push returns `422` (`subject_identifier` / waiver prerequisites).  
+  Waivers need an explicit subject: pass `--subject-identifier` (or set it in your CLI server profile), and check the waiver settings above. The push is refused before anything is written.
+
+- A Greenwave push returns `502`.  
+  The server could not reach ResultsDB or WaiverDB — transport-level failure, not a configuration problem. Check the URLs, `GREENWAVE_VERIFY_SSL`, and network reachability from the server.
 
 - The push returns `Operator access required.`  
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.

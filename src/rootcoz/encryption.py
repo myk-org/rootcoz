@@ -39,6 +39,8 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "github_token",
         "tests_repo_token",
         "reportportal_api_token",
+        "greenwave_api_token",
+        "greenwave_waiver_token",
     }
 )
 

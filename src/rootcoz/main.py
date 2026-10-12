@@ -125,7 +125,12 @@ from rootcoz.engine.core import (
     set_progress_callback,
 )
 from rootcoz.error_messages import make_user_friendly_error
-from rootcoz.exporters.base import ExportContext, Exporter
+from rootcoz.exporters.base import (
+    ExportContext,
+    Exporter,
+    ExporterPrerequisiteError,
+)
+from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
     ReportPortalClient,
@@ -259,6 +264,8 @@ from rootcoz.token_tracking import (
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
+    normalize_identifier,
+    strip_control_chars,
 )
 from rootcoz.vapid import get_vapid_config
 from rootcoz.xml_enrichment import (
@@ -281,6 +288,8 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "github_token",
         "tests_repo_token",
         "reportportal_api_token",
+        "greenwave_api_token",
+        "greenwave_waiver_token",
         "admin_key",
         "vapid_private_key",
     }
@@ -373,6 +382,20 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
+    ],
+    "Greenwave": [
+        "greenwave_url",
+        "greenwave_api_token",
+        "greenwave_waiver_url",
+        "greenwave_waiver_token",
+        "greenwave_push_waivers",
+        "greenwave_waivable_classifications",
+        "greenwave_allow_ai_waivers",
+        "greenwave_outcome_map",
+        "greenwave_subject_type",
+        "greenwave_product_version",
+        "greenwave_verify_ssl",
+        "enable_greenwave",
     ],
     "Auth & Security": [
         "admin_key",
@@ -861,14 +884,6 @@ def _build_internal_server_url() -> str:
     url = f"http://localhost:{APP_PORT}"
     logger.debug(f"Built internal server_url={url} for AI tool access")
     return url
-
-
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def _sanitize_control_chars(value: str) -> str:
-    """Strip control characters from a string."""
-    return _CONTROL_CHAR_RE.sub("", value)
 
 
 def _is_child_review_key(key: str) -> bool:
@@ -2699,7 +2714,7 @@ async def _auto_review_matching_failures(
 
         # Check if ALL failures are now reviewed → auto-push to configured exporters
         _raw_names = [
-            _sanitize_control_chars(n.strip())
+            strip_control_chars(n.strip())
             for n in (settings.auto_push_exporters or "").split(",")
         ]
         auto_push_names = list(
@@ -2714,6 +2729,7 @@ async def _auto_review_matching_failures(
                     result_data=result_data,
                     settings=settings,
                     pushed_by=AI_SYSTEM_USERNAME,
+                    skip_waivers=True,
                     fetch_history=_exporter_needs_history_classifications(
                         auto_push_names
                     ),
@@ -6995,6 +7011,22 @@ def _rp_has_push_content(settings: Settings) -> bool:
     return bool(rp.push_classifications or rp.push_rootcoz_url or rp.push_tracker_links)
 
 
+def _greenwave_ready(settings: Settings) -> bool:
+    """Whether GreenwaveExporter can be constructed with current settings.
+
+    Waiver prerequisites come from
+    :meth:`GreenwaveExporter.missing_waiver_settings` — the same source of
+    truth the constructor uses — so :func:`_available_exporters` never
+    advertises a plugin that cannot construct.  ``greenwave_enabled``
+    covers the ResultsDB side (enable flag + URL + API token).
+    """
+    if not settings.greenwave_enabled:
+        return False
+    if settings.greenwave_push_waivers:
+        return not GreenwaveExporter.missing_waiver_settings(settings)
+    return True
+
+
 def _available_exporters(settings: Settings) -> list[ExporterInfo]:
     """Build the list of available exporter plugins with their status."""
     rp_enabled = settings.reportportal_enabled
@@ -7009,6 +7041,11 @@ def _available_exporters(settings: Settings) -> list[ExporterInfo]:
             name=ReportPortalClient.NAME,
             display_name=ReportPortalClient.DISPLAY_NAME,
             enabled=rp_enabled,
+        ),
+        ExporterInfo(
+            name=GreenwaveExporter.NAME,
+            display_name=GreenwaveExporter.DISPLAY_NAME,
+            enabled=_greenwave_ready(settings),
         ),
     ]
 
@@ -7499,7 +7536,7 @@ async def push_to_reportportal(
     username = getattr(request.state, "username", "")
     # Sanitize control characters to prevent log forging (trusted-proxy
     # mode populates username from X-Forwarded-User with minimal validation)
-    safe_username = _sanitize_control_chars(username)
+    safe_username = strip_control_chars(username)
     logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
     if not settings.reportportal_enabled:
         raise HTTPException(
@@ -7547,6 +7584,18 @@ async def push_to_exporter(
     child_build_number: int | None = Query(
         default=None, description="Child build number for pipeline child push"
     ),
+    subject_identifier: str | None = Query(
+        default=None,
+        description=(
+            "Subject identifier for exporter writes (build NVR or artifact "
+            "identifier); falls back to job_name for result pushes. "
+            "Greenwave waiver submission requires it explicitly."
+        ),
+    ),
+    waiver_comment: str | None = Query(
+        default=None,
+        description=("Optional human comment included in Greenwave waiver submissions"),
+    ),
     settings: Settings = _SETTINGS_DEP,
     _job: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
@@ -7558,7 +7607,7 @@ async def push_to_exporter(
     _require_operator(request)
     _check_allow_list(request)
     username = getattr(request.state, "username", "")
-    safe_username = _sanitize_control_chars(username)
+    safe_username = strip_control_chars(username)
     logger.info(
         "Exporter push requested by '%s' for job %s, plugin=%s",
         safe_username,
@@ -7580,6 +7629,10 @@ async def push_to_exporter(
             child_job_name=child_job_name,
             child_build_number=child_build_number,
             pushed_by=safe_username,
+            subject_identifier=normalize_identifier(subject_identifier),
+            waiver_comment=strip_control_chars(waiver_comment)
+            if waiver_comment
+            else None,
             fetch_history=_exporter_needs_history_classifications([plugin_name]),
             fetch_tracked_in_links=_exporter_needs_tracked_in_links(
                 [plugin_name], settings
@@ -7590,6 +7643,10 @@ async def push_to_exporter(
 
     try:
         exporter = _create_exporter(plugin_name, settings)
+    except ExporterPrerequisiteError as exc:
+        # Missing server-side prerequisite (e.g. GREENWAVE_PRODUCT_VERSION when
+        # waivers are enabled) — the configuration, not the client input, is wrong.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
@@ -7599,6 +7656,10 @@ async def push_to_exporter(
     try:
         with exporter:
             result = await exporter.push(context)
+    except ExporterPrerequisiteError as exc:
+        # Missing push input (e.g. Greenwave waivers without an explicit
+        # subject_identifier) — the client request, not the server, is wrong.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         # Guard against unexpected exporter failures leaking as raw 500s.
         # Expected error modes are already returned inside push() as a
@@ -7686,6 +7747,9 @@ async def _build_export_context(
     child_job_name: str | None = None,
     child_build_number: int | None = None,
     pushed_by: str = "",
+    subject_identifier: str | None = None,
+    waiver_comment: str | None = None,
+    skip_waivers: bool = False,
     fetch_history: bool = True,
     fetch_tracked_in_links: bool = True,
 ) -> ExportContext:
@@ -7701,6 +7765,13 @@ async def _build_export_context(
         child_job_name: Optional child job name for scoped push.
         child_build_number: Optional child build number.
         pushed_by: Username of the user who triggered the push.
+        subject_identifier: Optional subject identifier (build NVR or artifact
+            identifier) for exporter writes; consumed by Greenwave.
+        waiver_comment: Optional human comment included in Greenwave waiver
+            submissions.
+        skip_waivers: When ``True``, gating exporters skip waiver
+            submissions instead of refusing the push.  Set by the auto-push
+            path, where no explicit subject identifier is available.
         fetch_history: When ``False``, skip the per-test history classification
             lookups (they hit the DB once per unique test name).  Set to
             ``False`` when no target exporter reads
@@ -7812,7 +7883,7 @@ async def _build_export_context(
                             continue
                         bare_name = key[len(pfx) :]
                         if bare_name not in reviewed_by:
-                            safe = _sanitize_control_chars(review_data["username"])
+                            safe = strip_control_chars(review_data["username"])
                             if safe:
                                 reviewed_by[bare_name] = safe
             else:
@@ -7823,7 +7894,7 @@ async def _build_export_context(
                         continue
                     if _is_child_review_key(key):
                         continue
-                    safe = _sanitize_control_chars(review_data["username"])
+                    safe = strip_control_chars(review_data["username"])
                     if safe:
                         reviewed_by[key] = safe
         except Exception:
@@ -7845,6 +7916,9 @@ async def _build_export_context(
         history_classifications=history_classifications,
         tracked_in_links=tracked_in_data,
         reviewed_by=reviewed_by,
+        subject_identifier=subject_identifier,
+        waiver_comment=waiver_comment,
+        skip_waivers=skip_waivers,
     )
 
 
@@ -7854,6 +7928,7 @@ async def _build_export_context(
 # ``_create_exporter()``.
 _EXPORTER_CLASSES: dict[str, type[Exporter]] = {
     ReportPortalClient.NAME: ReportPortalClient,
+    GreenwaveExporter.NAME: GreenwaveExporter,
 }
 
 
@@ -7948,6 +8023,14 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
             push_rootcoz_url=rp.push_rootcoz_url,
             push_tracker_links=rp.push_tracker_links,
         )
+    elif plugin_name == GreenwaveExporter.NAME:
+        if not settings.greenwave_enabled:
+            raise ValueError("Greenwave integration is disabled or not configured")
+        # Prerequisite validation (ResultsDB URL/token, and the waiver
+        # settings when GREENWAVE_PUSH_WAIVERS is enabled) lives in
+        # GreenwaveExporter.__init__; it raises ExporterPrerequisiteError
+        # (HTTP 422) when server configuration is incomplete.
+        return GreenwaveExporter(settings=settings)
     raise ValueError(f"Unknown exporter plugin: '{plugin_name}'")
 
 
@@ -11272,7 +11355,13 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     errors = []
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket"):
+    for key in (
+        "prow_url",
+        "gcs_bucket",
+        "greenwave_url",
+        "greenwave_waiver_url",
+        "greenwave_outcome_map",
+    ):
         if key not in settings_updates:
             continue
         value = settings_updates[key]
@@ -11291,7 +11380,13 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key in ("prow_url", "gcs_bucket"):
+        if key in (
+            "prow_url",
+            "gcs_bucket",
+            "greenwave_url",
+            "greenwave_waiver_url",
+            "greenwave_outcome_map",
+        ):
             continue
         # Check integer fields
         annotation = field_info.annotation
