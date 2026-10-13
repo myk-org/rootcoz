@@ -309,6 +309,21 @@ class ReportPortalConfig(NamedTuple):
     push_tracker_links: bool
 
 
+def _greenwave_allow_ai_waivers_description() -> str:
+    """Settings-UI description for ``greenwave_allow_ai_waivers``.
+
+    Imports the canonical identity lazily (``config`` is imported before
+    ``storage`` at application startup) so the description can never drift
+    from ``AI_SYSTEM_USERNAME``.
+    """
+    from rootcoz.storage import AI_SYSTEM_USERNAME
+
+    return (
+        f"Allow auto-reviewed failures ({AI_SYSTEM_USERNAME}) to generate "
+        "waivers. Default: only human-reviewed failures are waived."
+    )
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -567,10 +582,7 @@ class Settings(BaseSettings):
     )
     greenwave_allow_ai_waivers: bool = Field(
         default=False,
-        description=(
-            "Allow auto-reviewed failures (rootcoz-ai) to generate waivers. "
-            "Default: only human-reviewed failures are waived."
-        ),
+        description=_greenwave_allow_ai_waivers_description(),
     )
     greenwave_outcome_map: str = Field(
         default=DEFAULT_GREENWAVE_OUTCOME_MAP,
