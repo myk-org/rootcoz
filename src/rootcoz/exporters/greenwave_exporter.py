@@ -15,8 +15,9 @@ Push flow:
 3. When ``GREENWAVE_PUSH_WAIVERS`` is enabled and the failure's
    classification is listed in ``GREENWAVE_WAIVABLE_CLASSIFICATIONS``,
    submit a waiver to WaiverDB for failures that were reviewed by a
-   human.  Waivers are never auto-submitted for ``rootcoz-ai`` reviews
-   unless ``GREENWAVE_ALLOW_AI_WAIVERS`` is set.
+   human.  Waivers are never auto-submitted for reviews recorded by the
+   AI system identity (``storage.AI_SYSTEM_USERNAME``) unless
+   ``GREENWAVE_ALLOW_AI_WAIVERS`` is set.
 
 Deployment prerequisites (documented per issue #183):
 
