@@ -551,6 +551,10 @@
 <td><code>reportportal_url</code>, <code>reportportal_api_token</code>, <code>reportportal_project</code>, <code>reportportal_verify_ssl</code>, <code>enable_reportportal</code>, <code>rp_push_classifications</code>, <code>rp_push_rootcoz_url</code>, <code>rp_push_tracker_links</code></td>
 </tr>
 <tr>
+<td><code>Greenwave</code></td>
+<td><code>greenwave_url</code>, <code>greenwave_api_token</code>, <code>greenwave_waiver_url</code>, <code>greenwave_waiver_token</code>, <code>greenwave_push_waivers</code>, <code>greenwave_waivable_classifications</code>, <code>greenwave_allow_ai_waivers</code>, <code>greenwave_outcome_map</code>, <code>greenwave_subject_type</code>, <code>greenwave_product_version</code>, <code>greenwave_verify_ssl</code>, <code>enable_greenwave</code></td>
+</tr>
+<tr>
 <td><code>Auth &amp; Security</code></td>
 <td><code>admin_key</code>, <code>secure_cookies</code>, <code>trust_proxy_headers</code>, <code>require_approval</code>, <code>admin_wait_approve_msg</code>, <code>allowed_users</code>, <code>default_user_role</code></td>
 </tr>
@@ -599,6 +603,7 @@
 </tr>
 </tbody>
 </table></div>
+<p>Every <code>Greenwave</code> setting is editable here and applies immediately — none are server-only or restart-required. The per-push <code>subject_identifier</code> and <code>waiver_comment</code> are not settings at all: they are request parameters passed on each push via the CLI or API.</p>
 <ol>
 <li><strong>Understand masked and restart-required settings.</strong></li>
 </ol>
@@ -613,7 +618,7 @@
 <tbody>
 <tr>
 <td>Masked and encrypted (<code>_SENSITIVE_SETTINGS</code>)</td>
-<td><code>jenkins_password</code>, <code>jenkins_user</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_email</code>, <code>github_token</code>, <code>tests_repo_token</code>, <code>reportportal_api_token</code>, <code>admin_key</code>, <code>vapid_private_key</code></td>
+<td><code>jenkins_password</code>, <code>jenkins_user</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_email</code>, <code>github_token</code>, <code>tests_repo_token</code>, <code>reportportal_api_token</code>, <code>greenwave_api_token</code>, <code>greenwave_waiver_token</code>, <code>admin_key</code>, <code>vapid_private_key</code></td>
 </tr>
 <tr>
 <td>Requires a restart (<code>_RESTART_REQUIRED_SETTINGS</code>)</td>

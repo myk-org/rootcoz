@@ -49,6 +49,16 @@ class TestSettings:
             settings = Settings()
             assert not hasattr(settings, "unknown_field")
 
+    def test_greenwave_allow_ai_waivers_description_uses_canonical_identity(
+        self,
+    ) -> None:
+        """The description must reference AI_SYSTEM_USERNAME, not a literal."""
+        from rootcoz.storage import AI_SYSTEM_USERNAME
+
+        description = Settings.model_fields["greenwave_allow_ai_waivers"].description
+        assert description is not None
+        assert AI_SYSTEM_USERNAME in description
+
     def test_settings_loads_tests_repo_url(self) -> None:
         """Test that tests_repo_url is loaded from environment variable."""
         with patch.dict(

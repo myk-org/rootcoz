@@ -1058,13 +1058,31 @@ class RootCozClient:
         *,
         child_job_name: str | None = None,
         child_build_number: int | None = None,
+        subject_identifier: str | None = None,
+        waiver_comment: str | None = None,
     ) -> dict[str, Any]:
-        """Push results to an exporter plugin. POST /results/{job_id}/push/{plugin_name}"""
+        """Push results to an exporter plugin. POST /results/{job_id}/push/{plugin_name}
+
+        Args:
+            job_id: The rootcoz analysis job ID.
+            plugin_name: Exporter plugin name (e.g. 'reportportal', 'greenwave').
+            child_job_name: Optional child job name for scoped push.
+            child_build_number: Optional child build number for scoped push.
+            subject_identifier: Optional artifact identifier (e.g. build NVR);
+                required for Greenwave waiver submission (result pushes fall
+                back to job_name when omitted).
+            waiver_comment: Optional comment recorded with submitted waivers
+                (Greenwave).
+        """
         params: dict[str, str | int] = {}
         if child_job_name is not None:
             params["child_job_name"] = child_job_name
         if child_build_number is not None:
             params["child_build_number"] = child_build_number
+        if subject_identifier is not None:
+            params["subject_identifier"] = subject_identifier
+        if waiver_comment is not None:
+            params["waiver_comment"] = waiver_comment
         return self._request(
             "POST", f"/results/{job_id}/push/{plugin_name}", params=params
         )

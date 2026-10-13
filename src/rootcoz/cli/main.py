@@ -2722,7 +2722,10 @@ def push_rp_cmd(
 def push_cmd(
     job_id: str = typer.Argument(help="Job ID to push results for."),
     plugin: str = typer.Option(
-        ..., "--plugin", "-p", help="Exporter plugin name (e.g. 'reportportal')."
+        ...,
+        "--plugin",
+        "-p",
+        help="Exporter plugin name: 'reportportal' or 'greenwave'.",
     ),
     child_job_name: str | None = typer.Option(
         None, "--child-job-name", help="Child job name (for pipeline child push)."
@@ -2732,9 +2735,32 @@ def push_cmd(
         "--child-build-number",
         help="Child build number (for pipeline child push).",
     ),
+    subject_identifier: str | None = typer.Option(
+        None,
+        "--subject-identifier",
+        help=(
+            "Subject identifier (build NVR or artifact identifier); falls back "
+            "to job name for result pushes. Required for Greenwave waivers."
+        ),
+    ),
+    waiver_comment: str | None = typer.Option(
+        None,
+        "--waiver-comment",
+        help="Human comment included in Greenwave waiver submissions.",
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Push analysis results to an exporter plugin."""
+    # Config-file fallback for the Greenwave waiver comment (CLI flag wins).
+    # The subject identifier is deliberately NOT configurable: it names the
+    # artifact being gated and is specific to each push — a stored default
+    # would silently waive the wrong build.
+    cfg = _state.get("server_config")
+    effective_waiver_comment = (
+        waiver_comment
+        or ((cfg.greenwave_waiver_comment or "").strip() if cfg else "")
+        or None
+    )
     data = _run_client_command(
         json_output,
         lambda c: c.push_to_exporter(
@@ -2742,6 +2768,8 @@ def push_cmd(
             plugin,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
+            subject_identifier=subject_identifier,
+            waiver_comment=effective_waiver_comment,
         ),
         emit_output=False,
     )

@@ -132,7 +132,32 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`).
 
-8. **Auth and Security category.**
+8. **Greenwave category.**
+
+   | Variable | Default | Type | Secret | Restart | After login |
+   | --- | --- | --- | --- | --- | --- |
+   | `ENABLE_GREENWAVE` | unset | boolean | no | no | yes |
+   | `GREENWAVE_URL` | unset | string | no | no | yes |
+   | `GREENWAVE_API_TOKEN` | unset | string | yes | no | yes |
+   | `GREENWAVE_WAIVER_URL` | unset | string | no | no | yes |
+   | `GREENWAVE_WAIVER_TOKEN` | unset | string | yes | no | yes |
+   | `GREENWAVE_PUSH_WAIVERS` | `false` | boolean | no | no | yes |
+   | `GREENWAVE_WAIVABLE_CLASSIFICATIONS` | `INFRASTRUCTURE` | string | no | no | yes |
+   | `GREENWAVE_ALLOW_AI_WAIVERS` | `false` | boolean | no | no | yes |
+   | `GREENWAVE_OUTCOME_MAP` | `PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO` | string | no | no | yes |
+   | `GREENWAVE_SUBJECT_TYPE` | `koji_build` | string | no | no | yes |
+   | `GREENWAVE_PRODUCT_VERSION` | unset | string | no | no | yes |
+   | `GREENWAVE_VERIFY_SSL` | `true` | boolean | no | no | yes |
+
+   Every Greenwave setting is editable at runtime through Server Settings — none are server-only or restart-required. With `ENABLE_GREENWAVE` unset, the exporter auto-enables when `GREENWAVE_URL` and `GREENWAVE_API_TOKEN` are both set.
+
+   Both URLs are validated at startup: they must be HTTPS with a hostname, and must not embed userinfo, a query string, or a fragment. A malformed or credential-bearing URL is a configuration error, not a silent skip.
+
+   `GREENWAVE_OUTCOME_MAP` maps RootCoz classifications to ResultsDB outcomes, one `CLASS:OUTCOME` pair per comma-separated entry. Valid outcomes are `PASSED`, `FAILED`, `INFO`, and `NEEDS_INSPECTION`; anything else fails startup. Failures whose classification is not in the map are skipped (not exported). `GREENWAVE_WAIVABLE_CLASSIFICATIONS` is a comma-separated list, matched case-insensitively; unrecognized names log a warning but do not fail.
+
+   Waiver submission needs more than the server settings: `GREENWAVE_PUSH_WAIVERS=true` also requires `GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, and `GREENWAVE_PRODUCT_VERSION`, plus a per-push `subject_identifier` (the artifact/build being gated) passed as a query parameter on the push request. Waivers are only submitted for failures reviewed by a human; failures reviewed only by `rootcoz-ai` are skipped unless `GREENWAVE_ALLOW_AI_WAIVERS=true`.
+
+9. **Auth and Security category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -150,7 +175,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `TRUST_PROXY_HEADERS=true` makes `X-Forwarded-User` a valid identity for every route, which means the proxy becomes the authentication boundary. Only enable it behind a proxy you control.
 
-9. **Prow category.**
+10. **Prow category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -159,7 +184,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Both are validated on load rather than transformed. `PROW_URL` must start with `https://`, must contain a hostname, and must not embed credentials (`prow_validation.normalize_prow_url`) — surrounding whitespace is trimmed, but a trailing slash is left in place, so `https://prow.example.com/` and `https://prow.example.com` are both accepted and stay as written. `GCS_BUCKET` must match `[a-z0-9][a-z0-9._-]*` after trimming (`normalize_gcs_bucket`), so a `gs://` prefix is **rejected** rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.
 
-10. **Server category.**
+11. **Server category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -181,7 +206,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    
    `ENABLE_FREE_MODELS` lets every user run the admin-declared free provider+model pairs (Users page → *Free AI models*) on server credentials; the free-providers grant is not needed for admins or users who already have `can_use_server_providers`.
 
-11. **Web Push category.**
+12. **Web Push category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -378,9 +403,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `GREENWAVE_API_TOKEN`, `GREENWAVE_WAIVER_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only five of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only seven of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `REPORTPORTAL_API_TOKEN`, `GREENWAVE_API_TOKEN`, and `GREENWAVE_WAIVER_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.  

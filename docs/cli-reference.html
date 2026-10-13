@@ -392,7 +392,7 @@
 </tr>
 </tbody>
 </table></div>
-<p>Config keys are grouped as <code>[default] server = "NAME"</code>, <code>[servers.NAME]</code> entries, and a shared <code>[defaults]</code> table merged into every server. Per-server keys include <code>url</code>, <code>username</code>, <code>api_key</code>, <code>no_verify_ssl</code>, <code>ai_provider</code>, <code>ai_model</code>, <code>jenkins_*</code>, <code>jira_*</code>, <code>github_token</code>, <code>peers</code>, <code>additional_repos</code>, <code>labels</code>, <code>prow_url</code>, and <code>gcs_bucket</code>. See <a href="configuration-reference.html">Configuration Reference</a> for the full list.</p>
+<p>Config keys are grouped as <code>[default] server = "NAME"</code>, <code>[servers.NAME]</code> entries, and a shared <code>[defaults]</code> table merged into every server. Per-server keys include <code>url</code>, <code>username</code>, <code>api_key</code>, <code>no_verify_ssl</code>, <code>ai_provider</code>, <code>ai_model</code>, <code>jenkins_*</code>, <code>jira_*</code>, <code>github_token</code>, <code>peers</code>, <code>additional_repos</code>, <code>labels</code>, <code>prow_url</code>, <code>gcs_bucket</code>, <code>greenwave_subject_identifier</code>, and <code>greenwave_waiver_comment</code>. See <a href="configuration-reference.html">Configuration Reference</a> for the full list.</p>
 <ol>
 <li><strong>Submit analyses.</strong></li>
 </ol>
@@ -866,8 +866,8 @@
 </tr>
 <tr>
 <td><code>rootcoz push JOB_ID</code></td>
-<td><code>--plugin</code>/<code>-p</code> (required), <code>--child-job-name</code>, <code>--child-build-number</code></td>
-<td>Push results through a named exporter plugin.</td>
+<td><code>--plugin</code>/<code>-p</code> (required), <code>--child-job-name</code>, <code>--child-build-number</code>, <code>--subject-identifier</code>, <code>--waiver-comment</code></td>
+<td>Push results through a named exporter plugin (<code>reportportal</code>, <code>greenwave</code>). The Greenwave-only options set the waiver subject and comment; they fall back to the CLI server profile.</td>
 </tr>
 <tr>
 <td><code>rootcoz push-reportportal JOB_ID</code></td>

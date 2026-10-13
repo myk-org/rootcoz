@@ -22,6 +22,120 @@ PROW_ARTIFACTS_MAX_SIZE_MB = 50
 PROW_ARTIFACT_MAX_FILE_SIZE_MB = 10
 PROW_ARTIFACTS_MAX_OBJECTS = 5_000
 
+#: Valid ResultsDB result outcomes for ``GREENWAVE_OUTCOME_MAP`` validation.
+GREENWAVE_VALID_OUTCOMES = frozenset({"PASSED", "FAILED", "INFO", "NEEDS_INSPECTION"})
+
+#: Canonical rootcoz classifications — used to warn about unrecognized
+#: ``GREENWAVE_WAIVABLE_CLASSIFICATIONS`` entries at startup.
+GREENWAVE_KNOWN_CLASSIFICATIONS = frozenset(
+    {"PRODUCT BUG", "CODE ISSUE", "INFRASTRUCTURE"}
+)
+
+#: Default ``GREENWAVE_OUTCOME_MAP`` — classification → ResultsDB outcome.
+DEFAULT_GREENWAVE_OUTCOME_MAP = (
+    "PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO"
+)
+
+
+def parse_greenwave_outcome_map(raw: str | None) -> dict[str, str]:
+    """Parse ``GREENWAVE_OUTCOME_MAP`` into ``{classification: outcome}``.
+
+    Entries have the ``CLASS:OUTCOME`` format, comma-separated. Whitespace
+    around ``:`` and ``,`` is trimmed; classifications and outcomes are
+    uppercased (matching is case-insensitive).
+
+    Raises:
+        ValueError: Malformed entry or outcome outside
+            :data:`GREENWAVE_VALID_OUTCOMES`.
+    """
+    if raw is None or not raw.strip():
+        return {}
+    mapping: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise ValueError(
+                f"Invalid GREENWAVE_OUTCOME_MAP entry {entry!r} "
+                "(expected CLASS:OUTCOME)"
+            )
+        classification, _, outcome = entry.partition(":")
+        classification = classification.strip().upper()
+        outcome = outcome.strip().upper()
+        if not classification:
+            raise ValueError(
+                f"Invalid GREENWAVE_OUTCOME_MAP entry {entry!r} (empty classification)"
+            )
+        if outcome not in GREENWAVE_VALID_OUTCOMES:
+            raise ValueError(
+                f"Invalid ResultsDB outcome {outcome!r} in GREENWAVE_OUTCOME_MAP "
+                f"(valid outcomes: {', '.join(sorted(GREENWAVE_VALID_OUTCOMES))})"
+            )
+        mapping[classification] = outcome
+    return mapping
+
+
+def parse_greenwave_waivable_classifications(
+    raw: str | None, *, warn_unrecognized: bool = False
+) -> frozenset[str]:
+    """Parse ``GREENWAVE_WAIVABLE_CLASSIFICATIONS`` into an uppercase set.
+
+    Comma-separated, whitespace-trimmed, case-insensitive (values are
+    uppercased to match rootcoz classifications).
+    """
+    if raw is None or not raw.strip():
+        return frozenset()
+    parsed: set[str] = set()
+    for item in raw.split(","):
+        item = item.strip().upper()
+        if not item:
+            continue
+        if warn_unrecognized and item not in GREENWAVE_KNOWN_CLASSIFICATIONS:
+            logger.warning(
+                "GREENWAVE_WAIVABLE_CLASSIFICATIONS contains unrecognized "
+                "classification %r (known: %s)",
+                item,
+                ", ".join(sorted(GREENWAVE_KNOWN_CLASSIFICATIONS)),
+            )
+        parsed.add(item)
+    return frozenset(parsed)
+
+
+def _validate_greenwave_url(value: str | None, env_name: str) -> None:
+    """Validate a Greenwave ResultsDB/WaiverDB URL at Settings construction.
+
+    These URLs are push targets for authenticated writes, so they must be
+    strict HTTPS with a hostname and no userinfo, query, or fragment —
+    credentials embedded in a URL would risk leaking into logs and errors.
+    The URL itself is intentionally NOT echoed in the error message for the
+    same reason.
+
+    Raises:
+        ValueError: When *value* is set but not a valid bare HTTPS URL.
+    """
+    if not value:
+        return
+    parts = urlsplit(value)
+    try:
+        # Accessing .port raises ValueError for syntactically invalid
+        # ports (e.g. ``https://host:bad``) — urlsplit itself does not.
+        _ = parts.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid {env_name}: URL contains an invalid port") from exc
+    if (
+        parts.scheme != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(
+            f"Invalid {env_name}: must be an HTTPS URL with a hostname "
+            "(userinfo, query, and fragment are not allowed)"
+        )
+
 
 def _split_outside_brackets(raw: str) -> list[str]:
     """Split string on commas that are not inside square brackets."""
@@ -193,6 +307,21 @@ class ReportPortalConfig(NamedTuple):
     push_classifications: bool
     push_rootcoz_url: bool
     push_tracker_links: bool
+
+
+def _greenwave_allow_ai_waivers_description() -> str:
+    """Settings-UI description for ``greenwave_allow_ai_waivers``.
+
+    Imports the canonical identity lazily (``config`` is imported before
+    ``storage`` at application startup) so the description can never drift
+    from ``AI_SYSTEM_USERNAME``.
+    """
+    from rootcoz.storage import AI_SYSTEM_USERNAME
+
+    return (
+        f"Allow auto-reviewed failures ({AI_SYSTEM_USERNAME}) to generate "
+        "waivers. Default: only human-reviewed failures are waived."
+    )
 
 
 class Settings(BaseSettings):
@@ -406,6 +535,77 @@ class Settings(BaseSettings):
         description="Include Jira/GitHub issue links as external system issues on Report Portal test items.",
     )
 
+    # Greenwave / ResultsDB exporter integration (optional, runtime-editable
+    # via Server Settings — result pushes take per-request parameters)
+    enable_greenwave: bool | None = Field(
+        default=None,
+        description=(
+            "Enable the Greenwave exporter."
+            " When None, enabled if GREENWAVE_URL and GREENWAVE_API_TOKEN"
+            " are configured."
+        ),
+    )
+    greenwave_url: str | None = Field(
+        default=None,
+        description="ResultsDB API URL (e.g. https://resultsdb.example.com/api/v2.0).",
+    )
+    greenwave_api_token: SecretStr | None = Field(
+        default=None,
+        description="ResultsDB API auth token.",
+    )
+    greenwave_waiver_url: str | None = Field(
+        default=None,
+        description="WaiverDB API URL (optional; required for waiver submission).",
+    )
+    greenwave_waiver_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "WaiverDB auth token — OIDC bearer or service account token "
+            "(deployment-specific)."
+        ),
+    )
+    greenwave_push_waivers: bool = Field(
+        default=False,
+        description=(
+            "Submit WaiverDB waivers for reviewed failures whose classification "
+            "is in GREENWAVE_WAIVABLE_CLASSIFICATIONS. Requires GREENWAVE_WAIVER_URL, "
+            "GREENWAVE_WAIVER_TOKEN, and GREENWAVE_PRODUCT_VERSION."
+        ),
+    )
+    greenwave_waivable_classifications: str = Field(
+        default="INFRASTRUCTURE",
+        description=(
+            "Comma-separated classifications that generate waivers "
+            "(e.g. 'INFRASTRUCTURE,CODE ISSUE'). Matched case-insensitively "
+            "against rootcoz classifications."
+        ),
+    )
+    greenwave_allow_ai_waivers: bool = Field(
+        default=False,
+        description=_greenwave_allow_ai_waivers_description(),
+    )
+    greenwave_outcome_map: str = Field(
+        default=DEFAULT_GREENWAVE_OUTCOME_MAP,
+        description=(
+            "Classification to ResultsDB outcome mapping, format "
+            "CLASS:OUTCOME,... Valid outcomes: PASSED, FAILED, INFO, "
+            "NEEDS_INSPECTION. Classifications not in the map are skipped "
+            "(not exported)."
+        ),
+    )
+    greenwave_subject_type: str = Field(
+        default="koji_build",
+        description="ResultsDB subject type for the tested artifact.",
+    )
+    greenwave_product_version: str | None = Field(
+        default=None,
+        description="Product version for WaiverDB waivers (required when waivers enabled).",
+    )
+    greenwave_verify_ssl: bool = Field(
+        default=True,
+        description="Verify TLS certificates for ResultsDB and WaiverDB connections.",
+    )
+
     # Web Push (VAPID) configuration (optional, server-only)
     vapid_public_key: str = ""
     vapid_private_key: str = Field(default="", repr=False)
@@ -479,11 +679,18 @@ class Settings(BaseSettings):
             "public_base_url",
             "reportportal_url",
             "reportportal_project",
+            "greenwave_url",
+            "greenwave_waiver_url",
+            "greenwave_product_version",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 stripped = value.strip()
                 object.__setattr__(self, field_name, stripped or None)
+        # Validate Greenwave push targets before anything can use them —
+        # a malformed or credential-bearing URL is a startup error.
+        _validate_greenwave_url(self.greenwave_url, "GREENWAVE_URL")
+        _validate_greenwave_url(self.greenwave_waiver_url, "GREENWAVE_WAIVER_URL")
         # Strip whitespace from string fields with empty-string defaults
         for field_name in (
             "jenkins_url",
@@ -494,6 +701,7 @@ class Settings(BaseSettings):
             "ai_model",
             "prow_url",
             "gcs_bucket",
+            "greenwave_subject_type",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -510,6 +718,8 @@ class Settings(BaseSettings):
             "jira_api_token",
             "jira_pat",
             "reportportal_api_token",
+            "greenwave_api_token",
+            "greenwave_waiver_token",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -519,6 +729,30 @@ class Settings(BaseSettings):
                     field_name,
                     SecretStr(stripped) if stripped else None,
                 )
+        # Validate GREENWAVE_OUTCOME_MAP at startup: invalid outcomes or
+        # malformed entries are configuration errors, not runtime ones.
+        object.__setattr__(
+            self,
+            "greenwave_outcome_map",
+            self.greenwave_outcome_map.strip(),
+        )
+        parse_greenwave_outcome_map(self.greenwave_outcome_map)
+        # Auto-push depends on auto-review: failures are only pushed once
+        # auto-review has marked them reviewed.  A deployment configuring
+        # AUTO_PUSH_EXPORTERS with auto-review disabled would start
+        # successfully but the setting would be silently inert — reject it
+        # at construction instead.
+        if self.auto_push_exporters.strip() and self.enable_auto_review is False:
+            raise ValueError(
+                "AUTO_PUSH_EXPORTERS is configured but ENABLE_AUTO_REVIEW is "
+                "disabled — auto-push only runs for failures auto-review has "
+                "marked reviewed; enable ENABLE_AUTO_REVIEW or clear "
+                "AUTO_PUSH_EXPORTERS"
+            )
+        # Warn once at startup about unrecognized waivable classifications.
+        parse_greenwave_waivable_classifications(
+            self.greenwave_waivable_classifications, warn_unrecognized=True
+        )
         return self
 
     @property
@@ -667,6 +901,40 @@ class Settings(BaseSettings):
             push_classifications=self.rp_push_classifications,
             push_rootcoz_url=self.rp_push_rootcoz_url,
             push_tracker_links=self.rp_push_tracker_links,
+        )
+
+    @property
+    def greenwave_enabled(self) -> bool:
+        """Check if the Greenwave exporter is enabled and configured."""
+        if self.enable_greenwave is False:
+            return False
+        if not self.greenwave_url:
+            if self.enable_greenwave is True:
+                logger.warning(
+                    "enable_greenwave is True but GREENWAVE_URL is not configured"
+                )
+            return False
+        if (
+            not self.greenwave_api_token
+            or not self.greenwave_api_token.get_secret_value()
+        ):
+            if self.enable_greenwave is True:
+                logger.warning(
+                    "enable_greenwave is True but GREENWAVE_API_TOKEN is not configured"
+                )
+            return False
+        return True
+
+    @property
+    def greenwave_outcome_map_parsed(self) -> dict[str, str]:
+        """Parsed ``GREENWAVE_OUTCOME_MAP`` (uppercase classification → outcome)."""
+        return parse_greenwave_outcome_map(self.greenwave_outcome_map)
+
+    @property
+    def greenwave_waivable_set(self) -> frozenset[str]:
+        """Parsed ``GREENWAVE_WAIVABLE_CLASSIFICATIONS`` (uppercase set)."""
+        return parse_greenwave_waivable_classifications(
+            self.greenwave_waivable_classifications
         )
 
 

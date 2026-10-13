@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Any
 
 import jenkins
@@ -66,3 +67,53 @@ def mask_sensitive_fields(data: Any) -> Any:
 def is_sensitive_key(key: str) -> bool:
     """Return True if *key* names a sensitive field."""
     return key in SENSITIVE_KEYS or bool(_GENERIC_SENSITIVE_RE.search(key))
+
+
+#: ASCII control characters — stripped from identifiers and free-text
+#: fields built from CI input (job names, test names, error messages).
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def strip_control_chars(value: str) -> str:
+    """Return *value* with ASCII control characters removed.
+
+    Empty input is returned unchanged.
+    """
+    if not value:
+        return value
+    return _CONTROL_CHAR_RE.sub("", value)
+
+
+#: Unicode general categories of invisible characters — control (Cc),
+#: format (Cf: zero-width space, soft hyphen, bidi overrides), surrogate
+#: (Cs), private-use (Co), and unassigned (Cn) code points.  Stripping
+#: these closes the gap left by the ASCII-only ``_CONTROL_CHAR_RE``.
+_INVISIBLE_CHAR_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+
+
+def strip_invisible_chars(value: str) -> str:
+    """Return *value* with Unicode invisible characters removed.
+
+    Extends :func:`strip_control_chars` beyond ASCII C0/DEL to Unicode
+    invisible code points (e.g. ``U+200B`` ZERO WIDTH SPACE, ``U+00AD``
+    SOFT HYPHEN, bidi overrides), so identifier guards cannot be bypassed
+    with invisible-only input.  Whitespace is preserved; callers apply
+    ``.strip()`` as needed.
+    """
+    if not value:
+        return value
+    return "".join(
+        ch for ch in value if unicodedata.category(ch) not in _INVISIBLE_CHAR_CATEGORIES
+    )
+
+
+def normalize_identifier(value: str | None) -> str | None:
+    """Normalize an optional identifier: strip invisible chars + whitespace.
+
+    Returns ``None`` for empty, whitespace-only, or invisible-only input so
+    downstream guards treat it as absent.
+    """
+    if not value:
+        return None
+    normalized = strip_invisible_chars(value).strip()
+    return normalized or None

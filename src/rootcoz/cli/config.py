@@ -64,6 +64,10 @@ class ServerConfig:
     # Prow
     prow_url: str = ""
     gcs_bucket: str = ""
+    # Greenwave exporter push default (waiver comment for
+    # `rootcoz push --plugin greenwave`; the subject identifier is
+    # per-build and must be passed with --subject-identifier each time)
+    greenwave_waiver_comment: str = ""
     # Job metadata labels (comma-separated); merged into job_metadata.labels on analyze
     labels: str = ""
     # Authentication
@@ -260,6 +264,8 @@ def _server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         # Prow
         prow_url=data.get("prow_url", ""),
         gcs_bucket=data.get("gcs_bucket", ""),
+        # Greenwave push default (used by `rootcoz push --plugin greenwave`)
+        greenwave_waiver_comment=_validated_str(data, "greenwave_waiver_comment"),
         # Job metadata labels (fall back to legacy metadata_labels key)
         labels=_validated_str(data, "labels")
         if "labels" in data
