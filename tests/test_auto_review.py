@@ -46,6 +46,97 @@ async def _insert_human_review(
 # ---------------------------------------------------------------------------
 # Signature normalization
 # ---------------------------------------------------------------------------
+class TestAutoPushScopes:
+    """Unit tests for the _auto_push_scopes helper."""
+
+    def test_root_only(self):
+        from rootcoz.main import _auto_push_scopes
+
+        result_data = {"failures": [{"test_name": "a"}]}
+        assert _auto_push_scopes(result_data) == [(None, None)]
+
+    def test_root_and_direct_child(self):
+        from rootcoz.main import _auto_push_scopes
+
+        result_data = {
+            "failures": [{"test_name": "a"}],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-job",
+                    "build_number": 7,
+                    "failures": [{"test_name": "b"}],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [
+            (None, None),
+            ("child-job", 7),
+        ]
+
+    def test_nested_grandchild_scope(self):
+        """Failures under failed_children get their own scope.
+
+        A parent with only nested failures gets no scope of its own; the
+        grandchild with failures does.
+        """
+        from rootcoz.main import _auto_push_scopes
+
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "parent-job",
+                    "build_number": 3,
+                    "failures": [],
+                    "failed_children": [
+                        {
+                            "job_name": "grandchild-job",
+                            "build_number": 9,
+                            "failures": [{"test_name": "c"}],
+                        }
+                    ],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [("grandchild-job", 9)]
+
+    def test_child_without_build_number_skipped(self):
+        """The scoped context requires a build number — skip without one."""
+        from rootcoz.main import _auto_push_scopes
+
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "no-build",
+                    "build_number": 0,
+                    "failures": [{"test_name": "a"}],
+                },
+                {
+                    "job_name": "bad-build",
+                    "build_number": "not-a-number",
+                    "failures": [{"test_name": "b"}],
+                },
+            ],
+        }
+        assert _auto_push_scopes(result_data) == []
+
+    def test_empty_name_skipped(self):
+        from rootcoz.main import _auto_push_scopes
+
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "",
+                    "build_number": 5,
+                    "failures": [{"test_name": "a"}],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == []
+
+
 class TestNormalizeForSignature:
     """Tests for normalize_for_signature()."""
 
@@ -1145,6 +1236,106 @@ class TestAutoReviewMatchingFailures:
                     for c in mock_context.call_args_list
                 }
                 assert scopes == {(None, None), ("child-job", 7)}
+
+    async def test_auto_push_scope_failure_isolated(self, setup_test_db):
+        """A failing scope build does not abort remaining scopes."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job2", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await db.execute(
+                    "UPDATE failure_history SET child_job_name = 'child-job' "
+                    "WHERE job_id = 'prev-job2'"
+                )
+                await _insert_human_review(
+                    db, "prev-job2", "test_a", child_job_name="child-job"
+                )
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "error_signature": "sig-a",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    }
+                ],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 7,
+                        "failures": [
+                            {
+                                "test_name": "test_a",
+                                "error": "err",
+                                "error_signature": "sig-a",
+                                "analysis": {"classification": "PRODUCT BUG"},
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            settings = Settings(
+                **{
+                    k.lower(): v
+                    for k, v in build_test_env(
+                        ENABLE_REPORTPORTAL="true",
+                        REPORTPORTAL_URL="https://rp.example.com",
+                        REPORTPORTAL_API_TOKEN="test-token",
+                        REPORTPORTAL_PROJECT="test-project",
+                        AUTO_PUSH_EXPORTERS="reportportal",
+                    ).items()
+                }
+            )
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            mock_exporter = MagicMock()
+            mock_exporter.push = AsyncMock(
+                return_value=MagicMock(details={"pushed": 1})
+            )
+            mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+            mock_exporter.__exit__ = MagicMock(return_value=False)
+
+            async def context_builder(**kwargs):
+                # Root scope fails to build; the child scope still must be
+                # pushed.
+                if kwargs["child_job_name"] is None:
+                    raise ValueError("boom: root scope")
+                return MagicMock()
+
+            with (
+                patch(
+                    "rootcoz.main._create_exporter", return_value=mock_exporter
+                ) as mock_create,
+                patch(
+                    "rootcoz.main._build_export_context", side_effect=context_builder
+                ),
+            ):
+                await _auto_review_matching_failures(
+                    "current-job", "my-job", 101, result_data, settings
+                )
+
+                # Only the child scope reached the exporter
+                mock_create.assert_called_once_with("reportportal", settings)
+                mock_exporter.push.assert_called_once()
 
     @patch("rootcoz.main.logger")
     async def test_auto_push_log_includes_system_username(

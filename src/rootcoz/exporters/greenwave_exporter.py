@@ -415,6 +415,10 @@ class GreenwaveExporter(Exporter):
                         context.job_id,
                         safe_error,
                     )
+                    # Carry the pre-pass accounting (skipped counts,
+                    # validation errors) into the failure response so
+                    # operators get the complete picture of the attempted
+                    # push, not just the group error.
                     return ExporterResult(
                         success=False,
                         message=(
@@ -422,9 +426,12 @@ class GreenwaveExporter(Exporter):
                         ),
                         details={
                             "pushed": 0,
-                            "skipped": 0,
+                            "skipped": skipped,
                             "waived": 0,
-                            "errors": [f"group creation failed: {safe_error}"],
+                            "errors": [
+                                *errors,
+                                f"group creation failed: {safe_error}",
+                            ],
                             "details": {
                                 "resultsdb_ids": [],
                                 "waiver_ids": [],

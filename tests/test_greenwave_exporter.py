@@ -982,6 +982,39 @@ class TestGreenwaveExporterPush:
         # The mocked result response was never consumed — no result POST
         assert post.call_count == 1
 
+    def test_push_group_failure_carries_prepass_accounting(self):
+        """Group failure keeps the pre-pass skipped count and errors."""
+        exporter = self._make_exporter()
+        post = self._mock_post(
+            exporter,
+            [
+                _response(
+                    error=httpx.HTTPStatusError(
+                        "503", request=MagicMock(), response=MagicMock()
+                    )
+                ),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [
+                    _failure("test_a", "PRODUCT BUG"),
+                    _failure("test_b", classification="MYSTERY"),
+                    "not-a-dict",
+                ]
+            ),
+        )
+        assert result.success is False
+        # the unmapped failure is still counted as skipped
+        assert result.details["skipped"] == 1
+        # both the pre-pass validation error and the group error are kept
+        assert result.details["errors"] == [
+            "failure[2]: entry is not an object",
+            "group creation failed: 503",
+        ]
+        assert post.call_count == 1
+
     def test_push_result_without_usable_id_records_error(self):
         exporter = self._make_exporter()
         self._mock_post(

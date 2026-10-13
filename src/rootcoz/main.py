@@ -2657,6 +2657,44 @@ async def _match_and_auto_review_failures(
     return reviewed, total
 
 
+def _auto_push_scopes(
+    result_data: dict[str, Any],
+) -> list[tuple[str | None, int | None]]:
+    """Push scopes for auto-push: root plus every child analysis with failures.
+
+    Walks direct ``child_job_analyses`` entries AND their nested
+    ``failed_children`` recursively — nested failures count toward the
+    all-reviewed trigger (see ``_auto_review_child_failures``), so they
+    need their own export scopes too; a parent with only nested failures
+    gets no scope of its own.
+
+    Returns ``(child_job_name, child_build_number)`` tuples, ``(None,
+    None)`` for the root scope.  The raw stored ``job_name`` is used for
+    the lookup because ``_child_matches`` compares it verbatim; children
+    without a usable positive build number are skipped — the scoped
+    context requires one.  Scopes without failures are never emitted (an
+    empty scope would push nothing).
+    """
+    scopes: list[tuple[str | None, int | None]] = []
+    if result_data.get("failures"):
+        scopes.append((None, None))
+
+    def _walk(children: list[dict[str, Any]]) -> None:
+        for child in children:
+            name = child.get("job_name", "")
+            if child.get("failures") and name:
+                try:
+                    build = int(child.get("build_number") or 0)
+                except TypeError, ValueError:
+                    build = 0
+                if build > 0:
+                    scopes.append((name, build))
+            _walk(child.get("failed_children", []))
+
+    _walk(result_data.get("child_job_analyses", []))
+    return scopes
+
+
 async def _auto_review_matching_failures(
     job_id: str,
     job_name: str,
@@ -2725,40 +2763,47 @@ async def _auto_review_matching_failures(
             reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
             if reviewed_count >= total_failures:
                 # Push scopes: the unscoped root analysis plus every child
-                # analysis that has failures.  Child failures satisfy the
-                # all-reviewed trigger but are excluded from the unscoped
-                # root context — without child scopes they would never be
-                # pushed.  Scopes without failures are skipped (an empty
-                # scope would push nothing).
-                push_scopes: list[tuple[str | None, int | None]] = []
-                if result_data.get("failures"):
-                    push_scopes.append((None, None))
-                for child in result_data.get("child_job_analyses", []):
-                    child_name = strip_control_chars(child.get("job_name", "")).strip()
-                    child_build = child.get("build_number") or 0
-                    if child.get("failures") and child_name:
-                        push_scopes.append((child_name, int(child_build)))
-                for child_job_name, child_build_number in push_scopes:
-                    context = await _build_export_context(
-                        job_id=job_id,
-                        result_data=result_data,
-                        settings=settings,
-                        child_job_name=child_job_name,
-                        child_build_number=child_build_number,
-                        pushed_by=AI_SYSTEM_USERNAME,
-                        skip_waivers=True,
-                        fetch_history=_exporter_needs_history_classifications(
-                            auto_push_names
-                        ),
-                        fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                            auto_push_names, settings
-                        ),
-                    )
+                # analysis (direct or nested) that has failures.  Child
+                # failures satisfy the all-reviewed trigger but are
+                # excluded from the unscoped root context — without child
+                # scopes they would never be pushed.  Scopes without
+                # failures are skipped (an empty scope would push
+                # nothing).
+                for child_job_name, child_build_number in _auto_push_scopes(
+                    result_data
+                ):
                     scope_label = (
                         "root"
                         if child_job_name is None
-                        else f"child:{child_job_name}#{child_build_number}"
+                        else f"child:{strip_control_chars(child_job_name)}"
+                        f"#{child_build_number}"
                     )
+                    try:
+                        context = await _build_export_context(
+                            job_id=job_id,
+                            result_data=result_data,
+                            settings=settings,
+                            child_job_name=child_job_name,
+                            child_build_number=child_build_number,
+                            pushed_by=AI_SYSTEM_USERNAME,
+                            skip_waivers=True,
+                            fetch_history=_exporter_needs_history_classifications(
+                                auto_push_names
+                            ),
+                            fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                                auto_push_names, settings
+                            ),
+                        )
+                    except ValueError as exc:
+                        # One bad scope must not abort the remaining scopes
+                        # and exporters — log and continue.
+                        logger.warning(
+                            "Auto-push scope build failed for job_id=%s (scope=%s): %s",
+                            job_id,
+                            scope_label,
+                            exc,
+                        )
+                        continue
                     for plugin_name in auto_push_names:
                         logger.info(
                             "All failures auto-reviewed for job %s (scope=%s), "
