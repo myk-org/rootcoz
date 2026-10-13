@@ -121,6 +121,29 @@ class TestAutoPushScopes:
         }
         assert _auto_push_scopes(result_data) == []
 
+    def test_duplicate_name_build_pair_deduplicated(self):
+        """Two nodes sharing (job_name, build) export once, not twice."""
+        from rootcoz.main import _auto_push_scopes
+
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "dup-job",
+                    "build_number": 4,
+                    "failures": [{"test_name": "a"}],
+                    "failed_children": [
+                        {
+                            "job_name": "dup-job",
+                            "build_number": 4,
+                            "failures": [{"test_name": "b"}],
+                        }
+                    ],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [("dup-job", 4)]
+
     def test_empty_name_skipped(self):
         from rootcoz.main import _auto_push_scopes
 

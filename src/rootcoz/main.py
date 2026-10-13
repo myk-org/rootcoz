@@ -2674,6 +2674,12 @@ def _auto_push_scopes(
     without a usable positive build number are skipped — the scoped
     context requires one.  Scopes without failures are never emitted (an
     empty scope would push nothing).
+
+    Scopes are deduplicated by ``(job_name, build_number)``: that pair is
+    the identity every downstream lookup (``_find_child_job_in_children``,
+    history/review queries) uses, so two nodes sharing it are the same
+    logical child job — the first occurrence is exported once (with a
+    warning about the ambiguity) instead of pushing the first node twice.
     """
     scopes: list[tuple[str | None, int | None]] = []
     if result_data.get("failures"):
@@ -2692,7 +2698,20 @@ def _auto_push_scopes(
             _walk(child.get("failed_children", []))
 
     _walk(result_data.get("child_job_analyses", []))
-    return scopes
+
+    unique: list[tuple[str | None, int | None]] = []
+    seen: set[tuple[str | None, int | None]] = set()
+    for scope in scopes:
+        if scope in seen:
+            logger.warning(
+                "Duplicate auto-push scope %r in the job tree — exporting "
+                "the first occurrence only",
+                scope,
+            )
+            continue
+        seen.add(scope)
+        unique.append(scope)
+    return unique
 
 
 async def _auto_review_matching_failures(
