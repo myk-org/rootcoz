@@ -354,86 +354,117 @@ class GreenwaveExporter(Exporter):
         waiver_ids: list[int] = []
         group_uuid: str | None = None
 
-        async with httpx.AsyncClient(**self._client_kwargs()) as client:
-            # 1. Create one ResultsDB group for the analysis job.  This is
-            #    fatal: the group UUID is what correlates every result of
-            #    one analysis, so pushing results without it would create
-            #    untraceable ungrouped records while still reporting
-            #    success.
-            group_payload: dict[str, Any] = {
-                "description": f"rootcoz analysis {context.job_id}",
-                "ref_url": context.report_url or None,
-            }
+        # Pre-pass: validate and classify every failure BEFORE any HTTP
+        # write, so an analysis with no exportable failure never creates
+        # an empty ResultsDB group.
+        items: list[tuple[int, FailureAnalysis, str, str]] = []
+        for index, raw_failure in enumerate(context.failures):
+            if not isinstance(raw_failure, dict):
+                errors.append(f"failure[{index}]: entry is not an object")
+                continue
             try:
-                group_resp = await self._post(
-                    client,
-                    f"{self._url}/groups",
-                    token=self._api_token,
-                    json=group_payload,
-                    label="ResultsDB group creation",
-                )
-                group_resp.raise_for_status()
-                group_uuid = _uuid_response_id(group_resp)
-                if group_uuid is None:
-                    raise ValueError("group response missing 'uuid' field")
-            except Exception as exc:  # noqa: BLE001
-                safe_error = _sanitize_error(exc)
+                failure = FailureAnalysis(**raw_failure)
+            except ValidationError as exc:
                 logger.warning(
-                    "ResultsDB group creation failed for job_id=%r: %s — "
-                    "aborting push before any result writes",
+                    "Greenwave push: failure[%d] for job_id=%s failed schema "
+                    "validation: %s",
+                    index,
                     context.job_id,
-                    safe_error,
+                    _validation_error_summary(exc),
                 )
-                return ExporterResult(
-                    success=False,
-                    message=(
-                        "ResultsDB group creation failed; no results were pushed."
-                    ),
-                    details={
-                        "pushed": 0,
-                        "skipped": 0,
-                        "waived": 0,
-                        "errors": [f"group creation failed: {safe_error}"],
-                        "details": {
-                            "resultsdb_ids": [],
-                            "waiver_ids": [],
-                            "group_uuid": None,
-                        },
-                    },
-                )
-            logger.debug(
-                "ResultsDB group uuid=%s created for job_id=%s",
-                group_uuid,
-                context.job_id,
-            )
+                errors.append(f"failure[{index}]: validation failed")
+                continue
+            classification = failure.analysis.classification.strip().upper()
+            if not classification:
+                skipped += 1
+                continue
+            mapped_outcome = self._outcome_by_classification.get(classification)
+            if not mapped_outcome:
+                skipped += 1
+                continue
+            items.append((index, failure, classification, mapped_outcome))
 
-            # 2+3. Push each classified failure (result + optional waiver)
-            #     with bounded concurrency.  Outcomes are aggregated in
-            #     input order, so errors and recorded identifiers stay
-            #     deterministic regardless of completion order.
-            semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WRITES)
-            outcomes = await asyncio.gather(
-                *(
-                    self._push_failure(
+        if items:
+            async with httpx.AsyncClient(**self._client_kwargs()) as client:
+                # 1. Create one ResultsDB group for the analysis job.  This is
+                #    fatal: the group UUID is what correlates every result of
+                #    one analysis, so pushing results without it would create
+                #    untraceable ungrouped records while still reporting
+                #    success.
+                group_payload: dict[str, Any] = {
+                    "description": f"rootcoz analysis {context.job_id}",
+                    "ref_url": context.report_url or None,
+                }
+                try:
+                    group_resp = await self._post(
                         client,
-                        semaphore,
-                        index,
-                        raw_failure,
-                        context=context,
-                        subject_identifier=subject_identifier,
-                        group_uuid=group_uuid,
-                        skip_waivers=skip_waivers,
+                        f"{self._url}/groups",
+                        token=self._api_token,
+                        json=group_payload,
+                        label="ResultsDB group creation",
                     )
-                    for index, raw_failure in enumerate(context.failures)
+                    group_resp.raise_for_status()
+                    group_uuid = _uuid_response_id(group_resp)
+                    if group_uuid is None:
+                        raise ValueError("group response missing 'uuid' field")
+                except Exception as exc:  # noqa: BLE001
+                    safe_error = _sanitize_error(exc)
+                    logger.warning(
+                        "ResultsDB group creation failed for job_id=%r: %s — "
+                        "aborting push before any result writes",
+                        context.job_id,
+                        safe_error,
+                    )
+                    return ExporterResult(
+                        success=False,
+                        message=(
+                            "ResultsDB group creation failed; no results were pushed."
+                        ),
+                        details={
+                            "pushed": 0,
+                            "skipped": 0,
+                            "waived": 0,
+                            "errors": [f"group creation failed: {safe_error}"],
+                            "details": {
+                                "resultsdb_ids": [],
+                                "waiver_ids": [],
+                                "group_uuid": None,
+                            },
+                        },
+                    )
+                logger.debug(
+                    "ResultsDB group uuid=%s created for job_id=%s",
+                    group_uuid,
+                    context.job_id,
                 )
-            )
-            for outcome in outcomes:
-                pushed += outcome["pushed"]
-                skipped += outcome["skipped"]
-                waived += outcome["waived"]
-                errors.extend(outcome["errors"])
-                resultsdb_ids.extend(outcome["resultsdb_ids"])
-                waiver_ids.extend(outcome["waiver_ids"])
+
+                # 2+3. Push each classified failure (result + optional
+                #     waiver) with bounded concurrency.  Outcomes are
+                #     aggregated in input order, so errors and recorded
+                #     identifiers stay deterministic regardless of
+                #     completion order.
+                semaphore = asyncio.Semaphore(_MAX_CONCURRENT_WRITES)
+                outcomes = await asyncio.gather(
+                    *(
+                        self._push_failure(
+                            client,
+                            semaphore,
+                            item,
+                            context=context,
+                            subject_identifier=subject_identifier,
+                            group_uuid=group_uuid,
+                            skip_waivers=skip_waivers,
+                        )
+                        for item in items
+                    )
+                )
+                for outcome in outcomes:
+                    pushed += outcome["pushed"]
+                    skipped += outcome["skipped"]
+                    waived += outcome["waived"]
+                    errors.extend(outcome["errors"])
+                    resultsdb_ids.extend(outcome["resultsdb_ids"])
+                    waiver_ids.extend(outcome["waiver_ids"])
 
         # WaiverDB errors produce partial success whenever any result
         # landed; result-write errors are isolated per failure so one bad
@@ -470,8 +501,7 @@ class GreenwaveExporter(Exporter):
         self,
         client: httpx.AsyncClient,
         semaphore: asyncio.Semaphore,
-        index: int,
-        raw_failure: Any,
+        item: tuple[int, FailureAnalysis, str, str],
         *,
         context: ExportContext,
         subject_identifier: str,
@@ -480,9 +510,12 @@ class GreenwaveExporter(Exporter):
     ) -> dict[str, Any]:
         """Push one classified failure: ResultsDB result + optional waiver.
 
-        HTTP failures are caught and reported per failure so one bad entry
-        never aborts the rest of the analysis.  A waiver is only submitted
-        after the corresponding result write succeeded.
+        Receives a pre-validated ``item`` — ``(index, failure,
+        classification, outcome)`` — from :meth:`push`'s pre-pass.  Every
+        failure mode, including unexpected exceptions anywhere in the
+        task body, is caught and reported per failure so one bad entry
+        never aborts the rest of the ``asyncio.gather()`` batch.  A waiver
+        is only submitted after the corresponding result write succeeded.
 
         Returns an outcome dict with the failure's counters (``pushed``,
         ``skipped``, ``waived``), ``errors``, and written identifiers
@@ -496,31 +529,52 @@ class GreenwaveExporter(Exporter):
             "resultsdb_ids": [],
             "waiver_ids": [],
         }
-        if not isinstance(raw_failure, dict):
-            outcome["errors"].append(f"failure[{index}]: entry is not an object")
-            return outcome
+        index, failure, classification, outcome_for_class = item
         try:
-            failure = FailureAnalysis(**raw_failure)
-        except ValidationError as exc:
+            await self._push_failure_inner(
+                client,
+                semaphore,
+                failure,
+                classification,
+                outcome_for_class,
+                outcome,
+                context=context,
+                subject_identifier=subject_identifier,
+                group_uuid=group_uuid,
+                skip_waivers=skip_waivers,
+            )
+        except Exception as exc:
+            safe_error = _sanitize_error(exc)
             logger.warning(
-                "Greenwave push: failure[%d] for job_id=%s failed schema "
-                "validation: %s",
+                "Greenwave push: unexpected error for failure[%d] job_id=%s: %s",
                 index,
                 context.job_id,
-                _validation_error_summary(exc),
+                safe_error,
+                exc_info=True,
             )
-            outcome["errors"].append(f"failure[{index}]: validation failed")
-            return outcome
+            outcome["errors"].append(f"failure[{index}]: {safe_error}")
+        return outcome
 
-        classification = failure.analysis.classification.strip().upper()
-        if not classification:
-            outcome["skipped"] = 1
-            return outcome
-        outcome_for_class = self._outcome_by_classification.get(classification)
-        if not outcome_for_class:
-            outcome["skipped"] = 1
-            return outcome
+    async def _push_failure_inner(
+        self,
+        client: httpx.AsyncClient,
+        semaphore: asyncio.Semaphore,
+        failure: FailureAnalysis,
+        classification: str,
+        outcome_for_class: str,
+        outcome: dict[str, Any],
+        *,
+        context: ExportContext,
+        subject_identifier: str,
+        group_uuid: str,
+        skip_waivers: bool,
+    ) -> None:
+        """Result + waiver writes for one pre-validated failure.
 
+        Mutates *outcome* in place; raises only on unexpected (non-HTTP)
+        failures, which :meth:`_push_failure` converts into per-failure
+        error outcomes.
+        """
         testcase_name = _testcase_name(context.job_name, failure.test_name)
         note = f"rootcoz classification: {classification}"
         if failure.analysis.details:
@@ -561,7 +615,7 @@ class GreenwaveExporter(Exporter):
                 safe_error,
             )
             outcome["errors"].append(f"ResultsDB {testcase_name}: {safe_error}")
-            return outcome  # skip waiver when the result push failed
+            return  # skip waiver when the result push failed
 
         outcome["pushed"] = 1
         result_id = _positive_integer_response_id(result_resp)
@@ -581,14 +635,14 @@ class GreenwaveExporter(Exporter):
 
         # Optional waiver for human-reviewed failures.
         if not self._push_waivers or skip_waivers:
-            return outcome
+            return
         if classification not in self._waivable_classifications:
-            return outcome
+            return
         reviewer = context.reviewed_by.get(failure.test_name, "")
         if not reviewer:
-            return outcome
+            return
         if reviewer == AI_SYSTEM_USERNAME and not self._allow_ai_waivers:
-            return outcome
+            return
 
         assert self._waiver_url is not None
         assert self._product_version is not None
@@ -625,7 +679,7 @@ class GreenwaveExporter(Exporter):
                 safe_error,
             )
             outcome["errors"].append(f"WaiverDB {testcase_name}: {safe_error}")
-            return outcome
+            return
 
         outcome["waived"] = 1
         waiver_id = _positive_integer_response_id(waiver_resp)
@@ -642,4 +696,4 @@ class GreenwaveExporter(Exporter):
                 context.job_id,
                 testcase_name,
             )
-        return outcome
+        return

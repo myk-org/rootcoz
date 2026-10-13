@@ -47,7 +47,6 @@ github_token = "ghp_dev123"
 wait_for_completion = true
 poll_interval_minutes = 2
 max_wait_minutes = 45
-greenwave_subject_identifier = "pkg-1.0-1.el10"
 greenwave_waiver_comment = "known flake"
 
 [servers.prod]
@@ -252,7 +251,6 @@ class TestGetServerConfig:
         assert cfg.wait_for_completion is True
         assert cfg.poll_interval_minutes == 2
         assert cfg.max_wait_minutes == 45
-        assert cfg.greenwave_subject_identifier == "pkg-1.0-1.el10"
         assert cfg.greenwave_waiver_comment == "known flake"
 
     def test_greenwave_non_string_raises(self, tmp_path: Path):
@@ -260,10 +258,10 @@ class TestGetServerConfig:
         cfg = tmp_path / "config.toml"
         cfg.write_text(
             '[default]\nserver = "a"\n\n[servers.a]\n'
-            'url = "http://a"\ngreenwave_subject_identifier = 42\n'
+            'url = "http://a"\ngreenwave_waiver_comment = 42\n'
         )
         config = load_config(cfg)
-        with pytest.raises(TypeError, match=r"greenwave_subject_identifier"):
+        with pytest.raises(TypeError, match=r"greenwave_waiver_comment"):
             get_server_config("a", config)
 
     def test_defaults_for_missing_analyze_fields(self, config_file: Path):
@@ -283,7 +281,6 @@ class TestGetServerConfig:
         assert cfg.wait_for_completion is None
         assert cfg.poll_interval_minutes == 0
         assert cfg.max_wait_minutes == 0
-        assert cfg.greenwave_subject_identifier == ""
         assert cfg.greenwave_waiver_comment == ""
 
 

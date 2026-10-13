@@ -166,6 +166,34 @@ class TestGreenwaveSettings:
         ):
             Settings(_env_file=None)
 
+    def test_invalid_greenwave_port_rejected(self):
+        """Syntactically invalid ports fail at Settings construction."""
+        for env_name in ("GREENWAVE_URL", "GREENWAVE_WAIVER_URL"):
+            env = _greenwave_env(**{env_name: "https://results.example.com:bad"})
+            with (
+                patch.dict(os.environ, env, clear=True),
+                pytest.raises(ValueError, match="invalid port"),
+            ):
+                Settings(_env_file=None)
+
+    def test_auto_push_without_auto_review_rejected(self):
+        """AUTO_PUSH_EXPORTERS with auto-review disabled is a config error."""
+        env = _greenwave_env(
+            AUTO_PUSH_EXPORTERS="greenwave", ENABLE_AUTO_REVIEW="false"
+        )
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(ValueError, match="AUTO_PUSH_EXPORTERS"),
+        ):
+            Settings(_env_file=None)
+
+    def test_auto_push_with_auto_review_accepted(self):
+        """AUTO_PUSH_EXPORTERS with auto-review enabled (the default) is fine."""
+        env = _greenwave_env(AUTO_PUSH_EXPORTERS="greenwave")
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+        assert settings.auto_push_exporters == "greenwave"
+
     def test_valid_urls_pass_validation(self):
         settings = _make_settings(
             GREENWAVE_WAIVER_URL=WAIVERDB_URL,
@@ -488,6 +516,7 @@ class TestGreenwaveExporterPush:
         assert second_result["data"]["rootcoz_job_id"] == ["job-123"]
 
     def test_push_skips_unclassified_and_unmapped(self):
+        """Nothing exportable: no HTTP writes at all — no empty group."""
         exporter = self._make_exporter()
         post = self._mock_post(
             exporter, [_response({"uuid": "550e8400-e29b-41d4-a716-446655440000"})]
@@ -505,9 +534,85 @@ class TestGreenwaveExporterPush:
         assert result.details["pushed"] == 0
         assert result.details["skipped"] == 2
         assert result.details["errors"] == []
-        # only the group request was made
-        assert post.call_count == 1
+        # no group request — an all-unmapped analysis must not leave an
+        # empty ResultsDB group behind
+        assert post.call_count == 0
+        assert result.details["details"]["group_uuid"] is None
         assert "no matching classifications" in result.message
+
+    def test_push_mixed_classifications_still_creates_group(self):
+        """At least one exportable failure: the group IS created."""
+        exporter = self._make_exporter()
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [
+                    _failure("test_a", classification=""),
+                    _failure("test_b", classification="PRODUCT BUG"),
+                ]
+            ),
+        )
+        assert result.success is True
+        assert result.details["pushed"] == 1
+        assert result.details["skipped"] == 1
+        assert post.call_count == 2  # group + one result
+
+    def test_push_unexpected_task_error_isolated(self):
+        """An unexpected exception in one task never aborts the batch."""
+        exporter = self._make_exporter()
+        group_uuid = "550e8400-e29b-41d4-a716-446655440000"
+        real_inner = exporter._push_failure_inner
+
+        async def inner_for_a(
+            client, semaphore, failure, classification, outcome_for_class, outcome, **kw
+        ):
+            # Raise OUTSIDE the HTTP handlers so only the per-task
+            # catch-all in _push_failure() can contain it.
+            if failure.test_name == "test_a":
+                raise RuntimeError("unexpected boom")
+            await real_inner(
+                client,
+                semaphore,
+                failure,
+                classification,
+                outcome_for_class,
+                outcome,
+                **kw,
+            )
+
+        exporter._push_failure_inner = inner_for_a
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": group_uuid}),
+                _response({"id": 101}),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [
+                    _failure("test_a", "PRODUCT BUG"),
+                    _failure("test_b", "PRODUCT BUG"),
+                ]
+            ),
+        )
+        # test_b still pushed despite test_a's unexpected failure
+        assert result.success is True
+        assert result.details["pushed"] == 1
+        assert result.details["details"]["resultsdb_ids"] == [101]
+        assert any(
+            "failure[0]" in e and "unexpected boom" in e
+            for e in result.details["errors"]
+        )
+        assert post.call_count == 2  # group + test_b's result
 
     def test_push_non_dict_failure_entry(self):
         exporter = self._make_exporter()
