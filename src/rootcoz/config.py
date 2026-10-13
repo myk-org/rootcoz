@@ -117,6 +117,12 @@ def _validate_greenwave_url(value: str | None, env_name: str) -> None:
     if not value:
         return
     parts = urlsplit(value)
+    try:
+        # Accessing .port raises ValueError for syntactically invalid
+        # ports (e.g. ``https://host:bad``) — urlsplit itself does not.
+        _ = parts.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid {env_name}: URL contains an invalid port") from exc
     if (
         parts.scheme != "https"
         or not parts.hostname
@@ -719,6 +725,18 @@ class Settings(BaseSettings):
             self.greenwave_outcome_map.strip(),
         )
         parse_greenwave_outcome_map(self.greenwave_outcome_map)
+        # Auto-push depends on auto-review: failures are only pushed once
+        # auto-review has marked them reviewed.  A deployment configuring
+        # AUTO_PUSH_EXPORTERS with auto-review disabled would start
+        # successfully but the setting would be silently inert — reject it
+        # at construction instead.
+        if self.auto_push_exporters.strip() and self.enable_auto_review is False:
+            raise ValueError(
+                "AUTO_PUSH_EXPORTERS is configured but ENABLE_AUTO_REVIEW is "
+                "disabled — auto-push only runs for failures auto-review has "
+                "marked reviewed; enable ENABLE_AUTO_REVIEW or clear "
+                "AUTO_PUSH_EXPORTERS"
+            )
         # Warn once at startup about unrecognized waivable classifications.
         parse_greenwave_waivable_classifications(
             self.greenwave_waivable_classifications, warn_unrecognized=True

@@ -2724,60 +2724,86 @@ async def _auto_review_matching_failures(
             reviews = await storage.get_reviews_for_job(job_id)
             reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
             if reviewed_count >= total_failures:
-                context = await _build_export_context(
-                    job_id=job_id,
-                    result_data=result_data,
-                    settings=settings,
-                    pushed_by=AI_SYSTEM_USERNAME,
-                    skip_waivers=True,
-                    fetch_history=_exporter_needs_history_classifications(
-                        auto_push_names
-                    ),
-                    fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                        auto_push_names, settings
-                    ),
-                )
-                for plugin_name in auto_push_names:
-                    logger.info(
-                        "All failures auto-reviewed for job %s, pushing to "
-                        "'%s' (pushed_by=%s)",
-                        job_id,
-                        plugin_name,
-                        AI_SYSTEM_USERNAME,
+                # Push scopes: the unscoped root analysis plus every child
+                # analysis that has failures.  Child failures satisfy the
+                # all-reviewed trigger but are excluded from the unscoped
+                # root context — without child scopes they would never be
+                # pushed.  Scopes without failures are skipped (an empty
+                # scope would push nothing).
+                push_scopes: list[tuple[str | None, int | None]] = []
+                if result_data.get("failures"):
+                    push_scopes.append((None, None))
+                for child in result_data.get("child_job_analyses", []):
+                    child_name = strip_control_chars(child.get("job_name", "")).strip()
+                    child_build = child.get("build_number") or 0
+                    if child.get("failures") and child_name:
+                        push_scopes.append((child_name, int(child_build)))
+                for child_job_name, child_build_number in push_scopes:
+                    context = await _build_export_context(
+                        job_id=job_id,
+                        result_data=result_data,
+                        settings=settings,
+                        child_job_name=child_job_name,
+                        child_build_number=child_build_number,
+                        pushed_by=AI_SYSTEM_USERNAME,
+                        skip_waivers=True,
+                        fetch_history=_exporter_needs_history_classifications(
+                            auto_push_names
+                        ),
+                        fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                            auto_push_names, settings
+                        ),
                     )
-                    try:
-                        exporter = _create_exporter(plugin_name, settings)
-                    except (
-                        ValueError,
-                        TimeoutError,
-                        OSError,
-                        TypeError,
-                        RuntimeError,
-                    ) as exc:
-                        logger.warning(
-                            "Auto-push skipped for exporter '%s', job_id=%s: %s",
-                            plugin_name,
+                    scope_label = (
+                        "root"
+                        if child_job_name is None
+                        else f"child:{child_job_name}#{child_build_number}"
+                    )
+                    for plugin_name in auto_push_names:
+                        logger.info(
+                            "All failures auto-reviewed for job %s (scope=%s), "
+                            "pushing to '%s' (pushed_by=%s)",
                             job_id,
-                            exc,
+                            scope_label,
+                            plugin_name,
+                            AI_SYSTEM_USERNAME,
                         )
-                        continue
-                    try:
-                        with exporter:
-                            result = await exporter.push(context)
-                        if not result.success:
+                        try:
+                            exporter = _create_exporter(plugin_name, settings)
+                        except (
+                            ValueError,
+                            TimeoutError,
+                            OSError,
+                            TypeError,
+                            RuntimeError,
+                        ) as exc:
                             logger.warning(
-                                "Auto-push to '%s' returned failure for job_id=%s: %s",
+                                "Auto-push skipped for exporter '%s', job_id=%s: %s",
                                 plugin_name,
                                 job_id,
-                                result.message,
+                                exc,
                             )
-                    except Exception:
-                        logger.warning(
-                            "Auto-push to '%s' failed for job_id=%s",
-                            plugin_name,
-                            job_id,
-                            exc_info=True,
-                        )
+                            continue
+                        try:
+                            with exporter:
+                                result = await exporter.push(context)
+                            if not result.success:
+                                logger.warning(
+                                    "Auto-push to '%s' returned failure for "
+                                    "job_id=%s (scope=%s): %s",
+                                    plugin_name,
+                                    job_id,
+                                    scope_label,
+                                    result.message,
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Auto-push to '%s' failed for job_id=%s (scope=%s)",
+                                plugin_name,
+                                job_id,
+                                scope_label,
+                                exc_info=True,
+                            )
 
 
 async def _auto_review_child_failures(

@@ -2751,13 +2751,11 @@ def push_cmd(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Push analysis results to an exporter plugin."""
-    # Config-file fallbacks for Greenwave push defaults (CLI flags win)
+    # Config-file fallback for the Greenwave waiver comment (CLI flag wins).
+    # The subject identifier is deliberately NOT configurable: it names the
+    # artifact being gated and is specific to each push — a stored default
+    # would silently waive the wrong build.
     cfg = _state.get("server_config")
-    effective_subject_identifier = (
-        subject_identifier
-        or ((cfg.greenwave_subject_identifier or "").strip() if cfg else "")
-        or None
-    )
     effective_waiver_comment = (
         waiver_comment
         or ((cfg.greenwave_waiver_comment or "").strip() if cfg else "")
@@ -2770,7 +2768,7 @@ def push_cmd(
             plugin,
             child_job_name=child_job_name,
             child_build_number=child_build_number,
-            subject_identifier=effective_subject_identifier,
+            subject_identifier=subject_identifier,
             waiver_comment=effective_waiver_comment,
         ),
         emit_output=False,

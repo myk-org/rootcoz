@@ -963,6 +963,189 @@ class TestAutoReviewMatchingFailures:
 
                 mock_create.assert_called_once_with("reportportal", settings)
 
+    async def test_auto_push_child_scoped_context_when_only_child_failures(
+        self, setup_test_db
+    ):
+        """Reviewed child failures with no root failures get their own scope.
+
+        The unscoped root context excludes child failures — without a
+        child-scoped context, an analysis whose reviewed failures all live
+        in child jobs would push nothing.
+        """
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await db.execute(
+                    "UPDATE failure_history SET child_job_name = 'child-job' "
+                    "WHERE job_id = 'prev-job'"
+                )
+                await _insert_human_review(
+                    db, "prev-job", "test_a", child_job_name="child-job"
+                )
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 7,
+                        "failures": [
+                            {
+                                "test_name": "test_a",
+                                "error": "err",
+                                "error_signature": "sig-a",
+                                "analysis": {"classification": "INFRASTRUCTURE"},
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            settings = Settings(
+                **{
+                    k.lower(): v
+                    for k, v in build_test_env(
+                        ENABLE_REPORTPORTAL="true",
+                        REPORTPORTAL_URL="https://rp.example.com",
+                        REPORTPORTAL_API_TOKEN="test-token",
+                        REPORTPORTAL_PROJECT="test-project",
+                        AUTO_PUSH_EXPORTERS="reportportal",
+                    ).items()
+                }
+            )
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            mock_exporter = MagicMock()
+            mock_exporter.push = AsyncMock(
+                return_value=MagicMock(details={"pushed": 1})
+            )
+            mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+            mock_exporter.__exit__ = MagicMock(return_value=False)
+            with (
+                patch(
+                    "rootcoz.main._create_exporter", return_value=mock_exporter
+                ) as mock_create,
+                patch(
+                    "rootcoz.main._build_export_context", new_callable=AsyncMock
+                ) as mock_context,
+            ):
+                await _auto_review_matching_failures(
+                    "current-job", "my-job", 101, result_data, settings
+                )
+
+                mock_create.assert_called_once_with("reportportal", settings)
+                # Exactly one scope: the child (root has no failures)
+                mock_context.assert_called_once()
+                kwargs = mock_context.call_args.kwargs
+                assert kwargs["child_job_name"] == "child-job"
+                assert kwargs["child_build_number"] == 7
+
+    async def test_auto_push_root_and_child_scopes(self, setup_test_db):
+        """Root and child failures each get their own push scope."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job2", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await db.execute(
+                    "UPDATE failure_history SET child_job_name = 'child-job' "
+                    "WHERE job_id = 'prev-job2'"
+                )
+                await _insert_human_review(
+                    db, "prev-job2", "test_a", child_job_name="child-job"
+                )
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "error_signature": "sig-a",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    }
+                ],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 7,
+                        "failures": [
+                            {
+                                "test_name": "test_a",
+                                "error": "err",
+                                "error_signature": "sig-a",
+                                "analysis": {"classification": "PRODUCT BUG"},
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            settings = Settings(
+                **{
+                    k.lower(): v
+                    for k, v in build_test_env(
+                        ENABLE_REPORTPORTAL="true",
+                        REPORTPORTAL_URL="https://rp.example.com",
+                        REPORTPORTAL_API_TOKEN="test-token",
+                        REPORTPORTAL_PROJECT="test-project",
+                        AUTO_PUSH_EXPORTERS="reportportal",
+                    ).items()
+                }
+            )
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            mock_exporter = MagicMock()
+            mock_exporter.push = AsyncMock(
+                return_value=MagicMock(details={"pushed": 1})
+            )
+            mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+            mock_exporter.__exit__ = MagicMock(return_value=False)
+            with (
+                patch(
+                    "rootcoz.main._create_exporter", return_value=mock_exporter
+                ) as mock_create,
+                patch(
+                    "rootcoz.main._build_export_context", new_callable=AsyncMock
+                ) as mock_context,
+            ):
+                await _auto_review_matching_failures(
+                    "current-job", "my-job", 101, result_data, settings
+                )
+
+                # Two scopes: root + child — one exporter per scope
+                assert mock_create.call_count == 2
+                scopes = {
+                    (c.kwargs["child_job_name"], c.kwargs["child_build_number"])
+                    for c in mock_context.call_args_list
+                }
+                assert scopes == {(None, None), ("child-job", 7)}
+
     @patch("rootcoz.main.logger")
     async def test_auto_push_log_includes_system_username(
         self, mock_logger, setup_test_db
@@ -1030,16 +1213,17 @@ class TestAutoReviewMatchingFailures:
             ]
             assert info_calls, "Expected INFO log for auto-push trigger"
             log_args = info_calls[0].args
-            # Format: "All failures auto-reviewed for job %s, pushing to '%s' (pushed_by=%s)"
-            # args[0] = format string, args[1] = job_id, args[2] = plugin_name, args[3] = AI_SYSTEM_USERNAME
+            # Format: "All failures auto-reviewed for job %s (scope=%s), pushing to '%s' (pushed_by=%s)"
+            # args[0] = format string, args[1] = job_id, args[2] = scope, args[3] = plugin_name, args[4] = AI_SYSTEM_USERNAME
             assert log_args[1] == "current-job", (
                 f"Expected job_id 'current-job', got '{log_args[1]}'"
             )
-            assert log_args[2] == "reportportal", (
-                f"Expected plugin_name 'reportportal', got '{log_args[2]}'"
+            assert log_args[2] == "root", f"Expected scope 'root', got '{log_args[2]}'"
+            assert log_args[3] == "reportportal", (
+                f"Expected plugin_name 'reportportal', got '{log_args[3]}'"
             )
-            assert log_args[3] == AI_SYSTEM_USERNAME, (
-                f"Expected AI_SYSTEM_USERNAME, got '{log_args[3]}'"
+            assert log_args[4] == AI_SYSTEM_USERNAME, (
+                f"Expected AI_SYSTEM_USERNAME, got '{log_args[4]}'"
             )
 
     async def test_no_push_when_auto_push_exporters_empty(self, setup_test_db):

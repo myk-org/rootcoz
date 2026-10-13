@@ -3957,7 +3957,8 @@ class TestPushCommand:
         )
 
     def test_push_greenwave_config_fallback(self, mock_client):
-        """ServerConfig greenwave defaults apply when CLI flags are absent."""
+        """Only the waiver comment falls back to ServerConfig — the subject
+        identifier is per-build and must come from the CLI flag."""
         mock_client.push_to_exporter.return_value = {
             "pushed": 1,
             "errors": [],
@@ -3967,36 +3968,6 @@ class TestPushCommand:
             "rootcoz.cli.main.get_server_config",
             return_value=ServerConfig(
                 url=_TEST_SERVER,
-                greenwave_subject_identifier="cfg-nvr-2.0",
-                greenwave_waiver_comment="cfg comment",
-            ),
-        ):
-            # Use a server NAME (not URL) so _resolve_server consults the config
-            result = runner.invoke(
-                app, ["--server", "mygw", "push", "job-123", "-p", "greenwave"]
-            )
-        assert result.exit_code == 0
-        mock_client.push_to_exporter.assert_called_once_with(
-            "job-123",
-            "greenwave",
-            child_job_name=None,
-            child_build_number=None,
-            subject_identifier="cfg-nvr-2.0",
-            waiver_comment="cfg comment",
-        )
-
-    def test_push_greenwave_flags_override_config(self, mock_client):
-        """CLI flags win over ServerConfig greenwave defaults."""
-        mock_client.push_to_exporter.return_value = {
-            "pushed": 1,
-            "errors": [],
-            "message": "Pushed 1 result(s) to ResultsDB",
-        }
-        with patch(
-            "rootcoz.cli.main.get_server_config",
-            return_value=ServerConfig(
-                url=_TEST_SERVER,
-                greenwave_subject_identifier="cfg-nvr-2.0",
                 greenwave_waiver_comment="cfg comment",
             ),
         ):
@@ -4021,6 +3992,37 @@ class TestPushCommand:
             child_job_name=None,
             child_build_number=None,
             subject_identifier="flag-nvr-3.0",
+            waiver_comment="cfg comment",
+        )
+
+    def test_push_greenwave_no_subject_config_fallback(self, mock_client):
+        """No --subject-identifier and no config fallback: nothing is sent.
+
+        A stored default NVR would silently waive the wrong build, so the
+        config file cannot supply the subject identifier.
+        """
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 result(s) to ResultsDB",
+        }
+        with patch(
+            "rootcoz.cli.main.get_server_config",
+            return_value=ServerConfig(
+                url=_TEST_SERVER,
+                greenwave_waiver_comment="cfg comment",
+            ),
+        ):
+            result = runner.invoke(
+                app, ["--server", "mygw", "push", "job-123", "-p", "greenwave"]
+            )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier=None,
             waiver_comment="cfg comment",
         )
 
