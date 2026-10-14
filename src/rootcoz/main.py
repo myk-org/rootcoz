@@ -13,13 +13,14 @@ import sqlite3
 import threading
 import time as _time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import (
     AsyncIterator,
     Awaitable,
     Callable,
     Coroutine,
     Iterable,
+    Iterator,
     Mapping,
     Sequence,
 )
@@ -871,22 +872,32 @@ def _sanitize_control_chars(value: str) -> str:
     return _CONTROL_CHAR_RE.sub("", value)
 
 
-def _is_child_review_key(key: str) -> bool:
-    """Check if a review key is a child-scoped composite key.
+def resolve_failure_review(
+    reviews: dict[str, dict[str, Any]],
+    test_name: str,
+    child_job_name: str = "",
+    child_build_number: int = 0,
+) -> dict[str, Any] | None:
+    """Resolve the review entry for a single test, honoring child scoping.
 
-    Composite keys have the format ``child_name#build_num::test_name``
-    where the *first* ``::`` separates the ``child#build`` prefix from
-    the test name.  Uses delimiter-aware parsing instead of a greedy
-    regex to be explicit about the format.
-
-    Note: CI job names do not contain ``#`` in practice, so a key like
-    ``my-job#42::test`` is unambiguously child-scoped.
+    Exact-build child reviews take precedence over wildcard (build 0) ones.
+    A child-scoped test never matches a top-level (bare-name) review and
+    vice versa, matching report-page semantics. Returns the review dict only
+    when it represents a completed review carrying a username.
     """
-    prefix, sep, _rest = key.partition("::")
-    if not sep:
-        return False
-    child, hash_char, build = prefix.rpartition("#")
-    return hash_char == "#" and bool(child) and build.isdigit()
+    keys: tuple[str, ...]
+    if child_job_name:
+        keys = (
+            f"{child_job_name}#{child_build_number}::{test_name}",
+            f"{child_job_name}#0::{test_name}",
+        )
+    else:
+        keys = (test_name,)
+    for key in keys:
+        entry = reviews.get(key)
+        if entry and entry.get("reviewed") and entry.get("username"):
+            return entry
+    return None
 
 
 def _extract_base_url() -> str:
@@ -3763,6 +3774,35 @@ def _apply_cached_test_counts(
     result_data["failed_count"] = failed
 
 
+async def _persist_test_entries_and_cache_counts(
+    job_id: str,
+    source_result: CISourceResult | None,
+    child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] | None,
+    result_data: dict[str, Any],
+) -> None:
+    """Persist test outcomes and cache counts BEFORE update_status.
+
+    Used by every early-exit completion path so the stored result carries
+    the same cached counts as the normal completion path. On persist
+    failure, counts are NOT cached — the stored result must never claim
+    test outcomes the DB does not have.
+    """
+    all_test_entries = (
+        source_result.test_entry_dicts() if source_result is not None else []
+    )
+    scopes = child_test_scopes or []
+    try:
+        await replace_job_test_entries(job_id, all_test_entries, scopes)
+    except Exception:
+        logger.warning(
+            "Failed to persist test entries for job_id=%s",
+            job_id,
+            exc_info=True,
+        )
+    else:
+        _apply_cached_test_counts(result_data, all_test_entries, scopes)
+
+
 async def _run_per_group_analysis(
     *,
     groups: dict[str, list[Any]],
@@ -3964,6 +4004,11 @@ async def _analyze_failures_or_exit(
         result_data["job_name"] = display_name
         _stamp_result_metadata(result_data, source_result)
         await _preserve_request_params(job_id, result_data)
+        # Persist test outcomes and cache counts so /full and the dashboard
+        # report real numbers instead of zeros on this no-failure path.
+        await _persist_test_entries_and_cache_counts(
+            job_id, source_result, child_test_scopes, result_data
+        )
         await update_status(job_id, "completed", result_data)
         notify_active_count_changed()
         notify_dashboard_changed()
@@ -4075,22 +4120,9 @@ async def _analyze_failures_or_exit(
         await _attach_token_usage(job_id, fail_data)
         # Persist test outcomes and cache counts BEFORE update_status, so the
         # stored result carries them. Mirrors the normal completion path.
-        _all_test_entries = (
-            source_result.test_entry_dicts() if source_result is not None else []
+        await _persist_test_entries_and_cache_counts(
+            job_id, source_result, child_test_scopes, fail_data
         )
-        _scopes = child_test_scopes or []
-        try:
-            await replace_job_test_entries(job_id, _all_test_entries, _scopes)
-        except Exception:
-            # Do NOT cache counts from entries that were not persisted - the
-            # stored result must never claim test outcomes the DB does not have.
-            logger.warning(
-                "Failed to persist test entries for fully failed job_id=%s",
-                job_id,
-                exc_info=True,
-            )
-        else:
-            _apply_cached_test_counts(fail_data, _all_test_entries, _scopes)
         await update_status(job_id, "failed", fail_data)
         notify_active_count_changed()
         notify_dashboard_changed()
@@ -4451,6 +4483,11 @@ async def _process_ci_source_analysis(
                     _stamp_result_metadata(result_data, source_result)
                     await _preserve_request_params(job_id, result_data)
                     await _attach_token_usage(job_id, result_data)
+                    # Aggregate available child counts so /full and the
+                    # dashboard report real numbers on this path too.
+                    await _persist_test_entries_and_cache_counts(
+                        job_id, source_result, child_test_scopes, result_data
+                    )
                     await update_status(job_id, "failed", result_data)
                     notify_active_count_changed()
                     notify_dashboard_changed()
@@ -5097,6 +5134,35 @@ async def re_analyze(
     )
 
 
+def _iter_scoped_failures(
+    result_data: dict[str, Any],
+) -> Iterator[tuple[dict[str, Any], str, int]]:
+    """Yield ``(failure, child_job_name, child_build_number)`` across the tree.
+
+    Walks the top-level ``failures`` list (child scope ``""``/``0``), then
+    ``child_job_analyses`` and nested ``failed_children`` recursively.
+    """
+    for failure in result_data.get("failures", []):
+        if isinstance(failure, dict):
+            yield failure, "", 0
+
+    def _walk_children(
+        children: list[Any],
+    ) -> Iterator[tuple[dict[str, Any], str, int]]:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            child_job = child.get("job_name", "")
+            child_build = child.get("build_number", 0)
+            for failure in child.get("failures", []):
+                if isinstance(failure, dict):
+                    yield failure, child_job, child_build
+            # Recurse into nested failed_children
+            yield from _walk_children(child.get("failed_children", []))
+
+    yield from _walk_children(result_data.get("child_job_analyses", []))
+
+
 async def _apply_effective_classifications(
     job_id: str, result_data: dict[str, Any]
 ) -> None:
@@ -5139,30 +5205,10 @@ async def _apply_effective_classifications(
             analysis["code_fix"] = False
             analysis["product_bug_report"] = False
 
-    def _walk_failures(
-        failures: list[Any],
-        child_job_name: str = "",
-        child_build_number: int = 0,
-    ) -> None:
-        for failure in failures:
-            if isinstance(failure, dict):
-                _apply_override(failure, child_job_name, child_build_number)
-
-    # Top-level failures
-    _walk_failures(result_data.get("failures", []))
-
-    # Child job failures (including nested failed_children)
-    def _walk_children(children: list[Any]) -> None:
-        for child in children:
-            if not isinstance(child, dict):
-                continue
-            child_job = child.get("job_name", "")
-            child_build = child.get("build_number", 0)
-            _walk_failures(child.get("failures", []), child_job, child_build)
-            # Recurse into nested failed_children
-            _walk_children(child.get("failed_children", []))
-
-    _walk_children(result_data.get("child_job_analyses", []))
+    for failure, child_job_name, child_build_number in _iter_scoped_failures(
+        result_data
+    ):
+        _apply_override(failure, child_job_name, child_build_number)
 
 
 @app.get("/api/results/fields", operation_id="listResultFields")
@@ -5232,6 +5278,31 @@ async def get_job_result(
     return result
 
 
+def _validate_test_status_filter(status: list[str] | None) -> list[str] | None:
+    """Sanitize sidecar placeholders and validate test status filter values.
+
+    Returns the sanitized list, or ``None`` when nothing remains. Raises
+    HTTP 400 for invalid status values.
+    """
+    if not status:
+        return None
+    # Sidecar may leave unsubstituted "{status}" when optional tool arg omitted
+    sanitized = [
+        s for raw in status if (s := _sanitize_sidecar_placeholder(raw))
+    ] or None
+    if not sanitized:
+        return None
+    valid_statuses = {"passed", "skipped", "failed"}
+    invalid = [s for s in sanitized if s not in valid_statuses]
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status values: {', '.join(invalid)}. "
+            f"Valid values are: {', '.join(sorted(valid_statuses))}",
+        )
+    return sanitized
+
+
 @app.get("/api/results/{job_id}/tests", operation_id="getJobTests")
 async def get_job_tests(
     job_id: str,
@@ -5253,24 +5324,7 @@ async def get_job_tests(
     limit: int = Query(default=50, ge=1, le=200, description="Page size"),
 ) -> dict[str, Any]:
     """Get paginated test entries for a job (viewer+)."""
-    # Sidecar may leave unsubstituted "{status}" when optional tool arg omitted
-    if status:
-        status = [
-            sanitized
-            for raw in status
-            if (sanitized := _sanitize_sidecar_placeholder(raw))
-        ] or None
-
-    # Validate status values
-    valid_statuses = {"passed", "skipped", "failed"}
-    if status:
-        invalid = [s for s in status if s not in valid_statuses]
-        if invalid:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid status values: {', '.join(invalid)}. "
-                f"Valid values: {', '.join(sorted(valid_statuses))}",
-            )
+    status = _validate_test_status_filter(status)
 
     # Verify job exists
     result = await get_result(job_id)
@@ -5286,6 +5340,129 @@ async def get_job_tests(
         limit=limit,
     )
     return data
+
+
+@app.get("/api/results/{job_id}/full", operation_id="getJobResultFull")
+async def get_job_result_full(
+    response: Response,
+    job_id: str,
+    _: None = Depends(_bind_job_id),
+    status: Annotated[
+        list[str] | None,
+        Query(
+            description="Filter the tests section by status: "
+            "passed, skipped, failed (repeatable)"
+        ),
+    ] = None,
+    child_job_name: str | None = Query(
+        default=None,
+        description="Filter the tests section by child job name",
+    ),
+    child_build_number: int | None = Query(
+        default=None,
+        description="Filter the tests section by child build number",
+    ),
+    offset: int = Query(default=0, ge=0, description="Tests section pagination offset"),
+    limit: int = Query(default=50, ge=1, le=200, description="Tests section page size"),
+) -> dict[str, Any]:
+    """Get complete job data in one response (viewer+).
+
+    Combines what today needs several calls into a single payload:
+    job metadata, test counts, failures (flattened across child jobs,
+    with effective classifications and review state joined server-side),
+    a precomputed summary, a paginated ``tests`` page, comments, and
+    tracked-in links.
+
+    The ``tests`` section accepts the same filters and pagination as
+    ``GET /api/results/{job_id}/tests`` and reports ``total`` so
+    consumers can page through large jobs.
+    """
+    status = _validate_test_status_filter(status)
+
+    result = await get_result(job_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    result_data = result.get("result") or {}
+    await _apply_effective_classifications(job_id, result_data)
+
+    reviews = await storage.get_reviews_for_job(job_id)
+
+    failures: list[dict[str, Any]] = []
+    reviewed_count = 0
+    classification_counts: Counter[str] = Counter()
+    for failure, child_job, child_build in _iter_scoped_failures(result_data):
+        analysis = failure.get("analysis")
+        if not isinstance(analysis, dict):
+            # Legacy results stored the analysis as plain text — no
+            # classification/pattern to extract (raw text stays available
+            # via GET /results/{job_id}).
+            analysis = {}
+        classification = analysis.get("classification", "")
+        if classification:
+            classification_counts[classification] += 1
+        entry = resolve_failure_review(
+            reviews, failure.get("test_name", ""), child_job, child_build
+        )
+        reviewed = entry is not None
+        if reviewed:
+            reviewed_count += 1
+        failures.append(
+            {
+                "test_name": failure.get("test_name", ""),
+                "classification": classification,
+                "pattern": analysis.get("pattern", ""),
+                "error": failure.get("error", ""),
+                "error_signature": failure.get("error_signature", ""),
+                "child_job_name": child_job,
+                "child_build_number": child_build,
+                "reviewed": reviewed,
+                "reviewed_by": (
+                    _sanitize_control_chars(entry["username"]) if entry else ""
+                ),
+            }
+        )
+
+    tests = await storage.get_test_entries(
+        job_id,
+        status=status,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        offset=offset,
+        limit=limit,
+    )
+    comments = await storage.get_comments_for_job(job_id)
+    tracked_in = await storage.get_tracked_in_for_job(job_id)
+
+    payload: dict[str, Any] = {
+        "job": {
+            "job_id": result.get("job_id", job_id),
+            "job_name": result_data.get("job_name", ""),
+            "build_number": resolve_display_build_id(result_data),
+            "status": result.get("status", ""),
+            "analysis_state": result_data.get("analysis_state", "analyzed"),
+            "created_at": result.get("created_at", ""),
+        },
+        "counts": {
+            "passed": result_data.get("passed_count", 0),
+            "skipped": result_data.get("skipped_count", 0),
+            "failed": result_data.get("failed_count", 0),
+        },
+        "failures": failures,
+        "summary": {
+            "total_failures": len(failures),
+            "reviewed_count": reviewed_count,
+            "classifications": dict(classification_counts),
+        },
+        "tests": tests,
+        "comments": comments,
+        "tracked_in": tracked_in,
+    }
+
+    if result.get("status") in IN_PROGRESS_STATUSES:
+        response.status_code = 202
+
+    return strip_sensitive_from_response(payload)
 
 
 @app.get("/api/failures/{failure_uuid}", operation_id="getFailureByUuid")
@@ -7797,35 +7974,19 @@ async def _build_export_context(
 
         try:
             reviews = await storage.get_reviews_for_job(job_id)
-            if child_job_name is not None:
-                exact_prefix = f"{child_job_name}#{child_build_number}::"
-                wildcard_prefix = f"{child_job_name}#0::"
-                # Two passes: exact build first, then wildcard fallback.
-                # Exact-build reviews take precedence (checked first; duplicates skipped).
-                for pfx in (exact_prefix, wildcard_prefix):
-                    for key, review_data in reviews.items():
-                        if not (
-                            review_data.get("reviewed") and review_data.get("username")
-                        ):
-                            continue
-                        if not key.startswith(pfx):
-                            continue
-                        bare_name = key[len(pfx) :]
-                        if bare_name not in reviewed_by:
-                            safe = _sanitize_control_chars(review_data["username"])
-                            if safe:
-                                reviewed_by[bare_name] = safe
-            else:
-                for key, review_data in reviews.items():
-                    if not (
-                        review_data.get("reviewed") and review_data.get("username")
-                    ):
-                        continue
-                    if _is_child_review_key(key):
-                        continue
-                    safe = _sanitize_control_chars(review_data["username"])
+            scope_name = child_job_name or ""
+            scope_build = child_build_number or 0
+            for f in failures_data:
+                if not isinstance(f, dict):
+                    continue
+                name = f.get("test_name", "")
+                if not name or name in reviewed_by:
+                    continue
+                entry = resolve_failure_review(reviews, name, scope_name, scope_build)
+                if entry:
+                    safe = _sanitize_control_chars(entry["username"])
                     if safe:
-                        reviewed_by[key] = safe
+                        reviewed_by[name] = safe
         except Exception:
             logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
 

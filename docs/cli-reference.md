@@ -121,6 +121,7 @@ Related lifecycle commands:
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
+| `full JOB_ID` | `--status`/`-s`, `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) — all scope the `tests` section | Complete job data in one call: failures with review state and effective classifications, summary, tests page, comments, tracked-in links. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |
 | `set-reviewed JOB_ID` | `--test`/`-t`, `--reviewed`/`--not-reviewed`, `--child-job`, `--child-build` | Mark one failure reviewed. |
 | `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira` or `github`; omit for auto-detection), `--child-job`, `--child-build` | Link a failure to a ticket. |
@@ -260,6 +261,7 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
 ## Advanced Usage
 
 - `rootcoz results show JOB_ID --fields "result.summary,result.failures.test_name,result.failures.classification"` returns only what a report needs, which keeps large results cheap to poll.
+- `rootcoz results full JOB_ID --json` returns the complete picture in one call — failures with review state and effective classifications joined server-side, a precomputed summary, a paginated `tests` page, comments, and tracked-in links. Its `--status`/`--child-job`/`--child-build`/`--offset`/`--limit` flags page the `tests` section.
 - `rootcoz admin token-usage --group-by model --format csv > usage.csv` is the only command with a first-class CSV mode; everything else uses `--json`.
 - `rootcoz --server staging` switches servers without editing any file, and `rootcoz config servers` shows which name maps to which URL.
 - `rootcoz analyze --source file -f results.xml` works with no Jenkins or Prow access at all.

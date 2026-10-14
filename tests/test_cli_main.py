@@ -389,6 +389,268 @@ class TestResultsCommands:
         )
 
 
+class TestResultsFullCommand:
+    def test_results_full(self, mock_client):
+        mock_client.get_full_result.return_value = {
+            "job": {
+                "job_id": "abc-123",
+                "job_name": "pipe",
+                "build_number": 42,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            "counts": {"passed": 10, "skipped": 1, "failed": 2},
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "classification": "CODE ISSUE",
+                    "pattern": "NEW",
+                    "error": "boom",
+                    "error_signature": "sig",
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                    "reviewed": True,
+                    "reviewed_by": "alice",
+                }
+            ],
+            "summary": {
+                "total_failures": 1,
+                "reviewed_count": 1,
+                "classifications": {"CODE ISSUE": 1},
+            },
+            "tests": {
+                "entries": [{"test_name": "t1", "duration": 0.1, "status": "passed"}],
+                "total": 1,
+                "offset": 0,
+                "limit": 50,
+                "has_more": False,
+            },
+            "comments": [{"username": "carol", "test_name": "test_a", "comment": "hi"}],
+            "tracked_in": {},
+        }
+        result = runner.invoke(app, ["results", "full", "abc-123"])
+        assert result.exit_code == 0
+        assert "pipe #42" in result.output
+        assert "10 passed" in result.output
+        assert "test_a" in result.output
+        assert "carol" in result.output
+        mock_client.get_full_result.assert_called_once_with(
+            "abc-123",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
+
+    def test_results_full_with_filters(self, mock_client):
+        mock_client.get_full_result.return_value = {
+            "job": {
+                "job_id": "abc-123",
+                "job_name": "pipe",
+                "build_number": 42,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            "counts": {"passed": 10, "skipped": 1, "failed": 2},
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "classification": "CODE ISSUE",
+                    "pattern": "NEW",
+                    "error": "boom",
+                    "error_signature": "sig",
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                    "reviewed": True,
+                    "reviewed_by": "alice",
+                }
+            ],
+            "summary": {
+                "total_failures": 1,
+                "reviewed_count": 1,
+                "classifications": {"CODE ISSUE": 1},
+            },
+            "tests": {
+                "entries": [{"test_name": "t1", "duration": 0.1, "status": "passed"}],
+                "total": 1,
+                "offset": 0,
+                "limit": 50,
+                "has_more": False,
+            },
+            "comments": [{"username": "carol", "test_name": "test_a", "comment": "hi"}],
+            "tracked_in": {},
+        }
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "full",
+                "abc-123",
+                "--status",
+                "failed",
+                "--child-job",
+                "runner",
+                "--child-build",
+                "7",
+                "--offset",
+                "10",
+                "--limit",
+                "25",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.get_full_result.assert_called_once_with(
+            "abc-123",
+            status=["failed"],
+            child_job_name="runner",
+            child_build_number=7,
+            offset=10,
+            limit=25,
+        )
+
+    def test_results_full_json_output(self, mock_client):
+        mock_client.get_full_result.return_value = {
+            "job": {
+                "job_id": "abc-123",
+                "job_name": "pipe",
+                "build_number": 42,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            "counts": {"passed": 10, "skipped": 1, "failed": 2},
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "classification": "CODE ISSUE",
+                    "pattern": "NEW",
+                    "error": "boom",
+                    "error_signature": "sig",
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                    "reviewed": True,
+                    "reviewed_by": "alice",
+                }
+            ],
+            "summary": {
+                "total_failures": 1,
+                "reviewed_count": 1,
+                "classifications": {"CODE ISSUE": 1},
+            },
+            "tests": {
+                "entries": [{"test_name": "t1", "duration": 0.1, "status": "passed"}],
+                "total": 1,
+                "offset": 0,
+                "limit": 50,
+                "has_more": False,
+            },
+            "comments": [{"username": "carol", "test_name": "test_a", "comment": "hi"}],
+            "tracked_in": {},
+        }
+        result = runner.invoke(app, ["results", "full", "abc-123", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["job"]["job_id"] == "abc-123"
+        assert parsed["summary"]["total_failures"] == 1
+
+    def test_results_full_renders_tracked_in(self, mock_client):
+        sample = {
+            "job": {
+                "job_id": "abc-123",
+                "job_name": "p",
+                "build_number": 1,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "",
+            },
+            "counts": {"passed": 0, "skipped": 0, "failed": 1},
+            "failures": [],
+            "summary": {
+                "total_failures": 0,
+                "reviewed_count": 0,
+                "classifications": {},
+            },
+            "tests": {
+                "entries": [],
+                "total": 0,
+                "offset": 0,
+                "limit": 50,
+                "has_more": False,
+            },
+            "comments": [],
+            "tracked_in": {
+                "test_a": [
+                    {
+                        "tracked_in_url": "https://github.com/o/r/issues/9",
+                        "tracked_in_type": "github",
+                        "tracked_in_by": "alice",
+                    }
+                ]
+            },
+        }
+        mock_client.get_full_result.return_value = sample
+        result = runner.invoke(app, ["results", "full", "abc-123"])
+        assert result.exit_code == 0
+        assert "Tracked In:" in result.output
+        assert "test_a: https://github.com/o/r/issues/9" in result.output
+        assert "(github)" in result.output
+        assert "by alice" in result.output
+
+    def test_results_full_has_more_hint(self, mock_client):
+        sample = {
+            "job": {
+                "job_id": "abc-123",
+                "job_name": "pipe",
+                "build_number": 42,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            "counts": {"passed": 10, "skipped": 1, "failed": 2},
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "classification": "CODE ISSUE",
+                    "pattern": "NEW",
+                    "error": "boom",
+                    "error_signature": "sig",
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                    "reviewed": True,
+                    "reviewed_by": "alice",
+                }
+            ],
+            "summary": {
+                "total_failures": 1,
+                "reviewed_count": 1,
+                "classifications": {"CODE ISSUE": 1},
+            },
+            "tests": {
+                "entries": [{"test_name": "t1", "duration": 0.1, "status": "passed"}],
+                "total": 1,
+                "offset": 0,
+                "limit": 50,
+                "has_more": False,
+            },
+            "comments": [{"username": "carol", "test_name": "test_a", "comment": "hi"}],
+            "tracked_in": {},
+        }
+        sample["tests"] = {
+            "entries": [{"test_name": "t1", "duration": 0.1, "status": "passed"}],
+            "total": 3,
+            "offset": 0,
+            "limit": 1,
+            "has_more": True,
+        }
+        mock_client.get_full_result.return_value = sample
+        result = runner.invoke(app, ["results", "full", "abc-123", "--limit", "1"])
+        assert result.exit_code == 0
+        assert "--offset 1" in result.output
+
+
 class TestReviewStatusCommand:
     def test_review_status(self, mock_client):
         mock_client.get_review_status.return_value = {

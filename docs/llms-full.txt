@@ -2295,6 +2295,7 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/results/{job_id}` | viewer | `fields` — comma-separated allowlisted paths |
 | GET | `/api/results/fields` | viewer | none; returns the allowlist |
 | GET | `/api/results/{job_id}/tests` | viewer | `status` (repeatable: `passed`, `skipped`, `failed`), `child_job_name`, `child_build_number`, `offset`, `limit` (1–200, default 50) |
+| GET | `/api/results/{job_id}/full` | viewer | `status`, `child_job_name`, `child_build_number`, `offset`, `limit` — apply to the `tests` section (same contract as `/tests`) |
 | GET | `/api/failures/{failure_uuid}` | viewer | none |
 | GET | `/results/{job_id}/review-status` | viewer | none |
 | GET | `/api/dashboard` | viewer | `limit`, `offset` |
@@ -2302,6 +2303,8 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/api/dashboard/active-count` | viewer | none |
 
 `fields` returns full values for allowlisted paths only and is never truncated. Unknown paths return `400`, so fetch `/api/results/fields` first when you build against it.
+
+`GET /api/results/{job_id}/full` returns the complete picture in one call: `job` metadata, `counts` (passed/skipped/failed), a flat `failures` list across child jobs with effective classifications and review state (`reviewed`, `reviewed_by`) joined server-side, a precomputed `summary` (`total_failures`, `reviewed_count`, `classifications`), a paginated `tests` page, `comments`, and `tracked_in` links. Jobs still running return `202` with the sections that exist so far.
 
 ### Review, classification, and job maintenance
 
@@ -2643,6 +2646,7 @@ Related lifecycle commands:
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
+| `full JOB_ID` | `--status`/`-s`, `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) — all scope the `tests` section | Complete job data in one call: failures with review state and effective classifications, summary, tests page, comments, tracked-in links. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |
 | `set-reviewed JOB_ID` | `--test`/`-t`, `--reviewed`/`--not-reviewed`, `--child-job`, `--child-build` | Mark one failure reviewed. |
 | `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira` or `github`; omit for auto-detection), `--child-job`, `--child-build` | Link a failure to a ticket. |
@@ -2782,6 +2786,7 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
 ## Advanced Usage
 
 - `rootcoz results show JOB_ID --fields "result.summary,result.failures.test_name,result.failures.classification"` returns only what a report needs, which keeps large results cheap to poll.
+- `rootcoz results full JOB_ID --json` returns the complete picture in one call — failures with review state and effective classifications joined server-side, a precomputed summary, a paginated `tests` page, comments, and tracked-in links. Its `--status`/`--child-job`/`--child-build`/`--offset`/`--limit` flags page the `tests` section.
 - `rootcoz admin token-usage --group-by model --format csv > usage.csv` is the only command with a first-class CSV mode; everything else uses `--json`.
 - `rootcoz --server staging` switches servers without editing any file, and `rootcoz config servers` shows which name maps to which URL.
 - `rootcoz analyze --source file -f results.xml` works with no Jenkins or Prow access at all.

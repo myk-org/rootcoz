@@ -295,7 +295,7 @@ Validate the chart with `uvx --with tox-uv tox -e chart` (requires [Helm 3](http
 
 ## Development
 
-Requires Python 3.14 or newer.
+Requires Python 3.14 (3.14.x). Python 3.15+ is not supported yet — `pydantic-core`'s PyO3 build lags behind new CPython releases, so the project is capped at `>=3.14,<3.15`.
 
 ```bash
 git clone https://github.com/myk-org/rootcoz.git
