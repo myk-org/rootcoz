@@ -556,6 +556,49 @@ class TestResultsFullCommand:
         assert parsed["job"]["job_id"] == "abc-123"
         assert parsed["summary"]["total_failures"] == 1
 
+    def test_results_full_renders_tracked_in(self, mock_client):
+        sample = {
+            "job": {
+                "job_id": "abc-123",
+                "job_name": "p",
+                "build_number": 1,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "",
+            },
+            "counts": {"passed": 0, "skipped": 0, "failed": 1},
+            "failures": [],
+            "summary": {
+                "total_failures": 0,
+                "reviewed_count": 0,
+                "classifications": {},
+            },
+            "tests": {
+                "entries": [],
+                "total": 0,
+                "offset": 0,
+                "limit": 50,
+                "has_more": False,
+            },
+            "comments": [],
+            "tracked_in": {
+                "test_a": [
+                    {
+                        "tracked_in_url": "https://github.com/o/r/issues/9",
+                        "tracked_in_type": "github",
+                        "tracked_in_by": "alice",
+                    }
+                ]
+            },
+        }
+        mock_client.get_full_result.return_value = sample
+        result = runner.invoke(app, ["results", "full", "abc-123"])
+        assert result.exit_code == 0
+        assert "Tracked In:" in result.output
+        assert "test_a: https://github.com/o/r/issues/9" in result.output
+        assert "(github)" in result.output
+        assert "by alice" in result.output
+
     def test_results_full_has_more_hint(self, mock_client):
         sample = {
             "job": {

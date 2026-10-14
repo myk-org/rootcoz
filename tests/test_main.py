@@ -1,6 +1,7 @@
 """Tests for FastAPI main application."""
 
 import asyncio
+import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,6 +25,7 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
+from tests.conftest import make_test_client
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
@@ -9216,6 +9218,117 @@ class TestGetJobResultFullEndpoint:
         assert data["failures"] == []
 
     @pytest.mark.asyncio
+    async def test_legacy_string_analysis_handled(self, test_client) -> None:
+        """Legacy results with a plain-text analysis string must not crash."""
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_legacy",
+                    "error": "e",
+                    "analysis": "plain text analysis from an old run",
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-full-legacy", "http://jenkins", "completed", result_data
+        )
+
+        response = test_client.get("/api/results/job-full-legacy/full")
+        assert response.status_code == 200
+        data = response.json()
+        failure = data["failures"][0]
+        assert failure["test_name"] == "test_legacy"
+        assert failure["classification"] == ""
+        assert failure["pattern"] == ""
+        assert data["summary"]["classifications"] == {}
+
+    @pytest.mark.asyncio
+    async def test_cli_parity_with_endpoint_response(self, test_client) -> None:
+        """Client and CLI JSON output preserve the exact endpoint payload.
+
+        The client method and the ``results full --json`` command consume the
+        same payload the endpoint returns — verified against the real
+        endpoint response rather than an independently authored mock.
+        """
+        result_data = {
+            "status": "completed",
+            "summary": "1 failure",
+            "job_name": "pipeline-parity",
+            "build_number": 7,
+            "passed_count": 2,
+            "skipped_count": 1,
+            "failed_count": 1,
+            "failures": [
+                {
+                    "test_name": "test_parity",
+                    "error": "boom",
+                    "error_signature": "sig-parity",
+                    "analysis": {
+                        "classification": "CODE ISSUE",
+                        "pattern": "NEW",
+                    },
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-full-parity", "http://jenkins", "completed", result_data
+        )
+        await storage.set_reviewed(
+            "job-full-parity", "test_parity", reviewed=True, username="alice"
+        )
+        await storage.save_test_entries(
+            "job-full-parity",
+            [
+                {"test_name": "t.pass", "duration": 0.1, "status": "passed"},
+                {"test_name": "t.skip", "duration": 0.0, "status": "skipped"},
+            ],
+        )
+        await storage.add_comment(
+            "job-full-parity", "test_parity", "looks real", username="bob"
+        )
+        await storage.add_tracked_in_link(
+            "job-full-parity",
+            "test_parity",
+            "https://github.com/org/repo/issues/3",
+            "github",
+            tracked_by="alice",
+        )
+
+        response = test_client.get("/api/results/job-full-parity/full")
+        assert response.status_code == 200
+        endpoint_payload = response.json()
+
+        # The API client returns the endpoint payload unchanged
+        api_client = make_test_client(
+            lambda request: httpx.Response(200, json=endpoint_payload)
+        )
+        assert api_client.get_full_result("job-full-parity") == endpoint_payload
+
+        # The CLI --json output is the endpoint payload
+        from typer.testing import CliRunner
+
+        from rootcoz.cli import main as cli_main
+        from rootcoz.cli.config import ServerConfig
+
+        mock_cli_client = MagicMock()
+        mock_cli_client.get_full_result.return_value = endpoint_payload
+        with (
+            patch.dict(os.environ, {"ROOTCOZ_SERVER": "parity-test"}),
+            patch(
+                "rootcoz.cli.main.get_server_config",
+                return_value=ServerConfig(url="http://localhost:8700"),
+            ),
+            patch("rootcoz.cli.main._get_client", return_value=mock_cli_client),
+        ):
+            cli_result = CliRunner().invoke(
+                cli_main.app, ["results", "full", "job-full-parity", "--json"]
+            )
+        assert cli_result.exit_code == 0
+        assert json.loads(cli_result.output) == endpoint_payload
+
+    @pytest.mark.asyncio
     async def test_invalid_status_400(self, test_client) -> None:
         await storage.save_result(
             "job-full-7", "http://jenkins", "completed", {"summary": "ok"}
@@ -9225,6 +9338,77 @@ class TestGetJobResultFullEndpoint:
         )
         assert response.status_code == 400
         assert "Invalid status values" in response.json()["detail"]
+
+
+class TestPersistTestEntriesAndCacheCounts:
+    """Tests for the shared early-exit counts helper."""
+
+    @pytest.mark.asyncio
+    async def test_persists_entries_and_caches_counts(self, test_client) -> None:
+        from rootcoz.main import _persist_test_entries_and_cache_counts
+        from rootcoz.models import BaseTestEntry
+        from rootcoz.sources.base import CISourceResult
+
+        source_result = CISourceResult(
+            failures=[],
+            passed_tests=[
+                BaseTestEntry(test_name="a.pass", duration=0.1, status="passed")
+            ],
+            skipped_tests=[
+                BaseTestEntry(test_name="b.skip", duration=0.0, status="skipped")
+            ],
+        )
+        child_scopes = [
+            (
+                "child-job",
+                3,
+                [{"test_name": "c.fail", "duration": 0.2, "status": "failed"}],
+            )
+        ]
+        result_data: dict[str, Any] = {}
+
+        await _persist_test_entries_and_cache_counts(
+            "job-counts-1", source_result, child_scopes, result_data
+        )
+
+        assert result_data == {
+            "passed_count": 1,
+            "skipped_count": 1,
+            "failed_count": 1,
+        }
+        entries = await storage.get_test_entries("job-counts-1")
+        assert entries["total"] == 3
+        # Child entries are stored with their scope
+        child_entries = await storage.get_test_entries(
+            "job-counts-1", child_job_name="child-job", child_build_number=3
+        )
+        assert child_entries["total"] == 1
+        assert child_entries["entries"][0]["test_name"] == "c.fail"
+
+    @pytest.mark.asyncio
+    async def test_no_counts_cached_when_persist_fails(self, test_client) -> None:
+        """Persist failure must not leave counts the DB cannot back."""
+        from rootcoz.main import _persist_test_entries_and_cache_counts
+        from rootcoz.models import BaseTestEntry
+        from rootcoz.sources.base import CISourceResult
+
+        source_result = CISourceResult(
+            failures=[],
+            passed_tests=[
+                BaseTestEntry(test_name="a.pass", duration=0.1, status="passed")
+            ],
+        )
+        result_data: dict[str, Any] = {}
+
+        with patch(
+            "rootcoz.main.replace_job_test_entries",
+            side_effect=RuntimeError("db locked"),
+        ):
+            await _persist_test_entries_and_cache_counts(
+                "job-counts-2", source_result, None, result_data
+            )
+
+        assert "passed_count" not in result_data
 
 
 class TestResolveFailureReview:

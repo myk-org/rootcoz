@@ -1190,6 +1190,17 @@ def results_full(
                 f"{c.get('comment', '')}"
             )
 
+    tracked_in = data.get("tracked_in") or {}
+    if tracked_in:
+        typer.echo("\nTracked In:")
+        for test_key, links in tracked_in.items():
+            for link in links:
+                typer.echo(
+                    f"  {test_key}: {link.get('tracked_in_url', '')} "
+                    f"({link.get('tracked_in_type', '')}) "
+                    f"by {link.get('tracked_in_by', '')}"
+                )
+
 
 @results_app.command("enrich-comments")
 def enrich_comments_cmd(

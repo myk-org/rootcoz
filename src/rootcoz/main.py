@@ -3774,6 +3774,35 @@ def _apply_cached_test_counts(
     result_data["failed_count"] = failed
 
 
+async def _persist_test_entries_and_cache_counts(
+    job_id: str,
+    source_result: CISourceResult | None,
+    child_test_scopes: list[tuple[str, int, list[dict[str, Any]]]] | None,
+    result_data: dict[str, Any],
+) -> None:
+    """Persist test outcomes and cache counts BEFORE update_status.
+
+    Used by every early-exit completion path so the stored result carries
+    the same cached counts as the normal completion path. On persist
+    failure, counts are NOT cached — the stored result must never claim
+    test outcomes the DB does not have.
+    """
+    all_test_entries = (
+        source_result.test_entry_dicts() if source_result is not None else []
+    )
+    scopes = child_test_scopes or []
+    try:
+        await replace_job_test_entries(job_id, all_test_entries, scopes)
+    except Exception:
+        logger.warning(
+            "Failed to persist test entries for job_id=%s",
+            job_id,
+            exc_info=True,
+        )
+    else:
+        _apply_cached_test_counts(result_data, all_test_entries, scopes)
+
+
 async def _run_per_group_analysis(
     *,
     groups: dict[str, list[Any]],
@@ -3975,6 +4004,11 @@ async def _analyze_failures_or_exit(
         result_data["job_name"] = display_name
         _stamp_result_metadata(result_data, source_result)
         await _preserve_request_params(job_id, result_data)
+        # Persist test outcomes and cache counts so /full and the dashboard
+        # report real numbers instead of zeros on this no-failure path.
+        await _persist_test_entries_and_cache_counts(
+            job_id, source_result, child_test_scopes, result_data
+        )
         await update_status(job_id, "completed", result_data)
         notify_active_count_changed()
         notify_dashboard_changed()
@@ -4086,22 +4120,9 @@ async def _analyze_failures_or_exit(
         await _attach_token_usage(job_id, fail_data)
         # Persist test outcomes and cache counts BEFORE update_status, so the
         # stored result carries them. Mirrors the normal completion path.
-        _all_test_entries = (
-            source_result.test_entry_dicts() if source_result is not None else []
+        await _persist_test_entries_and_cache_counts(
+            job_id, source_result, child_test_scopes, fail_data
         )
-        _scopes = child_test_scopes or []
-        try:
-            await replace_job_test_entries(job_id, _all_test_entries, _scopes)
-        except Exception:
-            # Do NOT cache counts from entries that were not persisted - the
-            # stored result must never claim test outcomes the DB does not have.
-            logger.warning(
-                "Failed to persist test entries for fully failed job_id=%s",
-                job_id,
-                exc_info=True,
-            )
-        else:
-            _apply_cached_test_counts(fail_data, _all_test_entries, _scopes)
         await update_status(job_id, "failed", fail_data)
         notify_active_count_changed()
         notify_dashboard_changed()
@@ -4462,6 +4483,11 @@ async def _process_ci_source_analysis(
                     _stamp_result_metadata(result_data, source_result)
                     await _preserve_request_params(job_id, result_data)
                     await _attach_token_usage(job_id, result_data)
+                    # Aggregate available child counts so /full and the
+                    # dashboard report real numbers on this path too.
+                    await _persist_test_entries_and_cache_counts(
+                        job_id, source_result, child_test_scopes, result_data
+                    )
                     await update_status(job_id, "failed", result_data)
                     notify_active_count_changed()
                     notify_dashboard_changed()
@@ -5366,7 +5392,12 @@ async def get_job_result_full(
     reviewed_count = 0
     classification_counts: Counter[str] = Counter()
     for failure, child_job, child_build in _iter_scoped_failures(result_data):
-        analysis = failure.get("analysis") or {}
+        analysis = failure.get("analysis")
+        if not isinstance(analysis, dict):
+            # Legacy results stored the analysis as plain text — no
+            # classification/pattern to extract (raw text stays available
+            # via GET /results/{job_id}).
+            analysis = {}
         classification = analysis.get("classification", "")
         if classification:
             classification_counts[classification] += 1
@@ -5431,7 +5462,7 @@ async def get_job_result_full(
     if result.get("status") in IN_PROGRESS_STATUSES:
         response.status_code = 202
 
-    return payload
+    return strip_sensitive_from_response(payload)
 
 
 @app.get("/api/failures/{failure_uuid}", operation_id="getFailureByUuid")

@@ -274,6 +274,22 @@ class TestRootCozClientResults:
         )
         assert result == {"job": {}, "failures": []}
 
+    def test_get_full_result_accepts_202_running_job(self):
+        """Running jobs answer 202 — the client must treat it as success."""
+
+        def handler(request):
+            return httpx.Response(
+                202,
+                json={
+                    "job": {"job_id": "abc-123", "status": "running"},
+                    "failures": [],
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.get_full_result("abc-123")
+        assert result["job"]["status"] == "running"
+
     def test_get_full_result_not_found(self):
         client = _make_client(
             lambda request: httpx.Response(404, json={"detail": "Job not found"})

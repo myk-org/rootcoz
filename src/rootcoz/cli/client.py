@@ -807,7 +807,13 @@ class RootCozClient:
             params["child_job_name"] = child_job_name
         if child_build_number is not None:
             params["child_build_number"] = str(child_build_number)
-        return self._request("GET", f"/api/results/{job_id}/full", params=params)
+        # 202 = job still running (payload carries the sections that exist)
+        return self._request(
+            "GET",
+            f"/api/results/{job_id}/full",
+            params=params,
+            accept_statuses=(200, 202),
+        )
 
     # -- Review ---------------------------------------------------------------
 
