@@ -129,6 +129,7 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/results/{job_id}` | viewer | `fields` — comma-separated allowlisted paths |
 | GET | `/api/results/fields` | viewer | none; returns the allowlist |
 | GET | `/api/results/{job_id}/tests` | viewer | `status` (repeatable: `passed`, `skipped`, `failed`), `child_job_name`, `child_build_number`, `offset`, `limit` (1–200, default 50) |
+| GET | `/api/results/{job_id}/full` | viewer | `status`, `child_job_name`, `child_build_number`, `offset`, `limit` — apply to the `tests` section (same contract as `/tests`) |
 | GET | `/api/failures/{failure_uuid}` | viewer | none |
 | GET | `/results/{job_id}/review-status` | viewer | none |
 | GET | `/api/dashboard` | viewer | `limit`, `offset` |
@@ -136,6 +137,8 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/api/dashboard/active-count` | viewer | none |
 
 `fields` returns full values for allowlisted paths only and is never truncated. Unknown paths return `400`, so fetch `/api/results/fields` first when you build against it.
+
+`GET /api/results/{job_id}/full` returns the complete picture in one call: `job` metadata, `counts` (passed/skipped/failed), a flat `failures` list across child jobs with effective classifications and review state (`reviewed`, `reviewed_by`) joined server-side, a precomputed `summary` (`total_failures`, `reviewed_count`, `classifications`), a paginated `tests` page, `comments`, and `tracked_in` links. Jobs still running return `202` with the sections that exist so far.
 
 ### Review, classification, and job maintenance
 

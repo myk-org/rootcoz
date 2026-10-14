@@ -5,7 +5,7 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import aiosqlite
@@ -8961,40 +8961,331 @@ class TestGetJobTestsEndpoint:
         assert data["entries"][0]["test_name"] == "child.pass"
 
 
-class TestIsChildReviewKey:
-    """Tests for _is_child_review_key."""
+class TestGetJobResultFullEndpoint:
+    """Tests for GET /api/results/{job_id}/full."""
 
-    @pytest.mark.parametrize(
-        "key, expected",
-        [
-            ("child-job#42::test_a", True),
-            ("child-job#0::test_a", True),
-            ("my-job#999::TestClass::test_method", True),
-            ("test_a", False),
-            ("TestClass::test_method", False),
-            ("test_no_hash", False),
-            ("", False),
-            ("#42::test", False),  # empty child name
-            ("child#abc::test", False),  # non-numeric build
-            ("TestClass::suite#1::test_method", False),  # #digits:: after first ::
-        ],
-        ids=[
-            "child-scoped",
-            "wildcard",
-            "test-with-double-colon",
-            "simple-top-level",
-            "top-level-double-colon",
-            "no-hash",
-            "empty",
-            "empty-child-name",
-            "non-numeric-build",
-            "hash-digits-after-first-separator",
-        ],
-    )
-    def test_is_child_review_key(self, key: str, expected: bool) -> None:
-        from rootcoz.main import _is_child_review_key
+    @pytest.mark.asyncio
+    async def test_full_response_joins_everything(self, test_client) -> None:
+        """Failures across child jobs are flattened with reviews joined."""
+        result_data = {
+            "status": "completed",
+            "summary": "2 failures",
+            "job_name": "pipeline-main",
+            "build_number": 42,
+            "passed_count": 10,
+            "skipped_count": 2,
+            "failed_count": 3,
+            "failures": [
+                {
+                    "test_name": "test_top",
+                    "error": "boom",
+                    "error_signature": "sig-top",
+                    "analysis": {
+                        "classification": "CODE ISSUE",
+                        "pattern": "NEW",
+                    },
+                }
+            ],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-job",
+                    "build_number": 7,
+                    "failures": [
+                        {
+                            "test_name": "test_child",
+                            "error": "crash",
+                            "error_signature": "sig-child",
+                            "analysis": {
+                                "classification": "PRODUCT BUG",
+                                "pattern": "REGRESSION",
+                            },
+                        }
+                    ],
+                    "failed_children": [],
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-full-1", "http://jenkins", "completed", result_data
+        )
+        await storage.set_reviewed(
+            "job-full-1", "test_top", reviewed=True, username="alice"
+        )
+        # Wildcard child review (build 0) covers the child-scoped failure
+        await storage.set_reviewed(
+            "job-full-1",
+            "test_child",
+            reviewed=True,
+            username="bob",
+            child_job_name="child-job",
+            child_build_number=0,
+        )
+        await storage.add_comment(
+            "job-full-1", "test_top", "investigating", username="carol"
+        )
+        await storage.add_tracked_in_link(
+            "job-full-1",
+            "test_top",
+            "https://github.com/org/repo/issues/1",
+            "github",
+            tracked_by="alice",
+        )
 
-        assert _is_child_review_key(key) == expected
+        response = test_client.get("/api/results/job-full-1/full")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["job"]["job_id"] == "job-full-1"
+        assert data["job"]["job_name"] == "pipeline-main"
+        assert data["job"]["build_number"] == 42
+        assert data["job"]["status"] == "completed"
+        assert data["counts"] == {"passed": 10, "skipped": 2, "failed": 3}
+
+        failures = data["failures"]
+        assert len(failures) == 2
+        top = failures[0]
+        assert top["test_name"] == "test_top"
+        assert top["classification"] == "CODE ISSUE"
+        assert top["reviewed"] is True
+        assert top["reviewed_by"] == "alice"
+        assert top["child_job_name"] == ""
+        child = failures[1]
+        assert child["test_name"] == "test_child"
+        assert child["child_job_name"] == "child-job"
+        assert child["child_build_number"] == 7
+        assert child["reviewed"] is True
+        assert child["reviewed_by"] == "bob"
+
+        assert data["summary"] == {
+            "total_failures": 2,
+            "reviewed_count": 2,
+            "classifications": {"CODE ISSUE": 1, "PRODUCT BUG": 1},
+        }
+        assert data["tests"]["total"] == 0
+        assert len(data["comments"]) == 1
+        assert data["comments"][0]["comment"] == "investigating"
+        assert "test_top" in data["tracked_in"]
+
+    @pytest.mark.asyncio
+    async def test_exact_child_review_takes_precedence(self, test_client) -> None:
+        """Exact-build review wins over the wildcard (build 0) one."""
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "runner",
+                    "build_number": 9,
+                    "failures": [
+                        {
+                            "test_name": "test_x",
+                            "error": "e",
+                            "analysis": {"classification": "INFRASTRUCTURE"},
+                        }
+                    ],
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-full-2", "http://jenkins", "completed", result_data
+        )
+        await storage.set_reviewed(
+            "job-full-2",
+            "test_x",
+            reviewed=True,
+            username="wildcard-user",
+            child_job_name="runner",
+            child_build_number=0,
+        )
+        await storage.set_reviewed(
+            "job-full-2",
+            "test_x",
+            reviewed=True,
+            username="exact-user",
+            child_job_name="runner",
+            child_build_number=9,
+        )
+
+        data = test_client.get("/api/results/job-full-2/full").json()
+        assert data["failures"][0]["reviewed_by"] == "exact-user"
+
+    @pytest.mark.asyncio
+    async def test_bare_review_does_not_apply_to_child_scope(self, test_client) -> None:
+        """Top-level reviews never mark child-scoped failures as reviewed."""
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "runner",
+                    "build_number": 3,
+                    "failures": [
+                        {
+                            "test_name": "test_y",
+                            "error": "e",
+                            "analysis": {"classification": "CODE ISSUE"},
+                        }
+                    ],
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-full-3", "http://jenkins", "completed", result_data
+        )
+        await storage.set_reviewed(
+            "job-full-3", "test_y", reviewed=True, username="alice"
+        )
+
+        data = test_client.get("/api/results/job-full-3/full").json()
+        assert data["failures"][0]["reviewed"] is False
+        assert data["failures"][0]["reviewed_by"] == ""
+        assert data["summary"]["reviewed_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_effective_classification_override_applied(self, test_client) -> None:
+        """User overrides replace the stored classification in the response."""
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_override",
+                    "error": "e",
+                    "analysis": {"classification": "CODE ISSUE"},
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-full-4", "http://jenkins", "completed", result_data
+        )
+        await storage.override_classification(
+            "job-full-4", "test_override", "PRODUCT BUG", username="alice"
+        )
+
+        data = test_client.get("/api/results/job-full-4/full").json()
+        assert data["failures"][0]["classification"] == "PRODUCT BUG"
+        assert data["summary"]["classifications"] == {"PRODUCT BUG": 1}
+
+    @pytest.mark.asyncio
+    async def test_tests_section_pagination_and_filters(self, test_client) -> None:
+        """Tests section honors the /tests pagination contract."""
+        await storage.save_result(
+            "job-full-5",
+            "http://jenkins",
+            "completed",
+            {"status": "completed", "summary": "ok", "passed_count": 3},
+        )
+        await storage.save_test_entries(
+            "job-full-5",
+            [
+                {"test_name": f"t{i}", "duration": 0.1, "status": "passed"}
+                for i in range(3)
+            ],
+        )
+
+        base = "/api/results/job-full-5/full"
+        data = test_client.get(f"{base}?limit=2").json()
+        assert data["tests"]["total"] == 3
+        assert len(data["tests"]["entries"]) == 2
+        assert data["tests"]["has_more"] is True
+
+        data = test_client.get(f"{base}?limit=2&offset=2").json()
+        assert len(data["tests"]["entries"]) == 1
+        assert data["tests"]["has_more"] is False
+
+        data = test_client.get(f"{base}?status=failed").json()
+        assert data["tests"]["total"] == 0
+        assert data["tests"]["entries"] == []
+
+    @pytest.mark.asyncio
+    async def test_404_unknown_job(self, test_client) -> None:
+        response = test_client.get("/api/results/job-full-missing/full")
+        assert response.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_202_in_progress(self, test_client) -> None:
+        await storage.save_result(
+            "job-full-6", "http://jenkins", "running", {"summary": ""}
+        )
+        response = test_client.get("/api/results/job-full-6/full")
+        assert response.status_code == 202
+        data = response.json()
+        assert data["job"]["status"] == "running"
+        assert data["failures"] == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_status_400(self, test_client) -> None:
+        await storage.save_result(
+            "job-full-7", "http://jenkins", "completed", {"summary": "ok"}
+        )
+        response = test_client.get(
+            "/api/results/job-full-7/full", params={"status": "bogus"}
+        )
+        assert response.status_code == 400
+        assert "Invalid status values" in response.json()["detail"]
+
+
+class TestResolveFailureReview:
+    """Unit tests for the shared review-resolution helper."""
+
+    def _reviews(self) -> dict[str, dict[str, Any]]:
+        return {
+            "test_bare": {"reviewed": True, "username": "alice"},
+            "runner#9::test_x": {
+                "reviewed": True,
+                "username": "exact-user",
+            },
+            "runner#0::test_x": {
+                "reviewed": True,
+                "username": "wildcard-user",
+            },
+            "test_unreviewed": {"reviewed": False, "username": ""},
+            "test_anonymous": {"reviewed": True, "username": ""},
+        }
+
+    def test_exact_beats_wildcard(self) -> None:
+        from rootcoz.main import resolve_failure_review
+
+        entry = resolve_failure_review(self._reviews(), "test_x", "runner", 9)
+        assert entry is not None
+        assert entry["username"] == "exact-user"
+
+    def test_wildcard_fallback(self) -> None:
+        from rootcoz.main import resolve_failure_review
+
+        entry = resolve_failure_review(self._reviews(), "test_x", "runner", 12)
+        assert entry is not None
+        assert entry["username"] == "wildcard-user"
+
+    def test_bare_lookup(self) -> None:
+        from rootcoz.main import resolve_failure_review
+
+        entry = resolve_failure_review(self._reviews(), "test_bare")
+        assert entry is not None
+        assert entry["username"] == "alice"
+
+    def test_bare_never_matches_child_scope(self) -> None:
+        from rootcoz.main import resolve_failure_review
+
+        assert resolve_failure_review(self._reviews(), "test_bare", "runner", 9) is None
+
+    def test_child_never_matches_bare_scope(self) -> None:
+        from rootcoz.main import resolve_failure_review
+
+        assert resolve_failure_review(self._reviews(), "test_x") is None
+
+    def test_unreviewed_and_anonymous_return_none(self) -> None:
+        from rootcoz.main import resolve_failure_review
+
+        assert resolve_failure_review(self._reviews(), "test_unreviewed") is None
+        assert resolve_failure_review(self._reviews(), "test_anonymous") is None
+
+    def test_missing_test_returns_none(self) -> None:
+        from rootcoz.main import resolve_failure_review
+
+        assert resolve_failure_review(self._reviews(), "test_nope") is None
 
 
 class TestReadLogTail:

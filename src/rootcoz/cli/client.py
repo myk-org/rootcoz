@@ -784,6 +784,31 @@ class RootCozClient:
             params["child_build_number"] = str(child_build_number)
         return self._request("GET", f"/api/results/{job_id}/tests", params=params)
 
+    def get_full_result(
+        self,
+        job_id: str,
+        *,
+        status: list[str] | None = None,
+        child_job_name: str | None = None,
+        child_build_number: int | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Get complete job data in one response.
+
+        GET /api/results/{job_id}/full — job metadata, counts, failures
+        (with review state joined), summary, paginated tests, comments,
+        and tracked-in links.
+        """
+        params: dict[str, Any] = {"offset": str(offset), "limit": str(limit)}
+        if status:
+            params["status"] = status
+        if child_job_name is not None:
+            params["child_job_name"] = child_job_name
+        if child_build_number is not None:
+            params["child_build_number"] = str(child_build_number)
+        return self._request("GET", f"/api/results/{job_id}/full", params=params)
+
     # -- Review ---------------------------------------------------------------
 
     def get_review_status(self, job_id: str) -> dict[str, Any]:

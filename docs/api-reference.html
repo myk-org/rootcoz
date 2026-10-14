@@ -602,6 +602,12 @@
 </tr>
 <tr>
 <td>GET</td>
+<td><code>/api/results/{job_id}/full</code></td>
+<td>viewer</td>
+<td><code>status</code>, <code>child_job_name</code>, <code>child_build_number</code>, <code>offset</code>, <code>limit</code> — apply to the <code>tests</code> section (same contract as <code>/tests</code>)</td>
+</tr>
+<tr>
+<td>GET</td>
 <td><code>/api/failures/{failure_uuid}</code></td>
 <td>viewer</td>
 <td>none</td>
@@ -633,6 +639,7 @@
 </tbody>
 </table></div>
 <p><code>fields</code> returns full values for allowlisted paths only and is never truncated. Unknown paths return <code>400</code>, so fetch <code>/api/results/fields</code> first when you build against it.</p>
+<p><code>GET /api/results/{job_id}/full</code> returns the complete picture in one call: <code>job</code> metadata, <code>counts</code> (passed/skipped/failed), a flat <code>failures</code> list across child jobs with effective classifications and review state (<code>reviewed</code>, <code>reviewed_by</code>) joined server-side, a precomputed <code>summary</code> (<code>total_failures</code>, <code>reviewed_count</code>, <code>classifications</code>), a paginated <code>tests</code> page, <code>comments</code>, and <code>tracked_in</code> links. Jobs still running return <code>202</code> with the sections that exist so far.</p>
 <h3 id="review-classification-and-job-maintenance">Review, classification, and job maintenance</h3>
 <div class="table-wrap"><table>
 <thead>

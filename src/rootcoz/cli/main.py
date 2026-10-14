@@ -1091,6 +1091,106 @@ def results_tests(
         typer.echo(f"\n  ... {remaining} more (use --offset {offset + limit})")
 
 
+@results_app.command("full")
+def results_full(
+    job_id: str = typer.Argument(help="Job ID to get complete data for."),
+    status: list[str] = _STATUS_FILTER_OPTION,
+    child_job_name: str = typer.Option(
+        None, "--child-job", help="Filter the tests section by child job name."
+    ),
+    child_build_number: int = typer.Option(
+        None, "--child-build", help="Filter the tests section by child build number."
+    ),
+    offset: int = typer.Option(0, "--offset", help="Tests section pagination offset."),
+    limit: int = typer.Option(50, "--limit", help="Tests section page size (max 200)."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Show complete job data: failures, reviews, classifications, tests."""
+    _set_json(json_output)
+    try:
+        client = _get_client()
+        data = client.get_full_result(
+            job_id,
+            status=status or None,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+            offset=offset,
+            limit=limit,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json"):
+        print_output(data, columns=[], as_json=True)
+        return
+
+    job = data.get("job", {})
+    counts = data.get("counts", {})
+    summary = data.get("summary", {})
+
+    typer.echo(
+        f"Job {job.get('job_id', '')} — {job.get('job_name', '')} "
+        f"#{job.get('build_number', '')} [{job.get('status', '')}/"
+        f"{job.get('analysis_state', '')}]"
+    )
+    typer.echo(
+        f"Tests: {counts.get('passed', 0)} passed, "
+        f"{counts.get('skipped', 0)} skipped, {counts.get('failed', 0)} failed"
+    )
+    typer.echo(
+        f"Failures: {summary.get('total_failures', 0)} "
+        f"({summary.get('reviewed_count', 0)} reviewed)"
+    )
+    classifications = summary.get("classifications", {})
+    if classifications:
+        dist = ", ".join(
+            f"{name}: {count}" for name, count in sorted(classifications.items())
+        )
+        typer.echo(f"Classifications: {dist}")
+
+    failures = data.get("failures", [])
+    if failures:
+        typer.echo("\nFailures:")
+        for f in failures:
+            scope = (
+                f" ({f.get('child_job_name', '')}#{f.get('child_build_number', 0)})"
+                if f.get("child_job_name")
+                else ""
+            )
+            reviewed = "✓" if f.get("reviewed") else "✗"
+            reviewed_by = f" by {f.get('reviewed_by', '')}" if f.get("reviewed") else ""
+            typer.echo(
+                f"  {reviewed} {f.get('test_name', '')}{scope} — "
+                f"{f.get('classification', '')} / {f.get('pattern', '')}{reviewed_by}"
+            )
+
+    tests = data.get("tests", {})
+    entries = tests.get("entries", [])
+    total = tests.get("total", 0)
+    typer.echo(f"\nTests ({len(entries)} of {total}):")
+    for entry in entries:
+        icon = {"passed": "✓", "skipped": "⊘", "failed": "✗"}.get(
+            entry.get("status", ""), "?"
+        )
+        typer.echo(
+            f"  {icon} {entry.get('test_name', '')} ({entry.get('duration', 0.0):.2f}s)"
+        )
+    if tests.get("has_more"):
+        typer.echo(
+            f"\n  ... {total - len(entries) - offset} more "
+            f"(use --offset {offset + limit})"
+        )
+
+    comments = data.get("comments", [])
+    if comments:
+        typer.echo(f"\nComments ({len(comments)}):")
+        for c in comments:
+            typer.echo(
+                f"  [{c.get('username', '')}] {c.get('test_name', '')}: "
+                f"{c.get('comment', '')}"
+            )
+
+
 @results_app.command("enrich-comments")
 def enrich_comments_cmd(
     job_id: str = typer.Argument(help="Job ID."),

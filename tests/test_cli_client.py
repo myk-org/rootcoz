@@ -215,6 +215,73 @@ class TestRootCozClientResults:
             client.get_test_entries("nonexistent")
         assert exc_info.value.status_code == 404
 
+    def test_get_full_result(self):
+        sample = {
+            "job": {
+                "job_id": "abc-123",
+                "job_name": "pipe",
+                "build_number": 42,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            "counts": {"passed": 10, "skipped": 1, "failed": 2},
+            "failures": [],
+            "summary": {
+                "total_failures": 0,
+                "reviewed_count": 0,
+                "classifications": {},
+            },
+            "tests": {
+                "entries": [],
+                "total": 13,
+                "offset": 0,
+                "limit": 50,
+                "has_more": False,
+            },
+            "comments": [],
+            "tracked_in": {},
+        }
+
+        def handler(request):
+            assert request.method == "GET"
+            assert "/api/results/abc-123/full" in str(request.url)
+            return httpx.Response(200, json=sample)
+
+        client = _make_client(handler)
+        result = client.get_full_result("abc-123")
+        assert result["job"]["job_id"] == "abc-123"
+        assert result["tests"]["total"] == 13
+
+    def test_get_full_result_with_filters(self):
+        def handler(request):
+            params = dict(request.url.params)
+            assert params.get("offset") == "10"
+            assert params.get("limit") == "25"
+            assert ("status", "failed") in request.url.params.multi_items()
+            assert params.get("child_job_name") == "runner"
+            assert params.get("child_build_number") == "7"
+            return httpx.Response(200, json={"job": {}, "failures": []})
+
+        client = _make_client(handler)
+        result = client.get_full_result(
+            "abc-123",
+            status=["failed"],
+            child_job_name="runner",
+            child_build_number=7,
+            offset=10,
+            limit=25,
+        )
+        assert result == {"job": {}, "failures": []}
+
+    def test_get_full_result_not_found(self):
+        client = _make_client(
+            lambda request: httpx.Response(404, json={"detail": "Job not found"})
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.get_full_result("nonexistent")
+        assert exc_info.value.status_code == 404
+
 
 class TestRootCozClientDashboard:
     def test_dashboard(self):

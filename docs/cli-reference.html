@@ -580,6 +580,11 @@
 <td>Paginated test entries with <code>total</code> and <code>has_more</code>.</td>
 </tr>
 <tr>
+<td><code>full JOB_ID</code></td>
+<td><code>--status</code>/<code>-s</code>, <code>--child-job</code>, <code>--child-build</code>, <code>--offset</code> (0), <code>--limit</code> (50, max 200) — all scope the <code>tests</code> section</td>
+<td>Complete job data in one call: failures with review state and effective classifications, summary, tests page, comments, tracked-in links.</td>
+</tr>
+<tr>
 <td><code>review-status JOB_ID</code></td>
 <td>—</td>
 <td>Failure, reviewed, and comment counts.</td>
@@ -1107,6 +1112,7 @@
 <h2 id="advanced-usage">Advanced Usage</h2>
 <ul>
 <li><code>rootcoz results show JOB_ID --fields "result.summary,result.failures.test_name,result.failures.classification"</code> returns only what a report needs, which keeps large results cheap to poll.</li>
+<li><code>rootcoz results full JOB_ID --json</code> returns the complete picture in one call — failures with review state and effective classifications joined server-side, a precomputed summary, a paginated <code>tests</code> page, comments, and tracked-in links. Its <code>--status</code>/<code>--child-job</code>/<code>--child-build</code>/<code>--offset</code>/<code>--limit</code> flags page the <code>tests</code> section.</li>
 <li><code>rootcoz admin token-usage --group-by model --format csv &gt; usage.csv</code> is the only command with a first-class CSV mode; everything else uses <code>--json</code>.</li>
 <li><code>rootcoz --server staging</code> switches servers without editing any file, and <code>rootcoz config servers</code> shows which name maps to which URL.</li>
 <li><code>rootcoz analyze --source file -f results.xml</code> works with no Jenkins or Prow access at all.</li>
