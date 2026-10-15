@@ -4230,6 +4230,7 @@ class TestAiKeysCommands:
                 {
                     "provider": "acpx/a",
                     "configured": True,
+                    "supports_user_keys": True,
                     "api_key": "secret-key",  # pragma: allowlist secret
                 }
             ]
@@ -4237,7 +4238,9 @@ class TestAiKeysCommands:
         result = runner.invoke(app, ["auth", "ai-keys", "list", "--json"])
         assert result.exit_code == 0
         assert json.loads(result.output) == {
-            "providers": [{"provider": "acpx/a", "configured": True}]
+            "providers": [
+                {"provider": "acpx/a", "configured": True, "supports_user_keys": True}
+            ]
         }
         assert "secret-key" not in result.output
 

@@ -7,7 +7,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { ModelCombobox } from './ModelCombobox'
 
-type Provider = { provider: string; configured: boolean }
+type Provider = { provider: string; configured: boolean; supports_user_keys: boolean }
 
 export function AiCredentials() {
   const [providers, setProviders] = useState<Provider[] | null>(null)
@@ -36,9 +36,12 @@ export function AiCredentials() {
   }
 
   const listed = providers ?? []
-  // Configured providers stay listed: hiding them made a saved key look lost.
+  // Providers the user can still save a key for. A stored key for a provider
+  // that stopped accepting user keys (e.g. an ambient-auth provider) stays
+  // visible with a Remove action only — the save endpoint would reject it.
+  const addable = listed.filter((item) => item.supports_user_keys)
   // Picking one is a replace, which is what the form already submits.
-  const provider = editing ?? listed.find((item) => item.provider === selected)?.provider
+  const provider = editing ?? addable.find((item) => item.provider === selected)?.provider
   // Keys the sidecar accepted but that yielded nothing selectable. Surfaced per
   // provider, without needing a selection, so the row is never a dead end.
   // Only a provider that *does* advertise listing qualifies: a manual-only key
@@ -128,17 +131,17 @@ export function AiCredentials() {
         {providers && <>
           {listed.some((item) => item.configured) && (
             <ul aria-label="Configured AI providers" className="divide-y divide-border-muted border-t border-border-muted">
-              {listed.filter((item) => item.configured).map(({ provider: id }) => (
+              {listed.filter((item) => item.configured).map(({ provider: id, supports_user_keys: canReplace }) => (
                 <li key={id} className="flex flex-wrap items-center gap-2 py-3">
                   <span className="mr-auto font-mono text-sm text-text-primary break-all">{id}</span>
-                  <span className="text-xs text-text-tertiary">Configured</span>
-                  <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setEditing(id); setError('') }} aria-label={`Replace ${id} key`}>Replace</Button>
+                  <span className="text-xs text-text-tertiary">{canReplace ? 'Configured' : 'Configured — user keys no longer accepted'}</span>
+                  {canReplace && <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setEditing(id); setError('') }} aria-label={`Replace ${id} key`}>Replace</Button>}
                   <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => remove(id)} aria-label={`Remove ${id} key`}>Remove key</Button>
                 </li>
               ))}
             </ul>
           )}
-          {(listed.length > 0 || editing) && (
+          {(addable.length > 0 || editing) && (
             <form onSubmit={save} className="space-y-3 border-t border-border-muted pt-4">
               {editing ? (
                 <div className="flex items-center justify-between gap-2">
@@ -148,7 +151,7 @@ export function AiCredentials() {
               ) : (
                 <div className="space-y-1.5">
                   <span className="block text-xs text-text-tertiary">AI provider</span>
-                  <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); setError(''); setSelected(value) }} options={listed.map((item) => ({ id: item.provider, name: item.configured ? 'configured' : item.provider }))} placeholder="Find a provider" ariaLabel="AI provider" disabled={busy !== null} />
+                  <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); setError(''); setSelected(value) }} options={addable.map((item) => ({ id: item.provider, name: item.configured ? 'configured' : item.provider }))} placeholder="Find a provider" ariaLabel="AI provider" disabled={busy !== null} />
                 </div>
               )}
               <div className="space-y-1.5">

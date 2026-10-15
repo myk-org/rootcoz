@@ -398,7 +398,7 @@
 <td>GET</td>
 <td><code>/api/user/ai-credentials</code></td>
 <td>viewer</td>
-<td>Supported provider IDs with a <code>configured</code> flag each. Keys are never returned</td>
+<td>Supported provider IDs with a <code>configured</code> flag and a <code>supports_user_keys</code> flag each (a stored key for a provider that stopped accepting user keys — e.g. an ambient-auth provider — stays listed with <code>supports_user_keys: false</code>). Keys are never returned</td>
 </tr>
 <tr>
 <td>PUT</td>

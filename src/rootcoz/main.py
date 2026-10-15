@@ -10492,7 +10492,11 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
     return JSONResponse(
         content={
             "providers": [
-                {"provider": p, "configured": p in configured}
+                {
+                    "provider": p,
+                    "configured": p in configured,
+                    "supports_user_keys": p in supported,
+                }
                 for p in sorted(set(supported) | configured.keys())
             ]
         },
@@ -12519,6 +12523,12 @@ async def _available_chat_session(
             finally:
                 ai_username.reset(token)
         elif source == "user":
+            # A provider can stop accepting user keys after the session started
+            # (e.g. it was added to AMBIENT_AUTH_PROVIDERS): report the session
+            # unavailable instead of letting the next send fail on a source the
+            # catalog no longer offers.
+            if active["ai_provider"] not in await supported_key_providers():
+                return None
             from pi_sidecar_client import _validate_api_key
 
             key, generation = await storage.get_user_ai_credential_with_generation(

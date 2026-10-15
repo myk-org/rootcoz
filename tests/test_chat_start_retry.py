@@ -39,6 +39,11 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
         )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+    # Availability rechecks user-key eligibility per read; the test sidecar
+    # reports nothing, so pin the provider as key-capable.
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
 
     async def validate(body, username):
         ai_client._selected_credential_source.set(source)

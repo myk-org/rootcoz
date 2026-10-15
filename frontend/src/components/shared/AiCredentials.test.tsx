@@ -29,7 +29,7 @@ const remove = vi.mocked(api.delete)
 beforeEach(() => {
   vi.resetAllMocks()
   catalogMocks.providerStatus = {}
-  get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: false }, { provider: 'other', configured: false }] })
+  get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: false, supports_user_keys: true }, { provider: 'other', configured: false, supports_user_keys: true }] })
   put.mockResolvedValue({ outcome: 'accepted', ok: true })
   remove.mockResolvedValue(undefined)
 })
@@ -127,7 +127,7 @@ describe('AiCredentials', () => {
 
   it('replaces a configured key without removing it first', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValueOnce({ providers: [{ provider: 'other', configured: true }] })
+    get.mockResolvedValueOnce({ providers: [{ provider: 'other', configured: true, supports_user_keys: true }] })
     render(<AiCredentials />)
     await user.click(await screen.findByRole('button', { name: 'Replace other key' }))
     await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
@@ -153,7 +153,7 @@ describe('AiCredentials', () => {
     // the catalog is keyed by the folded lowercase ID — the verification
     // form must still find the provider's models.
     const user = userEvent.setup()
-    get.mockResolvedValueOnce({ providers: [{ provider: 'EnMaaS', configured: false }] })
+    get.mockResolvedValueOnce({ providers: [{ provider: 'EnMaaS', configured: false, supports_user_keys: true }] })
     render(<AiCredentials />)
     await user.click(await screen.findByRole('combobox', { name: 'AI provider' }))
     await user.click(await screen.findByRole('option', { name: 'EnMaaS' }))
@@ -163,7 +163,7 @@ describe('AiCredentials', () => {
 
   it('flags a starved mixed-case key via the folded status entry', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue({ providers: [{ provider: 'EnMaaS', configured: true }] })
+    get.mockResolvedValue({ providers: [{ provider: 'EnMaaS', configured: true, supports_user_keys: true }] })
     catalogMocks.providerStatus = {
       enmaas: { has_api_key: true, modelListingSupported: true, model_count: 0 },
     }
@@ -174,7 +174,7 @@ describe('AiCredentials', () => {
 
   it.each(['rejected', 'inconclusive'] as const)('keeps the configured key after %s verification', async outcome => {
     const user = userEvent.setup()
-    get.mockResolvedValueOnce({ providers: [{ provider: 'other', configured: true }] })
+    get.mockResolvedValueOnce({ providers: [{ provider: 'other', configured: true, supports_user_keys: true }] })
     put.mockResolvedValueOnce({ outcome, ok: false })
     render(<AiCredentials />)
     await user.click(await screen.findByRole('button', { name: 'Replace other key' }))
@@ -203,7 +203,7 @@ describe('AiCredentials with a configured but unusable key', () => {
     catalogMocks.providerStatus = {
       'openai/custom': { has_api_key: true, model_count: 0, modelListingSupported: true },
     }
-    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
+    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true, supports_user_keys: true }] })
 
     render(<AiCredentials />)
 
@@ -219,7 +219,7 @@ describe('AiCredentials with a configured but unusable key', () => {
     catalogMocks.providerStatus = {
       'openai/custom': { has_api_key: true, model_count: 0, modelListingSupported: false },
     }
-    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
+    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true, supports_user_keys: true }] })
 
     render(<AiCredentials />)
 
@@ -232,11 +232,45 @@ describe('AiCredentials with a configured but unusable key', () => {
     catalogMocks.providerStatus = {
       'openai/custom': { has_api_key: true, model_count: 2, modelListingSupported: true },
     }
-    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true }] })
+    get.mockResolvedValue({ providers: [{ provider: 'openai/custom', configured: true, supports_user_keys: true }] })
 
     render(<AiCredentials />)
 
     expect(await screen.findByText('openai/custom')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+describe('AiCredentials with a provider that stopped accepting user keys', () => {
+  const ambientRow = { provider: 'google-vertex-claude', configured: true, supports_user_keys: false }
+
+  it('keeps the stored key visible with a Remove action but no Replace', async () => {
+    get.mockResolvedValue({ providers: [ambientRow, { provider: 'other', configured: false, supports_user_keys: true }] })
+
+    render(<AiCredentials />)
+
+    expect(await screen.findByText('google-vertex-claude')).toBeInTheDocument()
+    expect(screen.getByText('Configured — user keys no longer accepted')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Replace google-vertex-claude key' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove google-vertex-claude key' })).toBeInTheDocument()
+  })
+
+  it('excludes the provider from the add-key picker, including after deletion', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue({ providers: [ambientRow] })
+
+    render(<AiCredentials />)
+
+    // Nothing is addable: the form (and its picker) is not rendered at all
+    expect(await screen.findByText('google-vertex-claude')).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'AI provider' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Remove google-vertex-claude key' }))
+    await waitFor(() => expect(remove).toHaveBeenCalledWith('/api/user/ai-credentials/google-vertex-claude'))
+
+    // After deletion the provider still accepts no user keys, so it must
+    // not come back as an addable option
+    expect(screen.queryByRole('combobox', { name: 'AI provider' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Replace google-vertex-claude key' })).not.toBeInTheDocument()
   })
 })

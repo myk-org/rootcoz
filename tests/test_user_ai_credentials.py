@@ -404,15 +404,19 @@ async def test_api_status_redacts_and_rejects_unsupported(tmp_path, monkeypatch)
     response = await main.set_user_ai_credential("custom", body, request)
     assert response.headers["cache-control"] == "no-store"
     status = await main.get_user_ai_credentials(request)
-    assert status.body == b'{"providers":[{"provider":"custom","configured":true}]}'
+    assert (
+        status.body
+        == b'{"providers":[{"provider":"custom","configured":true,"supports_user_keys":true}]}'
+    )
     assert b"private-value" not in status.body
     with pytest.raises(HTTPException) as exc:
         await main.set_user_ai_credential("unsupported", body, request)
     assert exc.value.status_code == 400
     await main.delete_user_ai_credential("custom", request)
     assert (
-        await main.get_user_ai_credentials(request)
-    ).body == b'{"providers":[{"provider":"custom","configured":false}]}'
+        (await main.get_user_ai_credentials(request)).body
+        == b'{"providers":[{"provider":"custom","configured":false,"supports_user_keys":true}]}'
+    )
 
 
 @pytest.mark.asyncio
@@ -429,7 +433,7 @@ async def test_openai_key_without_server_auth_or_catalog_models(tmp_path, monkey
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     assert (await main.get_user_ai_credentials(request)).body == (
-        b'{"providers":[{"provider":"openai","configured":false}]}'
+        b'{"providers":[{"provider":"openai","configured":false,"supports_user_keys":true}]}'
     )
     await main.set_user_ai_credential(
         "openai",
@@ -440,7 +444,7 @@ async def test_openai_key_without_server_auth_or_catalog_models(tmp_path, monkey
         request,
     )
     assert (await main.get_user_ai_credentials(request)).body == (
-        b'{"providers":[{"provider":"openai","configured":true}]}'
+        b'{"providers":[{"provider":"openai","configured":true,"supports_user_keys":true}]}'
     )
     token = ai_client.ai_username.set("alice")
     try:
@@ -1767,15 +1771,87 @@ class TestAmbientAuthProviderExclusion:
 
         request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
 
-        # GET unions supported | configured so the stored key stays visible
+        # GET unions supported | configured so the stored key stays visible,
+        # flagged as no longer accepting user keys
         response = await main.get_user_ai_credentials(request)
         providers = {
-            entry["provider"]: entry["configured"]
+            entry["provider"]: (
+                entry["configured"],
+                entry["supports_user_keys"],
+            )
             for entry in json.loads(response.body)["providers"]
         }
-        assert providers == {"google-vertex-claude": True, "supported": False}
+        assert providers == {
+            "google-vertex-claude": (True, False),
+            "supported": (False, True),
+        }
 
         # DELETE is self-service revocation and must not gate on capability
         response = await main.delete_user_ai_credential("google-vertex-claude", request)
         assert response.status_code == 200
         assert await storage.get_user_ai_credentials("alice") == {}
+
+    @pytest.mark.asyncio
+    async def test_ambient_user_source_chat_session_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        """A chat pinned to an ambient provider's user key reports unavailable.
+
+        The session was valid when it started; after the provider joined
+        AMBIENT_AUTH_PROVIDERS the next send would 422, so availability must
+        drop it first and the user is pointed at starting a new session.
+        """
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ambient-chat.db")
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "ambient-chat.db"))
+        from rootcoz.config import get_settings
+
+        get_settings.cache_clear()
+        await storage.init_db()
+        await storage.create_user("chatter")
+
+        client = AsyncMock()
+        client.get_providers.return_value = [
+            {"provider": "google-vertex-claude", "supportsSessionApiKey": True},
+            {"provider": "supported", "supportsSessionApiKey": True},
+        ]
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+        _override_ambient_providers(monkeypatch, "google-vertex-claude")
+
+        # Credentials first: saving one revokes that provider's existing
+        # sessions, so the messages and sources are created afterwards
+        await storage.update_user_ai_credential(
+            "chatter", "google-vertex-claude", "stored-ambient-key"
+        )
+        await storage.add_chat_message(
+            "job-1",
+            "assistant",
+            "started",
+            username="chatter",
+            ai_provider="google-vertex-claude",
+            ai_model="claude-vertex-model",
+            session_id="sess-ambient",
+        )
+        await storage.save_ai_session_source(
+            "sess-ambient", "chatter", "google-vertex-claude", "user"
+        )
+
+        # The stored key alone no longer makes the session usable
+        assert await main._available_chat_session("job-1", "chatter") is None
+
+        # A session on a still-supported provider keeps working
+        await storage.update_user_ai_credential("chatter", "supported", "stored-key")
+        await storage.add_chat_message(
+            "job-2",
+            "assistant",
+            "started",
+            username="chatter",
+            ai_provider="supported",
+            ai_model="supported-model",
+            session_id="sess-ok",
+        )
+        await storage.save_ai_session_source("sess-ok", "chatter", "supported", "user")
+        assert await main._available_chat_session("job-2", "chatter") == {
+            "ai_provider": "supported",
+            "ai_model": "supported-model",
+            "credential_source": "user",
+        }
