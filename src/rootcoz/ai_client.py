@@ -48,20 +48,18 @@ _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = Context
 )
 
 
-async def supported_key_providers() -> list[str]:
-    """List registered providers with affirmative session-key capability.
+async def _discover_session_key_providers() -> list[str] | None:
+    """Sidecar key-capable providers minus the ambient set; ``None`` on failure.
 
-    Providers in the ``AMBIENT_AUTH_PROVIDERS`` setting are excluded even
-    when the sidecar reports them as key-capable: they authenticate via
-    ambient credentials (ADC, OAuth, CLI login) and never consume a
-    per-session user API key, so offering them in the credential flow only
-    lets users store keys that do nothing.
+    Shared by the fail-closed :func:`supported_key_providers` gate and the
+    fail-open :func:`provider_accepts_user_keys` availability probe, which
+    must distinguish "confirmed unsupported" from "could not discover".
     """
     try:
         providers = await get_sidecar_client().get_providers()
     except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
         logger.warning("Unable to discover session-key providers")
-        return []
+        return None
     from rootcoz.config import get_settings
 
     ambient = {
@@ -78,6 +76,67 @@ async def supported_key_providers() -> list[str]:
         }
         - ambient
     )
+
+
+async def supported_key_providers() -> list[str]:
+    """List registered providers with affirmative session-key capability.
+
+    Providers in the ``AMBIENT_AUTH_PROVIDERS`` setting are excluded even
+    when the sidecar reports them as key-capable: they authenticate via
+    ambient credentials (ADC, OAuth, CLI login) and never consume a
+    per-session user API key, so offering them in the credential flow only
+    lets users store keys that do nothing. Fails closed: an unreachable
+    sidecar yields no providers.
+    """
+    discovered = await _discover_session_key_providers()
+    return discovered if discovered is not None else []
+
+
+# Bounded cache for the availability probe: (ambient setting, fetch time,
+# supported set). Chat-history reads recheck eligibility per request, so the
+# raw discovery is cached briefly instead of hitting the sidecar every poll.
+_provider_eligibility_cache: tuple[str, float, frozenset[str]] | None = None
+_PROVIDER_ELIGIBILITY_TTL_SEC = 30.0
+
+
+async def provider_accepts_user_keys(provider: str) -> bool | None:
+    """Whether a provider currently accepts user API keys, for availability.
+
+    Returns ``None`` when discovery failed — chat-session availability then
+    preserves the session instead of retiring it on a transient sidecar
+    outage. The result is cached for a short window (invalidated immediately
+    when ``AMBIENT_AUTH_PROVIDERS`` changes) so repeated chat-history reads
+    do not each perform a sidecar round-trip. The credential save gate uses
+    the uncached :func:`supported_key_providers` directly.
+    """
+    global _provider_eligibility_cache
+    from rootcoz.config import get_settings
+
+    ambient_setting = get_settings().ambient_auth_providers
+    now = time.monotonic()
+    cached = _provider_eligibility_cache
+    if (
+        cached is not None
+        and cached[0] == ambient_setting
+        and now - cached[1] < _PROVIDER_ELIGIBILITY_TTL_SEC
+    ):
+        return provider in cached[2]
+    discovered = await _discover_session_key_providers()
+    if discovered is None:
+        # Do not cache failures: a recovered sidecar is seen on the next read.
+        return None
+    _provider_eligibility_cache = (
+        ambient_setting,
+        now,
+        frozenset(discovered),
+    )
+    return provider in _provider_eligibility_cache[2]
+
+
+def clear_provider_eligibility_cache() -> None:
+    """Reset the availability-probe cache (tests, forced re-discovery)."""
+    global _provider_eligibility_cache
+    _provider_eligibility_cache = None
 
 
 async def require_server_provider_grant(provider: str = "", model: str = "") -> None:

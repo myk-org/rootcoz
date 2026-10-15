@@ -37,6 +37,22 @@ beforeEach(() => {
 describe('AiCredentials', () => {
   it('discovers providers, searches, adds two keys, and removes just one', async () => {
     const user = userEvent.setup()
+    // Server-side state: save/remove now refetch the list, so the mock
+    // mirrors what the server would return after each mutation.
+    const serverProviders = [
+      { provider: 'openai/custom', configured: false, supports_user_keys: true },
+      { provider: 'other', configured: false, supports_user_keys: true },
+    ]
+    get.mockImplementation(async () => ({ providers: serverProviders.map((p) => ({ ...p })) }))
+    put.mockImplementation(async (url: string) => {
+      const saved = serverProviders.find((p) => url.endsWith(encodeURIComponent(p.provider)))
+      if (saved) saved.configured = true
+      return { outcome: 'accepted', ok: true }
+    })
+    remove.mockImplementation(async (url: string) => {
+      const removed = serverProviders.find((p) => url.endsWith(encodeURIComponent(p.provider)))
+      if (removed) removed.configured = false
+    })
     render(<AiCredentials />)
     const picker = await screen.findByRole('combobox', { name: 'AI provider' })
     expect(screen.queryByText('anthropic')).not.toBeInTheDocument()
@@ -111,6 +127,13 @@ describe('AiCredentials', () => {
   it('clears the key and locks controls while saving', async () => {
     const user = userEvent.setup()
     let resolve!: (value: unknown) => void
+    let otherConfigured = false
+    get.mockImplementation(async () => ({
+      providers: [
+        { provider: 'openai/custom', configured: false, supports_user_keys: true },
+        { provider: 'other', configured: otherConfigured, supports_user_keys: true },
+      ],
+    }))
     put.mockImplementationOnce(() => new Promise((done) => { resolve = done }))
     render(<AiCredentials />)
     await user.click(await screen.findByRole('combobox', { name: 'AI provider' }))
@@ -122,12 +145,13 @@ describe('AiCredentials', () => {
     expect(screen.getByRole('combobox', { name: 'AI provider' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '+ Add key' })).toBeDisabled()
     resolve({ outcome: 'accepted', ok: true })
+    otherConfigured = true
     await waitFor(() => expect(screen.getByText('Configured')).toBeInTheDocument())
   })
 
   it('replaces a configured key without removing it first', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValueOnce({ providers: [{ provider: 'other', configured: true, supports_user_keys: true }] })
+    get.mockResolvedValue({ providers: [{ provider: 'other', configured: true, supports_user_keys: true }] })
     render(<AiCredentials />)
     await user.click(await screen.findByRole('button', { name: 'Replace other key' }))
     await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
@@ -272,5 +296,18 @@ describe('AiCredentials with a provider that stopped accepting user keys', () =>
     // not come back as an addable option
     expect(screen.queryByRole('combobox', { name: 'AI provider' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Replace google-vertex-claude key' })).not.toBeInTheDocument()
+  })
+
+  it('refreshes eligibility flags when the page regains focus', async () => {
+    get.mockResolvedValue({ providers: [{ provider: 'other', configured: false, supports_user_keys: true }] })
+    render(<AiCredentials />)
+    expect(await screen.findByRole('combobox', { name: 'AI provider' })).toBeInTheDocument()
+
+    // The provider becomes ambient-blocked server-side while the page is open
+    get.mockResolvedValue({ providers: [{ provider: 'other', configured: false, supports_user_keys: false }] })
+    window.dispatchEvent(new Event('focus'))
+
+    // The refreshed flags drive the picker: nothing is addable anymore
+    await waitFor(() => expect(screen.queryByRole('combobox', { name: 'AI provider' })).not.toBeInTheDocument())
   })
 })

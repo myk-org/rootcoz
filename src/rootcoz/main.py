@@ -10490,16 +10490,18 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return JSONResponse(
-        content={
-            "providers": [
-                {
-                    "provider": p,
-                    "configured": p in configured,
-                    "supports_user_keys": p in supported,
-                }
-                for p in sorted(set(supported) | configured.keys())
-            ]
-        },
+        content=strip_sensitive_from_response(
+            {
+                "providers": [
+                    {
+                        "provider": p,
+                        "configured": p in configured,
+                        "supports_user_keys": p in supported,
+                    }
+                    for p in sorted(set(supported) | configured.keys())
+                ]
+            }
+        ),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -12524,10 +12526,12 @@ async def _available_chat_session(
                 ai_username.reset(token)
         elif source == "user":
             # A provider can stop accepting user keys after the session started
-            # (e.g. it was added to AMBIENT_AUTH_PROVIDERS): report the session
-            # unavailable instead of letting the next send fail on a source the
-            # catalog no longer offers.
-            if active["ai_provider"] not in await supported_key_providers():
+            # (e.g. it was added to AMBIENT_AUTH_PROVIDERS). Retire the session
+            # only on a confirmed loss: a failed discovery (None) preserves it
+            # instead of failing every user session during a sidecar hiccup.
+            from rootcoz.ai_client import provider_accepts_user_keys
+
+            if await provider_accepts_user_keys(active["ai_provider"]) is False:
                 return None
             from pi_sidecar_client import _validate_api_key
 

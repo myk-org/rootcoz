@@ -3006,7 +3006,9 @@ def ai_keys_list(json_output: bool = _JSON_OPTION) -> None:
                 {
                     "provider": p["provider"],
                     "configured": p["configured"],
-                    "supports_user_keys": p["supports_user_keys"],
+                    # Older servers predate the field; every provider they
+                    # list was key-capable, so default to True.
+                    "supports_user_keys": p.get("supports_user_keys", True),
                 }
                 for p in c.list_ai_credentials()["providers"]
             ]

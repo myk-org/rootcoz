@@ -2711,13 +2711,13 @@ async def test_session_availability_checks_ownership_grant_and_key(
         session_id="legacy-unowned",
     )
     assert test_client.get(path, headers=headers).json()["active_session"] is None
-    from rootcoz import main as main_module
+    from rootcoz import ai_client as ai_client_module
 
     with patch.object(
-        main_module,
-        "supported_key_providers",
+        ai_client_module,
+        "provider_accepts_user_keys",
         new_callable=AsyncMock,
-        return_value=["claude"],
+        return_value=True,
     ):
         await storage.update_user_ai_credential(username, "claude", "valid-user-key")
         await storage.save_ai_session_source("sid-user", username, "claude", "user")

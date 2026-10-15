@@ -22,12 +22,23 @@ export function AiCredentials() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
 
+  // Eligibility flags mirror a server setting that can change while the
+  // page is open (AMBIENT_AUTH_PROVIDERS needs no restart), so the list is
+  // refetched on focus and after every mutation instead of patched locally.
+  function refreshProviders() {
+    return api.get<{ providers: Provider[] }>('/api/user/ai-credentials')
+      .then((result) => { setProviders(result.providers) })
+      .catch(() => { setError('Could not load AI credentials') })
+  }
+
   useEffect(() => {
     let active = true
     api.get<{ providers: Provider[] }>('/api/user/ai-credentials')
       .then((result) => { if (active) setProviders(result.providers) })
       .catch(() => { if (active) setError('Could not load AI credentials') })
-    return () => { active = false; keyRef.current = '' }
+    const onFocus = () => { refreshProviders() }
+    window.addEventListener('focus', onFocus)
+    return () => { active = false; window.removeEventListener('focus', onFocus); keyRef.current = '' }
   }, [])
 
   function clearKey() {
@@ -80,7 +91,7 @@ export function AiCredentials() {
         return
       }
       resetProviderCatalogCache()
-      setProviders((current) => current?.map((item) => item.provider === provider ? { ...item, configured: true } : item) ?? null)
+      await refreshProviders()
       setEditing(null)
       setSelected('')
       setModel('')
@@ -102,7 +113,7 @@ export function AiCredentials() {
     try {
       await api.delete(`/api/user/ai-credentials/${encodeURIComponent(provider)}`)
       resetProviderCatalogCache()
-      setProviders((current) => current?.map((item) => item.provider === provider ? { ...item, configured: false } : item) ?? null)
+      await refreshProviders()
       if (editing === provider) setEditing(null)
       setSelected('')
     } catch {

@@ -1816,6 +1816,7 @@ class TestAmbientAuthProviderExclusion:
         ]
         monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
         _override_ambient_providers(monkeypatch, "google-vertex-claude")
+        ai_client.clear_provider_eligibility_cache()
 
         # Credentials first: saving one revokes that provider's existing
         # sessions, so the messages and sources are created afterwards
@@ -1855,3 +1856,40 @@ class TestAmbientAuthProviderExclusion:
             "ai_model": "supported-model",
             "credential_source": "user",
         }
+
+        # A failed discovery is "unknown", not "unsupported": the session
+        # must survive a transient sidecar outage instead of being retired
+        client.get_providers.side_effect = httpx.ConnectError("sidecar down")
+        ai_client.clear_provider_eligibility_cache()
+        assert await main._available_chat_session("job-2", "chatter") == {
+            "ai_provider": "supported",
+            "ai_model": "supported-model",
+            "credential_source": "user",
+        }
+
+    @pytest.mark.asyncio
+    async def test_provider_eligibility_probe_is_cached_and_setting_aware(
+        self, monkeypatch
+    ):
+        """The availability probe caches discovery and tracks setting changes."""
+        client = AsyncMock()
+        client.get_providers.return_value = [
+            {"provider": "supported", "supportsSessionApiKey": True}
+        ]
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+        _override_ambient_providers(monkeypatch, "")
+        ai_client.clear_provider_eligibility_cache()
+
+        assert await ai_client.provider_accepts_user_keys("supported") is True
+        assert await ai_client.provider_accepts_user_keys("supported") is True
+        # One discovery served both reads
+        client.get_providers.assert_awaited_once()
+
+        # A settings change invalidates the cache immediately
+        _override_ambient_providers(monkeypatch, "supported")
+        assert await ai_client.provider_accepts_user_keys("supported") is False
+        assert client.get_providers.await_count == 2
+
+        # The uncached save gate still fails closed on discovery errors
+        client.get_providers.side_effect = httpx.ConnectError("sidecar down")
+        assert await ai_client.supported_key_providers() == []
