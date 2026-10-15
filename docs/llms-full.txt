@@ -481,6 +481,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `AI_MODEL` | empty | string | no | no | yes |
    | `FORCE_SERVER_CREDENTIALS` | `false` | boolean | no | no | yes |
    | `ENABLE_FREE_MODELS` | `false` | boolean | no | no | **no** |
+   | `AMBIENT_AUTH_PROVIDERS` | `google-vertex-claude` | comma-separated provider IDs | no | no | yes |
    | `AI_CALL_TIMEOUT` | `10` | integer > 0 (minutes) | no | no | yes |
    | `MAX_CONCURRENT_AI_CALLS` | `3` | integer > 0 | no | no | yes |
    | `PEER_AI_CONFIGS` | empty | string | no | no | yes |
@@ -580,6 +581,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     `AUTO_PUSH_EXPORTERS` takes a comma-separated exporter list such as `reportportal`, and only applies when `ENABLE_AUTO_REVIEW` is also on.
 
    `ENABLE_FREE_MODELS` lets every user run the admin-declared free provider+model pairs (Users page → *Free AI models*) on server credentials; the free-providers grant is not needed for admins or users who already have `can_use_server_providers`.
+
+   `AMBIENT_AUTH_PROVIDERS` lists provider IDs that authenticate via ambient credentials (ADC, OAuth, CLI login) and never consume a per-session user API key. They are excluded from the user credential flow even when the sidecar reports them as key-capable — without this, users can store a key the provider ignores (and any garbage key passes verification, because the provider authenticates via ADC regardless). Their models remain available with server credentials. Set it to an empty string to trust the sidecar's capability reporting entirely.
 
 11. **Web Push category.**
 
@@ -2242,7 +2245,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | POST | `/api/auth/logout` | authenticated | Clears the session cookie |
 | GET | `/api/auth/me` | viewer | Username, role, `can_view_reports`, `can_use_server_providers` |
 | POST | `/api/auth/rotate-key` | viewer | Rotates your own API key; the old key stops working. Known gap — see the note below |
-| GET | `/api/user/ai-credentials` | viewer | Supported provider IDs with a `configured` flag each. Keys are never returned |
+| GET | `/api/user/ai-credentials` | viewer | Supported provider IDs with a `configured` flag and a `supports_user_keys` flag each (a stored key for a provider that stopped accepting user keys — e.g. an ambient-auth provider — stays listed with `supports_user_keys: false`). Keys are never returned |
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
@@ -2575,7 +2578,7 @@ That single command resolves the server, authenticates, and returns machine-read
 | `rootcoz auth whoami` | Current username, role, admin flag, and report access. |
 | `rootcoz auth rotate-key` | Issue a new API key for yourself, shown once. |
 | `rootcoz auth logout` | Clear the browser session cookie. See the note below — this does not remove a configured API key. |
-| `rootcoz auth ai-keys list` | Show which providers already have a key for your account. |
+| `rootcoz auth ai-keys list` | Show which providers already have a key for your account, and whether each provider still accepts user keys. |
 | `rootcoz auth ai-keys set PROVIDER --model MODEL [--stdin]` | Store a provider key, verified against `MODEL`. |
 | `rootcoz auth ai-keys delete PROVIDER` | Remove your stored key for one provider. |
 

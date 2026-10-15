@@ -430,6 +430,14 @@ SECURE_COOKIES=false
 <td><strong>no</strong></td>
 </tr>
 <tr>
+<td><code>AMBIENT_AUTH_PROVIDERS</code></td>
+<td><code>google-vertex-claude</code></td>
+<td>comma-separated provider IDs</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
 <td><code>AI_CALL_TIMEOUT</code></td>
 <td><code>10</code></td>
 <td>integer &gt; 0 (minutes)</td>
@@ -896,6 +904,7 @@ SECURE_COOKIES=false
 </li>
 </ol>
 <p><code>ENABLE_FREE_MODELS</code> lets every user run the admin-declared free provider+model pairs (Users page → <em>Free AI models</em>) on server credentials; the free-providers grant is not needed for admins or users who already have <code>can_use_server_providers</code>.</p>
+<p><code>AMBIENT_AUTH_PROVIDERS</code> lists provider IDs that authenticate via ambient credentials (ADC, OAuth, CLI login) and never consume a per-session user API key. They are excluded from the user credential flow even when the sidecar reports them as key-capable — without this, users can store a key the provider ignores (and any garbage key passes verification, because the provider authenticates via ADC regardless). Their models remain available with server credentials. Set it to an empty string to trust the sidecar's capability reporting entirely.</p>
 <ol>
 <li>
 <p><strong>Web Push category.</strong></p>

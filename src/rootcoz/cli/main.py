@@ -3003,7 +3003,13 @@ def ai_keys_list(json_output: bool = _JSON_OPTION) -> None:
         json_output,
         lambda c: {
             "providers": [
-                {"provider": p["provider"], "configured": p["configured"]}
+                {
+                    "provider": p["provider"],
+                    "configured": p["configured"],
+                    # Older servers predate the field; every provider they
+                    # list was key-capable, so default to True.
+                    "supports_user_keys": p.get("supports_user_keys", True),
+                }
                 for p in c.list_ai_credentials()["providers"]
             ]
         },
@@ -3011,7 +3017,10 @@ def ai_keys_list(json_output: bool = _JSON_OPTION) -> None:
     )
     logging.getLogger(__name__).info("Listed AI credential providers")
     if not _state.get("json", False):
-        print_output(data["providers"], columns=["provider", "configured"])
+        print_output(
+            data["providers"],
+            columns=["provider", "configured", "supports_user_keys"],
+        )
 
 
 @ai_keys_app.command("set")

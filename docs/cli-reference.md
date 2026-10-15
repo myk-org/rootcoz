@@ -50,7 +50,7 @@ That single command resolves the server, authenticates, and returns machine-read
 | `rootcoz auth whoami` | Current username, role, admin flag, and report access. |
 | `rootcoz auth rotate-key` | Issue a new API key for yourself, shown once. |
 | `rootcoz auth logout` | Clear the browser session cookie. See the note below — this does not remove a configured API key. |
-| `rootcoz auth ai-keys list` | Show which providers already have a key for your account. |
+| `rootcoz auth ai-keys list` | Show which providers already have a key for your account, and whether each provider still accepts user keys. |
 | `rootcoz auth ai-keys set PROVIDER --model MODEL [--stdin]` | Store a provider key, verified against `MODEL`. |
 | `rootcoz auth ai-keys delete PROVIDER` | Remove your stored key for one provider. |
 

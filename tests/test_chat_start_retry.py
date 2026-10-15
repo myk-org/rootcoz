@@ -37,8 +37,15 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
         monkeypatch.setattr(
             chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
         )
-    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
+        monkeypatch.setattr(
+            chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path
+        )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+    # Availability rechecks user-key eligibility per read; pin the provider
+    # as key-capable so the user-source session stays reusable.
+    monkeypatch.setattr(
+        ai_client, "provider_accepts_user_keys", AsyncMock(return_value=True)
+    )
 
     async def validate(body, username):
         ai_client._selected_credential_source.set(source)

@@ -4230,6 +4230,7 @@ class TestAiKeysCommands:
                 {
                     "provider": "acpx/a",
                     "configured": True,
+                    "supports_user_keys": True,
                     "api_key": "secret-key",  # pragma: allowlist secret
                 }
             ]
@@ -4237,9 +4238,24 @@ class TestAiKeysCommands:
         result = runner.invoke(app, ["auth", "ai-keys", "list", "--json"])
         assert result.exit_code == 0
         assert json.loads(result.output) == {
-            "providers": [{"provider": "acpx/a", "configured": True}]
+            "providers": [
+                {"provider": "acpx/a", "configured": True, "supports_user_keys": True}
+            ]
         }
         assert "secret-key" not in result.output
+
+    def test_list_tolerates_legacy_two_field_payload(self, mock_client):
+        """Older servers predate supports_user_keys; the list must still work."""
+        mock_client.list_ai_credentials.return_value = {
+            "providers": [{"provider": "acpx/a", "configured": True}]
+        }
+        result = runner.invoke(app, ["auth", "ai-keys", "list", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {
+            "providers": [
+                {"provider": "acpx/a", "configured": True, "supports_user_keys": True}
+            ]
+        }
 
     @pytest.mark.parametrize(
         "outcome,exit_code", [("accepted", 0), ("rejected", 1), ("inconclusive", 1)]

@@ -2711,32 +2711,42 @@ async def test_session_availability_checks_ownership_grant_and_key(
         session_id="legacy-unowned",
     )
     assert test_client.get(path, headers=headers).json()["active_session"] is None
-    await storage.update_user_ai_credential(username, "claude", "valid-user-key")
-    await storage.save_ai_session_source("sid-user", username, "claude", "user")
-    await storage.add_chat_message(
-        job_id,
-        "assistant",
-        "",
-        username=username,
-        ai_provider="claude",
-        ai_model="sonnet-4",
-        session_id="sid-user",
-    )
-    assert (
-        test_client.get(path, headers=headers).json()["active_session"][
-            "credential_source"
-        ]
-        == "user"
-    )
+    from rootcoz import ai_client as ai_client_module
+
     with patch.object(
-        storage,
-        "get_user_ai_credential_with_generation",
+        ai_client_module,
+        "provider_accepts_user_keys",
         new_callable=AsyncMock,
-        return_value=("   ", 1),
+        return_value=True,
     ):
+        await storage.update_user_ai_credential(username, "claude", "valid-user-key")
+        await storage.save_ai_session_source("sid-user", username, "claude", "user")
+        await storage.add_chat_message(
+            job_id,
+            "assistant",
+            "",
+            username=username,
+            ai_provider="claude",
+            ai_model="sonnet-4",
+            session_id="sid-user",
+        )
+        assert (
+            test_client.get(path, headers=headers).json()["active_session"][
+                "credential_source"
+            ]
+            == "user"
+        )
+        with patch.object(
+            storage,
+            "get_user_ai_credential_with_generation",
+            new_callable=AsyncMock,
+            return_value=("   ", 1),
+        ):
+            assert (
+                test_client.get(path, headers=headers).json()["active_session"] is None
+            )
+        await storage.update_user_ai_credential(username, "claude", "rotated-user-key")
         assert test_client.get(path, headers=headers).json()["active_session"] is None
-    await storage.update_user_ai_credential(username, "claude", "rotated-user-key")
-    assert test_client.get(path, headers=headers).json()["active_session"] is None
 
 
 async def test_chat_availability_does_not_bypass_route_authorization(
