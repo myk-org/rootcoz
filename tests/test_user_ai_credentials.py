@@ -1666,3 +1666,116 @@ def test_provider_with_encoded_slash_routes():
         or r.path_regex.match("/api/user/ai-credentials/openai/custom")
         for r in routes
     )
+
+
+def _override_ambient_providers(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """Point ``rootcoz.config.get_settings`` at a copy with the ambient list set.
+
+    ``supported_key_providers()`` imports ``get_settings`` at call time, so
+    patching the module attribute reaches it without touching the global
+    lru_cache or process env (other consumers keep the real settings).
+    """
+    from rootcoz.config import get_settings
+
+    base = get_settings().model_copy(update={"ambient_auth_providers": value})
+    monkeypatch.setattr("rootcoz.config.get_settings", lambda: base)
+
+
+class TestAmbientAuthProviderExclusion:
+    """AMBIENT_AUTH_PROVIDERS closes the user-key flow for ADC/ambient providers (#314)."""
+
+    @pytest.mark.asyncio
+    async def test_ambient_provider_excluded_despite_sidecar_capability(
+        self, monkeypatch
+    ):
+        """Sidecar claiming key support for an ADC provider must not leak through."""
+        client = AsyncMock()
+        client.get_providers.return_value = [
+            {"provider": "google-vertex-claude", "supportsSessionApiKey": True},
+            {"provider": "supported", "supportsSessionApiKey": True},
+        ]
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+
+        _override_ambient_providers(monkeypatch, "google-vertex-claude")
+        assert await ai_client.supported_key_providers() == ["supported"]
+
+        # Multiple entries, whitespace, and unknown IDs are tolerated
+        _override_ambient_providers(monkeypatch, " a-prov , google-vertex-claude ")
+        assert await ai_client.supported_key_providers() == ["supported"]
+
+        # Empty setting disables the filter (upstream reporting trusted)
+        _override_ambient_providers(monkeypatch, "")
+        assert await ai_client.supported_key_providers() == [
+            "google-vertex-claude",
+            "supported",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ambient_provider_credential_save_rejected(
+        self, tmp_path, monkeypatch
+    ):
+        """Saving a key for an ambient provider 400s before any verification."""
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ambient-save.db")
+        await storage.init_db()
+        await storage.create_admin_user("alice")
+
+        client = AsyncMock()
+        client.get_providers.return_value = [
+            {"provider": "google-vertex-claude", "supportsSessionApiKey": True},
+        ]
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+        _override_ambient_providers(monkeypatch, "google-vertex-claude")
+
+        verify = AsyncMock(return_value="accepted")
+        monkeypatch.setattr(ai_client, "verify_ai_key", verify)
+        request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+
+        with pytest.raises(HTTPException) as exc_info:
+            await main.set_user_ai_credential(
+                "google-vertex-claude",
+                main.AiCredentialInput(
+                    api_key="garbage-key-123",  # pragma: allowlist secret
+                    model="claude-vertex-model",
+                ),
+                request,
+            )
+        assert exc_info.value.status_code == 400
+        # The verification path (which would succeed via ADC with any key)
+        # must never be reached for an ambient provider.
+        verify.assert_not_awaited()
+        assert await storage.get_user_ai_credentials("alice") == {}
+
+    @pytest.mark.asyncio
+    async def test_stored_ambient_credential_remains_removable(
+        self, tmp_path, monkeypatch
+    ):
+        """A key stored before the exclusion stays listed and deletable."""
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ambient-remove.db")
+        await storage.init_db()
+        await storage.create_admin_user("alice")
+        await storage.update_user_ai_credential(
+            "alice", "google-vertex-claude", "old-ambient-key"
+        )
+
+        client = AsyncMock()
+        client.get_providers.return_value = [
+            {"provider": "google-vertex-claude", "supportsSessionApiKey": True},
+            {"provider": "supported", "supportsSessionApiKey": True},
+        ]
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+        _override_ambient_providers(monkeypatch, "google-vertex-claude")
+
+        request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+
+        # GET unions supported | configured so the stored key stays visible
+        response = await main.get_user_ai_credentials(request)
+        providers = {
+            entry["provider"]: entry["configured"]
+            for entry in json.loads(response.body)["providers"]
+        }
+        assert providers == {"google-vertex-claude": True, "supported": False}
+
+        # DELETE is self-service revocation and must not gate on capability
+        response = await main.delete_user_ai_credential("google-vertex-claude", request)
+        assert response.status_code == 200
+        assert await storage.get_user_ai_credentials("alice") == {}

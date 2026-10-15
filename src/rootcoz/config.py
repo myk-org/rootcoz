@@ -425,6 +425,17 @@ class Settings(BaseSettings):
         ),
     )
 
+    ambient_auth_providers: str = Field(
+        default="google-vertex-claude",
+        description=(
+            "Comma-separated provider IDs that authenticate via ambient "
+            "credentials (ADC, OAuth, CLI login) and never consume per-session "
+            "user API keys. Excluded from the user credential flow regardless "
+            "of sidecar capability reporting; their models remain available "
+            "with server credentials."
+        ),
+    )
+
     # Auto-review: automatically mark failures as reviewed when they match
     # a previous human-reviewed failure with the same error signature
     enable_auto_review: bool = Field(

@@ -49,12 +49,26 @@ _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = Context
 
 
 async def supported_key_providers() -> list[str]:
-    """List registered providers with affirmative session-key capability."""
+    """List registered providers with affirmative session-key capability.
+
+    Providers in the ``AMBIENT_AUTH_PROVIDERS`` setting are excluded even
+    when the sidecar reports them as key-capable: they authenticate via
+    ambient credentials (ADC, OAuth, CLI login) and never consume a
+    per-session user API key, so offering them in the credential flow only
+    lets users store keys that do nothing.
+    """
     try:
         providers = await get_sidecar_client().get_providers()
     except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
         logger.warning("Unable to discover session-key providers")
         return []
+    from rootcoz.config import get_settings
+
+    ambient = {
+        provider.strip()
+        for provider in get_settings().ambient_auth_providers.split(",")
+        if provider.strip()
+    }
     return sorted(
         {
             entry["provider"]
@@ -62,6 +76,7 @@ async def supported_key_providers() -> list[str]:
             if isinstance(entry.get("provider"), str)
             and entry.get("supportsSessionApiKey") is True
         }
+        - ambient
     )
 
 

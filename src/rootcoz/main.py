@@ -347,6 +347,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "peer_ai_configs",
         "peer_analysis_max_rounds",
         "enable_free_models",
+        "ambient_auth_providers",
     ],
     "Jira": [
         "jira_url",

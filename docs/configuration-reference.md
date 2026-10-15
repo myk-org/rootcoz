@@ -81,6 +81,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `AI_MODEL` | empty | string | no | no | yes |
    | `FORCE_SERVER_CREDENTIALS` | `false` | boolean | no | no | yes |
    | `ENABLE_FREE_MODELS` | `false` | boolean | no | no | **no** |
+   | `AMBIENT_AUTH_PROVIDERS` | `google-vertex-claude` | comma-separated provider IDs | no | no | yes |
    | `AI_CALL_TIMEOUT` | `10` | integer > 0 (minutes) | no | no | yes |
    | `MAX_CONCURRENT_AI_CALLS` | `3` | integer > 0 | no | no | yes |
    | `PEER_AI_CONFIGS` | empty | string | no | no | yes |
@@ -180,6 +181,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     `AUTO_PUSH_EXPORTERS` takes a comma-separated exporter list such as `reportportal`, and only applies when `ENABLE_AUTO_REVIEW` is also on.
    
    `ENABLE_FREE_MODELS` lets every user run the admin-declared free provider+model pairs (Users page → *Free AI models*) on server credentials; the free-providers grant is not needed for admins or users who already have `can_use_server_providers`.
+
+   `AMBIENT_AUTH_PROVIDERS` lists provider IDs that authenticate via ambient credentials (ADC, OAuth, CLI login) and never consume a per-session user API key. They are excluded from the user credential flow even when the sidecar reports them as key-capable — without this, users can store a key the provider ignores (and any garbage key passes verification, because the provider authenticates via ADC regardless). Their models remain available with server credentials. Set it to an empty string to trust the sidecar's capability reporting entirely.
 
 11. **Web Push category.**
 
