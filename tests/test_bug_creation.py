@@ -983,3 +983,41 @@ plain _italic_ and [bare|https://x] tail"""
         adf = _text_to_adf("{code}\nkept line")
         code_block = next(n for n in adf["content"] if n["type"] == "codeBlock")
         assert code_block["content"][0]["text"] == "kept line"
+
+    async def test_text_to_adf_markdown_links(self):
+        """Markdown [text](url) links keep the URL as the link destination."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        adf = _text_to_adf("see [Jenkins Build](https://jenkins/job/1) here")
+        para = adf["content"][0]
+        link_node = next(
+            n
+            for n in para["content"]
+            if any(m["type"] == "link" for m in n.get("marks", []))
+        )
+        assert link_node["text"] == "Jenkins Build"
+        assert link_node["marks"] == [
+            {"type": "link", "attrs": {"href": "https://jenkins/job/1"}}
+        ]
+        # The URL must not survive as plain text (wiki misparse symptom)
+        texts = [n["text"] for n in para["content"]]
+        assert "(https://jenkins/job/1)" not in "".join(texts)
+
+    async def test_text_to_adf_footer_link_nested_in_italic(self):
+        """The attribution footer's link stays clickable inside the italic span."""
+        from rootcoz.bug_creation import JIRA_AI_FOOTER, _text_to_adf
+
+        adf = _text_to_adf(f"body text{JIRA_AI_FOOTER}")
+        # Footer line: _Generated using AI with [rootcoz|...]_
+        footer_para = adf["content"][-1]
+        rootcoz_node = next(n for n in footer_para["content"] if n["text"] == "rootcoz")
+        mark_types = [m["type"] for m in rootcoz_node["marks"]]
+        assert "em" in mark_types
+        assert "link" in mark_types
+        link_mark = next(m for m in rootcoz_node["marks"] if m["type"] == "link")
+        assert link_mark["attrs"]["href"] == "https://github.com/myk-org/rootcoz"
+        # Surrounding footer text keeps the italic mark without a link
+        generated = next(
+            n for n in footer_para["content"] if n["text"].startswith("Generated")
+        )
+        assert [m["type"] for m in generated["marks"]] == ["em"]

@@ -713,26 +713,48 @@ async def create_github_issue(
 _ADF_HEADING_RE = re.compile(r"^h([1-6])\.\s+(.*)$")
 _ADF_CODE_FENCE = "{code}"
 _ADF_INLINE_RE = re.compile(
-    r"\[(?P<link_text>[^\]|]+)(?:\|(?P<link_url>[^\]]+))?\]"
+    # Markdown links must be tried before wiki links — otherwise
+    # "[text](url)" matches the wiki alternative and loses the URL.
+    r"\[(?P<md_text>[^\]]+)\]\(\s*(?P<md_url>[^)\s]+)\s*\)"
+    r"|\[(?P<link_text>[^\]|]+)(?:\|(?P<link_url>[^\]]+))?\]"
     r"|(?<!\w)\*(?P<bold>[^*]+)\*(?!\w)"
     r"|(?<!\w)_(?P<italic>[^_]+)_(?!\w)"
     r"|\{\{(?P<mono>[^{}]+)\}\}"
 )
 
 
+def _with_adf_mark(
+    nodes: list[dict[str, Any]], mark: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Return copies of inline nodes with the given mark appended."""
+    return [{**node, "marks": [*node.get("marks", []), mark]} for node in nodes]
+
+
 def _adf_inline_nodes(text: str) -> list[dict[str, Any]]:
     """Convert one wiki-markup line into ADF inline nodes.
 
-    Supports the markup emitted by ``_build_fallback_jira_content``:
-    ``*bold*``, ``_italic_``, ``{{monospace}}``, and ``[text|url]`` links
-    (``[url]`` renders the URL as the link text).
+    Supports the markup emitted by ``_build_fallback_jira_content`` and by
+    AI-generated bodies: ``*bold*``, ``_italic_``, ``{{monospace}}``, wiki
+    links ``[text|url]``, and Markdown links ``[text](url)``. Bold and
+    italic spans are parsed recursively so links nested inside them (like
+    the attribution footer) receive both marks.
     """
     nodes: list[dict[str, Any]] = []
     pos = 0
     for match in _ADF_INLINE_RE.finditer(text):
         if match.start() > pos:
             nodes.append({"type": "text", "text": text[pos : match.start()]})
-        if match.group("link_text") is not None:
+        if match.group("md_text") is not None:
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("md_text"),
+                    "marks": [
+                        {"type": "link", "attrs": {"href": match.group("md_url")}}
+                    ],
+                }
+            )
+        elif match.group("link_text") is not None:
             href = match.group("link_url") or match.group("link_text")
             nodes.append(
                 {
@@ -742,20 +764,14 @@ def _adf_inline_nodes(text: str) -> list[dict[str, Any]]:
                 }
             )
         elif match.group("bold") is not None:
-            nodes.append(
-                {
-                    "type": "text",
-                    "text": match.group("bold"),
-                    "marks": [{"type": "strong"}],
-                }
+            nodes.extend(
+                _with_adf_mark(
+                    _adf_inline_nodes(match.group("bold")), {"type": "strong"}
+                )
             )
         elif match.group("italic") is not None:
-            nodes.append(
-                {
-                    "type": "text",
-                    "text": match.group("italic"),
-                    "marks": [{"type": "em"}],
-                }
+            nodes.extend(
+                _with_adf_mark(_adf_inline_nodes(match.group("italic")), {"type": "em"})
             )
         elif match.group("mono") is not None:
             nodes.append(
