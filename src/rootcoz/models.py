@@ -216,6 +216,19 @@ class BaseAnalysisRequest(BaseModel):
         description="Jira Server/DC personal access token (overrides JIRA_PAT env var)",
         json_schema_extra={"format": "password"},
     )
+    jira_oauth_access_token: str | None = Field(
+        default=None,
+        description="Atlassian service account (ATST) token (overrides JIRA_OAUTH_ACCESS_TOKEN env var)",
+        json_schema_extra={"format": "password"},
+    )
+    atlassian_oauth_cloud_id: str | None = Field(
+        default=None,
+        description="Atlassian cloud ID for the service account connection (overrides ATLASSIAN_OAUTH_CLOUD_ID env var)",
+    )
+    jira_site_url: str | None = Field(
+        default=None,
+        description="Atlassian site URL for browse links when JIRA_URL is scoped (overrides JIRA_SITE_URL env var)",
+    )
     jira_project_key: str | None = Field(
         default=None,
         description="Jira project key to scope searches (overrides JIRA_PROJECT_KEY env var)",
@@ -1069,6 +1082,11 @@ class _TrackerCredentialsMixin(BaseModel):
         default="", description="User's Jira token for bug creation"
     )
     jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
+    jira_sa_token: str = Field(
+        default="",
+        description="User's Atlassian service account (ATST) token — takes "
+        "precedence over jira_token/jira_email",
+    )
     jira_project_key: str = Field(
         default="", description="Override Jira project key for bug creation"
     )

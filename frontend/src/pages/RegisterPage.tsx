@@ -3,7 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 import { api, ApiError } from '@/lib/api'
 import { persistTokensToServer } from '@/lib/tokens'
-import { setGithubToken, setJiraEmail, setJiraToken } from '@/lib/cookies'
+import { setGithubToken, setJiraEmail, setJiraToken, setJiraSaToken } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -64,6 +64,7 @@ export function RegisterPage() {
   const [githubToken, setGithubTokenValue] = useState('')
   const [jiraEmail, setJiraEmailValue] = useState('')
   const [jiraToken, setJiraTokenValue] = useState('')
+  const [jiraSaToken, setJiraSaTokenValue] = useState('')
   const [pendingCustomMessage, setPendingCustomMessage] = useState('')
   const [loginCustomMessage, setLoginCustomMessage] = useState('')
 
@@ -97,13 +98,15 @@ export function RegisterPage() {
       const gh = githubToken.trim()
       const je = jiraEmail.trim()
       const jt = jiraToken.trim()
+      const jst = jiraSaToken.trim()
       if (gh) setGithubToken(gh)
       if (je) setJiraEmail(je)
       if (jt) setJiraToken(jt)
+      if (jst) setJiraSaToken(jst)
       // Only when something was typed: the server reads an empty field as a
       // clear, and a keyless account can already hold tracker credentials from
       // earlier authenticated activity (#294).
-      if (gh || je || jt) await persistTokensToServer(gh, je, jt)
+      if (gh || je || jt || jst) await persistTokensToServer(gh, je, jt, jst)
 
       setMode('key-reveal')
     } catch (err) {
@@ -251,6 +254,8 @@ export function RegisterPage() {
                       onJiraEmailChange={setJiraEmailValue}
                       jiraToken={jiraToken}
                       onJiraTokenChange={setJiraTokenValue}
+                      jiraSaToken={jiraSaToken}
+                      onJiraSaTokenChange={setJiraSaTokenValue}
                       idPrefix="reg"
                     />
 

@@ -4712,6 +4712,57 @@ class TestPeerAnalysisParams:
         merged = _merge_settings(body, settings)
         assert merged.max_concurrent_ai_calls == 7
 
+    def test_merge_settings_request_jira_creds_clear_server_sa_token(self) -> None:
+        """Request-level Jira credentials must not lose to a server ATST token.
+
+        The resolver prefers SA mode, so a request carrying its own
+        jira_api_token/jira_pat clears the server's jira_oauth_access_token
+        (mirroring _build_effective_jira_settings).
+        """
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+            jira_email="user@example.com",
+            jira_api_token="request-token",
+        )
+        settings = Settings(
+            jira_url="https://myorg.atlassian.net",
+            jira_oauth_access_token=SecretStr("ATST-server-token"),
+        )
+        merged = _merge_settings(body, settings)
+        assert merged.jira_oauth_access_token is None
+        assert merged.jira_api_token.get_secret_value() == "request-token"
+        # And the resolved connection is basic-auth cloud, not the SA.
+        from rootcoz.jira import resolve_jira_connection
+
+        connection = resolve_jira_connection(merged)
+        assert connection.mode == "cloud"
+        assert connection.auth == ("user@example.com", "request-token")
+
+    def test_merge_settings_preserves_server_sa_token_when_request_has_no_jira_creds(
+        self,
+    ) -> None:
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        settings = Settings(
+            jira_url="https://myorg.atlassian.net",
+            jira_oauth_access_token=SecretStr("ATST-server-token"),
+        )
+        merged = _merge_settings(body, settings)
+        assert merged.jira_oauth_access_token.get_secret_value() == "ATST-server-token"
+
     def test_merge_settings_max_concurrent_ai_calls_preserves_server_setting_when_omitted(
         self,
     ) -> None:
@@ -7481,6 +7532,105 @@ class TestReAnalyzeFailure:
         assert settings.jira_pat.get_secret_value() == "server-pat"
         assert settings.jira_email == "server@example.com"
 
+    def test_user_sa_token_overrides_everything(self):
+        """A user ATST token replaces all other Jira credentials unambiguously."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_email="server@example.com",
+            jira_api_token=SecretStr("server-api-token"),
+            jira_pat=SecretStr("server-pat"),
+            jira_oauth_access_token=SecretStr("ATST-server-token"),
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "user-token", "user@example.com", user_jira_sa_token="ATST-user"
+        )
+        assert result.jira_oauth_access_token.get_secret_value() == "ATST-user"
+        assert result.jira_api_token is None
+        assert result.jira_pat is None
+        assert result.jira_email is None
+
+    def test_user_regular_token_clears_server_sa_token(self):
+        """A user regular token must not be bypassed by the server SA token."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_oauth_access_token=SecretStr("ATST-server-token"),
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "user-token", "user@example.com"
+        )
+        assert result.jira_oauth_access_token is None
+        assert result.jira_api_token.get_secret_value() == "user-token"
+        assert result.jira_email == "user@example.com"
+
+    def test_non_atst_sa_token_falls_through_to_regular(self):
+        """A non-ATST value in the SA field must not silently disable Jira."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "user-token", "user@example.com", user_jira_sa_token="not-atst"
+        )
+        # Falls through to the regular-token branch instead of selecting
+        # SA mode with a token the resolver would ignore.
+        assert result.jira_oauth_access_token is None
+        assert result.jira_api_token.get_secret_value() == "user-token"
+        assert result.jira_email == "user@example.com"
+
+    def test_atst_in_regular_field_routes_to_sa(self):
+        """An ATST token in the regular field selects SA mode, matching validation."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "ATST-user-token", "user@example.com"
+        )
+        assert result.jira_oauth_access_token.get_secret_value() == "ATST-user-token"
+        assert result.jira_api_token is None
+        assert result.jira_email is None
+
+
+class TestHasJiraCredentials:
+    """Tests for _has_jira_credentials SA awareness."""
+
+    def test_sa_token_counts_as_credentials(self):
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_oauth_access_token=SecretStr("ATST-token"),
+        )
+        assert _has_jira_credentials(settings) is True
+
+    def test_non_atst_sa_token_does_not_count(self):
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_oauth_access_token=SecretStr("not-atst"),
+        )
+        assert _has_jira_credentials(settings) is False
+
+    def test_api_token_still_counts(self):
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_api_token=SecretStr("token"),
+        )
+        assert _has_jira_credentials(settings) is True
+
 
 class TestValidateToken:
     """Tests for POST /api/validate-token."""
@@ -7552,6 +7702,71 @@ class TestValidateToken:
         data = response.json()
         assert data["valid"] is False
         assert "not configured" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_jira_sa_token_validates_against_gateway(self, test_client):
+        """An ATST token is validated as a service account on REST v3."""
+        from rootcoz.main import app, get_settings
+
+        scoped_settings = _build_wait_settings(
+            jira_url="https://api.atlassian.com/ex/jira/cloud-id-123",
+            jira_site_url="https://myorg.atlassian.net",
+        )
+        app.dependency_overrides[get_settings] = lambda: scoped_settings
+        try:
+            with patch("rootcoz.main.httpx.AsyncClient") as mock_client_class:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.raise_for_status = MagicMock()
+                mock_resp.json.return_value = {"displayName": "Service Account"}
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client_class.return_value = mock_client
+                response = test_client.post(
+                    "/api/validate-token",
+                    json={"token_type": "jira", "token": "ATST-user-token"},
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["valid"] is True
+            assert data["username"] == "Service Account"
+            requested_url = mock_client.get.call_args.args[0]
+            assert requested_url == (
+                "https://api.atlassian.com/ex/jira/cloud-id-123/rest/api/3/myself"
+            )
+            sent_headers = mock_client.get.call_args.kwargs["headers"]
+            assert sent_headers["Authorization"] == "Bearer ATST-user-token"
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+
+    @pytest.mark.asyncio
+    async def test_jira_sa_token_unresolvable_cloud_id(self, test_client):
+        """An ATST token with no resolvable cloud ID reports a clear failure."""
+        from rootcoz.main import app, get_settings
+
+        scoped_settings = _build_wait_settings(jira_url="https://myorg.atlassian.net")
+        app.dependency_overrides[get_settings] = lambda: scoped_settings
+        try:
+            with patch("rootcoz.main.httpx.AsyncClient") as mock_client_class:
+                mock_client = AsyncMock()
+                mock_client.get.side_effect = httpx.ConnectError("refused")
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client_class.return_value = mock_client
+                response = test_client.post(
+                    "/api/validate-token",
+                    json={"token_type": "jira", "token": "ATST-user-token"},
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["valid"] is False
+            assert "cloud ID" in data["message"]
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
 
 
 class TestJiraProjectsEndpoint:

@@ -80,8 +80,8 @@ That single authenticated GET returns the stored analysis for one job, including
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
-| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. A body with none of the three fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
-| POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving |
+| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are `github_token`, `jira_email`, `jira_token`, and `jira_sa_token` (an Atlassian service account token, which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
+| POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving. Jira tokens are validated against the server's `JIRA_URL`; an ATST-prefixed token is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side |
 | POST | `/api/jira-projects` | viewer | List Jira projects visible to the supplied credentials |
 | POST | `/api/jira-security-levels` | viewer | List Jira security levels for a project |
 
@@ -114,7 +114,7 @@ The shared body accepts the server defaults as per-request overrides:
 | `peer_ai_configs`, `peer_analysis_max_rounds` | Multi-AI debate settings |
 | `additional_repos` | Extra repositories to clone for context |
 | `tests_repo_url`, `tests_repo_token` | Tests repository used for history and context |
-| `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira` | Jira search during analysis |
+| `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`, `atlassian_oauth_cloud_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira` | Jira search during analysis |
 | `github_token` | GitHub access for comment enrichment |
 | `raw_prompt`, `issue_prompt` | Additive prompt instructions |
 | `labels`, plus name and tag fields | Metadata for the job |

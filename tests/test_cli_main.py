@@ -3860,6 +3860,15 @@ class TestJiraProjectsCommand:
         assert result.exit_code == 0
         assert "PROJ" in result.output
 
+    def test_jira_projects_sa_token_flag(self, mock_client):
+        mock_client.jira_projects.return_value = []
+        result = runner.invoke(
+            app, ["jira-projects", "--jira-sa-token", "ATST-cli-token"]
+        )
+        assert result.exit_code == 0
+        kwargs = mock_client.jira_projects.call_args[1]
+        assert kwargs["jira_sa_token"] == "ATST-cli-token"
+
     def test_jira_projects_json(self, mock_client):
         mock_client.jira_projects.return_value = [
             {"key": "PROJ", "name": "My Project"},

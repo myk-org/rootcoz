@@ -231,6 +231,18 @@ class Settings(BaseSettings):
     jira_project_key: str | None = None
     jira_ssl_verify: bool = True
     jira_max_results: int = Field(default=5, gt=0)
+    # Atlassian service account (ATST) — a third, additional connection
+    # method alongside Cloud basic auth and Server/DC PAT. The token
+    # authenticates as Bearer against the scoped api.atlassian.com gateway.
+    jira_oauth_access_token: SecretStr | None = None
+    atlassian_oauth_cloud_id: str | None = None
+    # Inert pass-through kept for env-shape compatibility with the
+    # established Atlassian OAuth convention; not used for authentication
+    # (service account tokens have no refresh flow).
+    atlassian_oauth_client_id: str | None = None
+    # Site URL for browse links when JIRA_URL is the scoped API URL
+    # (the site URL cannot be derived from the scoped URL).
+    jira_site_url: str | None = None
 
     # Explicit Jira toggle (optional)
     enable_jira: bool | None = None
@@ -487,6 +499,9 @@ class Settings(BaseSettings):
             "jira_url",
             "jira_email",
             "jira_project_key",
+            "atlassian_oauth_cloud_id",
+            "atlassian_oauth_client_id",
+            "jira_site_url",
             "public_base_url",
             "reportportal_url",
             "reportportal_project",
@@ -520,6 +535,7 @@ class Settings(BaseSettings):
             "tests_repo_token",
             "jira_api_token",
             "jira_pat",
+            "jira_oauth_access_token",
             "reportportal_api_token",
         ):
             secret = getattr(self, field_name)
@@ -684,8 +700,14 @@ class Settings(BaseSettings):
 def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
     """Resolve Jira authentication mode and token value.
 
-    Determines Cloud vs Server/DC deployment first, then selects the
-    appropriate credential.
+    Determines the connection method first, then selects the appropriate
+    credential. Three additive modes, never replacing each other:
+
+    Service account (``is_cloud=True``) is detected when
+    ``jira_oauth_access_token`` holds an ATST-prefixed token. It wins over
+    ``jira_email`` — basic auth with an ATST token is rejected by Atlassian
+    (and the failure is masked by anonymous browsing), so the prefix takes
+    precedence. A non-ATST value in that field is ignored with a warning.
 
     Cloud mode (``is_cloud=True``) is detected when ``jira_email`` is
     set.  The token is selected by preferring ``jira_api_token`` and
@@ -698,6 +720,15 @@ def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
         Tuple of (is_cloud, token_value).  ``token_value`` is empty when
         no credentials are configured.
     """
+    if settings.jira_oauth_access_token:
+        sa_token = settings.jira_oauth_access_token.get_secret_value()
+        if sa_token.startswith("ATST"):
+            return True, sa_token
+        logger.warning(
+            "jira_oauth_access_token is set but not ATST-prefixed; "
+            "ignoring it for Jira auth resolution"
+        )
+
     has_api_token = bool(
         settings.jira_api_token and settings.jira_api_token.get_secret_value()
     )

@@ -2,6 +2,7 @@ const COOKIE_NAME = 'rootcoz_username'
 const GITHUB_TOKEN_KEY = 'rootcoz_github_token'
 const JIRA_TOKEN_KEY = 'rootcoz_jira_token'
 const JIRA_EMAIL_KEY = 'rootcoz_jira_email'
+const JIRA_SA_TOKEN_KEY = 'rootcoz_jira_sa_token'
 // Display-only UI hints — NOT an authorization boundary.
 // All admin gating is enforced server-side in AuthMiddleware.
 const ADMIN_KEY = 'rootcoz_is_admin'
@@ -110,6 +111,14 @@ export function getJiraToken(): string {
 
 export function setJiraToken(token: string): void {
   writeStoredValue(JIRA_TOKEN_KEY, token)
+}
+
+export function getJiraSaToken(): string {
+  return readStoredValue(JIRA_SA_TOKEN_KEY)
+}
+
+export function setJiraSaToken(token: string): void {
+  writeStoredValue(JIRA_SA_TOKEN_KEY, token)
 }
 
 export function getJiraEmail(): string {

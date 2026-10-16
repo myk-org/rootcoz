@@ -99,13 +99,19 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `JIRA_EMAIL` | unset | string | yes | no | yes |
    | `JIRA_API_TOKEN` | unset | string | yes | no | yes |
    | `JIRA_PAT` | unset | string | yes | no | yes |
+   | `JIRA_OAUTH_ACCESS_TOKEN` | unset | string | yes | no | yes |
+   | `ATLASSIAN_OAUTH_CLOUD_ID` | unset | string | no | no | yes |
+   | `ATLASSIAN_OAUTH_CLIENT_ID` | unset | string | no | no | yes |
+   | `JIRA_SITE_URL` | unset | string | no | no | yes |
    | `JIRA_PROJECT_KEY` | unset | string | no | no | yes |
    | `JIRA_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JIRA_MAX_RESULTS` | `5` | integer > 0 | no | no | yes |
    | `ENABLE_JIRA` | unset | boolean | no | no | yes |
    | `ENABLE_JIRA_ISSUES` | unset | boolean | no | no | yes |
 
-   `JIRA_EMAIL` decides the auth mode. With an email, RootCoz uses Jira Cloud Basic auth and prefers `JIRA_API_TOKEN`, falling back to `JIRA_PAT`. Without an email it treats the server as Server/DC, prefers `JIRA_PAT`, and falls back to `JIRA_API_TOKEN`. Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a URL, credentials, or project key logs a warning and stays off.
+   There are three connection methods, and they are additive — a new one never replaces the others. `JIRA_OAUTH_ACCESS_TOKEN` is the Atlassian service account method: an ATST-prefixed token (created by an admin in Atlassian Administration → Directory → Service accounts, long-lived up to 365 days) sent as a Bearer token against the scoped `https://api.atlassian.com/ex/jira/{cloud-id}` gateway using REST v3. It takes precedence over the other modes, because basic auth with an ATST token is rejected by Atlassian. Two configuration shapes work: point `JIRA_URL` directly at the scoped gateway URL (it already contains the cloud ID), or keep `JIRA_URL` as a regular URL and provide the cloud ID via `ATLASSIAN_OAUTH_CLOUD_ID` — or leave both unset and rootcoz resolves the cloud ID anonymously via the site's `_edge/tenant_info` endpoint on first use. `JIRA_SITE_URL` supplies `/browse` links when `JIRA_URL` is the scoped URL, since the site URL cannot be derived from it. `ATLASSIAN_OAUTH_CLIENT_ID` is an inert pass-through kept for env-shape compatibility with the established Atlassian OAuth convention; it is never used for authentication.
+
+   `JIRA_EMAIL` decides the auth mode for the remaining methods. With an email, RootCoz uses Jira Cloud Basic auth and prefers `JIRA_API_TOKEN`, falling back to `JIRA_PAT`. Without an email it treats the server as Server/DC, prefers `JIRA_PAT`, and falls back to `JIRA_API_TOKEN`. Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a URL, credentials, or project key logs a warning and stays off.
 
 6. **GitHub category.**
 
@@ -381,9 +387,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_ACCESS_TOKEN`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only five of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_ACCESS_TOKEN`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.  

@@ -499,13 +499,19 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `JIRA_EMAIL` | unset | string | yes | no | yes |
    | `JIRA_API_TOKEN` | unset | string | yes | no | yes |
    | `JIRA_PAT` | unset | string | yes | no | yes |
+   | `JIRA_OAUTH_ACCESS_TOKEN` | unset | string | yes | no | yes |
+   | `ATLASSIAN_OAUTH_CLOUD_ID` | unset | string | no | no | yes |
+   | `ATLASSIAN_OAUTH_CLIENT_ID` | unset | string | no | no | yes |
+   | `JIRA_SITE_URL` | unset | string | no | no | yes |
    | `JIRA_PROJECT_KEY` | unset | string | no | no | yes |
    | `JIRA_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JIRA_MAX_RESULTS` | `5` | integer > 0 | no | no | yes |
    | `ENABLE_JIRA` | unset | boolean | no | no | yes |
    | `ENABLE_JIRA_ISSUES` | unset | boolean | no | no | yes |
 
-   `JIRA_EMAIL` decides the auth mode. With an email, RootCoz uses Jira Cloud Basic auth and prefers `JIRA_API_TOKEN`, falling back to `JIRA_PAT`. Without an email it treats the server as Server/DC, prefers `JIRA_PAT`, and falls back to `JIRA_API_TOKEN`. Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a URL, credentials, or project key logs a warning and stays off.
+   There are three connection methods, and they are additive — a new one never replaces the others. `JIRA_OAUTH_ACCESS_TOKEN` is the Atlassian service account method: an ATST-prefixed token (created by an admin in Atlassian Administration → Directory → Service accounts, long-lived up to 365 days) sent as a Bearer token against the scoped `https://api.atlassian.com/ex/jira/{cloud-id}` gateway using REST v3. It takes precedence over the other modes, because basic auth with an ATST token is rejected by Atlassian. Two configuration shapes work: point `JIRA_URL` directly at the scoped gateway URL (it already contains the cloud ID), or keep `JIRA_URL` as a regular URL and provide the cloud ID via `ATLASSIAN_OAUTH_CLOUD_ID` — or leave both unset and rootcoz resolves the cloud ID anonymously via the site's `_edge/tenant_info` endpoint on first use. `JIRA_SITE_URL` supplies `/browse` links when `JIRA_URL` is the scoped URL, since the site URL cannot be derived from it. `ATLASSIAN_OAUTH_CLIENT_ID` is an inert pass-through kept for env-shape compatibility with the established Atlassian OAuth convention; it is never used for authentication.
+
+   `JIRA_EMAIL` decides the auth mode for the remaining methods. With an email, RootCoz uses Jira Cloud Basic auth and prefers `JIRA_API_TOKEN`, falling back to `JIRA_PAT`. Without an email it treats the server as Server/DC, prefers `JIRA_PAT`, and falls back to `JIRA_API_TOKEN`. Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a URL, credentials, or project key logs a warning and stays off.
 
 6. **GitHub category.**
 
@@ -781,9 +787,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_ACCESS_TOKEN`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only five of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_ACCESS_TOKEN`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.
@@ -1791,7 +1797,7 @@ This page covers everything you control about your own RootCoz identity: registe
 ## Prerequisites
 
 - A running RootCoz server. See [Quickstart](quickstart.html) or [Deploying RootCoz](deploy-rootcoz.html) for details.
-- For the tracker tokens, a GitHub personal access token with the `repo` scope, or a Jira Cloud API token (plus your Atlassian account email) or a Jira Server/Data Center personal access token.
+- For the tracker tokens, a GitHub personal access token with the `repo` scope, or a Jira Cloud API token (plus your Atlassian account email) or a Jira Server/Data Center personal access token. Optionally, an Atlassian service account (ATST) token — an additional connection method that takes precedence over the regular Jira credentials; it is created by an admin in Atlassian Administration → Directory → Service accounts.
 - For browser push notifications, a browser that supports Web Push (Chrome, Edge, Firefox, or Safari on a supported platform) and permission to show notifications.
 
 ## Quick Example
@@ -2066,7 +2072,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | --- | --- |
    | `Jenkins` | `jenkins_url`, `jenkins_user`, `jenkins_password`, `jenkins_ssl_verify`, `jenkins_timeout`, `jenkins_artifacts_max_size_mb`, `get_job_artifacts` |
    | `AI` | `ai_provider`, `ai_model`, `force_server_credentials`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds` |
-   | `Jira` | `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
+   | `Jira` | `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
    | `Auth & Security` | `admin_key`, `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
@@ -2249,8 +2255,8 @@ That single authenticated GET returns the stored analysis for one job, including
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
-| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. A body with none of the three fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
-| POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving |
+| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are `github_token`, `jira_email`, `jira_token`, and `jira_sa_token` (an Atlassian service account token, which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
+| POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving. Jira tokens are validated against the server's `JIRA_URL`; an ATST-prefixed token is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side |
 | POST | `/api/jira-projects` | viewer | List Jira projects visible to the supplied credentials |
 | POST | `/api/jira-security-levels` | viewer | List Jira security levels for a project |
 
@@ -2283,7 +2289,7 @@ The shared body accepts the server defaults as per-request overrides:
 | `peer_ai_configs`, `peer_analysis_max_rounds` | Multi-AI debate settings |
 | `additional_repos` | Extra repositories to clone for context |
 | `tests_repo_url`, `tests_repo_token` | Tests repository used for history and context |
-| `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira` | Jira search during analysis |
+| `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`, `atlassian_oauth_cloud_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira` | Jira search during analysis |
 | `github_token` | GitHub access for comment enrichment |
 | `raw_prompt`, `issue_prompt` | Additive prompt instructions |
 | `labels`, plus name and tag fields | Metadata for the job |
@@ -2616,6 +2622,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--get-job-artifacts` / `--no-get-job-artifacts` | Download build artifacts for AI context. |
 | `--tests-repo-url`, `--tests-repo-token` | Tests repository and its token. `TESTS_REPO_URL`, `TESTS_REPO_TOKEN`. |
 | `--jira-url`, `--jira-email`, `--jira-api-token`, `--jira-pat`, `--jira-project-key` | Jira connection. Each has a matching `JIRA_*` env var. |
+| `--jira-sa-token` | Atlassian service account (ATST) token, a third connection method that takes precedence over the regular Jira credentials. `JIRA_SA_TOKEN` in config files; server-side SA setup uses `JIRA_OAUTH_ACCESS_TOKEN` (see [Configuration Reference](configuration-reference.html)). |
 | `--jira-ssl-verify` / `--no-jira-ssl-verify`, `--jira-max-results` | Jira search tuning. |
 | `--github-token` | GitHub API token. `GITHUB_TOKEN`. |
 | `--ai-call-timeout` | AI timeout in minutes. |
@@ -2711,12 +2718,12 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz capabilities` | — | Whether the server can create GitHub issues and Jira bugs. |
-| `rootcoz jira-projects` | `--query`, `--jira-token`, `--jira-email` | Available Jira projects. |
-| `rootcoz jira-security-levels PROJECT_KEY` | `--jira-token`, `--jira-email` | Security levels for a project. |
-| `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
+| `rootcoz jira-projects` | `--query`, `--jira-token`, `--jira-email`, `--jira-sa-token` | Available Jira projects. |
+| `rootcoz jira-security-levels PROJECT_KEY` | `--jira-token`, `--jira-email`, `--jira-sa-token` | Security levels for a project. |
+| `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
-| `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
-| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. |
+| `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
+| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATST-prefixed Jira token is validated as a service account against the scoped Atlassian gateway. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 
 12. **Push to exporters.**

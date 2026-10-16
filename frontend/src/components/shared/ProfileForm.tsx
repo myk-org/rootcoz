@@ -6,10 +6,12 @@ import {
   setGithubToken,
   setJiraToken,
   setJiraEmail,
+  setJiraSaToken,
   getUsername,
   getGithubToken,
   getJiraToken,
   getJiraEmail,
+  getJiraSaToken,
 } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -40,10 +42,13 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   const [githubToken, setGithubTokenValue] = useState(getGithubToken())
   const [jiraEmail, setJiraEmailValue] = useState(getJiraEmail())
   const [jiraToken, setJiraTokenValue] = useState(getJiraToken())
+  const [jiraSaToken, setJiraSaTokenValue] = useState(getJiraSaToken())
   const [validatingGithub, setValidatingGithub] = useState(false)
   const [validatingJira, setValidatingJira] = useState(false)
+  const [validatingJiraSa, setValidatingJiraSa] = useState(false)
   const [githubValidation, setGithubValidation] = useState<TokenValidationResult | null>(null)
   const [jiraValidation, setJiraValidation] = useState<TokenValidationResult | null>(null)
+  const [jiraSaValidation, setJiraSaValidation] = useState<TokenValidationResult | null>(null)
 
   const [saving, setSaving] = useState(false)
   const [usernameError, setUsernameError] = useState<string | null>(null)
@@ -51,7 +56,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   /** Token values as last returned by the server. A save only re-validates what
    *  differs from these, so an untouched stored credential is not re-checked and
    *  a stale browser-cached one is (#294). */
-  const [baseline, setBaseline] = useState({ gh: '', je: '', jt: '' })
+  const [baseline, setBaseline] = useState({ gh: '', je: '', jt: '', jst: '' })
 
   const githubTokenRef = useRef(githubToken)
   githubTokenRef.current = githubToken
@@ -59,15 +64,18 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   jiraEmailRef.current = jiraEmail
   const jiraTokenRef = useRef(jiraToken)
   jiraTokenRef.current = jiraToken
+  const jiraSaTokenRef = useRef(jiraSaToken)
+  jiraSaTokenRef.current = jiraSaToken
 
   const hydrateTokensFromServer = useCallback(
-    async (current: { gh: string; je: string; jt: string }) => {
+    async (current: { gh: string; je: string; jt: string; jst: string }) => {
       try {
-        const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string }>('/api/user/tokens')
+        const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string; jira_sa_token: string }>('/api/user/tokens')
         const server = {
           gh: (tokens.github_token || '').trim(),
           je: (tokens.jira_email || '').trim(),
           jt: (tokens.jira_token || '').trim(),
+          jst: (tokens.jira_sa_token || '').trim(),
         }
         // Baseline is the server's value, not the browser's: a cookie left over
         // from another browser that has since been replaced counts as changed.
@@ -84,6 +92,10 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
           setJiraTokenValue(server.jt)
           setJiraToken(server.jt)
         }
+        if (server.jst && !current.jst.trim()) {
+          setJiraSaTokenValue(server.jst)
+          setJiraSaToken(server.jst)
+        }
       } catch (err) {
         // 401 (no cookie yet) and 404 (user not registered) are expected; log anything else.
         if (!isExpectedTokenSyncError(err)) {
@@ -99,13 +111,13 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       setTokensLoaded(true) // no user yet, nothing to load
       return
     }
-    hydrateTokensFromServer({ gh: githubTokenRef.current, je: jiraEmailRef.current, jt: jiraTokenRef.current })
+    hydrateTokensFromServer({ gh: githubTokenRef.current, je: jiraEmailRef.current, jt: jiraTokenRef.current, jst: jiraSaTokenRef.current })
       .finally(() => setTokensLoaded(true))
   // eslint-disable-next-line react-hooks/exhaustive-deps -- initialUsername (lazy useState) and hydrateTokensFromServer (useCallback) are stable; run once on mount
   }, [])
 
   async function refreshTokensFromServer() {
-    await hydrateTokensFromServer({ gh: githubToken, je: jiraEmail, jt: jiraToken })
+    await hydrateTokensFromServer({ gh: githubToken, je: jiraEmail, jt: jiraToken, jst: jiraSaToken })
   }
 
   async function handleRotateKey() {
@@ -138,10 +150,12 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       const gh = githubToken.trim()
       const je = jiraEmail.trim()
       const jt = jiraToken.trim()
+      const jst = jiraSaToken.trim()
       setGithubToken(gh)
       setJiraEmail(je)
       setJiraToken(jt)
-      await persistTokensToServer(gh, je, jt)
+      setJiraSaToken(jst)
+      await persistTokensToServer(gh, je, jt, jst)
     }
 
     // Validate only what this save introduces. A stored token the user never
@@ -158,16 +172,24 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       !!jiraToken.trim() &&
       (jiraToken.trim() !== baseline.jt || (jiraEmail.trim() !== baseline.je && !jiraEmailCleared)) &&
       (!jiraValidation || !jiraValidation.valid)
+    // The service account token gets the same pre-save check as the regular
+    // Jira credential — a mistyped ATST token must not be saved silently.
+    const needsJiraSaValidation =
+      !!jiraSaToken.trim() &&
+      jiraSaToken.trim() !== baseline.jst &&
+      (!jiraSaValidation || !jiraSaValidation.valid)
 
-    if (!isViewer && (needsGithubValidation || needsJiraValidation)) {
+    if (!isViewer && (needsGithubValidation || needsJiraValidation || needsJiraSaValidation)) {
       const validations = await Promise.allSettled([
         needsGithubValidation ? validateGithub() : Promise.resolve(),
         needsJiraValidation ? validateJira() : Promise.resolve(),
+        needsJiraSaValidation ? validateJiraSa() : Promise.resolve(),
       ])
 
       const results = validations.map((r) => r.status === 'fulfilled' ? r.value : false)
       if (needsGithubValidation && results[0] === false) { setSaving(false); return }
       if (needsJiraValidation && results[1] === false) { setSaving(false); return }
+      if (needsJiraSaValidation && results[2] === false) { setSaving(false); return }
     }
 
     try {
@@ -212,11 +234,17 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
     return validateToken('jira', email ? { token: jiraToken.trim(), email } : { token: jiraToken.trim() }, setValidatingJira, setJiraValidation)
   }
 
+  function validateJiraSa(): Promise<boolean> {
+    // The backend detects the ATST prefix and validates against the scoped
+    // Atlassian gateway — no email is involved for service account tokens.
+    return validateToken('jira', { token: jiraSaToken.trim() }, setValidatingJiraSa, setJiraSaValidation)
+  }
+
   return (
     <Card className="border-border-muted">
       <CardContent className="p-5">
         <form onSubmit={handleSubmit} className="space-y-4">
-          <fieldset disabled={saving || validatingGithub || validatingJira} className="space-y-4">
+          <fieldset disabled={saving || validatingGithub || validatingJira || validatingJiraSa} className="space-y-4">
           {/* Username field */}
           <div className="space-y-1.5">
             <label
@@ -295,11 +323,14 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             onJiraEmailChange={(v) => { setJiraEmailValue(v); setJiraValidation(null) }}
             jiraToken={jiraToken}
             onJiraTokenChange={(v) => { setJiraTokenValue(v); setJiraValidation(null) }}
+            jiraSaToken={jiraSaToken}
+            onJiraSaTokenChange={(v) => { setJiraSaTokenValue(v); setJiraSaValidation(null) }}
+            jiraSaValidation={jiraSaValidation}
             githubValidation={githubValidation}
             jiraValidation={jiraValidation}
           />}
 
-          <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || !tokensLoaded}>
+          <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || validatingJiraSa || !tokensLoaded}>
             {saving ? 'Saving...' : 'Save'}
           </Button>
           </fieldset>

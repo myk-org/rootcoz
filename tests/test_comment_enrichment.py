@@ -14,6 +14,7 @@ from rootcoz.comment_enrichment import (
     fetch_github_pr_status,
     fetch_jira_ticket_status,
 )
+from rootcoz.jira import resolve_jira_connection_from_params
 
 
 class TestDetectGitHubPRs:
@@ -264,10 +265,12 @@ class TestFetchJiraTicketStatus:
             mock_client.return_value = mock_instance
 
             status = await fetch_jira_ticket_status(
-                "https://myorg.atlassian.net",
+                resolve_jira_connection_from_params(
+                    "https://myorg.atlassian.net",
+                    "user@example.com",
+                    "api-token",
+                ),
                 "PROJ-100",
-                {},
-                auth=("user@example.com", "api-token"),
             )
             assert status == "Closed"
 
@@ -296,9 +299,10 @@ class TestFetchJiraTicketStatus:
             mock_client.return_value = mock_instance
 
             status = await fetch_jira_ticket_status(
-                "https://jira-server.example.com",
+                resolve_jira_connection_from_params(
+                    "https://jira-server.example.com", jira_pat="pat-token"
+                ),
                 "PROJ-200",
-                {"Authorization": "Bearer pat-token"},
             )
             assert status == "Open"
             assert mock_instance.get.call_count == 2
@@ -317,9 +321,10 @@ class TestFetchJiraTicketStatus:
             mock_client.return_value = mock_instance
 
             status = await fetch_jira_ticket_status(
-                "https://jira.example.com",
+                resolve_jira_connection_from_params(
+                    "https://jira.example.com", jira_pat="bad-token"
+                ),
                 "PROJ-300",
-                {"Authorization": "Bearer bad-token"},
             )
             assert status is None
 
@@ -334,9 +339,8 @@ class TestFetchJiraTicketStatus:
             mock_client.return_value = mock_instance
 
             status = await fetch_jira_ticket_status(
-                "https://jira.example.com",
+                resolve_jira_connection_from_params("https://jira.example.com"),
                 "PROJ-400",
-                {},
             )
             assert status is None
 
@@ -355,8 +359,38 @@ class TestFetchJiraTicketStatus:
             mock_client.return_value = mock_instance
 
             status = await fetch_jira_ticket_status(
-                "https://jira.example.com",
+                resolve_jira_connection_from_params("https://jira.example.com"),
                 "PROJ-999",
-                {},
             )
             assert status is None
+
+    @pytest.mark.asyncio
+    async def test_sa_mode_skips_v2_fallback(self):
+        """Service account connections hit only v3 (the gateway has no v2)."""
+        mock_response = MagicMock()
+        mock_response.status_code = 410
+        mock_response.json.return_value = {"issues": []}
+
+        with patch("rootcoz.comment_enrichment.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.get.return_value = mock_response
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            status = await fetch_jira_ticket_status(
+                resolve_jira_connection_from_params(
+                    "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+                    jira_oauth_access_token="ATST-test-token",
+                    jira_site_url="https://myorg.atlassian.net",
+                ),
+                "PROJ-500",
+            )
+            assert status is None
+            # Exactly one request: v3 only, no v2 fallback on the scoped gateway
+            assert mock_instance.get.await_count == 1
+            requested_url = mock_instance.get.call_args.args[0]
+            assert requested_url.endswith("/rest/api/3/search/jql")
+            # Auth headers come from the connection (Bearer ATST)
+            client_headers = mock_client.call_args.kwargs["headers"]
+            assert client_headers["Authorization"] == "Bearer ATST-test-token"

@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Self
+from urllib.parse import urlparse
 
 import httpx
 from simple_logger.logger import get_logger
@@ -29,6 +31,232 @@ logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 # JQL reserved characters that need to be stripped from search keywords
 _JQL_SPECIAL_CHARS = set(r'"\'{}[]()~^&|!?*%+-:')
 
+# Atlassian scoped API gateway for service account (ATST) tokens
+ATLASSIAN_API_GATEWAY = "https://api.atlassian.com/ex/jira"
+_SCOPED_URL_MARKER = "api.atlassian.com/ex/jira"
+
+
+@dataclass(frozen=True)
+class JiraConnection:
+    """Resolved Jira connection parameters — the single source of truth.
+
+    Every Jira call site (client, bug creation, comment enrichment, chat
+    tools, health check) resolves its connection through this instead of
+    rebuilding the auth/base-URL/api-version logic locally. Three additive
+    modes, detected from the configured credentials:
+
+    - ``sa``: Atlassian service account (ATST token, Bearer against the
+      scoped ``api.atlassian.com`` gateway, REST v3)
+    - ``cloud``: Cloud basic auth (email + token, REST v3)
+    - ``server``: Server/DC Bearer PAT (REST v2)
+    """
+
+    mode: str
+    # Base URL for REST calls. Empty in SA mode until the cloud ID resolves
+    # (``complete_jira_connection``); callers must complete it first.
+    api_base: str
+    # Site URL for /browse/KEY links — never the scoped gateway URL
+    browse_base: str
+    # Atlassian site URL for the tenant-info lookup ("" when unknown)
+    site_url: str
+    auth: tuple[str, str] | None
+    headers: dict[str, str] = field(default_factory=dict)
+    api_path: str = "/rest/api/2"
+    search_path: str = "/rest/api/2/search"
+
+
+def _is_scoped_api_url(url: str) -> bool:
+    return _SCOPED_URL_MARKER in url.lower()
+
+
+def _is_atlassian_cloud_host(url: str) -> bool:
+    """True when the URL's hostname is atlassian.net or a subdomain of it.
+
+    Hostname-anchored — a Server/DC URL that merely contains the substring
+    ``atlassian.net`` (path or lookalike domain) is NOT Atlassian Cloud.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "atlassian.net" or host.endswith(".atlassian.net")
+
+
+def resolve_jira_connection(settings: Settings) -> JiraConnection:
+    """Resolve the Jira connection from settings.
+
+    Detection order: ATST service account token first (basic auth with an
+    ATST token is rejected by Atlassian, so the prefix wins over email),
+    then Cloud basic auth (``jira_email``), then Server/DC Bearer.
+    """
+    url = (settings.jira_url or "").rstrip("/")
+
+    sa_token = ""
+    if settings.jira_oauth_access_token:
+        value = settings.jira_oauth_access_token.get_secret_value()
+        if value.startswith("ATST"):
+            sa_token = value
+
+    if sa_token:
+        # SA mode: REST calls go to the scoped gateway; browse links must
+        # still point at the site. The site URL cannot be derived from the
+        # scoped URL, so it comes from JIRA_SITE_URL or a non-scoped JIRA_URL.
+        site = (settings.jira_site_url or "").rstrip("/") or (
+            "" if _is_scoped_api_url(url) else url
+        )
+        if _is_scoped_api_url(url):
+            # Scoped shape: JIRA_URL already carries the cloud ID
+            api_base = url
+            if not site:
+                logger.warning(
+                    "JIRA_URL is the scoped Atlassian API URL but "
+                    "JIRA_SITE_URL is unset — browse links cannot be built"
+                )
+        elif settings.atlassian_oauth_cloud_id:
+            api_base = f"{ATLASSIAN_API_GATEWAY}/{settings.atlassian_oauth_cloud_id}"
+        else:
+            # Unresolved: complete_jira_connection() resolves it via tenant_info
+            api_base = ""
+        return JiraConnection(
+            mode="sa",
+            api_base=api_base,
+            browse_base=site,
+            site_url=site,
+            auth=None,
+            headers={"Authorization": f"Bearer {sa_token}"},
+            api_path="/rest/api/3",
+            search_path="/rest/api/3/search/jql",
+        )
+
+    is_cloud, token_value = resolve_jira_auth(settings)
+    if is_cloud and settings.jira_email and token_value:
+        # Basic auth keeps v3 regardless of host — Atlassian removed the v2
+        # search endpoint, so a Cloud site behind a custom domain or proxy
+        # would hard-fail on v2 paths. (A Server/DC instance configured with
+        # email+token basic auth keeps its historical pre-connection behavior.)
+        return JiraConnection(
+            mode="cloud",
+            api_base=url,
+            browse_base=url,
+            site_url=url,
+            auth=(settings.jira_email, token_value),
+            headers={},
+            api_path="/rest/api/3",
+            search_path="/rest/api/3/search/jql",
+        )
+    if token_value:
+        # Bearer auth (Server/DC PAT, or a Cloud PAT): v3 only when the
+        # hostname is positively Atlassian Cloud — a lookalike or
+        # substring-containing Server/DC host must keep v2.
+        host_is_atlassian_cloud = _is_atlassian_cloud_host(url)
+        return JiraConnection(
+            mode="server",
+            api_base=url,
+            browse_base=url,
+            site_url=url,
+            auth=None,
+            headers={"Authorization": f"Bearer {token_value}"},
+            api_path="/rest/api/3" if host_is_atlassian_cloud else "/rest/api/2",
+            search_path=(
+                "/rest/api/3/search/jql"
+                if host_is_atlassian_cloud
+                else "/rest/api/2/search"
+            ),
+        )
+    # No valid auth configured: anonymous, current behavior preserved
+    return JiraConnection(
+        mode="none",
+        api_base=url,
+        browse_base=url,
+        site_url=url,
+        auth=None,
+        headers={},
+    )
+
+
+def resolve_jira_connection_from_params(
+    jira_url: str,
+    jira_email: str = "",
+    jira_token: str = "",
+    jira_pat: str = "",
+    jira_oauth_access_token: str = "",
+    atlassian_oauth_cloud_id: str = "",
+    jira_site_url: str = "",
+) -> JiraConnection:
+    """Resolve a Jira connection from raw credential strings.
+
+    For call sites that receive credentials as plain strings (chat tools,
+    user token validation) rather than a :class:`Settings` instance. Uses
+    ``model_construct`` so the process environment is never consulted —
+    server deployment secrets must not leak into user-scoped resolution.
+    """
+    from pydantic import SecretStr
+
+    settings = Settings.model_construct(
+        jira_url=jira_url.strip().rstrip("/") or None,
+        jira_email=jira_email.strip() or None,
+        jira_api_token=SecretStr(jira_token) if jira_token else None,
+        jira_pat=SecretStr(jira_pat) if jira_pat else None,
+        jira_oauth_access_token=SecretStr(jira_oauth_access_token)
+        if jira_oauth_access_token
+        else None,
+        atlassian_oauth_cloud_id=atlassian_oauth_cloud_id.strip() or None,
+        jira_site_url=jira_site_url.strip() or None,
+    )
+    return resolve_jira_connection(settings)
+
+
+# Cloud IDs resolved via tenant_info, cached in-process per site URL
+_cloud_id_cache: dict[str, str] = {}
+
+
+async def resolve_jira_cloud_id(site_url: str, ssl_verify: bool = True) -> str | None:
+    """Resolve the Atlassian cloud ID anonymously from a site's tenant info.
+
+    ``GET {site}/_edge/tenant_info`` requires no authentication. Only
+    successful lookups are cached; failures return None so a transient
+    outage is retried on the next call.
+    """
+    site = (site_url or "").rstrip("/")
+    if not site:
+        return None
+    cached = _cloud_id_cache.get(site)
+    if cached:
+        return cached
+    try:
+        async with httpx.AsyncClient(verify=ssl_verify, timeout=10) as client:
+            resp = await client.get(f"{site}/_edge/tenant_info")
+            resp.raise_for_status()
+            payload = resp.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning("Cloud ID lookup failed for %s: %s", site, type(exc).__name__)
+        return None
+    # A successful response may still be malformed (null, array) — treat any
+    # non-object payload as unresolvable rather than crashing callers.
+    if isinstance(payload, dict):
+        cloud_id = payload.get("cloudId")
+        if isinstance(cloud_id, str) and cloud_id:
+            _cloud_id_cache[site] = cloud_id
+            return cloud_id
+    logger.warning("Cloud ID lookup for %s returned no usable cloudId", site)
+    return None
+
+
+async def complete_jira_connection(
+    connection: JiraConnection, ssl_verify: bool = True
+) -> JiraConnection:
+    """Complete an SA connection that lacks an API base (cloud ID unknown).
+
+    Idempotent: non-SA or already-resolved connections pass through
+    unchanged. Returns the input unchanged when the cloud ID cannot be
+    resolved — callers surface the configuration error at request time.
+    """
+    if connection.mode == "sa" and not connection.api_base and connection.site_url:
+        cloud_id = await resolve_jira_cloud_id(connection.site_url, ssl_verify)
+        if cloud_id:
+            return replace(connection, api_base=f"{ATLASSIAN_API_GATEWAY}/{cloud_id}")
+    return connection
+
 
 def _sanitize_jql_keyword(keyword: str) -> str:
     """Strip JQL-reserved characters from a search keyword.
@@ -45,45 +273,29 @@ def _sanitize_jql_keyword(keyword: str) -> str:
 class JiraClient:
     """HTTP client for Jira REST API.
 
-    Auto-detects Cloud (email + API token, REST API v3) vs
-    Server/DC (PAT or API token, REST API v2) based on provided credentials.
+    Resolves its connection through :func:`resolve_jira_connection` — the
+    shared single source of truth for all Jira call sites. Three additive
+    connection methods, detected from the configured credentials:
 
-    Cloud detection: ``jira_email`` present → Cloud mode.
-    The token is ``jira_api_token`` (preferred) or ``jira_pat``
-    (fallback).
-
-    Server/DC detection (no ``jira_email``): uses Bearer auth
-    with ``jira_pat`` (preferred) or ``jira_api_token`` as
-    fallback.
+    - Atlassian service account (ATST token): Bearer against the scoped
+      ``api.atlassian.com`` gateway, REST v3. The cloud ID is resolved on
+      entry (``__aenter__``) when not configured.
+    - Cloud (``jira_email`` present): basic auth, REST v3.
+    - Server/DC (no email): Bearer PAT, REST v2.
     """
 
     def __init__(self, settings: Settings) -> None:
-        self._base_url = (settings.jira_url or "").rstrip("/")
+        self._settings = settings
+        connection = resolve_jira_connection(settings)
+        self._connection = connection
+        self._base_url = connection.api_base
+        self._browse_base = connection.browse_base
         self._project_key = settings.jira_project_key
         self._max_results = settings.jira_max_results
-
-        is_cloud, token_value = resolve_jira_auth(settings)
-
-        # Configure Cloud vs Server/DC auth
-        self._auth: tuple[str, str] | None
-        if is_cloud and settings.jira_email:
-            # Cloud: resolve_jira_auth() selected email + token (api_token or pat).
-            self._auth = (settings.jira_email, token_value)
-            self._search_path = "/rest/api/3/search/jql"
-            self._api_path = "/rest/api/3"
-            self._headers: dict[str, str] = {}
-        elif token_value:
-            # Server/DC: resolve_jira_auth() already selected the credential.
-            self._auth = None
-            self._search_path = "/rest/api/2/search"
-            self._api_path = "/rest/api/2"
-            self._headers = {"Authorization": f"Bearer {token_value}"}
-        else:
-            # No valid auth configured
-            self._auth = None
-            self._search_path = "/rest/api/2/search"
-            self._api_path = "/rest/api/2"
-            self._headers = {}
+        self._auth: tuple[str, str] | None = connection.auth
+        self._headers: dict[str, str] = connection.headers
+        self._search_path = connection.search_path
+        self._api_path = connection.api_path
 
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
@@ -98,6 +310,23 @@ class JiraClient:
         await self._client.aclose()
 
     async def __aenter__(self) -> Self:
+        # SA mode may still need its cloud ID resolved (tenant_info lookup)
+        connection = await complete_jira_connection(
+            self._connection, self._settings.jira_ssl_verify
+        )
+        if connection is not self._connection:
+            self._connection = connection
+            self._base_url = connection.api_base
+            self._client.base_url = connection.api_base
+        if connection.mode == "sa" and not connection.api_base:
+            # __aexit__ never runs when __aenter__ raises — close the client
+            # created in __init__ before surfacing the configuration error.
+            await self._client.aclose()
+            raise ValueError(
+                "Jira service account mode could not resolve the Atlassian "
+                "cloud ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL, or "
+                "point JIRA_URL at the scoped api.atlassian.com URL"
+            )
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -272,6 +501,12 @@ class JiraClient:
                 desc = _extract_text_from_adf(desc)
 
             issue_key = issue.get("key", "")
+            # A scoped JIRA_URL without JIRA_SITE_URL cannot produce a browse
+            # link — omit it rather than emitting a relative "/browse/..."
+            # URL that downstream tracker detection would misclassify.
+            issue_url = (
+                f"{self._browse_base}/browse/{issue_key}" if self._browse_base else ""
+            )
             candidates.append(
                 {
                     "key": issue_key,
@@ -279,7 +514,7 @@ class JiraClient:
                     "description": desc,
                     "status": status_name,
                     "priority": priority_name,
-                    "url": f"{self._base_url}/browse/{issue_key}",
+                    "url": issue_url,
                 }
             )
 

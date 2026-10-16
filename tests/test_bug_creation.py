@@ -193,6 +193,9 @@ class TestSearchJiraDuplicatesIncludesDescription:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
         mock_settings.jira_max_results = 5
 
@@ -371,6 +374,9 @@ class TestCreateJiraBug:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token123"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -412,7 +418,13 @@ class TestCreateJiraBug:
         mock_settings.jira_email = None
         mock_settings.jira_api_token = None
         mock_settings.jira_pat = MagicMock()
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_pat.get_secret_value.return_value = "pat123"
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = False
 
         mock_response = httpx.Response(
@@ -445,6 +457,9 @@ class TestCreateJiraBug:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token123"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -483,6 +498,9 @@ class TestCreateJiraBug:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token123"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -727,6 +745,9 @@ class TestAiFooterNotDoubled:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -750,3 +771,271 @@ class TestAiFooterNotDoubled:
                 "description"
             ]
             assert posted_body.count(_JIRA_FOOTER_MARKER) == 1
+
+    async def test_sa_token_uses_scoped_gateway_and_v3(self):
+        """Service account tokens post to the scoped gateway with REST v3."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_url = (
+            "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        )
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = "user@example.com"
+        mock_settings.jira_api_token = MagicMock()
+        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = "https://myorg.atlassian.net"
+        mock_settings.jira_ssl_verify = True
+
+        mock_response = httpx.Response(
+            201, json={"key": "PROJ-789"}, request=_mock_request()
+        )
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            result = await create_jira_bug(
+                title="SA bug",
+                body="body",
+                settings=mock_settings,
+            )
+            assert result["key"] == "PROJ-789"
+            # Browse link uses the site URL, never the scoped gateway
+            assert result["url"] == "https://myorg.atlassian.net/browse/PROJ-789"
+
+            post_url = mock_client.post.call_args.args[0]
+            assert post_url.startswith(
+                "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432/rest/api/3/issue"
+            )
+            post_headers = mock_client.post.call_args.kwargs["headers"]
+            assert post_headers["Authorization"] == "Bearer ATST-test-token"
+            assert MockClient.call_args.kwargs["auth"] is None
+
+    async def test_sa_token_without_cloud_id_raises(self):
+        """An unresolvable SA cloud ID fails fast with a clear message."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_url = "https://myorg.atlassian.net"
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = None
+        mock_settings.jira_api_token = None
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
+        mock_settings.jira_ssl_verify = True
+
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = httpx.ConnectError("refused")
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            with pytest.raises(ValueError, match="cloud ID"):
+                await create_jira_bug(
+                    title="SA bug", body="body", settings=mock_settings
+                )
+
+    async def test_sa_description_is_adf_document(self):
+        """SA mode (REST v3) wraps the description in an ADF document."""
+        from rootcoz.bug_creation import _text_to_adf, create_jira_bug
+
+        # Unit: plain text becomes a doc with one paragraph per line.
+        adf = _text_to_adf("line one\n\nline three")
+        assert adf["type"] == "doc"
+        assert adf["version"] == 1
+        assert [p.get("content") for p in adf["content"]] == [
+            [{"type": "text", "text": "line one"}],
+            [],
+            [{"type": "text", "text": "line three"}],
+        ]
+        mock_settings = MagicMock()
+        mock_settings.jira_url = (
+            "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        )
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = None
+        mock_settings.jira_api_token = None
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = "https://myorg.atlassian.net"
+        mock_settings.jira_ssl_verify = True
+
+        mock_response = httpx.Response(
+            201, json={"key": "PROJ-790"}, request=_mock_request()
+        )
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            await create_jira_bug(
+                title="SA bug", body="plain body", settings=mock_settings
+            )
+            payload = mock_client.post.call_args.kwargs["json"]
+            description = payload["fields"]["description"]
+            assert description["type"] == "doc"
+            paragraphs = description["content"]
+            assert paragraphs[0]["content"] == [{"type": "text", "text": "plain body"}]
+            # Non-SA modes must keep the plain string description.
+            # (Covered by the cloud/server tests asserting no ADF.)
+
+    async def test_sa_token_without_site_url_raises(self):
+        """A scoped URL without a site URL fails fast — no broken links."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_url = (
+            "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        )
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = None
+        mock_settings.jira_api_token = None
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
+        mock_settings.jira_ssl_verify = True
+
+        with pytest.raises(ValueError, match="JIRA_SITE_URL"):
+            await create_jira_bug(title="SA bug", body="body", settings=mock_settings)
+
+    async def test_text_to_adf_translates_wiki_markup(self):
+        """Fallback wiki markup renders as structured ADF, not literal text."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        adf = _text_to_adf(
+            """h2. Test Failure
+*Test:* {{code}}test.module::case{{code}}
+
+h2. Error
+{code}
+AssertionError: boom
+{code}
+
+* [Jenkins Build|https://jenkins/job/1]
+* [Analysis Report|https://rootcoz/r/1]
+plain _italic_ and [bare|https://x] tail"""
+        )
+        nodes = adf["content"]
+        # h2. → heading level 2 with inline strong/code marks
+        assert nodes[0]["type"] == "heading"
+        assert nodes[0]["attrs"]["level"] == 2
+        assert nodes[0]["content"][0]["text"] == "Test Failure"
+        # *bold* and {{mono}} become marked text nodes. The fallback emits
+        # {{code}} markers around the test name, so the literal word "code"
+        # is the monospaced content — conversion is faithful to the wiki.
+        para = nodes[1]
+        assert para["type"] == "paragraph"
+        texts = {
+            (n["text"], tuple(m["type"] for m in n.get("marks", [])))
+            for n in para["content"]
+        }
+        assert ("Test:", ("strong",)) in texts
+        assert ("code", ("code",)) in texts
+        assert ("test.module::case", ()) in texts
+        # {code} fence → codeBlock with the raw error inside
+        code_block = next(n for n in nodes if n["type"] == "codeBlock")
+        assert code_block["content"][0]["text"] == "AssertionError: boom"
+        # consecutive "* " lines merge into one bulletList with link marks
+        bullet_list = next(n for n in nodes if n["type"] == "bulletList")
+        assert len(bullet_list["content"]) == 2
+        first_item_text = bullet_list["content"][0]["content"][0]["content"][0]
+        assert first_item_text["text"] == "Jenkins Build"
+        assert first_item_text["marks"] == [
+            {"type": "link", "attrs": {"href": "https://jenkins/job/1"}}
+        ]
+        # inline italic and links in a plain paragraph
+        last_para = nodes[-1]
+        marks = {
+            tuple(m["type"] for m in n.get("marks", [])) for n in last_para["content"]
+        }
+        assert ("em",) in marks
+        assert ("link",) in marks
+
+    async def test_text_to_adf_unterminated_code_fence_keeps_content(self):
+        """An unterminated {code} fence keeps its lines instead of dropping them."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        adf = _text_to_adf("{code}\nkept line")
+        code_block = next(n for n in adf["content"] if n["type"] == "codeBlock")
+        assert code_block["content"][0]["text"] == "kept line"
+
+    async def test_text_to_adf_markdown_links(self):
+        """Markdown [text](url) links keep the URL as the link destination."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        adf = _text_to_adf("see [Jenkins Build](https://jenkins/job/1) here")
+        para = adf["content"][0]
+        link_node = next(
+            n
+            for n in para["content"]
+            if any(m["type"] == "link" for m in n.get("marks", []))
+        )
+        assert link_node["text"] == "Jenkins Build"
+        assert link_node["marks"] == [
+            {"type": "link", "attrs": {"href": "https://jenkins/job/1"}}
+        ]
+        # The URL must not survive as plain text (wiki misparse symptom)
+        texts = [n["text"] for n in para["content"]]
+        assert "(https://jenkins/job/1)" not in "".join(texts)
+
+    async def test_text_to_adf_footer_link_nested_in_italic(self):
+        """The attribution footer's link stays clickable inside the italic span."""
+        from rootcoz.bug_creation import JIRA_AI_FOOTER, _text_to_adf
+
+        adf = _text_to_adf(f"body text{JIRA_AI_FOOTER}")
+        # Footer line: _Generated using AI with [rootcoz|...]_
+        footer_para = adf["content"][-1]
+        rootcoz_node = next(n for n in footer_para["content"] if n["text"] == "rootcoz")
+        mark_types = [m["type"] for m in rootcoz_node["marks"]]
+        assert "em" in mark_types
+        assert "link" in mark_types
+        link_mark = next(m for m in rootcoz_node["marks"] if m["type"] == "link")
+        assert link_mark["attrs"]["href"] == "https://github.com/myk-org/rootcoz"
+        # Surrounding footer text keeps the italic mark without a link
+        generated = next(
+            n for n in footer_para["content"] if n["text"].startswith("Generated")
+        )
+        assert [m["type"] for m in generated["marks"]] == ["em"]
+
+    async def test_text_to_adf_markdown_link_with_parenthesized_url(self):
+        """Markdown URLs with balanced parentheses are not truncated."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        url = "https://en.wikipedia.org/wiki/Function_(mathematics)"
+        adf = _text_to_adf(f"see [docs]({url}) end")
+        para = adf["content"][0]
+        link_node = next(
+            n
+            for n in para["content"]
+            if any(m["type"] == "link" for m in n.get("marks", []))
+        )
+        assert link_node["marks"] == [{"type": "link", "attrs": {"href": url}}]
+        # No leftover parenthesis from a truncated destination
+        joined = "".join(n["text"] for n in para["content"])
+        assert "())" not in joined
+        assert joined.endswith("end")

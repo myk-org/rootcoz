@@ -458,6 +458,10 @@
 <td>Jira connection. Each has a matching <code>JIRA_*</code> env var.</td>
 </tr>
 <tr>
+<td><code>--jira-sa-token</code></td>
+<td>Atlassian service account (ATST) token, a third connection method that takes precedence over the regular Jira credentials. <code>JIRA_SA_TOKEN</code> in config files; server-side SA setup uses <code>JIRA_OAUTH_ACCESS_TOKEN</code> (see <a href="configuration-reference.html">Configuration Reference</a>).</td>
+</tr>
+<tr>
 <td><code>--jira-ssl-verify</code> / <code>--no-jira-ssl-verify</code>, <code>--jira-max-results</code></td>
 <td>Jira search tuning.</td>
 </tr>
@@ -817,17 +821,17 @@
 </tr>
 <tr>
 <td><code>rootcoz jira-projects</code></td>
-<td><code>--query</code>, <code>--jira-token</code>, <code>--jira-email</code></td>
+<td><code>--query</code>, <code>--jira-token</code>, <code>--jira-email</code>, <code>--jira-sa-token</code></td>
 <td>Available Jira projects.</td>
 </tr>
 <tr>
 <td><code>rootcoz jira-security-levels PROJECT_KEY</code></td>
-<td><code>--jira-token</code>, <code>--jira-email</code></td>
+<td><code>--jira-token</code>, <code>--jira-email</code>, <code>--jira-sa-token</code></td>
 <td>Security levels for a project.</td>
 </tr>
 <tr>
 <td><code>rootcoz preview-issue JOB_ID</code></td>
-<td><code>--test</code>/<code>-t</code>, <code>--type</code> (<code>github</code> or <code>jira</code>), <code>--child-job</code>, <code>--child-build</code>, <code>--include-links</code>, <code>--ai-provider</code>, <code>--ai-model</code>, <code>--github-token</code>, <code>--github-repo-url</code>, <code>--jira-token</code>, <code>--jira-email</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--issue-prompt</code></td>
+<td><code>--test</code>/<code>-t</code>, <code>--type</code> (<code>github</code> or <code>jira</code>), <code>--child-job</code>, <code>--child-build</code>, <code>--include-links</code>, <code>--ai-provider</code>, <code>--ai-model</code>, <code>--github-token</code>, <code>--github-repo-url</code>, <code>--jira-token</code>, <code>--jira-email</code>, <code>--jira-sa-token</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--issue-prompt</code></td>
 <td>Render issue title, body, and similar issues without creating anything.</td>
 </tr>
 <tr>
@@ -837,13 +841,13 @@
 </tr>
 <tr>
 <td><code>rootcoz create-issue JOB_ID</code></td>
-<td><code>--test</code>/<code>-t</code>, <code>--type</code>, <code>--title</code>, <code>--body</code>, <code>--child-job</code>, <code>--child-build</code>, <code>--github-token</code>, <code>--github-repo-url</code>, <code>--jira-token</code>, <code>--jira-email</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--jira-issue-type</code> (default <code>Bug</code>)</td>
+<td><code>--test</code>/<code>-t</code>, <code>--type</code>, <code>--title</code>, <code>--body</code>, <code>--child-job</code>, <code>--child-build</code>, <code>--github-token</code>, <code>--github-repo-url</code>, <code>--jira-token</code>, <code>--jira-email</code>, <code>--jira-sa-token</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--jira-issue-type</code> (default <code>Bug</code>)</td>
 <td>Create the issue.</td>
 </tr>
 <tr>
 <td><code>rootcoz validate-token github\|jira</code></td>
 <td><code>--token</code> (hidden prompt), <code>--email</code></td>
-<td>Check a tracker token before using it.</td>
+<td>Check a tracker token before using it. An ATST-prefixed Jira token is validated as a service account against the scoped Atlassian gateway.</td>
 </tr>
 <tr>
 <td><code>rootcoz ai-models</code></td>

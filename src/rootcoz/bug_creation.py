@@ -14,7 +14,7 @@ from simple_logger.logger import get_logger
 from rootcoz.ai_client import call_ai_once
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, build_ai_attribution
 from rootcoz.config import Settings
-from rootcoz.jira import JiraClient
+from rootcoz.jira import JiraClient, complete_jira_connection, resolve_jira_connection
 from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
@@ -710,6 +710,161 @@ async def create_github_issue(
         }
 
 
+_ADF_HEADING_RE = re.compile(r"^h([1-6])\.\s+(.*)$")
+_ADF_CODE_FENCE = "{code}"
+_ADF_INLINE_RE = re.compile(
+    # Markdown links must be tried before wiki links — otherwise
+    # "[text](url)" matches the wiki alternative and loses the URL.
+    # The destination allows one level of balanced parentheses so URLs
+    # like https://en.wikipedia.org/wiki/Function_(mathematics) survive
+    # intact instead of being truncated at the first ")".
+    r"\[(?P<md_text>[^\]]+)\]\(\s*(?P<md_url>(?:[^()\s]|\([^()\s]*\))+)\s*\)"
+    r"|\[(?P<link_text>[^\]|]+)(?:\|(?P<link_url>[^\]]+))?\]"
+    r"|(?<!\w)\*(?P<bold>[^*]+)\*(?!\w)"
+    r"|(?<!\w)_(?P<italic>[^_]+)_(?!\w)"
+    r"|\{\{(?P<mono>[^{}]+)\}\}"
+)
+
+
+def _with_adf_mark(
+    nodes: list[dict[str, Any]], mark: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Return copies of inline nodes with the given mark appended."""
+    return [{**node, "marks": [*node.get("marks", []), mark]} for node in nodes]
+
+
+def _adf_inline_nodes(text: str) -> list[dict[str, Any]]:
+    """Convert one wiki-markup line into ADF inline nodes.
+
+    Supports the markup emitted by ``_build_fallback_jira_content`` and by
+    AI-generated bodies: ``*bold*``, ``_italic_``, ``{{monospace}}``, wiki
+    links ``[text|url]``, and Markdown links ``[text](url)``. Bold and
+    italic spans are parsed recursively so links nested inside them (like
+    the attribution footer) receive both marks.
+    """
+    nodes: list[dict[str, Any]] = []
+    pos = 0
+    for match in _ADF_INLINE_RE.finditer(text):
+        if match.start() > pos:
+            nodes.append({"type": "text", "text": text[pos : match.start()]})
+        if match.group("md_text") is not None:
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("md_text"),
+                    "marks": [
+                        {"type": "link", "attrs": {"href": match.group("md_url")}}
+                    ],
+                }
+            )
+        elif match.group("link_text") is not None:
+            href = match.group("link_url") or match.group("link_text")
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("link_text"),
+                    "marks": [{"type": "link", "attrs": {"href": href}}],
+                }
+            )
+        elif match.group("bold") is not None:
+            nodes.extend(
+                _with_adf_mark(
+                    _adf_inline_nodes(match.group("bold")), {"type": "strong"}
+                )
+            )
+        elif match.group("italic") is not None:
+            nodes.extend(
+                _with_adf_mark(_adf_inline_nodes(match.group("italic")), {"type": "em"})
+            )
+        elif match.group("mono") is not None:
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("mono"),
+                    "marks": [{"type": "code"}],
+                }
+            )
+        pos = match.end()
+    if pos < len(text):
+        nodes.append({"type": "text", "text": text[pos:]})
+    return nodes
+
+
+def _text_to_adf(text: str) -> dict[str, Any]:
+    """Convert wiki-markup text to an Atlassian Document Format document.
+
+    REST v3 issue creation rejects plain-string ``fields.description``.
+    Translates the Jira wiki markup the fallback content builder emits —
+    ``hN.`` headings, ``{code}`` blocks, ``*``/``-`` bullet items, and
+    inline bold/italic/monospace/links — so service-account issues keep
+    the same rendered formatting as v2 wiki-text ones.
+    """
+    content: list[dict[str, Any]] = []
+    code_lines: list[str] = []
+    in_code = False
+    list_items: list[dict[str, Any]] | None = None
+
+    def flush_list() -> None:
+        nonlocal list_items
+        if list_items is not None:
+            content.append({"type": "bulletList", "content": list_items})
+            list_items = None
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        content.append(
+            {
+                "type": "codeBlock",
+                "content": [{"type": "text", "text": "\n".join(code_lines)}],
+            }
+        )
+        code_lines = []
+
+    for line in text.split("\n"):
+        if line.strip() == _ADF_CODE_FENCE:
+            flush_list()
+            if in_code:
+                flush_code()
+            in_code = not in_code
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        heading = _ADF_HEADING_RE.match(line)
+        if heading:
+            flush_list()
+            content.append(
+                {
+                    "type": "heading",
+                    "attrs": {"level": int(heading.group(1))},
+                    "content": _adf_inline_nodes(heading.group(2)),
+                }
+            )
+            continue
+        if line.startswith(("* ", "- ")):
+            item = {
+                "type": "listItem",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": _adf_inline_nodes(line[2:]),
+                    }
+                ],
+            }
+            if list_items is None:
+                list_items = []
+            list_items.append(item)
+            continue
+        flush_list()
+        content.append({"type": "paragraph", "content": _adf_inline_nodes(line)})
+
+    flush_list()
+    if in_code and code_lines:
+        # Unterminated fence: keep the content rather than dropping it
+        flush_code()
+    return {"type": "doc", "version": 1, "content": content}
+
+
 async def create_jira_bug(
     title: str,
     body: str,
@@ -721,34 +876,33 @@ async def create_jira_bug(
 ) -> dict[str, Any]:
     """Create a Jira Bug issue via the REST API.
 
-    Reuses the existing JiraClient auth pattern (Cloud vs Server/DC).
+    Resolves the connection through :func:`resolve_jira_connection` — the
+    shared single source of truth for all Jira call sites (service account,
+    Cloud basic auth, or Server/DC Bearer).
     Returns dict with key, url, and title keys.
 
     Raises httpx.HTTPStatusError on failure.
     """
-    base_url = (settings.jira_url or "").rstrip("/")
+    connection = await complete_jira_connection(
+        resolve_jira_connection(settings), settings.jira_ssl_verify
+    )
+    if not connection.api_base:
+        raise ValueError(
+            "Jira service account mode could not resolve the Atlassian cloud "
+            "ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL, or point "
+            "JIRA_URL at the scoped api.atlassian.com URL"
+        )
+    if not connection.browse_base:
+        raise ValueError(
+            "Jira service account mode cannot build issue links: JIRA_SITE_URL "
+            "is required when JIRA_URL is the scoped api.atlassian.com URL"
+        )
     effective_project_key = project_key or settings.jira_project_key or ""
 
-    # Resolve auth (same logic as JiraClient)
-    token_value = ""
-    if settings.jira_api_token:
-        token_value = settings.jira_api_token.get_secret_value()
-    elif settings.jira_pat:
-        token_value = settings.jira_pat.get_secret_value()
-
-    auth: tuple[str, str] | None = None
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-
-    if settings.jira_email and token_value:
-        # Cloud: Basic auth
-        auth = (settings.jira_email, token_value)
-        api_path = "/rest/api/2"
-    elif token_value:
-        # Server/DC: Bearer PAT
-        headers["Authorization"] = f"Bearer {token_value}"
-        api_path = "/rest/api/2"
-    else:
-        api_path = "/rest/api/2"
+    headers: dict[str, str] = {"Content-Type": "application/json", **connection.headers}
+    # Issue creation: existing modes keep REST v2; service account must use
+    # v3 — the scoped api.atlassian.com gateway only serves v3.
+    api_path = connection.api_path if connection.mode == "sa" else "/rest/api/2"
 
     effective_issue_type = issue_type.strip() if issue_type else "Bug"
     if not effective_issue_type:
@@ -762,7 +916,10 @@ async def create_jira_bug(
         "fields": {
             "project": {"key": effective_project_key},
             "summary": title,
-            "description": body,
+            # REST v3 requires an Atlassian Document Format document for the
+            # description; v2 (Cloud basic auth, Server/DC) keeps the plain
+            # string that has always worked there.
+            "description": _text_to_adf(body) if connection.mode == "sa" else body,
             "issuetype": {"name": effective_issue_type},
         }
     }
@@ -772,10 +929,10 @@ async def create_jira_bug(
         payload["fields"]["security"] = {"name": security_level}
 
     async with httpx.AsyncClient(
-        verify=settings.jira_ssl_verify, timeout=15, auth=auth
+        verify=settings.jira_ssl_verify, timeout=15, auth=connection.auth
     ) as client:
         resp = await client.post(
-            f"{base_url}{api_path}/issue",
+            f"{connection.api_base}{api_path}/issue",
             json=payload,
             headers=headers,
         )
@@ -784,6 +941,6 @@ async def create_jira_bug(
         issue_key = data["key"]
         return {
             "key": issue_key,
-            "url": f"{base_url}/browse/{issue_key}",
+            "url": f"{connection.browse_base}/browse/{issue_key}",
             "title": title,
         }

@@ -5,7 +5,7 @@ import { ProfileForm } from '@/components/shared/ProfileForm'
 import { setGithubToken } from '@/lib/cookies'
 
 const apiMock = vi.hoisted(() => ({
-  get: vi.fn(async (path: string) => (path === '/api/user/tokens' ? { github_token: '', jira_email: '', jira_token: '' } : {})),
+  get: vi.fn(async (path: string) => (path === '/api/user/tokens' ? { github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' } : {})),
   post: vi.fn(async (path: string) => (path === '/api/validate-token' ? { valid: true, username: 'jdoe', message: 'ok' } : {})),
   put: vi.fn(async () => ({})),
   delete: vi.fn(async () => ({})),
@@ -28,7 +28,7 @@ describe('ProfileForm tracker tokens', () => {
     // clear would let one test's response leak into the next.
     apiMock.get.mockReset()
     apiMock.get.mockImplementation(async (path: string) =>
-      path === '/api/user/tokens' ? { github_token: '', jira_email: '', jira_token: '' } : {},
+      path === '/api/user/tokens' ? { github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' } : {},
     )
     apiMock.post.mockReset()
     apiMock.post.mockImplementation(async (path: string) =>
@@ -84,14 +84,32 @@ describe('ProfileForm tracker tokens', () => {
       github_token: '',
       jira_email: '',
       jira_token: '',
+      jira_sa_token: '',
     })
+  })
+
+  it('hydrates and persists the Jira service account token', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: '', jira_email: '', jira_token: '', jira_sa_token: 'ATST_stored' }
+        : {},
+    )
+    const onSaved = renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).toHaveBeenCalledWith('/api/user/tokens', expect.objectContaining({
+      jira_sa_token: 'ATST_stored',
+    }))
   })
 
   it('clears a stored Jira email without blocking on validation (#294)', async () => {
     role.value = 'reviewer'
     apiMock.get.mockImplementation(async (path: string) =>
       path === '/api/user/tokens'
-        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok' }
+        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok', jira_sa_token: '' }
         : {},
     )
     apiMock.post.mockImplementation(async (path: string) =>
@@ -117,7 +135,7 @@ describe('ProfileForm tracker tokens', () => {
     role.value = 'reviewer'
     apiMock.get.mockImplementation(async (path: string) =>
       path === '/api/user/tokens'
-        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok' }
+        ? { github_token: '', jira_email: 'old@test.com', jira_token: 'jira_tok', jira_sa_token: '' }
         : {},
     )
 
@@ -141,7 +159,7 @@ describe('ProfileForm tracker tokens', () => {
     role.value = 'reviewer'
     apiMock.get.mockImplementation(async (path: string) =>
       path === '/api/user/tokens'
-        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '' }
+        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '', jira_sa_token: '' }
         : {},
     )
 
@@ -158,7 +176,7 @@ describe('ProfileForm tracker tokens', () => {
     setGithubToken('ghp_stale_local')
     apiMock.get.mockImplementation(async (path: string) =>
       path === '/api/user/tokens'
-        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '' }
+        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '', jira_sa_token: '' }
         : {},
     )
 
@@ -180,7 +198,7 @@ describe('ProfileForm tracker tokens', () => {
     // Server hands back a stored GitHub token that no longer validates.
     apiMock.get.mockImplementation(async (path: string) =>
       path === '/api/user/tokens'
-        ? { github_token: 'ghp_revoked', jira_email: '', jira_token: '' }
+        ? { github_token: 'ghp_revoked', jira_email: '', jira_token: '', jira_sa_token: '' }
         : {},
     )
     apiMock.post.mockImplementation(async (path: string) =>

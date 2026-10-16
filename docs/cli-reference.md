@@ -88,6 +88,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--get-job-artifacts` / `--no-get-job-artifacts` | Download build artifacts for AI context. |
 | `--tests-repo-url`, `--tests-repo-token` | Tests repository and its token. `TESTS_REPO_URL`, `TESTS_REPO_TOKEN`. |
 | `--jira-url`, `--jira-email`, `--jira-api-token`, `--jira-pat`, `--jira-project-key` | Jira connection. Each has a matching `JIRA_*` env var. |
+| `--jira-sa-token` | Atlassian service account (ATST) token, a third connection method that takes precedence over the regular Jira credentials. `JIRA_SA_TOKEN` in config files; server-side SA setup uses `JIRA_OAUTH_ACCESS_TOKEN` (see [Configuration Reference](configuration-reference.html)). |
 | `--jira-ssl-verify` / `--no-jira-ssl-verify`, `--jira-max-results` | Jira search tuning. |
 | `--github-token` | GitHub API token. `GITHUB_TOKEN`. |
 | `--ai-call-timeout` | AI timeout in minutes. |
@@ -183,12 +184,12 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz capabilities` | — | Whether the server can create GitHub issues and Jira bugs. |
-| `rootcoz jira-projects` | `--query`, `--jira-token`, `--jira-email` | Available Jira projects. |
-| `rootcoz jira-security-levels PROJECT_KEY` | `--jira-token`, `--jira-email` | Security levels for a project. |
-| `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
+| `rootcoz jira-projects` | `--query`, `--jira-token`, `--jira-email`, `--jira-sa-token` | Available Jira projects. |
+| `rootcoz jira-security-levels PROJECT_KEY` | `--jira-token`, `--jira-email`, `--jira-sa-token` | Security levels for a project. |
+| `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
-| `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
-| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. |
+| `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
+| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATST-prefixed Jira token is validated as a service account against the scoped Atlassian gateway. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 
 12. **Push to exporters.**

@@ -568,6 +568,36 @@ class TestUserTokens:
         assert data["github_token"] == "ghp_test123"
         assert data["jira_email"] == "a@b.com"
         assert data["jira_token"] == "jira_tok"
+        assert data["jira_sa_token"] == ""
+
+    def test_save_and_get_sa_token(self, client):
+        """The service account token round-trips independently of the others."""
+        cookies = _register_user(client, "sauser")
+        resp = client.put(
+            "/api/user/tokens",
+            json={
+                "jira_token": "jira_tok",
+                "jira_sa_token": "ATST-user-token",
+            },
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        resp = client.get("/api/user/tokens", cookies=cookies)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["jira_sa_token"] == "ATST-user-token"
+        assert data["jira_token"] == "jira_tok"
+        # Clearing the SA token leaves the regular token intact
+        resp = client.put(
+            "/api/user/tokens",
+            json={"jira_sa_token": ""},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        resp = client.get("/api/user/tokens", cookies=cookies)
+        data = resp.json()
+        assert data["jira_sa_token"] == ""
+        assert data["jira_token"] == "jira_tok"
 
     def test_get_tokens_no_user(self, client):
         resp = client.get("/api/user/tokens")
@@ -678,14 +708,24 @@ class TestUserTokens:
 
         resp = client.put(
             "/api/user/tokens",
-            json={"github_token": "", "jira_email": "", "jira_token": ""},
+            json={
+                "github_token": "",
+                "jira_email": "",
+                "jira_token": "",
+                "jira_sa_token": "",
+            },
             cookies=cookies,
         )
         assert resp.status_code == 200
         assert resp.json()["saved"] is True
 
         data = client.get("/api/user/tokens", cookies=cookies).json()
-        assert data == {"github_token": "", "jira_email": "", "jira_token": ""}
+        assert data == {
+            "github_token": "",
+            "jira_email": "",
+            "jira_token": "",
+            "jira_sa_token": "",
+        }
 
     def test_null_clears_and_never_stores_literal_none(self, client):
         """A null field clears it and must not persist the string "None" (#294)."""
@@ -700,7 +740,12 @@ class TestUserTokens:
         assert resp.status_code == 200
 
         data = client.get("/api/user/tokens", cookies=cookies).json()
-        assert data == {"github_token": "", "jira_email": "", "jira_token": ""}
+        assert data == {
+            "github_token": "",
+            "jira_email": "",
+            "jira_token": "",
+            "jira_sa_token": "",
+        }
         assert "None" not in json.dumps(data)
 
     def test_null_field_does_not_resurrect_on_next_partial_save(self, client):
