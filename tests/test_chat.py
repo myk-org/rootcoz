@@ -257,6 +257,37 @@ class TestBuildChatCustomTools:
         jira_tool = next(t for t in tools if t["name"] == "search_jira")
         assert jira_tool["http"]["headers"]["Authorization"] == "Bearer jira-pat"
 
+    def test_jira_atst_in_regular_field_routes_to_sa(self):
+        """An ATST token in the regular field selects SA mode, like validation."""
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://myorg.atlassian.net",
+            jira_token="ATST-tok",
+        )
+        names = [t["name"] for t in tools]
+        # The sync fallback cannot complete the cloud ID, so the SA
+        # connection stays pending: no Jira tool is built rather than a
+        # misrouted bearer/v2 tool. (Async callers pass a completed
+        # connection via jira_connection.)
+        assert "search_jira" not in names
+        assert "get_jira_issue" not in names
+
+    def test_jira_v2_paths_for_server_basic_auth(self):
+        """Server/DC with an email keeps v2 endpoints — host decides the version."""
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.example.com",
+            jira_email="user@example.com",
+            jira_token="jira-tok",
+        )
+        jira_tool = next(t for t in tools if t["name"] == "search_jira")
+        assert jira_tool["http"]["url"].endswith("/rest/api/2/search")
+        assert "fields" in jira_tool["http"]["query_params"]
+
     def test_github_tools(self):
         tools = build_chat_custom_tools(
             server_url="http://localhost:8000",

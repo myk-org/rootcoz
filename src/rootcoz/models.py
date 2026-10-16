@@ -216,6 +216,19 @@ class BaseAnalysisRequest(BaseModel):
         description="Jira Server/DC personal access token (overrides JIRA_PAT env var)",
         json_schema_extra={"format": "password"},
     )
+    jira_oauth_access_token: str | None = Field(
+        default=None,
+        description="Atlassian service account (ATST) token (overrides JIRA_OAUTH_ACCESS_TOKEN env var)",
+        json_schema_extra={"format": "password"},
+    )
+    atlassian_oauth_cloud_id: str | None = Field(
+        default=None,
+        description="Atlassian cloud ID for the service account connection (overrides ATLASSIAN_OAUTH_CLOUD_ID env var)",
+    )
+    jira_site_url: str | None = Field(
+        default=None,
+        description="Atlassian site URL for browse links when JIRA_URL is scoped (overrides JIRA_SITE_URL env var)",
+    )
     jira_project_key: str | None = Field(
         default=None,
         description="Jira project key to scope searches (overrides JIRA_PROJECT_KEY env var)",

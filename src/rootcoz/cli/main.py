@@ -174,6 +174,30 @@ _JiraPatOpt = Annotated[
         help="Jira Server/DC personal access token.",
     ),
 ]
+_JiraSaTokenOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-sa-token",
+        envvar="JIRA_OAUTH_ACCESS_TOKEN",
+        help="Atlassian service account (ATST) token — takes precedence over the other Jira credentials.",
+    ),
+]
+_AtlassianCloudIdOpt = Annotated[
+    str,
+    typer.Option(
+        "--atlassian-oauth-cloud-id",
+        envvar="ATLASSIAN_OAUTH_CLOUD_ID",
+        help="Atlassian cloud ID for the service account connection.",
+    ),
+]
+_JiraSiteUrlOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-site-url",
+        envvar="JIRA_SITE_URL",
+        help="Atlassian site URL for browse links when JIRA_URL is the scoped API URL.",
+    ),
+]
 _JiraProjectKeyOpt = Annotated[
     str,
     typer.Option(
@@ -1247,6 +1271,9 @@ def _apply_common_config_defaults(
         "jira_email": cfg.jira_email,
         "jira_api_token": cfg.jira_api_token,
         "jira_pat": cfg.jira_pat,
+        "jira_oauth_access_token": cfg.jira_oauth_access_token,
+        "atlassian_oauth_cloud_id": cfg.atlassian_oauth_cloud_id,
+        "jira_site_url": cfg.jira_site_url,
         "jira_project_key": cfg.jira_project_key,
         "github_token": cfg.github_token,
         "ai_provider": cfg.ai_provider,
@@ -1494,6 +1521,9 @@ def analyze(
     jira_email: _JiraEmailOpt = "",
     jira_api_token: _JiraApiTokenOpt = "",
     jira_pat: _JiraPatOpt = "",
+    jira_sa_token: _JiraSaTokenOpt = "",
+    atlassian_oauth_cloud_id: _AtlassianCloudIdOpt = "",
+    jira_site_url: _JiraSiteUrlOpt = "",
     jira_project_key: _JiraProjectKeyOpt = "",
     jira_ssl_verify: _JiraSslVerifyOpt = None,
     jira_max_results: _JiraMaxResultsOpt = None,
@@ -1640,6 +1670,9 @@ def analyze(
             "jira_email": jira_email,
             "jira_api_token": jira_api_token,
             "jira_pat": jira_pat,
+            "jira_oauth_access_token": jira_sa_token,
+            "atlassian_oauth_cloud_id": atlassian_oauth_cloud_id,
+            "jira_site_url": jira_site_url,
             "jira_project_key": jira_project_key,
             "github_token": github_token,
             "raw_prompt": raw_prompt,

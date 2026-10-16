@@ -3009,3 +3009,43 @@ class TestDefaultServerSettings:
         assert result["ai_model"] == "gemini-2.5-pro"
         assert result["enable_jira"] is False
         assert result["peer_ai_configs"] == []
+
+
+class TestRootCozClientSaveUserTokens:
+    """Tests for save_user_tokens SA sentinel semantics."""
+
+    def test_sa_token_omitted_when_none(self):
+        """None (default) omits jira_sa_token — the stored value is preserved."""
+        captured = {}
+
+        def handler(request):
+            captured["json"] = json.loads(request.content)
+            return httpx.Response(200, json={"status": "ok"})
+
+        client = _make_client(handler)
+        client.save_user_tokens(jira_token="tok")
+        assert "jira_sa_token" not in captured["json"]
+        assert captured["json"]["jira_token"] == "tok"
+
+    def test_sa_token_cleared_with_empty_string(self):
+        """An explicit empty string clears the stored SA token."""
+        captured = {}
+
+        def handler(request):
+            captured["json"] = json.loads(request.content)
+            return httpx.Response(200, json={"status": "ok"})
+
+        client = _make_client(handler)
+        client.save_user_tokens(jira_sa_token="")
+        assert captured["json"] == {"jira_sa_token": ""}
+
+    def test_sa_token_sent_when_set(self):
+        captured = {}
+
+        def handler(request):
+            captured["json"] = json.loads(request.content)
+            return httpx.Response(200, json={"status": "ok"})
+
+        client = _make_client(handler)
+        client.save_user_tokens(jira_sa_token="ATST-tok")
+        assert captured["json"] == {"jira_sa_token": "ATST-tok"}

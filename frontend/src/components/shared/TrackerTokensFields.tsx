@@ -11,6 +11,8 @@ interface TrackerTokensFieldsProps {
   onJiraTokenChange: (v: string) => void
   jiraSaToken: string
   onJiraSaTokenChange: (v: string) => void
+  /** Service account token validation result (ProfileForm passes it; RegisterPage passes undefined) */
+  jiraSaValidation?: TokenValidationResult | null
   /** Token validation results (ProfileForm uses these, RegisterPage passes undefined) */
   githubValidation?: TokenValidationResult | null
   jiraValidation?: TokenValidationResult | null
@@ -27,6 +29,7 @@ export function TrackerTokensFields({
   onJiraTokenChange,
   jiraSaToken,
   onJiraSaTokenChange,
+  jiraSaValidation,
   githubValidation,
   jiraValidation,
   idPrefix = '',
@@ -93,7 +96,7 @@ export function TrackerTokensFields({
         onChange={onJiraSaTokenChange}
         show={showJiraSaToken}
         onToggleShow={() => setShowJiraSaToken(!showJiraSaToken)}
-        validation={null}
+        validation={jiraSaValidation ?? null}
         placeholder="ATST..."
         helpContent={<>Optional Atlassian service account (ATST) token — an additional connection method that takes precedence over the regular Jira token. Created by an admin in Atlassian Administration → Directory → Service accounts.</>}
       />

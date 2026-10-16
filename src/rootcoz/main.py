@@ -1227,6 +1227,8 @@ def _reconstruct_from_params(
         "jira_project_key",
         "jira_ssl_verify",
         "jira_max_results",
+        "atlassian_oauth_cloud_id",
+        "jira_site_url",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "force_server_credentials",
@@ -1255,6 +1257,12 @@ def _reconstruct_from_params(
     if params.get("jira_pat") is not None:
         overrides["jira_pat"] = (
             SecretStr(params["jira_pat"]) if params["jira_pat"] else None
+        )
+    if params.get("jira_oauth_access_token") is not None:
+        overrides["jira_oauth_access_token"] = (
+            SecretStr(params["jira_oauth_access_token"])
+            if params["jira_oauth_access_token"]
+            else None
         )
     if params.get("github_token") is not None:
         overrides["github_token"] = (
@@ -2458,6 +2466,8 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "jira_project_key",
         "jira_ssl_verify",
         "jira_max_results",
+        "atlassian_oauth_cloud_id",
+        "jira_site_url",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "force_server_credentials",
@@ -2480,6 +2490,8 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         overrides["jira_api_token"] = SecretStr(body.jira_api_token)
     if body.jira_pat is not None:
         overrides["jira_pat"] = SecretStr(body.jira_pat)
+    if body.jira_oauth_access_token is not None:
+        overrides["jira_oauth_access_token"] = SecretStr(body.jira_oauth_access_token)
     if body.github_token is not None:
         overrides["github_token"] = SecretStr(body.github_token)
     if body.tests_repo_token is not None:
@@ -3278,6 +3290,25 @@ def _apply_base_analysis_overrides(
         body.jira_pat
         if body.jira_pat is not None
         else (merged.jira_pat.get_secret_value() if merged.jira_pat else "")
+    )
+    params["jira_oauth_access_token"] = (
+        body.jira_oauth_access_token
+        if body.jira_oauth_access_token is not None
+        else (
+            merged.jira_oauth_access_token.get_secret_value()
+            if merged.jira_oauth_access_token
+            else ""
+        )
+    )
+    params["atlassian_oauth_cloud_id"] = (
+        body.atlassian_oauth_cloud_id
+        if body.atlassian_oauth_cloud_id is not None
+        else (merged.atlassian_oauth_cloud_id or "")
+    )
+    params["jira_site_url"] = (
+        body.jira_site_url
+        if body.jira_site_url is not None
+        else (merged.jira_site_url or "")
     )
     params["jira_project_key"] = (
         body.jira_project_key
@@ -6633,6 +6664,17 @@ async def enrich_comments(
     jira_connection: JiraConnection | None = (
         resolve_jira_connection(settings) if jira_active else None
     )
+    if jira_connection is not None and jira_connection.mode == "sa":
+        # Complete the cloud ID ONCE here — otherwise every per-key status
+        # task would fire its own tenant_info lookup on a cold cache.
+        jira_connection = await complete_jira_connection(
+            jira_connection, settings.jira_ssl_verify
+        )
+        if not jira_connection.api_base:
+            logger.warning(
+                "Comment enrichment: SA cloud ID unresolvable; skipping Jira keys"
+            )
+            jira_connection = None
 
     github_token = (
         settings.github_token.get_secret_value() if settings.github_token else None
@@ -7154,9 +7196,11 @@ async def preview_jira_bug(
 
 def _has_jira_credentials(settings: Settings) -> bool:
     """Return True if the given settings contain usable Jira credentials."""
+    sa_token = settings.jira_oauth_access_token
     return bool(
         (settings.jira_api_token and settings.jira_api_token.get_secret_value())
         or (settings.jira_pat and settings.jira_pat.get_secret_value())
+        or (sa_token and sa_token.get_secret_value().startswith("ATST"))
     )
 
 
@@ -7255,8 +7299,18 @@ def _build_effective_jira_settings(
     so that duplicate searches and bug creation target the user's chosen project.
     """
     overrides: dict[str, Any] = {}
-    if user_jira_sa_token and user_jira_sa_token.strip():
+    if user_jira_sa_token and user_jira_sa_token.strip().startswith("ATST"):
+        # Service account override — only an ATST-prefixed value selects SA
+        # mode; anything else would be ignored by the resolver and silently
+        # disable Jira, so it falls through to the regular-token branch.
         overrides["jira_oauth_access_token"] = SecretStr(user_jira_sa_token.strip())
+        overrides["jira_api_token"] = None
+        overrides["jira_pat"] = None
+        overrides["jira_email"] = None
+    elif user_jira_token and user_jira_token.strip().startswith("ATST"):
+        # An ATST token supplied in the regular field: route it to SA mode so
+        # validation (which detects the prefix) and actual use agree.
+        overrides["jira_oauth_access_token"] = SecretStr(user_jira_token.strip())
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
@@ -7538,6 +7592,10 @@ async def create_jira_bug_endpoint(
             security_level=body.jira_security_level,
             issue_type=body.jira_issue_type,
         )
+    except ValueError as exc:
+        # Unresolvable SA cloud ID / missing site URL — a configuration
+        # error, surfaced as a controlled 400 rather than an unhandled 500.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code in (401, 403):
             raise HTTPException(
@@ -10774,6 +10832,18 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
             raise HTTPException(
                 status_code=400, detail=f"{field} must be a string or null"
             )
+        if (
+            field == "jira_sa_token"
+            and kwargs[field]
+            and not kwargs[field].startswith("ATST")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "jira_sa_token must be an ATST-prefixed Atlassian service "
+                    "account token — use jira_token for regular credentials"
+                ),
+            )
 
     if not kwargs:
         return JSONResponse(content={"ok": True, "saved": False})
@@ -12979,7 +13049,7 @@ async def _init_chat_under_barrier(
             build_number=resolve_display_build_id(result_data),
             repos_available=repos_available,
             ci_build_data_available=ci_build_data_available,
-            jira_available=bool(jira_url and jira_token),
+            jira_available=bool(jira_connection),
             github_available=bool(github_token and github_repo),
         )
         if session_id:

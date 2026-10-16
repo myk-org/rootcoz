@@ -43,6 +43,9 @@ class ServerConfig:
     jira_email: str = ""
     jira_api_token: str = ""
     jira_pat: str = ""
+    jira_oauth_access_token: str = ""
+    atlassian_oauth_cloud_id: str = ""
+    jira_site_url: str = ""
     jira_token: str = ""
     jira_sa_token: str = ""
     jira_project_key: str = ""
@@ -245,6 +248,9 @@ def _server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         jira_email=data.get("jira_email", ""),
         jira_api_token=data.get("jira_api_token", ""),
         jira_pat=data.get("jira_pat", ""),
+        jira_oauth_access_token=data.get("jira_oauth_access_token", ""),
+        atlassian_oauth_cloud_id=data.get("atlassian_oauth_cloud_id", ""),
+        jira_site_url=data.get("jira_site_url", ""),
         jira_token=_validated_str(data, "jira_token"),
         jira_sa_token=_validated_str(data, "jira_sa_token"),
         jira_project_key=data.get("jira_project_key", ""),

@@ -849,3 +849,77 @@ class TestAiFooterNotDoubled:
                 await create_jira_bug(
                     title="SA bug", body="body", settings=mock_settings
                 )
+
+    async def test_sa_description_is_adf_document(self):
+        """SA mode (REST v3) wraps the description in an ADF document."""
+        from rootcoz.bug_creation import _text_to_adf, create_jira_bug
+
+        # Unit: plain text becomes a doc with one paragraph per line.
+        adf = _text_to_adf("line one\n\nline three")
+        assert adf["type"] == "doc"
+        assert adf["version"] == 1
+        assert [p.get("content") for p in adf["content"]] == [
+            [{"type": "text", "text": "line one"}],
+            [],
+            [{"type": "text", "text": "line three"}],
+        ]
+
+        mock_settings = MagicMock()
+        mock_settings.jira_url = (
+            "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        )
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = None
+        mock_settings.jira_api_token = None
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = "https://myorg.atlassian.net"
+        mock_settings.jira_ssl_verify = True
+
+        mock_response = httpx.Response(
+            201, json={"key": "PROJ-790"}, request=_mock_request()
+        )
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            await create_jira_bug(
+                title="SA bug", body="plain body", settings=mock_settings
+            )
+            payload = mock_client.post.call_args.kwargs["json"]
+            description = payload["fields"]["description"]
+            assert description["type"] == "doc"
+            paragraphs = description["content"]
+            assert paragraphs[0]["content"] == [{"type": "text", "text": "plain body"}]
+            # Non-SA modes must keep the plain string description.
+            # (Covered by the cloud/server tests asserting no ADF.)
+
+    async def test_sa_token_without_site_url_raises(self):
+        """A scoped URL without a site URL fails fast — no broken links."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_url = (
+            "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        )
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = None
+        mock_settings.jira_api_token = None
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
+        mock_settings.jira_ssl_verify = True
+
+        with pytest.raises(ValueError, match="JIRA_SITE_URL"):
+            await create_jira_bug(title="SA bug", body="body", settings=mock_settings)

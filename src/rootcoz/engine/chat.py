@@ -599,9 +599,15 @@ def build_chat_custom_tools(
     )
 
     jira_conn = jira_connection
-    if jira_conn is None and jira_url and jira_token:
+    if jira_conn is None and jira_url and (jira_token or jira_email):
+        # An ATST token supplied in the regular field routes to SA mode so
+        # validation and actual use agree (validate-token detects the prefix).
+        sa_fallback = jira_token if jira_token.startswith("ATST") else ""
         jira_conn = resolve_jira_connection_from_params(
-            jira_url, jira_email, jira_token
+            jira_url,
+            jira_email,
+            "" if sa_fallback else jira_token,
+            jira_oauth_access_token=sa_fallback,
         )
     if jira_conn and jira_conn.api_base and jira_conn.mode != "none":
         # Basic auth (cloud) must be embedded as a header — tool HTTP
@@ -612,13 +618,18 @@ def build_chat_custom_tools(
         else:
             jira_auth = dict(jira_conn.headers)
 
+        # REST version comes from the connection itself (single source of
+        # truth): SA/cloud carry v3 paths, Server/DC carries v2 — the v2
+        # search endpoint also needs an explicit fields param.
+        is_v2_search = jira_conn.search_path == "/rest/api/2/search"
+
         search_url = f"{jira_conn.api_base}{jira_conn.search_path}"
         issue_url = f"{jira_conn.api_base}{jira_conn.api_path}/issue/{{issue_key}}"
         search_params: dict[str, str] = {
             "jql": 'summary ~ "{query}" ORDER BY updated DESC',
             "maxResults": "{limit}",
         }
-        if jira_conn.mode == "server":
+        if is_v2_search:
             search_params["fields"] = "summary,status,assignee,created,updated"
 
         tools.append(

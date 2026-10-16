@@ -710,6 +710,26 @@ async def create_github_issue(
         }
 
 
+def _text_to_adf(text: str) -> dict[str, Any]:
+    """Convert plain text to a minimal Atlassian Document Format document.
+
+    REST v3 issue creation rejects plain-string ``fields.description``;
+    each source line becomes a paragraph with a single text node. Empty
+    lines become empty paragraphs, preserving the layout one-to-one.
+    """
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": line}] if line else [],
+            }
+            for line in text.split("\n")
+        ],
+    }
+
+
 async def create_jira_bug(
     title: str,
     body: str,
@@ -737,6 +757,11 @@ async def create_jira_bug(
             "ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL, or point "
             "JIRA_URL at the scoped api.atlassian.com URL"
         )
+    if not connection.browse_base:
+        raise ValueError(
+            "Jira service account mode cannot build issue links: JIRA_SITE_URL "
+            "is required when JIRA_URL is the scoped api.atlassian.com URL"
+        )
     effective_project_key = project_key or settings.jira_project_key or ""
 
     headers: dict[str, str] = {"Content-Type": "application/json", **connection.headers}
@@ -756,7 +781,10 @@ async def create_jira_bug(
         "fields": {
             "project": {"key": effective_project_key},
             "summary": title,
-            "description": body,
+            # REST v3 requires an Atlassian Document Format document for the
+            # description; v2 (Cloud basic auth, Server/DC) keeps the plain
+            # string that has always worked there.
+            "description": _text_to_adf(body) if connection.mode == "sa" else body,
             "issuetype": {"name": effective_issue_type},
         }
     }

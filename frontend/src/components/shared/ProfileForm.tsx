@@ -45,8 +45,10 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   const [jiraSaToken, setJiraSaTokenValue] = useState(getJiraSaToken())
   const [validatingGithub, setValidatingGithub] = useState(false)
   const [validatingJira, setValidatingJira] = useState(false)
+  const [validatingJiraSa, setValidatingJiraSa] = useState(false)
   const [githubValidation, setGithubValidation] = useState<TokenValidationResult | null>(null)
   const [jiraValidation, setJiraValidation] = useState<TokenValidationResult | null>(null)
+  const [jiraSaValidation, setJiraSaValidation] = useState<TokenValidationResult | null>(null)
 
   const [saving, setSaving] = useState(false)
   const [usernameError, setUsernameError] = useState<string | null>(null)
@@ -170,16 +172,24 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       !!jiraToken.trim() &&
       (jiraToken.trim() !== baseline.jt || (jiraEmail.trim() !== baseline.je && !jiraEmailCleared)) &&
       (!jiraValidation || !jiraValidation.valid)
+    // The service account token gets the same pre-save check as the regular
+    // Jira credential — a mistyped ATST token must not be saved silently.
+    const needsJiraSaValidation =
+      !!jiraSaToken.trim() &&
+      jiraSaToken.trim() !== baseline.jst &&
+      (!jiraSaValidation || !jiraSaValidation.valid)
 
-    if (!isViewer && (needsGithubValidation || needsJiraValidation)) {
+    if (!isViewer && (needsGithubValidation || needsJiraValidation || needsJiraSaValidation)) {
       const validations = await Promise.allSettled([
         needsGithubValidation ? validateGithub() : Promise.resolve(),
         needsJiraValidation ? validateJira() : Promise.resolve(),
+        needsJiraSaValidation ? validateJiraSa() : Promise.resolve(),
       ])
 
       const results = validations.map((r) => r.status === 'fulfilled' ? r.value : false)
       if (needsGithubValidation && results[0] === false) { setSaving(false); return }
       if (needsJiraValidation && results[1] === false) { setSaving(false); return }
+      if (needsJiraSaValidation && results[2] === false) { setSaving(false); return }
     }
 
     try {
@@ -224,11 +234,17 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
     return validateToken('jira', email ? { token: jiraToken.trim(), email } : { token: jiraToken.trim() }, setValidatingJira, setJiraValidation)
   }
 
+  function validateJiraSa(): Promise<boolean> {
+    // The backend detects the ATST prefix and validates against the scoped
+    // Atlassian gateway — no email is involved for service account tokens.
+    return validateToken('jira', { token: jiraSaToken.trim() }, setValidatingJiraSa, setJiraSaValidation)
+  }
+
   return (
     <Card className="border-border-muted">
       <CardContent className="p-5">
         <form onSubmit={handleSubmit} className="space-y-4">
-          <fieldset disabled={saving || validatingGithub || validatingJira} className="space-y-4">
+          <fieldset disabled={saving || validatingGithub || validatingJira || validatingJiraSa} className="space-y-4">
           {/* Username field */}
           <div className="space-y-1.5">
             <label
@@ -308,12 +324,13 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             jiraToken={jiraToken}
             onJiraTokenChange={(v) => { setJiraTokenValue(v); setJiraValidation(null) }}
             jiraSaToken={jiraSaToken}
-            onJiraSaTokenChange={(v) => setJiraSaTokenValue(v)}
+            onJiraSaTokenChange={(v) => { setJiraSaTokenValue(v); setJiraSaValidation(null) }}
+            jiraSaValidation={jiraSaValidation}
             githubValidation={githubValidation}
             jiraValidation={jiraValidation}
           />}
 
-          <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || !tokensLoaded}>
+          <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || validatingJiraSa || !tokensLoaded}>
             {saving ? 'Saving...' : 'Save'}
           </Button>
           </fieldset>

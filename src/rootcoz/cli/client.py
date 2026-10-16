@@ -1048,9 +1048,14 @@ class RootCozClient:
         github_token: str = "",
         jira_email: str = "",
         jira_token: str = "",
-        jira_sa_token: str = "",
+        jira_sa_token: str | None = None,
     ) -> dict[str, Any]:
-        """Save user tokens. PUT /api/user/tokens"""
+        """Save user tokens. PUT /api/user/tokens
+
+        ``jira_sa_token`` uses ``None`` as the omission sentinel so callers
+        can explicitly clear the stored service account token with an empty
+        string — the API preserves omitted fields and clears empty ones.
+        """
         body: dict[str, Any] = {}
         if github_token:
             body["github_token"] = github_token
@@ -1058,7 +1063,7 @@ class RootCozClient:
             body["jira_email"] = jira_email
         if jira_token:
             body["jira_token"] = jira_token
-        if jira_sa_token:
+        if jira_sa_token is not None:
             body["jira_sa_token"] = jira_sa_token
         return self._request("PUT", "/api/user/tokens", json=body)
 

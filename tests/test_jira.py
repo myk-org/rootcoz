@@ -44,7 +44,7 @@ def jira_settings() -> Generator[Settings]:
     """Create Settings with Jira Cloud credentials."""
     yield from _jira_settings_from_env(
         {
-            "JIRA_URL": "https://jira.example.com",
+            "JIRA_URL": "https://testorg.atlassian.net",
             "JIRA_EMAIL": "user@example.com",
             "JIRA_API_TOKEN": "test-token",
             "JIRA_PROJECT_KEY": "PROJ",
@@ -214,6 +214,28 @@ class TestJiraClient:
             assert client._search_path == "/rest/api/2/search"
             assert client._auth is None
             assert client._headers.get("Authorization") == "Bearer server-pat-token"
+
+    async def test_basic_auth_on_server_url_uses_v2(self) -> None:
+        """Email+token on a non-atlassian.net URL is Server/DC basic auth → v2.
+
+        Host, not email presence, decides the REST version — a Server/DC
+        user who filled in the email field must not get Cloud v3 paths.
+        """
+        settings = next(
+            _jira_settings_from_env(
+                {
+                    "JIRA_URL": "https://jira.example.com",
+                    "JIRA_EMAIL": "user@example.com",
+                    "JIRA_API_TOKEN": "test-token",
+                    "JIRA_PROJECT_KEY": "PROJ",
+                }
+            )
+        )
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "cloud"
+        assert connection.auth == ("user@example.com", "test-token")
+        assert connection.api_path == "/rest/api/2"
+        assert connection.search_path == "/rest/api/2/search"
 
     async def test_cloud_pat_auth_detection(self, jira_cloud_pat_settings) -> None:
         """JIRA_PAT + JIRA_EMAIL resolves to Cloud auth (email present = Cloud)."""
@@ -385,7 +407,7 @@ class TestJiraClient:
         assert candidates[0]["key"] == "PROJ-123"
         assert candidates[0]["summary"] == "Login authentication failure"
         assert candidates[0]["description"] == "Users cannot log in"
-        assert candidates[0]["url"].startswith("https://jira.example.com/browse/")
+        assert candidates[0]["url"].startswith("https://testorg.atlassian.net/browse/")
         await client.close()
 
     async def test_search_empty_keywords(self, jira_settings) -> None:

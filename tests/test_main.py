@@ -7517,6 +7517,69 @@ class TestReAnalyzeFailure:
         assert result.jira_api_token.get_secret_value() == "user-token"
         assert result.jira_email == "user@example.com"
 
+    def test_non_atst_sa_token_falls_through_to_regular(self):
+        """A non-ATST value in the SA field must not silently disable Jira."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "user-token", "user@example.com", user_jira_sa_token="not-atst"
+        )
+        # Falls through to the regular-token branch instead of selecting
+        # SA mode with a token the resolver would ignore.
+        assert result.jira_oauth_access_token is None
+        assert result.jira_api_token.get_secret_value() == "user-token"
+        assert result.jira_email == "user@example.com"
+
+    def test_atst_in_regular_field_routes_to_sa(self):
+        """An ATST token in the regular field selects SA mode, matching validation."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "ATST-user-token", "user@example.com"
+        )
+        assert result.jira_oauth_access_token.get_secret_value() == "ATST-user-token"
+        assert result.jira_api_token is None
+        assert result.jira_email is None
+
+
+class TestHasJiraCredentials:
+    """Tests for _has_jira_credentials SA awareness."""
+
+    def test_sa_token_counts_as_credentials(self):
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_oauth_access_token=SecretStr("ATST-token"),
+        )
+        assert _has_jira_credentials(settings) is True
+
+    def test_non_atst_sa_token_does_not_count(self):
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_oauth_access_token=SecretStr("not-atst"),
+        )
+        assert _has_jira_credentials(settings) is False
+
+    def test_api_token_still_counts(self):
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_api_token=SecretStr("token"),
+        )
+        assert _has_jira_credentials(settings) is True
+
 
 class TestValidateToken:
     """Tests for POST /api/validate-token."""
