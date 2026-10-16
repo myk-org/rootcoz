@@ -1011,7 +1011,12 @@ async def _call_with_safe_error(
             )
             else "AI call failed"
         )
-        return replace(result, text=text, error=text if result.error else None)
+        result = replace(result, text=text, error=text if result.error else None)
+        # Failed one-shot calls have already had session_id cleared by
+        # cleanup — the transcript correlation id is the only link left.
+        if transcript_session_id is not None:
+            result.transcript_session_id = transcript_session_id
+        return result
     except Exception as exc:
         if redact_key is None:
             raise
@@ -1204,6 +1209,9 @@ async def _call_user_session(
         KeyError,
         TypeError,
     ) as exc:
+        # Stash before cleanup clears it: a created-then-deleted session may
+        # still have a transcript (header + partial turn) worth correlating.
+        failed_session_id = session_id
         if created and session_id:
             try:
                 await delete_ai_session(client, session_id)
@@ -1211,9 +1219,14 @@ async def _call_user_session(
             except httpx.HTTPError, OSError, RuntimeError, ValueError:
                 logger.warning("Unable to clean up failed AI session")
         # The outer wrapper replaces all failure details for keyed sessions.
-        return AIResult(
+        failed = AIResult(
             success=False, text=str(exc), error=str(exc), session_id=session_id
         )
+        # The transcript correlation id survives the failure: the JSONL file
+        # is keyed by it and recording is independent of call success.
+        if failed_session_id:
+            failed.transcript_session_id = failed_session_id
+        return failed
     if once or (created and not result.success):
         try:
             await delete_ai_session(client, session_id)

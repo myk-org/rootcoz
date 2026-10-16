@@ -224,6 +224,17 @@ These are read straight from the process environment and have no `Settings` fiel
 | `RECORD_TRANSCRIPTS` | `false` | Record one redacted JSONL per AI session (pi-sidecar >= 4.12.0). **Restart required** — the sidecar reads it at container start. Also toggleable in Server Settings → AI (rootcoz persists the value to `/data/pi-sidecar/env`, which the container entrypoint sources on boot) |
 | `PI_SIDECAR_TRANSCRIPTS_DIR` | `/data/pi-sidecar/transcripts` | Where transcript JSONL files land — keep it under the persistent `/data` mount so they survive container replacement |
 
+#### Transcript retention
+
+Recording is **off by default** — an administrator must enable it (Server Settings → AI or `RECORD_TRANSCRIPTS`), and rootcoz never deletes transcript files. Retention is the sidecar's pruning job, controlled by two env vars it reads at container start:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | `0` (disabled) | Delete transcript files older than this many days |
+| `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | `0` (disabled) | Keep the transcripts directory under this total size |
+
+Both defaults mean **no pruning**: every recorded session stays until an operator sets a budget or cleans the directory manually. Plan disk usage accordingly — a transcript stores the full redacted turn history of its session.
+
 `gemini` resolves to the `google` provider, and `GEMINI_API_KEY` is the credential RootCoz documents and charts for it (`ai.provider=gemini` pairs with `ai.geminiApiKey`). `gemini auth login` is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — `cli-gemini`, the canonical form of the legacy `gemini-cli` name — not under `google`, so it is not a substitute for `GEMINI_API_KEY` on the `gemini` alias. For `claude`, see the resolution rules above: the alias maps to `google-vertex-claude`, so `ANTHROPIC_API_KEY` on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.
 
 RootCoz does not read the Vertex trio itself — `config.py` documents them as variables the Claude CLI consumes, and the server only passes them through the process environment to the sidecar. What this repo guarantees is limited to that pass-through. The Helm chart is the more useful reference, because it treats Vertex as a unit: setting `ai.vertex.enabled` writes `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`, and separately mounts `ai.vertex.serviceAccountKey` and points `GOOGLE_APPLICATION_CREDENTIALS` at the mounted `application_default_credentials.json`. Install fails outright if `ai.vertex.enabled` is set without `ai.vertex.projectId` or `ai.vertex.serviceAccountKey`, so the chart's own definition of "Vertex enabled" includes a credential file, not just the three variables above.

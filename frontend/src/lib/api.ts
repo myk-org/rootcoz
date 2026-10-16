@@ -94,12 +94,15 @@ export const api = {
   /** GET returning raw text (e.g. JSONL transcript downloads). */
   getText: async (path: string): Promise<string> => {
     const res = await fetch(path)
+    // Read the body once — a failed res.json() consumes it, and reading
+    // res.text() afterwards rejects with "body already used".
+    const raw = await res.text()
     if (!res.ok) {
-      let body: unknown
+      let body: unknown = raw
       try {
-        body = await res.json()
+        body = JSON.parse(raw)
       } catch {
-        body = await res.text()
+        body = raw
       }
       trackFailedCall({
         status: res.status,
@@ -109,7 +112,7 @@ export const api = {
       })
       throw new ApiError(res.status, res.statusText, body)
     }
-    return res.text()
+    return raw
   },
 
   post: <T>(path: string, body?: unknown) =>

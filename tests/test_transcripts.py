@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import uuid
 from collections.abc import Generator
 from pathlib import Path
@@ -22,6 +23,14 @@ def transcripts_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     directory.mkdir()
     monkeypatch.setattr(transcripts_module, "TRANSCRIPTS_DIR", directory)
     return directory
+
+
+@pytest.fixture
+def env_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the env bridge at a temp file (fixed path, decoupled from the dir)."""
+    bridge = tmp_path / "env"
+    monkeypatch.setattr(transcripts_module, "ENV_BRIDGE_PATH", bridge)
+    return bridge
 
 
 def _write_transcript(directory: Path, session_id: str, lines: list[str]) -> Path:
@@ -70,14 +79,30 @@ class TestSessionIdValidation:
 class TestListTranscripts:
     def test_lists_valid_files_with_turns(self, transcripts_dir: Path):
         session = "00000000-0000-0000-0000-000000000001"
-        _write_transcript(transcripts_dir, session, ["a", "b", "c"])
+        # pi-sidecar format: one session_header record, then turn records
+        _write_transcript(
+            transcripts_dir,
+            session,
+            [
+                f'{{"type": "session_header", "session_id": "{session}"}}',
+                '{"type": "turn", "turn_number": 1}',
+                '{"type": "turn", "turn_number": 2}',
+            ],
+        )
         other = "00000000-0000-0000-0000-000000000002"
-        _write_transcript(transcripts_dir, other, ["x"])
+        _write_transcript(
+            transcripts_dir, other, ['{"type": "turn", "turn_number": 1}']
+        )
+        # A non-JSON line still counts as content written for the session
+        unparseable = "00000000-0000-0000-0000-000000000003"
+        _write_transcript(transcripts_dir, unparseable, ["not json"])
 
         infos = transcripts_module.list_transcripts()
         by_id = {info.session_id: info for info in infos}
-        assert by_id[session].turns == 3
+        # The header is NOT a turn
+        assert by_id[session].turns == 2
         assert by_id[other].turns == 1
+        assert by_id[unparseable].turns == 1
         assert by_id[session].size_bytes > 0
 
     def test_skips_foreign_and_malformed_files(self, transcripts_dir: Path):
@@ -101,21 +126,42 @@ class TestListTranscripts:
 
 
 class TestEnvBridge:
-    def test_writes_enabled_state(self, transcripts_dir: Path):
+    def test_writes_enabled_state(self, env_bridge: Path):
         write_transcript_env_bridge(True)
-        bridge = transcripts_dir.parent / "env"
-        content = bridge.read_text()
+        content = env_bridge.read_text()
         assert "RECORD_TRANSCRIPTS=true" in content
-        assert f"PI_SIDECAR_TRANSCRIPTS_DIR={transcripts_dir}" in content
+        # The bridge carries only the DB override — the directory stays under
+        # deployment env control so compose/Helm changes are never pinned.
+        assert "PI_SIDECAR_TRANSCRIPTS_DIR" not in content
 
-    def test_writes_disabled_state(self, transcripts_dir: Path):
+    def test_writes_disabled_state(self, env_bridge: Path):
         write_transcript_env_bridge(False)
-        bridge = transcripts_dir.parent / "env"
-        assert "RECORD_TRANSCRIPTS=false" in bridge.read_text()
+        assert "RECORD_TRANSCRIPTS=false" in env_bridge.read_text()
+
+    def test_no_db_override_assigns_nothing(self, env_bridge: Path):
+        write_transcript_env_bridge(None)
+        content = env_bridge.read_text()
+        # Comment-only: sourcing it must not assign RECORD_TRANSCRIPTS, so the
+        # deployment environment (compose/Helm) stays in control.
+        assert "RECORD_TRANSCRIPTS=" not in content
+        assert "# no DB override" in content
+
+    def test_shell_sources_cleanly(self, env_bridge: Path):
+        write_transcript_env_bridge(True)
+        # The bridge is sourced by /bin/sh under set -e — verify it parses and
+        # assigns (guards against quoting regressions).
+        result = subprocess.run(
+            ["/bin/sh", "-c", f". {env_bridge} && printf '%s' \"$RECORD_TRANSCRIPTS\""],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "true"
 
     def test_unwritable_path_is_best_effort(self, tmp_path: Path, monkeypatch):
         monkeypatch.setattr(
-            transcripts_module, "TRANSCRIPTS_DIR", Path("/proc/definitely/not/writable")
+            transcripts_module, "ENV_BRIDGE_PATH", Path("/proc/definitely/not/writable")
         )
         # Must not raise
         write_transcript_env_bridge(True)
@@ -197,6 +243,8 @@ class TestTranscriptEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["count"] == 2
+        # The server's filesystem layout must not leak into the API response
+        assert "transcripts_dir" not in data
         by_id = {item["session_id"]: item for item in data["items"]}
         assert by_id[session]["turns"] == 2
         assert by_id[session]["context"]["job_id"] == "job-1"

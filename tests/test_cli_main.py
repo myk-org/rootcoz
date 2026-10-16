@@ -6453,7 +6453,6 @@ class TestTranscriptsCommands:
                 json={
                     "count": 1,
                     "recording_enabled": True,
-                    "transcripts_dir": "/data/pi-sidecar/transcripts",
                     "items": [
                         {
                             "session_id": "00000000-0000-0000-0000-000000000001",

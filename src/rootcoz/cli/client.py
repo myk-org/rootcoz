@@ -299,6 +299,38 @@ class RootCozClient:
             raise RootCozError(status_code=response.status_code, detail=detail)
         return response.text
 
+    def admin_download_transcript_to_file(self, session_id: str, path: str) -> int:
+        """Stream one transcript JSONL to a file. Admin only.
+
+        Consumes the server's streamed chunks instead of buffering the whole
+        download in memory. Returns the number of bytes written.
+        """
+        url = f"/api/admin/transcripts/{quote(session_id, safe='')}"
+        try:
+            with self._client.stream("GET", url) as response:
+                if response.status_code != 200:
+                    response.read()
+                    detail = ""
+                    try:
+                        detail = response.json().get("detail", str(response.json()))
+                    except ValueError, KeyError:
+                        detail = response.text
+                    raise RootCozError(status_code=response.status_code, detail=detail)
+                written = 0
+                with open(path, "wb") as handle:
+                    for chunk in response.iter_bytes():
+                        handle.write(chunk)
+                        written += len(chunk)
+            return written
+        except httpx.TimeoutException as exc:
+            raise RootCozError(
+                status_code=0, detail=f"Request timed out: {exc}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RootCozError(
+                status_code=0, detail=f"Cannot connect to {self.server_url}: {exc}"
+            ) from exc
+
     def admin_list_settings(self, reveal: bool = False) -> list[dict[str, Any]]:
         """List all server settings. GET /api/admin/settings"""
         params = {}

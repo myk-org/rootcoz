@@ -813,6 +813,11 @@ async def load_db_settings() -> None:
         logger.warning("Failed to load server settings from DB", exc_info=True)
 
 
+def db_setting_is_set(key: str) -> bool:
+    """True when the server_settings DB table holds an explicit value for key."""
+    return key in _db_settings_cache
+
+
 def get_db_setting(key: str) -> str:
     """Return a Server Settings DB override (decrypted), or "" when unset.
 

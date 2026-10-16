@@ -36,11 +36,16 @@ interface TranscriptItem {
 }
 
 interface TranscriptsResponse {
-  transcripts_dir: string
   recording_enabled: boolean
   count: number
   items: TranscriptItem[]
 }
+
+// UI display limit for long identifiers (session/job UUIDs) — named so the
+// constraint is documented once instead of duplicated slice literals.
+const ID_DISPLAY_LIMIT = 13
+
+const shortId = (id: string): string => `${id.slice(0, ID_DISPLAY_LIMIT)}…`
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -57,7 +62,10 @@ function contextSummary(item: TranscriptItem): string {
   const bits: string[] = []
   if (ctx.call_type) bits.push(ctx.call_type)
   if (ctx.chat_username) bits.push(`chat: ${ctx.chat_username}`)
+  if (ctx.ai_provider) bits.push(ctx.ai_provider)
   if (ctx.ai_model) bits.push(ctx.ai_model)
+  if (ctx.total_tokens)
+    bits.push(`${formatCompactNumber(ctx.total_tokens)} tokens`)
   return bits.length > 0 ? bits.join(' · ') : '—'
 }
 
@@ -111,7 +119,8 @@ export function AdminTranscriptsPage() {
         <div>
           <h1 className="text-2xl font-semibold">Session Transcripts</h1>
           <p className="text-sm text-muted-foreground">
-            Recorded pi-sidecar sessions (redacted JSONL). Admin only, read-only.
+            Recorded pi-sidecar sessions (redacted JSONL).{' '}
+            {data ? `${data.count} recorded · ` : ''}Admin only, read-only.
           </p>
         </div>
       </div>
@@ -191,21 +200,32 @@ export function AdminTranscriptsPage() {
                 {items.map((item) => (
                   <TableRow key={item.session_id}>
                     <TableCell className="font-mono text-xs">
-                      {item.session_id.slice(0, 13)}…
+                      {shortId(item.session_id)}
                     </TableCell>
                     <TableCell>{formatCompactNumber(item.turns)}</TableCell>
                     <TableCell>{formatSize(item.size_bytes)}</TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {formatDate(item.modified_at)}
                     </TableCell>
-                    <TableCell className="text-sm">{contextSummary(item)}</TableCell>
+                    <TableCell
+                      className="text-sm"
+                      title={
+                        item.context?.chat_last_activity
+                          ? `Last chat activity: ${formatDate(
+                              Date.parse(item.context.chat_last_activity) / 1000,
+                            )}`
+                          : undefined
+                      }
+                    >
+                      {contextSummary(item)}
+                    </TableCell>
                     <TableCell className="text-sm">
                       {item.context?.job_id ? (
                         <a
                           className="text-primary hover:underline"
                           href={`/results/${item.context.job_id}`}
                         >
-                          {item.context.job_id.slice(0, 13)}…
+                          {shortId(item.context.job_id)}
                         </a>
                       ) : (
                         '—'

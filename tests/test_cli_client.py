@@ -3064,7 +3064,6 @@ class TestRootCozClientTranscripts:
                     "count": 0,
                     "items": [],
                     "recording_enabled": True,
-                    "transcripts_dir": "/data/pi-sidecar/transcripts",
                 },
             )
 
@@ -3110,4 +3109,41 @@ class TestRootCozClientTranscripts:
         client = _make_client(handler)
         with pytest.raises(RootCozError) as exc_info:
             client.admin_download_transcript("00000000-0000-0000-0000-000000000002")
+        assert "Transcript not found" in str(exc_info.value)
+
+    def test_download_transcript_to_file_streams(self, tmp_path):
+        """--output streams chunks to disk instead of buffering the download."""
+        session = "00000000-0000-0000-0000-000000000003"
+        payload = '{"type": "turn"}\n' * 500
+        seen_streaming = []
+
+        def handler(request):
+            assert request.url.path == f"/api/admin/transcripts/{session}"
+
+            def chunks():
+                for i in range(10):
+                    seen_streaming.append(i)
+                    yield payload.encode()
+
+            return httpx.Response(
+                200,
+                content=chunks(),
+                headers={"Content-Type": "application/x-ndjson"},
+            )
+
+        client = _make_client(handler)
+        target = tmp_path / "out.jsonl"
+        written = client.admin_download_transcript_to_file(session, str(target))
+        assert written == len(payload.encode()) * 10
+        assert target.read_text() == payload * 10
+
+    def test_download_transcript_to_file_error_detail(self, tmp_path):
+        def handler(request):
+            return httpx.Response(404, json={"detail": "Transcript not found"})
+
+        client = _make_client(handler)
+        with pytest.raises(RootCozError) as exc_info:
+            client.admin_download_transcript_to_file(
+                "00000000-0000-0000-0000-000000000004", str(tmp_path / "x.jsonl")
+            )
         assert "Transcript not found" in str(exc_info.value)

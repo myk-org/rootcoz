@@ -25,7 +25,6 @@ function renderPage() {
 describe('AdminTranscriptsPage', () => {
   it('lists transcripts with context and turns', async () => {
     apiGet.mockResolvedValue({
-      transcripts_dir: '/data/pi-sidecar/transcripts',
       recording_enabled: true,
       count: 1,
       items: [
@@ -46,7 +45,6 @@ describe('AdminTranscriptsPage', () => {
 
   it('shows the disabled-recording notice', async () => {
     apiGet.mockResolvedValue({
-      transcripts_dir: '/x',
       recording_enabled: false,
       count: 0,
       items: [],
@@ -59,7 +57,6 @@ describe('AdminTranscriptsPage', () => {
 
   it('shows an empty state when no transcripts exist', async () => {
     apiGet.mockResolvedValue({
-      transcripts_dir: '/x',
       recording_enabled: true,
       count: 0,
       items: [],

@@ -1236,6 +1236,11 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "ai_token_usage", "session_id", "TEXT NOT NULL DEFAULT ''"
         )
+        # Transcript context lookups (#328/#329) filter and order by session_id
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_token_usage_session "
+            "ON ai_token_usage (session_id, created_at)"
+        )
         # NULL (not 0/1) so legacy rows stay "outcome unknown" instead of failed
         await _migrate_add_column(db, "ai_token_usage", "success", "INTEGER")
         # pi-sidecar sets cost_partial when a multi-turn prompt reported a real
@@ -1364,6 +1369,11 @@ async def init_db() -> None:
         # Migration: add session_id to chat_messages
         await _migrate_add_column(
             db, "chat_messages", "session_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        # Transcript context lookups (#328/#329) group by session_id
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_session "
+            "ON chat_messages (session_id, created_at)"
         )
 
         # Migration: add status to chat_messages (pending/completed/failed)
@@ -7165,6 +7175,11 @@ async def get_token_usage_for_job(job_id: str) -> list[dict[str, Any]]:
         return [dict(row) for row in await cursor.fetchall()]
 
 
+# SQLite's default bound-variable limit is 999; chunk session-id IN lists
+# well below it so transcript listings never hit "too many SQL variables".
+_SESSION_QUERY_CHUNK = 400
+
+
 async def get_usage_context_for_sessions(
     session_ids: list[str],
 ) -> dict[str, dict[str, Any]]:
@@ -7174,37 +7189,53 @@ async def get_usage_context_for_sessions(
     this maps each id to its most recent ``ai_token_usage`` row (job_id,
     call_type, provider, model) so the transcript list can show what the
     session was for. Chat sessions additionally carry ``chat_messages`` rows.
+
+    The latest row is selected SQL-side per session (indexed on
+    session_id/created_at); ids are chunked under SQLite's bound-variable
+    limit. Python only deduplicates rare created_at ties.
     """
-    if not session_ids:
-        return {}
-    placeholders = ",".join("?" for _ in session_ids)
+    context: dict[str, dict[str, Any]] = {}
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT * FROM ai_token_usage WHERE session_id IN "
-            f"({placeholders}) ORDER BY created_at ASC",
-            tuple(session_ids),
-        )
-        rows = [dict(row) for row in await cursor.fetchall()]
-    # Last row wins — the latest call in a multi-turn session describes it.
-    return {row["session_id"]: row for row in rows if row.get("session_id")}
+        for start in range(0, len(session_ids), _SESSION_QUERY_CHUNK):
+            chunk = session_ids[start : start + _SESSION_QUERY_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = await db.execute(
+                "SELECT * FROM ai_token_usage u WHERE u.session_id IN "
+                f"({placeholders}) AND u.created_at = ("
+                "SELECT MAX(u2.created_at) FROM ai_token_usage u2 "
+                "WHERE u2.session_id = u.session_id)",
+                tuple(chunk),
+            )
+            for row in await cursor.fetchall():
+                record = dict(row)
+                if record.get("session_id"):
+                    # Last row wins on created_at ties — same rule as before.
+                    context[record["session_id"]] = record
+    return context
 
 
 async def get_chat_context_for_sessions(
     session_ids: list[str],
 ) -> dict[str, dict[str, Any]]:
     """Latest chat message context per session id (chat sessions only)."""
+    context: dict[str, dict[str, Any]] = {}
     if not session_ids:
-        return {}
-    placeholders = ",".join("?" for _ in session_ids)
+        return context
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT job_id, session_id, username, MAX(created_at) AS last_activity "
-            "FROM chat_messages WHERE session_id IN "
-            f"({placeholders}) GROUP BY session_id",
-            tuple(session_ids),
-        )
-        rows = [dict(row) for row in await cursor.fetchall()]
-    return {row["session_id"]: row for row in rows if row.get("session_id")}
+        for start in range(0, len(session_ids), _SESSION_QUERY_CHUNK):
+            chunk = session_ids[start : start + _SESSION_QUERY_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = await db.execute(
+                "SELECT job_id, session_id, username, MAX(created_at) AS last_activity "
+                "FROM chat_messages WHERE session_id IN "
+                f"({placeholders}) GROUP BY session_id",
+                tuple(chunk),
+            )
+            for row in await cursor.fetchall():
+                record = dict(row)
+                if record.get("session_id"):
+                    context[record["session_id"]] = record
+    return context
 
 
 # --- Cost aggregation contract -----------------------------------------

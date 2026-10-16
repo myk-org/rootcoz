@@ -1580,14 +1580,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Load DB setting overrides BEFORE config validation so
     # validate_startup_config() sees merged env + DB values.
-    from rootcoz.config import load_db_settings
+    from rootcoz.config import db_setting_is_set, load_db_settings
 
     await load_db_settings()
 
-    # Keep the sidecar transcript env bridge in sync with the effective
-    # (env + DB) setting — the entrypoint sources it before starting the
-    # sidecar, applying Server Settings changes after a restart.
-    write_transcript_env_bridge(get_settings().record_transcripts)
+    # Keep the sidecar transcript env bridge in sync with the DB setting —
+    # the entrypoint sources it before starting the sidecar, applying Server
+    # Settings changes after a restart. Only an explicit DB override is
+    # bridged; without one the deployment environment stays in control.
+    write_transcript_env_bridge(
+        get_settings().record_transcripts
+        if db_setting_is_set("record_transcripts")
+        else None
+    )
 
     # Startup config validation (after DB settings loaded)
     config_result = validate_startup_config()
@@ -11109,7 +11114,7 @@ async def list_session_transcripts(
     """
     _require_admin(request)
 
-    infos = sidecar_transcripts.list_transcripts()
+    infos = await asyncio.to_thread(sidecar_transcripts.list_transcripts)
     if job_id:
         usage_rows = await storage.get_token_usage_for_job(job_id)
         job_sessions = {
@@ -11148,12 +11153,13 @@ async def list_session_transcripts(
             )
         items.append(transcript_summary(info, context))
 
-    return {
-        "transcripts_dir": str(sidecar_transcripts.TRANSCRIPTS_DIR),
-        "recording_enabled": get_settings().record_transcripts,
-        "count": len(items),
-        "items": items,
-    }
+    return strip_sensitive_from_response(
+        {
+            "recording_enabled": get_settings().record_transcripts,
+            "count": len(items),
+            "items": items,
+        }
+    )
 
 
 @app.get(
@@ -11180,7 +11186,9 @@ async def download_session_transcript(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Transcript not found")
 
-    async def file_stream() -> AsyncIterator[bytes]:
+    # Sync generator: Starlette iterates sync generators in a threadpool, so
+    # blocking chunk reads never stall the event loop.
+    def file_stream() -> Iterator[bytes]:
         with path.open("rb") as handle:
             while chunk := handle.read(64 * 1024):
                 yield chunk
@@ -11789,7 +11797,13 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     # the sidecar reads RECORD_TRANSCRIPTS from its process env at start, so
     # the bridge file is how a DB toggle reaches it after a restart.
     if "record_transcripts" in settings_updates:
-        write_transcript_env_bridge(get_settings().record_transcripts)
+        from rootcoz.config import db_setting_is_set
+
+        write_transcript_env_bridge(
+            get_settings().record_transcripts
+            if db_setting_is_set("record_transcripts")
+            else None
+        )
 
     _broadcast_settings_change()
 

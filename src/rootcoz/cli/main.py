@@ -3813,7 +3813,7 @@ def transcripts_list_cmd(
             err=True,
         )
     items = data.get("items", [])
-    typer.echo(f"Transcripts: {len(items)} (dir: {data.get('transcripts_dir', '')})")
+    typer.echo(f"Transcripts: {data.get('count', len(items))}")
     for item in items:
         ctx = item.get("context", {})
         context_bits = []
@@ -3842,15 +3842,15 @@ def transcripts_show_cmd(
     """Download one AI session transcript (JSONL)."""
     try:
         client = _get_client()
+        if output:
+            written = client.admin_download_transcript_to_file(session_id, output)
+            typer.echo(f"Saved {written} bytes to {output}")
+            return
         content = client.admin_download_transcript(session_id)
     except RootCozError as exc:
         _handle_error(exc)
         raise typer.Exit(1)
-    if output:
-        Path(output).write_text(content, encoding="utf-8")
-        typer.echo(f"Saved {len(content)} bytes to {output}")
-    else:
-        typer.echo(content)
+    typer.echo(content)
 
 
 @admin_app.command("token-usage")

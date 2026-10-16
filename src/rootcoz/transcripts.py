@@ -15,8 +15,10 @@ through rootcoz.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,16 +28,21 @@ from simple_logger.logger import get_logger
 logger = get_logger(name=__name__)
 
 # Bridge file: the sidecar reads RECORD_TRANSCRIPTS from its process env at
-# container start. rootcoz persists the DB-configured value to
-# ``<transcripts parent>/env``; the container entrypoint sources it before
-# starting the sidecar, so a Server Settings change applies to the sidecar
-# after a restart.
+# container start. rootcoz persists the DB-configured value to a FIXED path
+# (never derived from TRANSCRIPTS_DIR — a custom directory must not move the
+# bridge away from the path the entrypoint sources). The bridge carries ONLY
+# the DB override: when the admin has not set the value in Server Settings,
+# no assignment is written, so the deployment environment (compose/Helm)
+# controls the sidecar.
 
 # Same env var the sidecar reads; the default must live under /data so
 # transcripts survive container replacement.
 TRANSCRIPTS_DIR = Path(
     os.getenv("PI_SIDECAR_TRANSCRIPTS_DIR", "/data/pi-sidecar/transcripts")
 )
+
+# Fixed bridge location (env-overridable for tests).
+ENV_BRIDGE_PATH = Path(os.getenv("PI_SIDECAR_ENV_BRIDGE", "/data/pi-sidecar/env"))
 
 # Sidecar session ids are UUIDs (node:crypto randomUUID). Anchored with
 # \Z (not $) — Python's `$` matches before a trailing newline, which would
@@ -52,25 +59,30 @@ def valid_session_id(session_id: str) -> bool:
     return bool(SESSION_ID_RE.match(session_id))
 
 
-def write_transcript_env_bridge(enabled: bool) -> None:
-    """Persist the record_transcripts value for the container entrypoint.
+def write_transcript_env_bridge(enabled: bool | None) -> None:
+    """Persist the DB-configured record_transcripts value for the entrypoint.
+
+    ``enabled=None`` means no DB override exists — nothing is assigned, so the
+    deployment environment (compose/Helm) stays in control. Values are
+    shell-quoted: a directory or value containing spaces must survive
+    ``source`` under ``set -e``.
 
     Best-effort: environments without a writable /data (local dev without a
     container) simply skip the bridge — the deployment env still controls the
     sidecar there.
     """
     try:
-        bridge = TRANSCRIPTS_DIR.parent / "env"
-        TRANSCRIPTS_DIR.parent.mkdir(parents=True, exist_ok=True)
-        bridge.write_text(
-            f"RECORD_TRANSCRIPTS={'true' if enabled else 'false'}\n"
-            f"PI_SIDECAR_TRANSCRIPTS_DIR={TRANSCRIPTS_DIR}\n"
-        )
+        ENV_BRIDGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if enabled is None:
+            # Comment-only file: sourcing it assigns nothing.
+            content = "# no DB override for RECORD_TRANSCRIPTS\n"
+        else:
+            content = (
+                f"RECORD_TRANSCRIPTS={shlex.quote('true' if enabled else 'false')}\n"
+            )
+        ENV_BRIDGE_PATH.write_text(content)
     except OSError:
-        logger.warning(
-            "Unable to write transcript env bridge at %s",
-            TRANSCRIPTS_DIR.parent / "env",
-        )
+        logger.warning("Unable to write transcript env bridge at %s", ENV_BRIDGE_PATH)
 
 
 @dataclass(frozen=True)
@@ -107,7 +119,7 @@ def list_transcripts() -> list[TranscriptInfo]:
             stat = entry.stat()
         except OSError:
             continue
-        turns = _count_lines(entry)
+        turns = _count_turns(entry)
         infos.append(
             TranscriptInfo(
                 session_id=session_id,
@@ -120,13 +132,28 @@ def list_transcripts() -> list[TranscriptInfo]:
     return infos
 
 
-def _count_lines(path: Path) -> int:
-    """Count JSONL lines (turns). Unreadable files report 0."""
+def _count_turns(path: Path) -> int:
+    """Count ``turn`` records. Unreadable files report 0.
+
+    pi-sidecar writes a ``session_header`` record before the ``turn`` records;
+    headers are not turns. Unparseable lines still count — they are content
+    written for this session, and a placeholder replacing an oversized record
+    keeps its ``type`` so it parses normally.
+    """
+    turns = 0
     try:
-        with path.open("rb") as handle:
-            return sum(1 for _ in handle)
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    turns += 1
+                    continue
+                if not isinstance(record, dict) or record.get("type") == "turn":
+                    turns += 1
     except OSError:
         return 0
+    return turns
 
 
 def transcript_path(session_id: str) -> Path | None:
