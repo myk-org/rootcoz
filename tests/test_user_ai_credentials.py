@@ -595,6 +595,9 @@ async def test_real_sidecar_http_error_never_logs_user_key(
     [
         ("session not found: review%2Fkey", "session not found"),
         ("not authenticated: review%2Fkey", "authentication required"),
+        # The sidecar's actual lost-session body carries the session UUID between
+        # the words; the retry signal must survive key redaction.
+        ("Session 3a67c516-a2ea-4cb0-869f-0c81a81932ac not found", "session not found"),
     ],
 )
 async def test_keyed_failure_preserves_safe_retry_and_auth_signal(
