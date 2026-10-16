@@ -715,7 +715,10 @@ _ADF_CODE_FENCE = "{code}"
 _ADF_INLINE_RE = re.compile(
     # Markdown links must be tried before wiki links — otherwise
     # "[text](url)" matches the wiki alternative and loses the URL.
-    r"\[(?P<md_text>[^\]]+)\]\(\s*(?P<md_url>[^)\s]+)\s*\)"
+    # The destination allows one level of balanced parentheses so URLs
+    # like https://en.wikipedia.org/wiki/Function_(mathematics) survive
+    # intact instead of being truncated at the first ")".
+    r"\[(?P<md_text>[^\]]+)\]\(\s*(?P<md_url>(?:[^()\s]|\([^()\s]*\))+)\s*\)"
     r"|\[(?P<link_text>[^\]|]+)(?:\|(?P<link_url>[^\]]+))?\]"
     r"|(?<!\w)\*(?P<bold>[^*]+)\*(?!\w)"
     r"|(?<!\w)_(?P<italic>[^_]+)_(?!\w)"

@@ -1021,3 +1021,21 @@ plain _italic_ and [bare|https://x] tail"""
             n for n in footer_para["content"] if n["text"].startswith("Generated")
         )
         assert [m["type"] for m in generated["marks"]] == ["em"]
+
+    async def test_text_to_adf_markdown_link_with_parenthesized_url(self):
+        """Markdown URLs with balanced parentheses are not truncated."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        url = "https://en.wikipedia.org/wiki/Function_(mathematics)"
+        adf = _text_to_adf(f"see [docs]({url}) end")
+        para = adf["content"][0]
+        link_node = next(
+            n
+            for n in para["content"]
+            if any(m["type"] == "link" for m in n.get("marks", []))
+        )
+        assert link_node["marks"] == [{"type": "link", "attrs": {"href": url}}]
+        # No leftover parenthesis from a truncated destination
+        joined = "".join(n["text"] for n in para["content"])
+        assert "())" not in joined
+        assert joined.endswith("end")
