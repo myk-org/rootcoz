@@ -7190,9 +7190,9 @@ async def get_usage_context_for_sessions(
     call_type, provider, model) so the transcript list can show what the
     session was for. Chat sessions additionally carry ``chat_messages`` rows.
 
-    The latest row is selected SQL-side per session (indexed on
-    session_id/created_at); ids are chunked under SQLite's bound-variable
-    limit. Python only deduplicates rare created_at ties.
+    The latest row is selected SQL-side per session with a deterministic
+    rowid tie-break (SQLite's created_at has one-second resolution, so ties
+    are real); ids are chunked under SQLite's bound-variable limit.
     """
     context: dict[str, dict[str, Any]] = {}
     async with _connect_db() as db:
@@ -7200,16 +7200,15 @@ async def get_usage_context_for_sessions(
             chunk = session_ids[start : start + _SESSION_QUERY_CHUNK]
             placeholders = ",".join("?" for _ in chunk)
             cursor = await db.execute(
-                "SELECT * FROM ai_token_usage u WHERE u.session_id IN "
-                f"({placeholders}) AND u.created_at = ("
-                "SELECT MAX(u2.created_at) FROM ai_token_usage u2 "
-                "WHERE u2.session_id = u.session_id)",
+                "SELECT * FROM ai_token_usage u WHERE u.rowid IN ("
+                "SELECT rowid FROM ai_token_usage u2 WHERE u2.session_id = u.session_id "
+                "ORDER BY u2.created_at DESC, u2.rowid DESC LIMIT 1) "
+                f"AND u.session_id IN ({placeholders})",
                 tuple(chunk),
             )
             for row in await cursor.fetchall():
                 record = dict(row)
                 if record.get("session_id"):
-                    # Last row wins on created_at ties — same rule as before.
                     context[record["session_id"]] = record
     return context
 
@@ -7217,7 +7216,12 @@ async def get_usage_context_for_sessions(
 async def get_chat_context_for_sessions(
     session_ids: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Latest chat message context per session id (chat sessions only)."""
+    """Latest chat message context per session id (chat sessions only).
+
+    The latest message is selected SQL-side per session with a deterministic
+    rowid tie-break — a bare-column GROUP BY would return username/job_id
+    from an arbitrary row among same-second messages.
+    """
     context: dict[str, dict[str, Any]] = {}
     if not session_ids:
         return context
@@ -7226,9 +7230,11 @@ async def get_chat_context_for_sessions(
             chunk = session_ids[start : start + _SESSION_QUERY_CHUNK]
             placeholders = ",".join("?" for _ in chunk)
             cursor = await db.execute(
-                "SELECT job_id, session_id, username, MAX(created_at) AS last_activity "
-                "FROM chat_messages WHERE session_id IN "
-                f"({placeholders}) GROUP BY session_id",
+                "SELECT job_id, session_id, username, created_at AS last_activity "
+                "FROM chat_messages c WHERE c.rowid IN ("
+                "SELECT rowid FROM chat_messages c2 WHERE c2.session_id = c.session_id "
+                "ORDER BY c2.created_at DESC, c2.rowid DESC LIMIT 1) "
+                f"AND c.session_id IN ({placeholders})",
                 tuple(chunk),
             )
             for row in await cursor.fetchall():

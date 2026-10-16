@@ -3850,7 +3850,9 @@ def transcripts_show_cmd(
     except RootCozError as exc:
         _handle_error(exc)
         raise typer.Exit(1)
-    typer.echo(content)
+    # No extra newline when the JSONL already ends with one — piping to a
+    # line-by-line consumer must not synthesize an empty trailing record.
+    typer.echo(content, nl=not content.endswith("\n"))
 
 
 @admin_app.command("token-usage")

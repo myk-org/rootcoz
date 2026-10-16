@@ -47,6 +47,12 @@ const ID_DISPLAY_LIMIT = 13
 
 const shortId = (id: string): string => `${id.slice(0, ID_DISPLAY_LIMIT)}…`
 
+// SQLite CURRENT_TIMESTAMP is timezone-less UTC in `YYYY-MM-DD HH:MM:SS`;
+// Date.parse would read it as local time. Normalize to an explicit UTC ISO
+// string before parsing so the tooltip is correct for admins outside UTC.
+const parseDbTimestamp = (value: string): number =>
+  Date.parse(value.includes('T') ? value : `${value.trim().replace(' ', 'T')}Z`)
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
@@ -212,7 +218,7 @@ export function AdminTranscriptsPage() {
                       title={
                         item.context?.chat_last_activity
                           ? `Last chat activity: ${formatDate(
-                              Date.parse(item.context.chat_last_activity) / 1000,
+                              parseDbTimestamp(item.context.chat_last_activity) / 1000,
                             )}`
                           : undefined
                       }

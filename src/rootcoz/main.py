@@ -11856,6 +11856,18 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     # Remove from in-memory cache so get_settings() falls back to env/default
     remove_from_db_settings_cache([key])
 
+    # Keep the sidecar transcript env bridge in sync with the reset — the
+    # bridge must stop assigning the removed override so the deployment
+    # environment controls the sidecar again after the next restart.
+    if key == "record_transcripts":
+        from rootcoz.config import db_setting_is_set
+
+        write_transcript_env_bridge(
+            get_settings().record_transcripts
+            if db_setting_is_set("record_transcripts")
+            else None
+        )
+
     _broadcast_settings_change()
 
     logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)

@@ -6523,6 +6523,24 @@ class TestTranscriptsCommands:
         assert "Saved" in out
         assert target.read_text() == payload
 
+    def test_transcripts_show_stdout_no_synthetic_blank_line(self, tmp_path, capsys):
+        """A JSONL payload already ending in a newline must not gain another."""
+        from rootcoz.cli.main import transcripts_show_cmd
+
+        payload = '{"turn":1}\n{"turn":2}\n'
+
+        def handler(request):
+            return httpx.Response(200, content=payload.encode())
+
+        client = make_test_client(handler, api_key="k")
+        with patch("rootcoz.cli.main._get_client", return_value=client):
+            transcripts_show_cmd(
+                session_id="00000000-0000-0000-0000-000000000005",
+                output="",
+            )
+        out = capsys.readouterr().out
+        assert out == payload
+
     def test_transcripts_show_error_exits(self):
         from typer.testing import CliRunner
 

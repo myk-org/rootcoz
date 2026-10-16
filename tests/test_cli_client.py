@@ -3147,3 +3147,16 @@ class TestRootCozClientTranscripts:
                 "00000000-0000-0000-0000-000000000004", str(tmp_path / "x.jsonl")
             )
         assert "Transcript not found" in str(exc_info.value)
+
+    def test_download_transcript_to_file_bad_path_is_clean_error(self, tmp_path):
+        """An unwritable output path raises RootCozError, not a traceback."""
+        session = "00000000-0000-0000-0000-000000000005"
+
+        def handler(request):
+            return httpx.Response(200, content=b'{"type": "turn"}\n')
+
+        client = _make_client(handler)
+        bad = tmp_path / "missing-dir" / "out.jsonl"
+        with pytest.raises(RootCozError) as exc_info:
+            client.admin_download_transcript_to_file(session, str(bad))
+        assert "Cannot write" in str(exc_info.value)

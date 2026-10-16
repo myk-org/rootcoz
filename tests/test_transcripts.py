@@ -412,3 +412,57 @@ class TestSessionIdRecording:
 
         rows = await storage.get_token_usage_for_job("job-rt")
         assert rows[0]["session_id"] == session
+
+    async def test_latest_row_selected_with_rowid_tiebreak(self, initialized_db):
+        """Same-second usage rows: the LAST inserted row must win, deterministically."""
+        from rootcoz import storage
+
+        session = "00000000-0000-0000-0000-000000000011"
+        for job in ("job-first", "job-second"):
+            await storage.record_token_usage(
+                job_id=job,
+                ai_provider="claude",
+                ai_model="m",
+                call_type="primary",
+                session_id=session,
+            )
+        context = await storage.get_usage_context_for_sessions([session])
+        # SQLite's created_at has one-second resolution — both rows share a
+        # timestamp, and the rowid tie-break must pick the latest insert.
+        assert context[session]["job_id"] == "job-second"
+
+    async def test_chat_context_latest_message_tiebreak(self, initialized_db):
+        """Same-second chat messages: username comes from the LAST message."""
+        from rootcoz import storage
+
+        session = "00000000-0000-0000-0000-000000000012"
+        await storage.add_chat_message(
+            "job-c", "user", "m1", "first-user", session_id=session
+        )
+        await storage.add_chat_message(
+            "job-c", "user", "m2", "second-user", session_id=session
+        )
+        context = await storage.get_chat_context_for_sessions([session])
+        assert context[session]["username"] == "second-user"
+
+    async def test_reset_setting_rewrites_bridge_without_override(
+        self, client, admin_headers, env_bridge, monkeypatch
+    ):
+        """DELETE /api/admin/settings/record_transcripts clears the bridge assignment."""
+        from rootcoz import storage
+
+        # Seed a DB override, then reset through the API
+        await storage.set_server_setting(
+            "record_transcripts", "true", updated_by="admin"
+        )
+        write_transcript_env_bridge(True)
+        assert "RECORD_TRANSCRIPTS=true" in env_bridge.read_text()
+
+        monkeypatch.setattr("rootcoz.main.sidecar_transcripts", transcripts_module)
+        resp = client.delete(
+            "/api/admin/settings/record_transcripts", headers=admin_headers
+        )
+        assert resp.status_code == 200
+        content = env_bridge.read_text()
+        # No assignment: the deployment environment controls the sidecar again
+        assert "RECORD_TRANSCRIPTS=" not in content

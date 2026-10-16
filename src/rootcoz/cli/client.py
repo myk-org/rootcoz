@@ -317,10 +317,15 @@ class RootCozClient:
                         detail = response.text
                     raise RootCozError(status_code=response.status_code, detail=detail)
                 written = 0
-                with open(path, "wb") as handle:
-                    for chunk in response.iter_bytes():
-                        handle.write(chunk)
-                        written += len(chunk)
+                try:
+                    with open(path, "wb") as handle:
+                        for chunk in response.iter_bytes():
+                            handle.write(chunk)
+                            written += len(chunk)
+                except OSError as exc:
+                    raise RootCozError(
+                        status_code=0, detail=f"Cannot write {path}: {exc}"
+                    ) from exc
             return written
         except httpx.TimeoutException as exc:
             raise RootCozError(
