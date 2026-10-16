@@ -3049,3 +3049,65 @@ class TestRootCozClientSaveUserTokens:
         client = _make_client(handler)
         client.save_user_tokens(jira_sa_token="ATST-tok")
         assert captured["json"] == {"jira_sa_token": "ATST-tok"}
+
+
+class TestRootCozClientTranscripts:
+    """Tests for admin transcript client methods."""
+
+    def test_list_transcripts_no_filter(self):
+        def handler(request):
+            assert request.url.path == "/api/admin/transcripts"
+            assert "job_id" not in str(request.url)
+            return httpx.Response(
+                200,
+                json={
+                    "count": 0,
+                    "items": [],
+                    "recording_enabled": True,
+                    "transcripts_dir": "/data/pi-sidecar/transcripts",
+                },
+            )
+
+        client = _make_client(handler)
+        data = client.admin_list_transcripts()
+        assert data["count"] == 0
+
+    def test_list_transcripts_job_filter(self):
+        def handler(request):
+            assert request.url.params.get("job_id") == "job-1"
+            return httpx.Response(
+                200, json={"count": 1, "items": [{"session_id": "s"}]}
+            )
+
+        client = _make_client(handler)
+        data = client.admin_list_transcripts(job_id="job-1")
+        assert data["count"] == 1
+
+    def test_download_transcript_returns_raw_text(self):
+        payload = '{"turn":1}\n{"turn":2}\n'
+
+        def handler(request):
+            assert (
+                request.url.path
+                == "/api/admin/transcripts/00000000-0000-0000-0000-000000000001"
+            )
+            return httpx.Response(
+                200,
+                content=payload.encode(),
+                headers={"Content-Type": "application/x-ndjson"},
+            )
+
+        client = _make_client(handler)
+        content = client.admin_download_transcript(
+            "00000000-0000-0000-0000-000000000001"
+        )
+        assert content == payload
+
+    def test_download_transcript_error_detail(self):
+        def handler(request):
+            return httpx.Response(404, json={"detail": "Transcript not found"})
+
+        client = _make_client(handler)
+        with pytest.raises(RootCozError) as exc_info:
+            client.admin_download_transcript("00000000-0000-0000-0000-000000000002")
+        assert "Transcript not found" in str(exc_info.value)

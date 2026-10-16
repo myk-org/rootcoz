@@ -91,6 +91,27 @@ const requestWithJsonBody = <T>(
 export const api = {
   get: <T>(path: string, options?: RequestInit) => request<T>(path, options),
 
+  /** GET returning raw text (e.g. JSONL transcript downloads). */
+  getText: async (path: string): Promise<string> => {
+    const res = await fetch(path)
+    if (!res.ok) {
+      let body: unknown
+      try {
+        body = await res.json()
+      } catch {
+        body = await res.text()
+      }
+      trackFailedCall({
+        status: res.status,
+        endpoint: path,
+        error: typeof body === 'string' ? body : body != null ? JSON.stringify(body) : '',
+        timestamp: Date.now(),
+      })
+      throw new ApiError(res.status, res.statusText, body)
+    }
+    return res.text()
+  },
+
   post: <T>(path: string, body?: unknown) =>
     requestWithJsonBody<T>('POST', path, body),
 

@@ -6,6 +6,7 @@ import {
   BarChart3,
   Clock,
   Coins,
+  FileText,
   LayoutDashboard,
   MessageSquare,
   ScrollText,
@@ -50,6 +51,7 @@ const ADMIN_NAV_ITEMS: NavItem[] = [
   { to: '/admin/token-usage', label: 'Tokens', icon: Coins },
   { to: '/admin/chat', label: 'Chat', icon: MessageSquare },
   { to: '/admin/logs', label: 'Logs', icon: ScrollText },
+  { to: '/admin/transcripts', label: 'Transcripts', icon: FileText },
   { to: '/admin/settings', label: 'Settings', icon: Settings },
 ]
 

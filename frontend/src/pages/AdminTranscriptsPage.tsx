@@ -1,0 +1,266 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { api } from '@/lib/api'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { formatCompactNumber } from '@/lib/format'
+import { FileText, Download, Eye, Loader2, Search } from 'lucide-react'
+
+interface TranscriptItem {
+  session_id: string
+  size_bytes: number
+  modified_at: number
+  turns: number
+  context: {
+    job_id?: string
+    call_type?: string
+    ai_provider?: string
+    ai_model?: string
+    total_tokens?: number
+    chat_username?: string
+    chat_last_activity?: string
+  }
+}
+
+interface TranscriptsResponse {
+  transcripts_dir: string
+  recording_enabled: boolean
+  count: number
+  items: TranscriptItem[]
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
+}
+
+function formatDate(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toLocaleString()
+}
+
+function contextSummary(item: TranscriptItem): string {
+  const ctx = item.context ?? {}
+  const bits: string[] = []
+  if (ctx.call_type) bits.push(ctx.call_type)
+  if (ctx.chat_username) bits.push(`chat: ${ctx.chat_username}`)
+  if (ctx.ai_model) bits.push(ctx.ai_model)
+  return bits.length > 0 ? bits.join(' · ') : '—'
+}
+
+export function AdminTranscriptsPage() {
+  const [data, setData] = useState<TranscriptsResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [jobFilter, setJobFilter] = useState('')
+  const [appliedFilter, setAppliedFilter] = useState('')
+  const [viewing, setViewing] = useState<TranscriptItem | null>(null)
+  const [viewContent, setViewContent] = useState('')
+  const [viewLoading, setViewLoading] = useState(false)
+  const [viewError, setViewError] = useState('')
+
+  const load = useCallback(async (jobId: string) => {
+    setLoading(true)
+    setError('')
+    try {
+      const query = jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''
+      setData(await api.get<TranscriptsResponse>(`/api/admin/transcripts${query}`))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load transcripts')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load('')
+  }, [load])
+
+  const items = useMemo(() => data?.items ?? [], [data])
+
+  const openViewer = useCallback(async (item: TranscriptItem) => {
+    setViewing(item)
+    setViewContent('')
+    setViewError('')
+    setViewLoading(true)
+    try {
+      setViewContent(await api.getText(`/api/admin/transcripts/${item.session_id}`))
+    } catch (err) {
+      setViewError(err instanceof Error ? err.message : 'Failed to load transcript')
+    } finally {
+      setViewLoading(false)
+    }
+  }, [])
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Session Transcripts</h1>
+          <p className="text-sm text-muted-foreground">
+            Recorded pi-sidecar sessions (redacted JSONL). Admin only, read-only.
+          </p>
+        </div>
+      </div>
+
+      {data && !data.recording_enabled && (
+        <Card>
+          <CardContent className="text-sm text-muted-foreground py-3">
+            Transcript recording is currently disabled. Enable it in Server
+            Settings → AI (restart required — the sidecar reads the setting at
+            container start).
+          </CardContent>
+        </Card>
+      )}
+
+      <form
+        className="flex gap-2 items-center"
+        onSubmit={(e) => {
+          e.preventDefault()
+          setAppliedFilter(jobFilter.trim())
+          void load(jobFilter.trim())
+        }}
+      >
+        <Input
+          placeholder="Filter by job id…"
+          value={jobFilter}
+          onChange={(e) => setJobFilter(e.target.value)}
+          className="max-w-sm"
+        />
+        <Button type="submit" variant="secondary" size="sm" disabled={loading}>
+          <Search className="h-4 w-4 mr-1" /> Filter
+        </Button>
+        {appliedFilter && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setJobFilter('')
+              setAppliedFilter('')
+              void load('')
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </form>
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+
+      {loading ? (
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading transcripts…
+        </div>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableCell>Session</TableCell>
+                  <TableCell>Turns</TableCell>
+                  <TableCell>Size</TableCell>
+                  <TableCell>Last modified</TableCell>
+                  <TableCell>Context</TableCell>
+                  <TableCell>Job</TableCell>
+                  <TableCell className="text-right">Actions</TableCell>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                      No transcripts{appliedFilter ? ' for this job' : ''}.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {items.map((item) => (
+                  <TableRow key={item.session_id}>
+                    <TableCell className="font-mono text-xs">
+                      {item.session_id.slice(0, 13)}…
+                    </TableCell>
+                    <TableCell>{formatCompactNumber(item.turns)}</TableCell>
+                    <TableCell>{formatSize(item.size_bytes)}</TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {formatDate(item.modified_at)}
+                    </TableCell>
+                    <TableCell className="text-sm">{contextSummary(item)}</TableCell>
+                    <TableCell className="text-sm">
+                      {item.context?.job_id ? (
+                        <a
+                          className="text-primary hover:underline"
+                          href={`/results/${item.context.job_id}`}
+                        >
+                          {item.context.job_id.slice(0, 13)}…
+                        </a>
+                      ) : (
+                        '—'
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void openViewer(item)}
+                          title="View transcript"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                        <a
+                          href={`/api/admin/transcripts/${item.session_id}`}
+                          download={`${item.session_id}.jsonl`}
+                        >
+                          <Button variant="ghost" size="sm" title="Download JSONL">
+                            <Download className="h-4 w-4" />
+                          </Button>
+                        </a>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      <Dialog open={viewing !== null} onOpenChange={(open) => !open && setViewing(null)}>
+        <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="font-mono text-sm flex items-center gap-2">
+              <FileText className="h-4 w-4" /> {viewing?.session_id}.jsonl
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 overflow-auto">
+            {viewLoading && (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading transcript…
+              </div>
+            )}
+            {viewError && <p className="text-sm text-destructive">{viewError}</p>}
+            {!viewLoading && !viewError && viewContent && (
+              <pre className="text-xs whitespace-pre-wrap break-all font-mono">
+                {viewContent}
+              </pre>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}

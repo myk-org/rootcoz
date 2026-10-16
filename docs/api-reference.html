@@ -1257,6 +1257,16 @@
 <td>Per-job usage</td>
 </tr>
 <tr>
+<td>GET</td>
+<td><code>/api/admin/transcripts</code></td>
+<td>List session transcripts with joined context (<code>job_id</code> filter)</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/transcripts/{session_id}</code></td>
+<td>Download one transcript JSONL (streaming, no truncation)</td>
+</tr>
+<tr>
 <td>POST</td>
 <td><code>/api/admin/ai-models/refresh</code></td>
 <td>Re-discover models from the sidecar</td>

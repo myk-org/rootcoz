@@ -115,6 +115,9 @@ src/rootcoz/
     src/server.ts           # Thin wrapper calling @myk-org/pi-sidecar startSidecar()
     src/http-tools-mcp.ts   # Stdio MCP server wrapping HTTP custom tools for CLI/acpx
   cli/                      # CLI client (rootcoz command)
+  transcripts.py           # pi-sidecar session transcript access: dir constant,
+                            # UUID session-id gate (traversal-safe), env bridge
+                            # for RECORD_TRANSCRIPTS, read-only listing
   peer_analysis.py          # Multi-AI peer debate loop
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
@@ -423,6 +426,7 @@ Exceptions (server-level only, no payload equivalent):
 - `SECURE_COOKIES` — server-only deployment toggle for HTTPS cookie flags (default: True, set False for local HTTP dev)
 - `TRUST_PROXY_HEADERS` — server-only trust toggle for reverse-proxy user identification; only enable behind a trusted proxy. When enabled, `X-Forwarded-User` satisfies authentication for all routes without requiring API key registration — the proxy is the authentication boundary.
 - `VAPID_CLAIM_EMAIL` — server-only contact email for VAPID claims (Web Push notifications)
+- `RECORD_TRANSCRIPTS` — server-only toggle for pi-sidecar session transcript recording (>= 4.12.0); restart required (the sidecar reads it at container start). Registered in Server Settings → AI; rootcoz persists the value to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar. Admin-only retrieval: `GET /api/admin/transcripts`, `rootcoz admin transcripts list/show`
 - `VAPID_PRIVATE_KEY` — server-only VAPID private key for Web Push notifications; never expose via request payloads, CLI flags, or shared config files
 - `VAPID_PUBLIC_KEY` — server-only VAPID public key for Web Push notifications; auto-generated with `VAPID_PRIVATE_KEY` if not set
 - Security-sensitive credentials for preview/create-issue endpoints (`GITHUB_TOKEN`, `TESTS_REPO_URL`, Jira credentials, `REPORTPORTAL_URL`, `REPORTPORTAL_API_TOKEN`, `REPORTPORTAL_PROJECT`) — these use deployment config, not per-request overrides

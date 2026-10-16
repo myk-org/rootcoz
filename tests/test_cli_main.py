@@ -5,13 +5,14 @@ import os
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from typer.testing import CliRunner
 
 from rootcoz.cli.client import RootCozError
 from rootcoz.cli.config import ServerConfig
 from rootcoz.cli.main import app
-from tests.conftest import host_env
+from tests.conftest import host_env, make_test_client
 
 runner = CliRunner()
 
@@ -6437,3 +6438,108 @@ class TestSetTrackedInChildScope:
         kwargs = mock_client.set_tracked_in.call_args[1]
         assert kwargs["child_job_name"] == "child-runner"
         assert kwargs["child_build_number"] == 0
+
+
+class TestTranscriptsCommands:
+    """Tests for `rootcoz admin transcripts list/show`."""
+
+    def test_transcripts_list_table(self, capsys):
+        from rootcoz.cli.main import transcripts_list_cmd
+
+        def handler(request):
+            assert request.url.path == "/api/admin/transcripts"
+            return httpx.Response(
+                200,
+                json={
+                    "count": 1,
+                    "recording_enabled": True,
+                    "transcripts_dir": "/data/pi-sidecar/transcripts",
+                    "items": [
+                        {
+                            "session_id": "00000000-0000-0000-0000-000000000001",
+                            "size_bytes": 1234,
+                            "modified_at": 1700000000.0,
+                            "turns": 7,
+                            "context": {
+                                "job_id": "job-1",
+                                "call_type": "primary",
+                                "ai_model": "opus-4-6",
+                            },
+                        }
+                    ],
+                },
+            )
+
+        client = make_test_client(handler, api_key="k")
+        with patch("rootcoz.cli.main._get_client", return_value=client):
+            transcripts_list_cmd(job_id="", output_format="table", json_output=False)
+        out = capsys.readouterr().out
+        assert "00000000-0000-0000-0000-000000000001" in out
+        assert "job=job-1" in out
+        assert "primary" in out
+
+    def test_transcripts_list_json(self, capsys):
+        from rootcoz.cli.main import transcripts_list_cmd
+
+        def handler(request):
+            return httpx.Response(200, json={"count": 0, "items": []})
+
+        client = make_test_client(handler, api_key="k")
+        with patch("rootcoz.cli.main._get_client", return_value=client):
+            transcripts_list_cmd(job_id="", output_format="json", json_output=False)
+        out = capsys.readouterr().out
+        assert '"count": 0' in out
+
+    def test_transcripts_list_disabled_note(self, capsys):
+        from rootcoz.cli.main import transcripts_list_cmd
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={"count": 0, "items": [], "recording_enabled": False},
+            )
+
+        client = make_test_client(handler, api_key="k")
+        with patch("rootcoz.cli.main._get_client", return_value=client):
+            transcripts_list_cmd(job_id="", output_format="table", json_output=False)
+        err = capsys.readouterr().err
+        assert "recording is disabled" in err
+
+    def test_transcripts_show_to_file(self, tmp_path, capsys):
+        from rootcoz.cli.main import transcripts_show_cmd
+
+        payload = '{"turn":1}\n'
+
+        def handler(request):
+            return httpx.Response(200, content=payload.encode())
+
+        client = make_test_client(handler, api_key="k")
+        target = tmp_path / "t.jsonl"
+        with patch("rootcoz.cli.main._get_client", return_value=client):
+            transcripts_show_cmd(
+                session_id="00000000-0000-0000-0000-000000000003",
+                output=str(target),
+            )
+        out = capsys.readouterr().out
+        assert "Saved" in out
+        assert target.read_text() == payload
+
+    def test_transcripts_show_error_exits(self):
+        from typer.testing import CliRunner
+
+        def handler(request):
+            return httpx.Response(404, json={"detail": "Transcript not found"})
+
+        client = make_test_client(handler, api_key="k")
+        runner = CliRunner()
+        with patch("rootcoz.cli.main._get_client", return_value=client):
+            result = runner.invoke(
+                app,
+                [
+                    "admin",
+                    "transcripts",
+                    "show",
+                    "00000000-0000-0000-0000-000000000004",
+                ],
+            )
+        assert result.exit_code == 1

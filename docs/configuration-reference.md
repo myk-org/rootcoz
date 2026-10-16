@@ -221,6 +221,8 @@ These are read straight from the process environment and have no `Settings` fiel
 | `ACPX_AGENTS` | unset | Comma-separated providers exposed through the Cursor ACPX bridge |
 | `CLI_AGENTS` | unset | Comma-separated providers exposed through the local CLI agents |
 | `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
+| `RECORD_TRANSCRIPTS` | `false` | Record one redacted JSONL per AI session (pi-sidecar >= 4.12.0). **Restart required** — the sidecar reads it at container start. Also toggleable in Server Settings → AI (rootcoz persists the value to `/data/pi-sidecar/env`, which the container entrypoint sources on boot) |
+| `PI_SIDECAR_TRANSCRIPTS_DIR` | `/data/pi-sidecar/transcripts` | Where transcript JSONL files land — keep it under the persistent `/data` mount so they survive container replacement |
 
 `gemini` resolves to the `google` provider, and `GEMINI_API_KEY` is the credential RootCoz documents and charts for it (`ai.provider=gemini` pairs with `ai.geminiApiKey`). `gemini auth login` is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — `cli-gemini`, the canonical form of the legacy `gemini-cli` name — not under `google`, so it is not a substitute for `GEMINI_API_KEY` on the `gemini` alias. For `claude`, see the resolution rules above: the alias maps to `google-vertex-claude`, so `ANTHROPIC_API_KEY` on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.
 

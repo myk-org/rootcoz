@@ -274,6 +274,19 @@ class Settings(BaseSettings):
     # Default AI model (server-level default, can be overridden per-request)
     ai_model: str = ""
 
+    # pi-sidecar session transcript recording (sidecar >= 4.12.0).
+    # Restart-required: the sidecar reads RECORD_TRANSCRIPTS from its process
+    # env at container start — rootcoz persists the DB-configured value to a
+    # bridge file the container entrypoint sources on boot.
+    record_transcripts: bool = Field(
+        default=False,
+        description=(
+            "Record pi-sidecar session transcripts (JSONL, redacted) under "
+            "/data for admin-only retrieval. Restart required: the sidecar "
+            "reads RECORD_TRANSCRIPTS at container start."
+        ),
+    )
+
     # Peer analysis configuration
     peer_ai_configs: str = ""  # "provider:model,provider:model" format
     peer_analysis_max_rounds: int = Field(default=3, ge=1, le=10)

@@ -533,15 +533,15 @@ wheels = [
 
 [[package]]
 name = "pi-sidecar-client"
-version = "4.9.0"
+version = "4.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "python-simple-logger" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0a/bf/d68043933df91338e37685bea4e3475f0e06db94ca57f3b1de164c8d7246/pi_sidecar_client-4.9.0.tar.gz", hash = "sha256:d77dc8f943f7934801f3f6e29c1a8d2246d66452288e370d9cf213be2485453c", size = 25157, upload-time = "2026-10-11T16:18:24.637Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c9/06/0d51b96e5c0aaac5153dc814707d1a1a840ab1238c783bba8f397591658d/pi_sidecar_client-4.12.0.tar.gz", hash = "sha256:352b9bb2924cb45e70f2963d6418139dae021b72d1b10e410d3f96ea9565d39c", size = 27502, upload-time = "2026-10-16T17:46:50.046Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/ad/0274425835e49e8f536d69b6689916ad60efa8962f729e3ab9d59f8169bb/pi_sidecar_client-4.9.0-py3-none-any.whl", hash = "sha256:ac2b6167d8d04249f02fa9a8b15a6d0d00fc35d4afcb28f8a9e5a290d32550d8", size = 19874, upload-time = "2026-10-11T16:18:23.114Z" },
+    { url = "https://files.pythonhosted.org/packages/93/ec/75183bd5c5201545e4a14751727063017788f2bc0d47d70135ccbe902bf2/pi_sidecar_client-4.12.0-py3-none-any.whl", hash = "sha256:aacaf43e8eec4addd6fb6d0ce54d5ecad377031118aeccebe9cfa67b332105a8", size = 21066, upload-time = "2026-10-16T17:46:48.732Z" },
 ]
 
 [[package]]
@@ -900,7 +900,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "httpx" },
-    { name = "pi-sidecar-client", specifier = ">=4.9.0" },
+    { name = "pi-sidecar-client", specifier = ">=4.12.0" },
     { name = "pydantic-settings" },
     { name = "pytest", marker = "extra == 'tests'" },
     { name = "pytest-asyncio", marker = "extra == 'tests'" },

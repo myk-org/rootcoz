@@ -3780,6 +3780,79 @@ def _print_token_usage_csv(rows: list[dict[str, Any]]) -> None:
         writer.writerow({k: row.get(k, "") for k in rows[0]})
 
 
+transcripts_app = typer.Typer(help="Session transcript commands. Admin only.")
+admin_app.add_typer(transcripts_app, name="transcripts")
+
+
+@transcripts_app.command("list")
+def transcripts_list_cmd(
+    job_id: str = typer.Option("", "--job", help="Filter to transcripts of one run"),
+    output_format: str = typer.Option(
+        "table", "--format", help="Output format: table, json"
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List recorded AI session transcripts."""
+    _set_json(json_output)
+    effective_format = "json" if _state.get("json", False) else output_format
+    if effective_format not in {"table", "json"}:
+        typer.echo("Invalid --format: Valid: table, json", err=True)
+        raise typer.Exit(1)
+    try:
+        client = _get_client()
+        data = client.admin_list_transcripts(job_id=job_id)
+    except RootCozError as exc:
+        _handle_error(exc)
+        raise typer.Exit(1)
+    if effective_format == "json":
+        print_output(data, columns=[], as_json=True)
+        return
+    if not data.get("recording_enabled"):
+        typer.echo(
+            "Note: transcript recording is disabled (Server Settings → AI → Record transcripts, restart required)",
+            err=True,
+        )
+    items = data.get("items", [])
+    typer.echo(f"Transcripts: {len(items)} (dir: {data.get('transcripts_dir', '')})")
+    for item in items:
+        ctx = item.get("context", {})
+        context_bits = []
+        if ctx.get("job_id"):
+            context_bits.append(f"job={ctx['job_id']}")
+        if ctx.get("call_type"):
+            context_bits.append(ctx["call_type"])
+        if ctx.get("chat_username"):
+            context_bits.append(f"chat:{ctx['chat_username']}")
+        if ctx.get("ai_model"):
+            context_bits.append(ctx["ai_model"])
+        context_str = " ".join(context_bits) if context_bits else "-"
+        typer.echo(
+            f"  {item['session_id']}  {item['turns']:>4} turns  "
+            f"{item['size_bytes']:>9} bytes  {context_str}"
+        )
+
+
+@transcripts_app.command("show")
+def transcripts_show_cmd(
+    session_id: str = typer.Argument(help="Sidecar session id (UUID)"),
+    output: str = typer.Option(
+        "", "--output", "-o", help="Write JSONL to a file instead of stdout"
+    ),
+) -> None:
+    """Download one AI session transcript (JSONL)."""
+    try:
+        client = _get_client()
+        content = client.admin_download_transcript(session_id)
+    except RootCozError as exc:
+        _handle_error(exc)
+        raise typer.Exit(1)
+    if output:
+        Path(output).write_text(content, encoding="utf-8")
+        typer.echo(f"Saved {len(content)} bytes to {output}")
+    else:
+        typer.echo(content)
+
+
 @admin_app.command("token-usage")
 def token_usage_cmd(
     period: str | None = typer.Option(None, help="Period: today, week, month, all"),

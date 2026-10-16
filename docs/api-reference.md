@@ -287,6 +287,8 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin/token-usage` | `start_date`, `end_date`, `ai_provider`, `ai_model`, `call_type`, `group_by` |
 | GET | `/api/admin/token-usage/summary` | Dashboard totals |
 | GET | `/api/admin/token-usage/{job_id}` | Per-job usage |
+| GET | `/api/admin/transcripts` | List session transcripts with joined context (`job_id` filter) |
+| GET | `/api/admin/transcripts/{session_id}` | Download one transcript JSONL (streaming, no truncation) |
 | POST | `/api/admin/ai-models/refresh` | Re-discover models from the sidecar |
 | GET | `/api/admin/component-versions` | Backend, sidecar, and chart versions |
 | GET | `/api/admin/db/schema` | Read-only schema dump |

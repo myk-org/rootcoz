@@ -264,6 +264,41 @@ class RootCozClient:
             json={"role": role},
         )
 
+    def admin_list_transcripts(self, job_id: str = "") -> dict[str, Any]:
+        """List session transcripts with business context.
+
+        GET /api/admin/transcripts (optional ?job_id= filter). Admin only.
+        """
+        params = {"job_id": job_id} if job_id else None
+        return self._request("GET", "/api/admin/transcripts", params=params)
+
+    def admin_download_transcript(self, session_id: str) -> str:
+        """Download one session transcript JSONL. Admin only.
+
+        GET /api/admin/transcripts/{session_id} — returns the raw JSONL
+        content; the caller decides where it lands.
+        """
+        try:
+            response = self._client.get(
+                f"/api/admin/transcripts/{quote(session_id, safe='')}"
+            )
+        except httpx.TimeoutException as exc:
+            raise RootCozError(
+                status_code=0, detail=f"Request timed out: {exc}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RootCozError(
+                status_code=0, detail=f"Cannot connect to {self.server_url}: {exc}"
+            ) from exc
+        if response.status_code != 200:
+            detail = ""
+            try:
+                detail = response.json().get("detail", str(response.json()))
+            except ValueError, KeyError:
+                detail = response.text
+            raise RootCozError(status_code=response.status_code, detail=detail)
+        return response.text
+
     def admin_list_settings(self, reveal: bool = False) -> list[dict[str, Any]]:
         """List all server settings. GET /api/admin/settings"""
         params = {}

@@ -238,6 +238,8 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | --- | --- | --- |
 | `component-versions` | — | Installed AI-sidecar component versions. |
 | `token-usage` | `--period` (`today`, `week`, `month`, `all`), `--start-date`, `--end-date`, `--provider`, `--model`, `--call-type`, `--group-by` (`provider`, `model`, `call_type`, `day`, `week`, `month`, `job`), `--job-id`, `--format` (`table`, `json`, `csv`) | AI token usage and cost. No filters prints the summary dashboard. |
+| `transcripts list` | `--job` (filter to one run), `--format` (`table`, `json`) | Recorded AI session transcripts (redacted JSONL) with per-session context. Admin only. |
+| `transcripts show SESSION_ID` | `--output`/`-o` FILE | Download one transcript JSONL. Admin only. |
 | `users list` | — | All users, roles, and grants. |
 | `users create USERNAME` | `--role` (required), `--can-view-reports`/`--no-can-view-reports`, `--can-use-server-providers`/`--no-can-use-server-providers` | Create a user; the API key is shown once. |
 | `users delete USERNAME` | `--force`/`-f` | Delete a user without the confirmation prompt. |

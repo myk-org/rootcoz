@@ -1068,6 +1068,16 @@ SECURE_COOKIES=false
 <td>unset</td>
 <td>Sidecar agent dir for custom providers and settings (see below)</td>
 </tr>
+<tr>
+<td><code>RECORD_TRANSCRIPTS</code></td>
+<td><code>false</code></td>
+<td>Record one redacted JSONL per AI session (pi-sidecar &gt;= 4.12.0). <strong>Restart required</strong> — the sidecar reads it at container start. Also toggleable in Server Settings → AI (rootcoz persists the value to <code>/data/pi-sidecar/env</code>, which the container entrypoint sources on boot)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_TRANSCRIPTS_DIR</code></td>
+<td><code>/data/pi-sidecar/transcripts</code></td>
+<td>Where transcript JSONL files land — keep it under the persistent <code>/data</code> mount so they survive container replacement</td>
+</tr>
 </tbody>
 </table></div>
 <p><code>gemini</code> resolves to the <code>google</code> provider, and <code>GEMINI_API_KEY</code> is the credential RootCoz documents and charts for it (<code>ai.provider=gemini</code> pairs with <code>ai.geminiApiKey</code>). <code>gemini auth login</code> is a host-side login for the standalone Gemini CLI; the sidecar exposes that agent under its own provider id — <code>cli-gemini</code>, the canonical form of the legacy <code>gemini-cli</code> name — not under <code>google</code>, so it is not a substitute for <code>GEMINI_API_KEY</code> on the <code>gemini</code> alias. For <code>claude</code>, see the resolution rules above: the alias maps to <code>google-vertex-claude</code>, so <code>ANTHROPIC_API_KEY</code> on its own is not the credential that provider uses — the Vertex path is. RootCoz passes the environment through to the sidecar and cannot say which credentials a provider accepts, so confirm the requirement in that provider's own documentation.</p>

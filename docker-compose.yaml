@@ -114,6 +114,16 @@ services:
       - PI_SIDECAR_LOG_LEVEL=${PI_SIDECAR_LOG_LEVEL:-INFO}
 
       # ===================
+      # Session Transcript Recording (pi-sidecar >= 4.12.0)
+      # ===================
+      # RECORD_TRANSCRIPTS can also be toggled in Server Settings (restart
+      # required — rootcoz persists the value to /data/pi-sidecar/env, which
+      # the container entrypoint sources at startup; this env var wins on
+      # first boot). Transcripts land under /data and survive replacement.
+      - RECORD_TRANSCRIPTS=${RECORD_TRANSCRIPTS:-false}
+      - PI_SIDECAR_TRANSCRIPTS_DIR=${PI_SIDECAR_TRANSCRIPTS_DIR:-/data/pi-sidecar/transcripts}
+
+      # ===================
       # Optional Defaults (can be overridden per-request)
       # ===================
       - TESTS_REPO_URL=${TESTS_REPO_URL:-}

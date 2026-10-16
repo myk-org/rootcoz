@@ -375,7 +375,6 @@ def _mock_sidecar_calls():
         # (get_models → []) so catalog/routing tests can still exercise it.
         # --- low-level AI calls inside ai_client ---
         patch("rootcoz.ai_client._call_ai", deny_ai),
-        patch("rootcoz.ai_client._call_ai_once", deny_ai),
         patch(
             "rootcoz.ai_client._list_models_raw",
             new_callable=AsyncMock,

@@ -119,6 +119,13 @@ env:
   # Override auto-derived PUBLIC_BASE_URL (https://route.host or ingress host)
   publicBaseUrl: ""
   metadataRulesFile: ""
+  # pi-sidecar session transcript recording (>= 4.12.0). Restart required —
+  # the sidecar reads RECORD_TRANSCRIPTS at container start. Files land under
+  # the data volume (xdgDataHome) and survive pod replacement. Admin-only
+  # retrieval via GET /api/admin/transcripts.
+  recordTranscripts: false
+  # Override the transcripts directory (default: <xdgDataHome>/pi-sidecar/transcripts)
+  sidecarTranscriptsDir: ""
 
 tuning:
   # → LOG_LEVEL (omit for app default INFO)
