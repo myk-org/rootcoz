@@ -7,6 +7,8 @@ from typing import Any
 import httpx
 from simple_logger.logger import get_logger
 
+from rootcoz.jira import JiraConnection, complete_jira_connection
+
 logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
 
 _GITHUB_PR_PATTERN = re.compile(r"https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)")
@@ -198,33 +200,39 @@ def _extract_status_from_issues(data: dict[str, Any]) -> str | None:
 
 
 async def fetch_jira_ticket_status(
-    jira_url: str,
+    connection: JiraConnection,
     ticket_key: str,
-    auth_headers: dict[str, str],
     ssl_verify: bool = True,
-    auth: tuple[str, str] | None = None,
 ) -> str | None:
     """Fetch Jira ticket status by key using direct REST API with JQL key lookup.
 
     Tries the Cloud API v3 endpoint first (``/rest/api/3/search/jql``), then
     falls back to the legacy v2 endpoint (``/rest/api/2/search``) for
-    Server/Data Center instances.
+    Server/Data Center instances. Service account connections skip the v2
+    fallback — the scoped api.atlassian.com gateway only serves v3.
 
     Args:
-        jira_url: Base Jira URL (e.g. 'https://jira.example.com').
+        connection: Resolved Jira connection (see ``resolve_jira_connection``).
+            Service account connections lacking a cloud ID are completed via
+            the anonymous tenant-info lookup before the request.
         ticket_key: Jira ticket key (e.g. 'OCPBUGS-12345').
-        auth_headers: Authorization headers for Jira API (used when *auth* is None).
         ssl_verify: Whether to verify SSL certificates.
-        auth: Optional ``(username, token)`` tuple for httpx Basic auth (Cloud).
-              When provided, *auth_headers* are ignored for authentication.
 
     Returns:
         Status string (e.g. 'Open', 'Closed') or None if fetch fails.
     """
     logger.debug(
-        f"fetch_jira_ticket_status: jira_url={jira_url}, ticket_key={ticket_key}"
+        f"fetch_jira_ticket_status: api_base={connection.api_base}, "
+        f"ticket_key={ticket_key}, mode={connection.mode}"
     )
-    base = jira_url.rstrip("/")
+    connection = await complete_jira_connection(connection, ssl_verify)
+    base = connection.api_base
+    if not base:
+        logger.warning(
+            "fetch_jira_ticket_status: no Jira API base resolved; skipping %s",
+            ticket_key,
+        )
+        return None
     jql = f'key = "{ticket_key}"'
     search_params: dict[str, str | int] = {
         "jql": jql,
@@ -233,14 +241,17 @@ async def fetch_jira_ticket_status(
     }
 
     # Endpoints to try in order: Cloud v3 first, then Server/DC v2
-    endpoints = [
-        f"{base}/rest/api/3/search/jql",
-        f"{base}/rest/api/2/search",
-    ]
+    # (SA mode: the scoped gateway only serves v3)
+    endpoints = [f"{base}/rest/api/3/search/jql"]
+    if connection.mode != "sa":
+        endpoints.append(f"{base}/rest/api/2/search")
 
     try:
         async with httpx.AsyncClient(
-            verify=ssl_verify, timeout=10, auth=auth, headers=auth_headers
+            verify=ssl_verify,
+            timeout=10,
+            auth=connection.auth,
+            headers=connection.headers,
         ) as client:
             for i, url in enumerate(endpoints):
                 resp = await client.get(url, params=search_params)

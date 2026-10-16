@@ -1069,6 +1069,11 @@ class _TrackerCredentialsMixin(BaseModel):
         default="", description="User's Jira token for bug creation"
     )
     jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
+    jira_sa_token: str = Field(
+        default="",
+        description="User's Atlassian service account (ATST) token — takes "
+        "precedence over jira_token/jira_email",
+    )
     jira_project_key: str = Field(
         default="", description="Override Jira project key for bug creation"
     )

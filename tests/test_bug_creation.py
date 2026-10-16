@@ -193,6 +193,9 @@ class TestSearchJiraDuplicatesIncludesDescription:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
         mock_settings.jira_max_results = 5
 
@@ -371,6 +374,9 @@ class TestCreateJiraBug:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token123"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -412,7 +418,13 @@ class TestCreateJiraBug:
         mock_settings.jira_email = None
         mock_settings.jira_api_token = None
         mock_settings.jira_pat = MagicMock()
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_pat.get_secret_value.return_value = "pat123"
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = False
 
         mock_response = httpx.Response(
@@ -445,6 +457,9 @@ class TestCreateJiraBug:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token123"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -483,6 +498,9 @@ class TestCreateJiraBug:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token123"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -727,6 +745,9 @@ class TestAiFooterNotDoubled:
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token"
         mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
         mock_settings.jira_ssl_verify = True
 
         mock_response = httpx.Response(
@@ -750,3 +771,81 @@ class TestAiFooterNotDoubled:
                 "description"
             ]
             assert posted_body.count(_JIRA_FOOTER_MARKER) == 1
+
+    async def test_sa_token_uses_scoped_gateway_and_v3(self):
+        """Service account tokens post to the scoped gateway with REST v3."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_url = (
+            "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        )
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = "user@example.com"
+        mock_settings.jira_api_token = MagicMock()
+        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = "https://myorg.atlassian.net"
+        mock_settings.jira_ssl_verify = True
+
+        mock_response = httpx.Response(
+            201, json={"key": "PROJ-789"}, request=_mock_request()
+        )
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            result = await create_jira_bug(
+                title="SA bug",
+                body="body",
+                settings=mock_settings,
+            )
+            assert result["key"] == "PROJ-789"
+            # Browse link uses the site URL, never the scoped gateway
+            assert result["url"] == "https://myorg.atlassian.net/browse/PROJ-789"
+
+            post_url = mock_client.post.call_args.args[0]
+            assert post_url.startswith(
+                "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432/rest/api/3/issue"
+            )
+            post_headers = mock_client.post.call_args.kwargs["headers"]
+            assert post_headers["Authorization"] == "Bearer ATST-test-token"
+            assert MockClient.call_args.kwargs["auth"] is None
+
+    async def test_sa_token_without_cloud_id_raises(self):
+        """An unresolvable SA cloud ID fails fast with a clear message."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_url = "https://myorg.atlassian.net"
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = None
+        mock_settings.jira_api_token = None
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_access_token = MagicMock()
+        mock_settings.jira_oauth_access_token.get_secret_value.return_value = (
+            "ATST-test-token"
+        )
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
+        mock_settings.jira_ssl_verify = True
+
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.get.side_effect = httpx.ConnectError("refused")
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            with pytest.raises(ValueError, match="cloud ID"):
+                await create_jira_bug(
+                    title="SA bug", body="body", settings=mock_settings
+                )

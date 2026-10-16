@@ -101,7 +101,9 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
         chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
     )
     monkeypatch.setattr(
-        main, "_resolve_chat_credentials", AsyncMock(return_value=("", "", "", "", ""))
+        main,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", "", None, "", "")),
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
 
@@ -368,7 +370,9 @@ async def test_new_session_replaces_stale_welcome_but_keeps_replies(
         chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
     )
     monkeypatch.setattr(
-        main, "_resolve_chat_credentials", AsyncMock(return_value=("", "", "", "", ""))
+        main,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", "", None, "", "")),
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
 

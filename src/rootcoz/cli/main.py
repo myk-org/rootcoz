@@ -391,20 +391,23 @@ def _run_client_command(
 def _resolve_jira_cli_auth(
     jira_token: str,
     jira_email: str,
-) -> tuple[str, str]:
-    """Resolve Jira token and email from CLI flags with config fallback.
+    jira_sa_token: str = "",
+) -> tuple[str, str, str]:
+    """Resolve Jira token, email, and service account token from CLI flags with config fallback.
 
     Args:
         jira_token: Value from --jira-token flag (may be empty).
         jira_email: Value from --jira-email flag (may be empty).
+        jira_sa_token: Value from --jira-sa-token flag (may be empty).
 
     Returns:
-        (jira_token, jira_email) with config defaults applied.
+        (jira_token, jira_email, jira_sa_token) with config defaults applied.
     """
     cfg = _state.get("server_config")
     return (
         jira_token.strip() or ((cfg.jira_token or "").strip() if cfg else ""),
         jira_email.strip() or ((cfg.jira_email or "").strip() if cfg else ""),
+        jira_sa_token.strip() or ((cfg.jira_sa_token or "").strip() if cfg else ""),
     )
 
 
@@ -2259,14 +2262,22 @@ def jira_projects_cmd(
     jira_email: str = typer.Option(
         "", "--jira-email", help="Jira email (uses config fallback)."
     ),
+    jira_sa_token: str = typer.Option(
+        "", "--jira-sa-token", help="Atlassian service account (ATST) token."
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List available Jira projects."""
-    _jira_token, _jira_email = _resolve_jira_cli_auth(jira_token, jira_email)
+    _jira_token, _jira_email, _jira_sa_token = _resolve_jira_cli_auth(
+        jira_token, jira_email, jira_sa_token
+    )
     data = _run_client_command(
         json_output,
         lambda c: c.jira_projects(
-            jira_token=_jira_token, jira_email=_jira_email, query=query
+            jira_token=_jira_token,
+            jira_email=_jira_email,
+            query=query,
+            jira_sa_token=_jira_sa_token,
         ),
         emit_output=False,
     )
@@ -2287,14 +2298,22 @@ def jira_security_levels_cmd(
     project_key: str = typer.Argument(help="Jira project key."),
     jira_token: str = typer.Option("", "--jira-token", help="Jira token."),
     jira_email: str = typer.Option("", "--jira-email", help="Jira email."),
+    jira_sa_token: str = typer.Option(
+        "", "--jira-sa-token", help="Atlassian service account (ATST) token."
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List security levels for a Jira project."""
-    _jira_token, _jira_email = _resolve_jira_cli_auth(jira_token, jira_email)
+    _jira_token, _jira_email, _jira_sa_token = _resolve_jira_cli_auth(
+        jira_token, jira_email, jira_sa_token
+    )
     data = _run_client_command(
         json_output,
         lambda c: c.jira_security_levels(
-            project_key=project_key, jira_token=_jira_token, jira_email=_jira_email
+            project_key=project_key,
+            jira_token=_jira_token,
+            jira_email=_jira_email,
+            jira_sa_token=_jira_sa_token,
         ),
         emit_output=False,
     )
@@ -2494,7 +2513,8 @@ def _resolve_tracker_tokens(
     jira_project_key: str = "",
     github_repo_url: str = "",
     jira_security_level: str = "",
-) -> tuple[str, str, str, str, str, str]:
+    jira_sa_token: str = "",
+) -> tuple[str, str, str, str, str, str, str]:
     """Resolve tracker tokens and related fields with config fallback."""
     cfg = _state.get("server_config")
     return (
@@ -2506,6 +2526,7 @@ def _resolve_tracker_tokens(
         github_repo_url.strip() or ((cfg.github_repo_url or "").strip() if cfg else ""),
         jira_security_level.strip()
         or ((cfg.jira_security_level or "").strip() if cfg else ""),
+        jira_sa_token.strip() or ((cfg.jira_sa_token or "").strip() if cfg else ""),
     )
 
 
@@ -2555,6 +2576,11 @@ def preview_issue(
     jira_email: str = typer.Option(
         "", "--jira-email", help="Jira email for Cloud auth (used with --jira-token)."
     ),
+    jira_sa_token: str = typer.Option(
+        "",
+        "--jira-sa-token",
+        help="Atlassian service account (ATST) token — takes precedence over --jira-token.",
+    ),
     jira_project_key: str = typer.Option(
         "",
         "--jira-project-key",
@@ -2583,6 +2609,7 @@ def preview_issue(
         _jira_project_key,
         _github_repo_url,
         _jira_security_level,
+        _jira_sa_token,
     ) = _resolve_tracker_tokens(
         github_token,
         jira_token,
@@ -2590,6 +2617,7 @@ def preview_issue(
         jira_project_key,
         github_repo_url,
         jira_security_level,
+        jira_sa_token,
     )
     try:
         client = _get_client()
@@ -2617,6 +2645,7 @@ def preview_issue(
                 ai_model=ai_model,
                 jira_token=_jira_token,
                 jira_email=_jira_email,
+                jira_sa_token=_jira_sa_token,
                 jira_project_key=_jira_project_key,
                 jira_security_level=_jira_security_level,
                 issue_prompt=issue_prompt,
@@ -2687,6 +2716,11 @@ def create_issue(
     jira_email: str = typer.Option(
         "", "--jira-email", help="Jira email for Cloud auth (used with --jira-token)."
     ),
+    jira_sa_token: str = typer.Option(
+        "",
+        "--jira-sa-token",
+        help="Atlassian service account (ATST) token — takes precedence over --jira-token.",
+    ),
     jira_project_key: str = typer.Option(
         "",
         "--jira-project-key",
@@ -2715,6 +2749,7 @@ def create_issue(
         _jira_project_key,
         _github_repo_url,
         _jira_security_level,
+        _jira_sa_token,
     ) = _resolve_tracker_tokens(
         github_token,
         jira_token,
@@ -2722,6 +2757,7 @@ def create_issue(
         jira_project_key,
         github_repo_url,
         jira_security_level,
+        jira_sa_token,
     )
     try:
         client = _get_client()
@@ -2746,6 +2782,7 @@ def create_issue(
                 child_build_number=child_build_number,
                 jira_token=_jira_token,
                 jira_email=_jira_email,
+                jira_sa_token=_jira_sa_token,
                 jira_project_key=_jira_project_key,
                 jira_security_level=_jira_security_level,
                 jira_issue_type=jira_issue_type,

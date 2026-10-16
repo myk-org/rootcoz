@@ -621,7 +621,7 @@ async def test_chat_call_rotated_mid_flight_cannot_publish_session(
         monkeypatch.setattr(
             main,
             "_resolve_chat_credentials",
-            AsyncMock(return_value=("", "", "", "", "")),
+            AsyncMock(return_value=("", "", "", None, "", "")),
         )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
@@ -684,7 +684,7 @@ async def test_revoked_server_grant_mid_call_does_not_publish_reply(
         monkeypatch.setattr(
             main,
             "_resolve_chat_credentials",
-            AsyncMock(return_value=("", "", "", "", "")),
+            AsyncMock(return_value=("", "", "", None, "", "")),
         )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
@@ -782,7 +782,9 @@ async def test_credential_rotation_preserves_server_reply_in_flight(
         chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
     )
     monkeypatch.setattr(
-        main, "_resolve_chat_credentials", AsyncMock(return_value=("", "", "", "", ""))
+        main,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", "", None, "", "")),
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
 
@@ -888,7 +890,7 @@ async def test_unrelated_or_noop_change_does_not_abort_chat(
         monkeypatch.setattr(
             main,
             "_resolve_chat_credentials",
-            AsyncMock(return_value=("", "", "", "", "")),
+            AsyncMock(return_value=("", "", "", None, "", "")),
         )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
@@ -997,7 +999,7 @@ async def test_abort_between_status_check_and_completion_preserves_reason(
         monkeypatch.setattr(
             main,
             "_resolve_chat_credentials",
-            AsyncMock(return_value=("", "", "", "", "")),
+            AsyncMock(return_value=("", "", "", None, "", "")),
         )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *args, **kwargs: tmp_path)
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
@@ -1139,7 +1141,7 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
         monkeypatch.setattr(
             main,
             "_resolve_chat_credentials",
-            AsyncMock(return_value=("", "", "", "", "")),
+            AsyncMock(return_value=("", "", "", None, "", "")),
         )
         monkeypatch.setattr(chat, "init_chat_session", rotate_during_init)
         result = await main._init_chat_under_barrier(

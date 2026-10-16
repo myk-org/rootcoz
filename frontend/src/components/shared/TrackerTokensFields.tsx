@@ -9,6 +9,8 @@ interface TrackerTokensFieldsProps {
   onJiraEmailChange: (v: string) => void
   jiraToken: string
   onJiraTokenChange: (v: string) => void
+  jiraSaToken: string
+  onJiraSaTokenChange: (v: string) => void
   /** Token validation results (ProfileForm uses these, RegisterPage passes undefined) */
   githubValidation?: TokenValidationResult | null
   jiraValidation?: TokenValidationResult | null
@@ -23,12 +25,15 @@ export function TrackerTokensFields({
   onJiraEmailChange,
   jiraToken,
   onJiraTokenChange,
+  jiraSaToken,
+  onJiraSaTokenChange,
   githubValidation,
   jiraValidation,
   idPrefix = '',
 }: TrackerTokensFieldsProps) {
   const [showGithubToken, setShowGithubToken] = useState(false)
   const [showJiraToken, setShowJiraToken] = useState(false)
+  const [showJiraSaToken, setShowJiraSaToken] = useState(false)
 
   const prefix = idPrefix ? `${idPrefix}-` : ''
 
@@ -40,7 +45,7 @@ export function TrackerTokensFields({
         under your name. Without tokens, you can still preview generated
         content but cannot submit.
         Clear a field and save to remove that credential from the server; the
-        other two are left as they are.
+        others are left as they are.
       </p>
 
       {/* GitHub Token field */}
@@ -78,6 +83,19 @@ export function TrackerTokensFields({
         validation={jiraValidation}
         placeholder="Token..."
         helpContent={<>Jira Cloud: API token from{' '}<a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Atlassian account →</a>{' '}· Jira Server/DC: Personal Access Token</>}
+      />
+
+      {/* Jira Service Account Token field */}
+      <TokenField
+        id={`${prefix}jira-sa-token`}
+        label="Jira Service Account Token"
+        value={jiraSaToken}
+        onChange={onJiraSaTokenChange}
+        show={showJiraSaToken}
+        onToggleShow={() => setShowJiraSaToken(!showJiraSaToken)}
+        validation={null}
+        placeholder="ATST..."
+        helpContent={<>Optional Atlassian service account (ATST) token — an additional connection method that takes precedence over the regular Jira token. Created by an admin in Atlassian Administration → Directory → Service accounts.</>}
       />
     </>
   )

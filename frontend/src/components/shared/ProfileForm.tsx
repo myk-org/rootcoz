@@ -6,10 +6,12 @@ import {
   setGithubToken,
   setJiraToken,
   setJiraEmail,
+  setJiraSaToken,
   getUsername,
   getGithubToken,
   getJiraToken,
   getJiraEmail,
+  getJiraSaToken,
 } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -40,6 +42,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   const [githubToken, setGithubTokenValue] = useState(getGithubToken())
   const [jiraEmail, setJiraEmailValue] = useState(getJiraEmail())
   const [jiraToken, setJiraTokenValue] = useState(getJiraToken())
+  const [jiraSaToken, setJiraSaTokenValue] = useState(getJiraSaToken())
   const [validatingGithub, setValidatingGithub] = useState(false)
   const [validatingJira, setValidatingJira] = useState(false)
   const [githubValidation, setGithubValidation] = useState<TokenValidationResult | null>(null)
@@ -51,7 +54,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   /** Token values as last returned by the server. A save only re-validates what
    *  differs from these, so an untouched stored credential is not re-checked and
    *  a stale browser-cached one is (#294). */
-  const [baseline, setBaseline] = useState({ gh: '', je: '', jt: '' })
+  const [baseline, setBaseline] = useState({ gh: '', je: '', jt: '', jst: '' })
 
   const githubTokenRef = useRef(githubToken)
   githubTokenRef.current = githubToken
@@ -59,15 +62,18 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   jiraEmailRef.current = jiraEmail
   const jiraTokenRef = useRef(jiraToken)
   jiraTokenRef.current = jiraToken
+  const jiraSaTokenRef = useRef(jiraSaToken)
+  jiraSaTokenRef.current = jiraSaToken
 
   const hydrateTokensFromServer = useCallback(
-    async (current: { gh: string; je: string; jt: string }) => {
+    async (current: { gh: string; je: string; jt: string; jst: string }) => {
       try {
-        const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string }>('/api/user/tokens')
+        const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string; jira_sa_token: string }>('/api/user/tokens')
         const server = {
           gh: (tokens.github_token || '').trim(),
           je: (tokens.jira_email || '').trim(),
           jt: (tokens.jira_token || '').trim(),
+          jst: (tokens.jira_sa_token || '').trim(),
         }
         // Baseline is the server's value, not the browser's: a cookie left over
         // from another browser that has since been replaced counts as changed.
@@ -84,6 +90,10 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
           setJiraTokenValue(server.jt)
           setJiraToken(server.jt)
         }
+        if (server.jst && !current.jst.trim()) {
+          setJiraSaTokenValue(server.jst)
+          setJiraSaToken(server.jst)
+        }
       } catch (err) {
         // 401 (no cookie yet) and 404 (user not registered) are expected; log anything else.
         if (!isExpectedTokenSyncError(err)) {
@@ -99,13 +109,13 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       setTokensLoaded(true) // no user yet, nothing to load
       return
     }
-    hydrateTokensFromServer({ gh: githubTokenRef.current, je: jiraEmailRef.current, jt: jiraTokenRef.current })
+    hydrateTokensFromServer({ gh: githubTokenRef.current, je: jiraEmailRef.current, jt: jiraTokenRef.current, jst: jiraSaTokenRef.current })
       .finally(() => setTokensLoaded(true))
   // eslint-disable-next-line react-hooks/exhaustive-deps -- initialUsername (lazy useState) and hydrateTokensFromServer (useCallback) are stable; run once on mount
   }, [])
 
   async function refreshTokensFromServer() {
-    await hydrateTokensFromServer({ gh: githubToken, je: jiraEmail, jt: jiraToken })
+    await hydrateTokensFromServer({ gh: githubToken, je: jiraEmail, jt: jiraToken, jst: jiraSaToken })
   }
 
   async function handleRotateKey() {
@@ -138,10 +148,12 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       const gh = githubToken.trim()
       const je = jiraEmail.trim()
       const jt = jiraToken.trim()
+      const jst = jiraSaToken.trim()
       setGithubToken(gh)
       setJiraEmail(je)
       setJiraToken(jt)
-      await persistTokensToServer(gh, je, jt)
+      setJiraSaToken(jst)
+      await persistTokensToServer(gh, je, jt, jst)
     }
 
     // Validate only what this save introduces. A stored token the user never
@@ -295,6 +307,8 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             onJiraEmailChange={(v) => { setJiraEmailValue(v); setJiraValidation(null) }}
             jiraToken={jiraToken}
             onJiraTokenChange={(v) => { setJiraTokenValue(v); setJiraValidation(null) }}
+            jiraSaToken={jiraSaToken}
+            onJiraSaTokenChange={(v) => setJiraSaTokenValue(v)}
             githubValidation={githubValidation}
             jiraValidation={jiraValidation}
           />}

@@ -44,6 +44,7 @@ class ServerConfig:
     jira_api_token: str = ""
     jira_pat: str = ""
     jira_token: str = ""
+    jira_sa_token: str = ""
     jira_project_key: str = ""
     jira_security_level: str = ""
     jira_ssl_verify: bool | None = None
@@ -245,6 +246,7 @@ def _server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         jira_api_token=data.get("jira_api_token", ""),
         jira_pat=data.get("jira_pat", ""),
         jira_token=_validated_str(data, "jira_token"),
+        jira_sa_token=_validated_str(data, "jira_sa_token"),
         jira_project_key=data.get("jira_project_key", ""),
         jira_security_level=_validated_str(data, "jira_security_level"),
         jira_ssl_verify=data.get("jira_ssl_verify"),

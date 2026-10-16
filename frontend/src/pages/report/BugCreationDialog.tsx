@@ -17,7 +17,7 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
 import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews } from '@/types'
-import { getGithubToken, getJiraToken, getJiraEmail } from '@/lib/cookies'
+import { getGithubToken, getJiraToken, getJiraEmail, getJiraSaToken } from '@/lib/cookies'
 import { useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
 import { useAiSelection } from './useAiSelection'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
@@ -113,13 +113,15 @@ export function BugCreationDialog({
   const previewPath = target === 'github' ? 'preview-github-issue' : 'preview-jira-bug'
   const createPath = target === 'github' ? 'create-github-issue' : 'create-jira-bug'
   const label = target === 'github' ? 'GitHub Issue' : 'Jira Ticket'
-  const hasToken = target === 'github' ? !!getGithubToken() : !!getJiraToken()
+  const hasToken =
+    target === 'github' ? !!getGithubToken() : !!getJiraToken() || !!getJiraSaToken()
 
   function getTrackerCredentials() {
     return {
       github_token: target === 'github' ? getGithubToken() : '',
       jira_token: target === 'jira' ? getJiraToken() : '',
       jira_email: target === 'jira' ? getJiraEmail() : '',
+      jira_sa_token: target === 'jira' ? getJiraSaToken() : '',
       ...(target === 'github' && selectedRepo ? { github_repo_url: selectedRepo } : {}),
       ...(target === 'jira' && jiraProjectKey ? { jira_project_key: jiraProjectKey } : {}),
       ...(target === 'jira' && jiraSecurityLevel ? { jira_security_level: jiraSecurityLevel } : {}),
@@ -138,6 +140,7 @@ export function BugCreationDialog({
       api.post<JiraProject[]>('/api/jira-projects', {
         jira_token: getJiraToken(),
         jira_email: getJiraEmail(),
+        jira_sa_token: getJiraSaToken(),
         query: jiraProjectKey,
       })
         .then((data) => { if (!ignore) setProjectSearch({ query: jiraProjectKey, projects: data }) })
@@ -153,6 +156,7 @@ export function BugCreationDialog({
     api.post<JiraSecurityLevel[]>('/api/jira-security-levels', {
       jira_token: getJiraToken(),
       jira_email: getJiraEmail(),
+      jira_sa_token: getJiraSaToken(),
       project_key: confirmedProjectKey,
     })
       .then((data) => { if (!ignore) setSecurityLevelResult({ key: securityLevelsKey, levels: data }) })

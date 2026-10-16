@@ -19,9 +19,12 @@ paths = [
     '''tests/test_auth\.py''',
     '''tests/test_debug_request_logging\.py''',
     '''tests/test_feedback\.py''',
+    '''tests/test_jira\.py''',
 ]
 # Migration idempotency keys are not secrets
 regexTarget = "line"
 regexes = [
     '''migration_key\s*=\s*"[^"]+"''',
+    # Example Atlassian cloud-ID placeholders (UUIDs), not secrets
+    '''ATLASSIAN_OAUTH_CLOUD_ID\s*=\s*"?[0-9a-f-]{36}"?''',
 ]

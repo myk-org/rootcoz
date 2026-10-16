@@ -1065,7 +1065,12 @@ async def init_db() -> None:
         """)
 
         # Migration: add encrypted token columns to users table
-        for col in ("github_token_enc", "jira_email_enc", "jira_token_enc"):
+        for col in (
+            "github_token_enc",
+            "jira_email_enc",
+            "jira_token_enc",
+            "jira_sa_token_enc",
+        ):
             await _migrate_add_column(db, "users", col, "TEXT NOT NULL DEFAULT ''")
 
         await _migrate_add_column(
@@ -6116,6 +6121,7 @@ async def save_user_tokens(
     github_token: str | None = None,
     jira_email: str | None = None,
     jira_token: str | None = None,
+    jira_sa_token: str | None = None,
 ) -> None:
     """Save encrypted user tokens. Only updates fields that are explicitly provided (not None).
 
@@ -6132,6 +6138,9 @@ async def save_user_tokens(
     if jira_token is not None:
         updates.append("jira_token_enc = ?")
         params.append(encrypt_value(jira_token))
+    if jira_sa_token is not None:
+        updates.append("jira_sa_token_enc = ?")
+        params.append(encrypt_value(jira_sa_token))
 
     if not updates:
         return
@@ -6146,19 +6155,29 @@ async def save_user_tokens(
 
 
 async def get_user_tokens(username: str) -> dict[str, str]:
-    """Get decrypted user tokens. Returns dict with github_token, jira_email, jira_token."""
+    """Get decrypted user tokens.
+
+    Returns dict with github_token, jira_email, jira_token, jira_sa_token.
+    """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT github_token_enc, jira_email_enc, jira_token_enc FROM users WHERE username = ?",
+            "SELECT github_token_enc, jira_email_enc, jira_token_enc, "
+            "jira_sa_token_enc FROM users WHERE username = ?",
             (username,),
         )
         row = await cursor.fetchone()
         if not row:
-            return {"github_token": "", "jira_email": "", "jira_token": ""}
+            return {
+                "github_token": "",
+                "jira_email": "",
+                "jira_token": "",
+                "jira_sa_token": "",
+            }
         return {
             "github_token": decrypt_value(row[0] or ""),
             "jira_email": decrypt_value(row[1] or ""),
             "jira_token": decrypt_value(row[2] or ""),
+            "jira_sa_token": decrypt_value(row[3] or ""),
         }
 
 

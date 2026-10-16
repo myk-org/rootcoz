@@ -865,6 +865,7 @@ class RootCozClient:
         github_repo_url: str = "",
         jira_token: str = "",
         jira_email: str = "",
+        jira_sa_token: str = "",
         jira_project_key: str = "",
         jira_security_level: str = "",
         include_github: bool = True,
@@ -893,6 +894,8 @@ class RootCozClient:
             payload["jira_token"] = jira_token
         if include_jira and jira_email:
             payload["jira_email"] = jira_email
+        if include_jira and jira_sa_token:
+            payload["jira_sa_token"] = jira_sa_token
         if include_jira and jira_project_key:
             payload["jira_project_key"] = jira_project_key
         if include_jira and jira_security_level:
@@ -944,6 +947,7 @@ class RootCozClient:
         ai_model: str = "",
         jira_token: str = "",
         jira_email: str = "",
+        jira_sa_token: str = "",
         jira_project_key: str = "",
         jira_security_level: str = "",
         issue_prompt: str = "",
@@ -958,6 +962,7 @@ class RootCozClient:
             ai_model=ai_model,
             jira_token=jira_token,
             jira_email=jira_email,
+            jira_sa_token=jira_sa_token,
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             include_github=False,
@@ -1004,6 +1009,7 @@ class RootCozClient:
         child_build_number: int = 0,
         jira_token: str = "",
         jira_email: str = "",
+        jira_sa_token: str = "",
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
@@ -1017,6 +1023,7 @@ class RootCozClient:
             body_text=body,
             jira_token=jira_token,
             jira_email=jira_email,
+            jira_sa_token=jira_sa_token,
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             include_github=False,
@@ -1037,7 +1044,11 @@ class RootCozClient:
         return self._request("GET", "/api/user/tokens")
 
     def save_user_tokens(
-        self, github_token: str = "", jira_email: str = "", jira_token: str = ""
+        self,
+        github_token: str = "",
+        jira_email: str = "",
+        jira_token: str = "",
+        jira_sa_token: str = "",
     ) -> dict[str, Any]:
         """Save user tokens. PUT /api/user/tokens"""
         body: dict[str, Any] = {}
@@ -1047,6 +1058,8 @@ class RootCozClient:
             body["jira_email"] = jira_email
         if jira_token:
             body["jira_token"] = jira_token
+        if jira_sa_token:
+            body["jira_sa_token"] = jira_sa_token
         return self._request("PUT", "/api/user/tokens", json=body)
 
     # -- Token Validation -----------------------------------------------------
@@ -1114,31 +1127,44 @@ class RootCozClient:
 
     @staticmethod
     def _with_jira_auth_fields(
-        body: dict[str, Any], jira_token: str = "", jira_email: str = ""
+        body: dict[str, Any],
+        jira_token: str = "",
+        jira_email: str = "",
+        jira_sa_token: str = "",
     ) -> dict[str, Any]:
-        """Add jira_token/jira_email to *body* when set."""
+        """Add jira_token/jira_email/jira_sa_token to *body* when set."""
         if jira_token and jira_token.strip():
             body["jira_token"] = jira_token.strip()
         if jira_email and jira_email.strip():
             body["jira_email"] = jira_email.strip()
+        if jira_sa_token and jira_sa_token.strip():
+            body["jira_sa_token"] = jira_sa_token.strip()
         return body
 
     def jira_projects(
-        self, jira_token: str = "", jira_email: str = "", query: str = ""
+        self,
+        jira_token: str = "",
+        jira_email: str = "",
+        query: str = "",
+        jira_sa_token: str = "",
     ) -> list[dict[str, Any]]:
         """List Jira projects. POST /api/jira-projects"""
         body: dict[str, Any] = {}
         if query:
             body["query"] = query
-        body = self._with_jira_auth_fields(body, jira_token, jira_email)
+        body = self._with_jira_auth_fields(body, jira_token, jira_email, jira_sa_token)
         return self._request("POST", "/api/jira-projects", json=body)
 
     def jira_security_levels(
-        self, project_key: str, jira_token: str = "", jira_email: str = ""
+        self,
+        project_key: str,
+        jira_token: str = "",
+        jira_email: str = "",
+        jira_sa_token: str = "",
     ) -> list[dict[str, Any]]:
         """List security levels for a Jira project. POST /api/jira-security-levels"""
         body: dict[str, Any] = {"project_key": project_key}
-        body = self._with_jira_auth_fields(body, jira_token, jira_email)
+        body = self._with_jira_auth_fields(body, jira_token, jira_email, jira_sa_token)
         return self._request("POST", "/api/jira-security-levels", json=body)
 
     # -- Token Usage ----------------------------------------------------------

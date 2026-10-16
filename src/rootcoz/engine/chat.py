@@ -26,6 +26,7 @@ from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
     install_http_tools_mcp_best_effort_async,
 )
+from rootcoz.jira import JiraConnection, resolve_jira_connection_from_params
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
 logger = get_logger(name=__name__)
@@ -483,11 +484,16 @@ def build_chat_custom_tools(
     jira_token: str = "",
     github_token: str = "",
     github_repo: str = "",
+    jira_connection: JiraConnection | None = None,
 ) -> list[dict[str, Any]]:
     """Build HTTP-backed custom tools for a chat session.
 
     Returns tool definitions with 'http' configs that the sidecar
     executes directly — no bash, no scripts on disk.
+
+    ``jira_connection`` overrides the raw Jira params when provided —
+    the async caller resolves and completes it (service account mode
+    needs an async cloud ID lookup that cannot happen here).
     """
     tools: list[dict[str, Any]] = []
     server_url = server_url.rstrip("/")
@@ -592,30 +598,28 @@ def build_chat_custom_tools(
         )
     )
 
-    if jira_url and jira_token:
-        jira_url = jira_url.rstrip("/")
-        jira_auth: dict[str, str] = {"Authorization": f"Bearer {jira_token}"}
-        if jira_email:
-            encoded = base64.b64encode(f"{jira_email}:{jira_token}".encode()).decode()
-            jira_auth = {"Authorization": f"Basic {encoded}"}
-
-        # Detect Jira Cloud vs Server — Cloud deprecated API v2
-        is_cloud = "atlassian.net" in jira_url.lower()
-        if is_cloud:
-            search_url = f"{jira_url}/rest/api/3/search/jql"
-            issue_url = f"{jira_url}/rest/api/3/issue/{{issue_key}}"
-            search_params = {
-                "jql": 'summary ~ "{query}" ORDER BY updated DESC',
-                "maxResults": "{limit}",
-            }
+    jira_conn = jira_connection
+    if jira_conn is None and jira_url and jira_token:
+        jira_conn = resolve_jira_connection_from_params(
+            jira_url, jira_email, jira_token
+        )
+    if jira_conn and jira_conn.api_base and jira_conn.mode != "none":
+        # Basic auth (cloud) must be embedded as a header — tool HTTP
+        # configs cannot carry httpx auth objects.
+        if jira_conn.auth:
+            encoded = base64.b64encode(":".join(jira_conn.auth).encode()).decode()
+            jira_auth: dict[str, str] = {"Authorization": f"Basic {encoded}"}
         else:
-            search_url = f"{jira_url}/rest/api/2/search"
-            issue_url = f"{jira_url}/rest/api/2/issue/{{issue_key}}"
-            search_params = {
-                "jql": 'summary ~ "{query}" ORDER BY updated DESC',
-                "maxResults": "{limit}",
-                "fields": "summary,status,assignee,created,updated",
-            }
+            jira_auth = dict(jira_conn.headers)
+
+        search_url = f"{jira_conn.api_base}{jira_conn.search_path}"
+        issue_url = f"{jira_conn.api_base}{jira_conn.api_path}/issue/{{issue_key}}"
+        search_params: dict[str, str] = {
+            "jql": 'summary ~ "{query}" ORDER BY updated DESC',
+            "maxResults": "{limit}",
+        }
+        if jira_conn.mode == "server":
+            search_params["fields"] = "summary,status,assignee,created,updated"
 
         tools.append(
             {

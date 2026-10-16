@@ -119,7 +119,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | --- | --- |
    | `Jenkins` | `jenkins_url`, `jenkins_user`, `jenkins_password`, `jenkins_ssl_verify`, `jenkins_timeout`, `jenkins_artifacts_max_size_mb`, `get_job_artifacts` |
    | `AI` | `ai_provider`, `ai_model`, `force_server_credentials`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds` |
-   | `Jira` | `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
+   | `Jira` | `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
    | `Auth & Security` | `admin_key`, `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |

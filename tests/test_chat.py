@@ -1390,7 +1390,7 @@ async def test_followup_indexes_only_new_or_missing_graph(
     monkeypatch.setattr(
         main_mod,
         "_resolve_chat_credentials",
-        AsyncMock(return_value=("", "", "", "", "")),
+        AsyncMock(return_value=("", "", "", None, "", "")),
     )
     monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
     job_id = f"chat-index-{graph_state}"
@@ -1472,7 +1472,7 @@ async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatc
     monkeypatch.setattr(
         main_mod,
         "_resolve_chat_credentials",
-        AsyncMock(return_value=("", "", "", "", "")),
+        AsyncMock(return_value=("", "", "", None, "", "")),
     )
     monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
 
@@ -1824,7 +1824,7 @@ async def _start_chat(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", "", ""),
+            return_value=("", "", "", None, "", ""),
         ),
         patch(
             "rootcoz.main._create_ai_auth_header",
@@ -2356,7 +2356,7 @@ async def test_rotation_does_not_reactivate_older_server_chat(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", "", ""),
+            return_value=("", "", "", None, "", ""),
         ),
         patch("rootcoz.engine.chat.clone_chat_repos", new_callable=AsyncMock),
         patch(
@@ -2412,7 +2412,7 @@ async def test_init_without_session_does_not_notify(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", "", ""),
+            return_value=("", "", "", None, "", ""),
         ),
         patch("rootcoz.engine.chat.clone_chat_repos", new_callable=AsyncMock),
         patch(
@@ -2517,7 +2517,7 @@ async def test_orphan_history_can_start_without_losing_messages(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", "", ""),
+            return_value=("", "", "", None, "", ""),
         ),
         patch("rootcoz.main.notify_chat_changed") as notify,
     ):

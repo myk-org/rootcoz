@@ -1542,6 +1542,34 @@ class TestRootCozClientJiraProjects:
         assert len(result) == 1
         assert result[0]["key"] == "PROJ"
 
+    def test_jira_projects_sa_token_sent(self):
+        captured = {}
+
+        def handler(request):
+            captured["payload"] = json.loads(request.content)
+            return httpx.Response(200, json=[])
+
+        client = _make_client(handler)
+        client.jira_projects(
+            jira_token="tok", jira_email="a@b.com", jira_sa_token="ATST-x"
+        )
+        assert captured["payload"]["jira_sa_token"] == "ATST-x"
+        assert captured["payload"]["jira_token"] == "tok"
+
+    def test_create_jira_bug_sa_token_sent(self):
+        captured = {}
+
+        def handler(request):
+            captured["payload"] = json.loads(request.content)
+            return httpx.Response(201, json={"key": "PROJ-1"})
+
+        client = _make_client(handler)
+        client.create_jira_bug(
+            "job-1", "test_a", "T", "B", jira_token="", jira_sa_token="ATST-x"
+        )
+        assert captured["payload"]["jira_sa_token"] == "ATST-x"
+        assert "jira_token" not in captured["payload"]
+
 
 class TestRootCozClientJiraSecurityLevels:
     def test_jira_security_levels(self):

@@ -14,7 +14,7 @@ from simple_logger.logger import get_logger
 from rootcoz.ai_client import call_ai_once
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, build_ai_attribution
 from rootcoz.config import Settings
-from rootcoz.jira import JiraClient
+from rootcoz.jira import JiraClient, complete_jira_connection, resolve_jira_connection
 from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
@@ -721,34 +721,28 @@ async def create_jira_bug(
 ) -> dict[str, Any]:
     """Create a Jira Bug issue via the REST API.
 
-    Reuses the existing JiraClient auth pattern (Cloud vs Server/DC).
+    Resolves the connection through :func:`resolve_jira_connection` — the
+    shared single source of truth for all Jira call sites (service account,
+    Cloud basic auth, or Server/DC Bearer).
     Returns dict with key, url, and title keys.
 
     Raises httpx.HTTPStatusError on failure.
     """
-    base_url = (settings.jira_url or "").rstrip("/")
+    connection = await complete_jira_connection(
+        resolve_jira_connection(settings), settings.jira_ssl_verify
+    )
+    if not connection.api_base:
+        raise ValueError(
+            "Jira service account mode could not resolve the Atlassian cloud "
+            "ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL, or point "
+            "JIRA_URL at the scoped api.atlassian.com URL"
+        )
     effective_project_key = project_key or settings.jira_project_key or ""
 
-    # Resolve auth (same logic as JiraClient)
-    token_value = ""
-    if settings.jira_api_token:
-        token_value = settings.jira_api_token.get_secret_value()
-    elif settings.jira_pat:
-        token_value = settings.jira_pat.get_secret_value()
-
-    auth: tuple[str, str] | None = None
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-
-    if settings.jira_email and token_value:
-        # Cloud: Basic auth
-        auth = (settings.jira_email, token_value)
-        api_path = "/rest/api/2"
-    elif token_value:
-        # Server/DC: Bearer PAT
-        headers["Authorization"] = f"Bearer {token_value}"
-        api_path = "/rest/api/2"
-    else:
-        api_path = "/rest/api/2"
+    headers: dict[str, str] = {"Content-Type": "application/json", **connection.headers}
+    # Issue creation: existing modes keep REST v2; service account must use
+    # v3 — the scoped api.atlassian.com gateway only serves v3.
+    api_path = connection.api_path if connection.mode == "sa" else "/rest/api/2"
 
     effective_issue_type = issue_type.strip() if issue_type else "Bug"
     if not effective_issue_type:
@@ -772,10 +766,10 @@ async def create_jira_bug(
         payload["fields"]["security"] = {"name": security_level}
 
     async with httpx.AsyncClient(
-        verify=settings.jira_ssl_verify, timeout=15, auth=auth
+        verify=settings.jira_ssl_verify, timeout=15, auth=connection.auth
     ) as client:
         resp = await client.post(
-            f"{base_url}{api_path}/issue",
+            f"{connection.api_base}{api_path}/issue",
             json=payload,
             headers=headers,
         )
@@ -784,6 +778,6 @@ async def create_jira_bug(
         issue_key = data["key"]
         return {
             "key": issue_key,
-            "url": f"{base_url}/browse/{issue_key}",
+            "url": f"{connection.browse_base}/browse/{issue_key}",
             "title": title,
         }
