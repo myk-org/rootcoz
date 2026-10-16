@@ -215,16 +215,17 @@ class TestJiraClient:
             assert client._auth is None
             assert client._headers.get("Authorization") == "Bearer server-pat-token"
 
-    async def test_basic_auth_on_server_url_uses_v2(self) -> None:
-        """Email+token on a non-atlassian.net URL is Server/DC basic auth → v2.
+    async def test_basic_auth_on_server_url_keeps_v3(self) -> None:
+        """Email+token basic auth keeps v3 regardless of host.
 
-        Host, not email presence, decides the REST version — a Server/DC
-        user who filled in the email field must not get Cloud v3 paths.
+        Atlassian removed the v2 search endpoint, so a Cloud site behind a
+        custom domain or proxy must not be downgraded to v2 by host sniffing.
+        (Pre-connection behavior for Server/DC basic auth is unchanged.)
         """
         settings = next(
             _jira_settings_from_env(
                 {
-                    "JIRA_URL": "https://jira.example.com",
+                    "JIRA_URL": "https://jira.corp.example.com",
                     "JIRA_EMAIL": "user@example.com",
                     "JIRA_API_TOKEN": "test-token",
                     "JIRA_PROJECT_KEY": "PROJ",
@@ -234,8 +235,45 @@ class TestJiraClient:
         connection = resolve_jira_connection(settings)
         assert connection.mode == "cloud"
         assert connection.auth == ("user@example.com", "test-token")
-        assert connection.api_path == "/rest/api/2"
-        assert connection.search_path == "/rest/api/2/search"
+        assert connection.api_path == "/rest/api/3"
+        assert connection.search_path == "/rest/api/3/search/jql"
+
+    async def test_bearer_on_lookalike_host_keeps_v2(self) -> None:
+        """A hostname merely containing atlassian.net is NOT Atlassian Cloud."""
+        for url in (
+            "https://jira.atlassian.net.example.com",
+            "https://myorg.com/atlassian.net",
+            "https://myorg.com/browse/atlassian.net",
+        ):
+            settings = next(
+                _jira_settings_from_env(
+                    {
+                        "JIRA_URL": url,
+                        "JIRA_PAT": "server-pat",
+                        "JIRA_PROJECT_KEY": "PROJ",
+                    }
+                )
+            )
+            connection = resolve_jira_connection(settings)
+            assert connection.mode == "server", url
+            assert connection.api_path == "/rest/api/2", url
+            assert connection.search_path == "/rest/api/2/search", url
+
+    async def test_bearer_on_atlassian_host_gets_v3(self) -> None:
+        """A PAT against a real atlassian.net host uses Cloud v3 paths."""
+        settings = next(
+            _jira_settings_from_env(
+                {
+                    "JIRA_URL": "https://myorg.atlassian.net",
+                    "JIRA_PAT": "cloud-pat",
+                    "JIRA_PROJECT_KEY": "PROJ",
+                }
+            )
+        )
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "server"
+        assert connection.api_path == "/rest/api/3"
+        assert connection.search_path == "/rest/api/3/search/jql"
 
     async def test_cloud_pat_auth_detection(self, jira_cloud_pat_settings) -> None:
         """JIRA_PAT + JIRA_EMAIL resolves to Cloud auth (email present = Cloud)."""

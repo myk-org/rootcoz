@@ -863,7 +863,6 @@ class TestAiFooterNotDoubled:
             [],
             [{"type": "text", "text": "line three"}],
         ]
-
         mock_settings = MagicMock()
         mock_settings.jira_url = (
             "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
@@ -923,3 +922,64 @@ class TestAiFooterNotDoubled:
 
         with pytest.raises(ValueError, match="JIRA_SITE_URL"):
             await create_jira_bug(title="SA bug", body="body", settings=mock_settings)
+
+    async def test_text_to_adf_translates_wiki_markup(self):
+        """Fallback wiki markup renders as structured ADF, not literal text."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        adf = _text_to_adf(
+            """h2. Test Failure
+*Test:* {{code}}test.module::case{{code}}
+
+h2. Error
+{code}
+AssertionError: boom
+{code}
+
+* [Jenkins Build|https://jenkins/job/1]
+* [Analysis Report|https://rootcoz/r/1]
+plain _italic_ and [bare|https://x] tail"""
+        )
+        nodes = adf["content"]
+        # h2. → heading level 2 with inline strong/code marks
+        assert nodes[0]["type"] == "heading"
+        assert nodes[0]["attrs"]["level"] == 2
+        assert nodes[0]["content"][0]["text"] == "Test Failure"
+        # *bold* and {{mono}} become marked text nodes. The fallback emits
+        # {{code}} markers around the test name, so the literal word "code"
+        # is the monospaced content — conversion is faithful to the wiki.
+        para = nodes[1]
+        assert para["type"] == "paragraph"
+        texts = {
+            (n["text"], tuple(m["type"] for m in n.get("marks", [])))
+            for n in para["content"]
+        }
+        assert ("Test:", ("strong",)) in texts
+        assert ("code", ("code",)) in texts
+        assert ("test.module::case", ()) in texts
+        # {code} fence → codeBlock with the raw error inside
+        code_block = next(n for n in nodes if n["type"] == "codeBlock")
+        assert code_block["content"][0]["text"] == "AssertionError: boom"
+        # consecutive "* " lines merge into one bulletList with link marks
+        bullet_list = next(n for n in nodes if n["type"] == "bulletList")
+        assert len(bullet_list["content"]) == 2
+        first_item_text = bullet_list["content"][0]["content"][0]["content"][0]
+        assert first_item_text["text"] == "Jenkins Build"
+        assert first_item_text["marks"] == [
+            {"type": "link", "attrs": {"href": "https://jenkins/job/1"}}
+        ]
+        # inline italic and links in a plain paragraph
+        last_para = nodes[-1]
+        marks = {
+            tuple(m["type"] for m in n.get("marks", [])) for n in last_para["content"]
+        }
+        assert ("em",) in marks
+        assert ("link",) in marks
+
+    async def test_text_to_adf_unterminated_code_fence_keeps_content(self):
+        """An unterminated {code} fence keeps its lines instead of dropping them."""
+        from rootcoz.bug_creation import _text_to_adf
+
+        adf = _text_to_adf("{code}\nkept line")
+        code_block = next(n for n in adf["content"] if n["type"] == "codeBlock")
+        assert code_block["content"][0]["text"] == "kept line"

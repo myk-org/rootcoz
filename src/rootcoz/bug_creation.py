@@ -710,24 +710,140 @@ async def create_github_issue(
         }
 
 
-def _text_to_adf(text: str) -> dict[str, Any]:
-    """Convert plain text to a minimal Atlassian Document Format document.
+_ADF_HEADING_RE = re.compile(r"^h([1-6])\.\s+(.*)$")
+_ADF_CODE_FENCE = "{code}"
+_ADF_INLINE_RE = re.compile(
+    r"\[(?P<link_text>[^\]|]+)(?:\|(?P<link_url>[^\]]+))?\]"
+    r"|(?<!\w)\*(?P<bold>[^*]+)\*(?!\w)"
+    r"|(?<!\w)_(?P<italic>[^_]+)_(?!\w)"
+    r"|\{\{(?P<mono>[^{}]+)\}\}"
+)
 
-    REST v3 issue creation rejects plain-string ``fields.description``;
-    each source line becomes a paragraph with a single text node. Empty
-    lines become empty paragraphs, preserving the layout one-to-one.
+
+def _adf_inline_nodes(text: str) -> list[dict[str, Any]]:
+    """Convert one wiki-markup line into ADF inline nodes.
+
+    Supports the markup emitted by ``_build_fallback_jira_content``:
+    ``*bold*``, ``_italic_``, ``{{monospace}}``, and ``[text|url]`` links
+    (``[url]`` renders the URL as the link text).
     """
-    return {
-        "type": "doc",
-        "version": 1,
-        "content": [
+    nodes: list[dict[str, Any]] = []
+    pos = 0
+    for match in _ADF_INLINE_RE.finditer(text):
+        if match.start() > pos:
+            nodes.append({"type": "text", "text": text[pos : match.start()]})
+        if match.group("link_text") is not None:
+            href = match.group("link_url") or match.group("link_text")
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("link_text"),
+                    "marks": [{"type": "link", "attrs": {"href": href}}],
+                }
+            )
+        elif match.group("bold") is not None:
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("bold"),
+                    "marks": [{"type": "strong"}],
+                }
+            )
+        elif match.group("italic") is not None:
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("italic"),
+                    "marks": [{"type": "em"}],
+                }
+            )
+        elif match.group("mono") is not None:
+            nodes.append(
+                {
+                    "type": "text",
+                    "text": match.group("mono"),
+                    "marks": [{"type": "code"}],
+                }
+            )
+        pos = match.end()
+    if pos < len(text):
+        nodes.append({"type": "text", "text": text[pos:]})
+    return nodes
+
+
+def _text_to_adf(text: str) -> dict[str, Any]:
+    """Convert wiki-markup text to an Atlassian Document Format document.
+
+    REST v3 issue creation rejects plain-string ``fields.description``.
+    Translates the Jira wiki markup the fallback content builder emits —
+    ``hN.`` headings, ``{code}`` blocks, ``*``/``-`` bullet items, and
+    inline bold/italic/monospace/links — so service-account issues keep
+    the same rendered formatting as v2 wiki-text ones.
+    """
+    content: list[dict[str, Any]] = []
+    code_lines: list[str] = []
+    in_code = False
+    list_items: list[dict[str, Any]] | None = None
+
+    def flush_list() -> None:
+        nonlocal list_items
+        if list_items is not None:
+            content.append({"type": "bulletList", "content": list_items})
+            list_items = None
+
+    def flush_code() -> None:
+        nonlocal code_lines
+        content.append(
             {
-                "type": "paragraph",
-                "content": [{"type": "text", "text": line}] if line else [],
+                "type": "codeBlock",
+                "content": [{"type": "text", "text": "\n".join(code_lines)}],
             }
-            for line in text.split("\n")
-        ],
-    }
+        )
+        code_lines = []
+
+    for line in text.split("\n"):
+        if line.strip() == _ADF_CODE_FENCE:
+            flush_list()
+            if in_code:
+                flush_code()
+            in_code = not in_code
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        heading = _ADF_HEADING_RE.match(line)
+        if heading:
+            flush_list()
+            content.append(
+                {
+                    "type": "heading",
+                    "attrs": {"level": int(heading.group(1))},
+                    "content": _adf_inline_nodes(heading.group(2)),
+                }
+            )
+            continue
+        if line.startswith(("* ", "- ")):
+            item = {
+                "type": "listItem",
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": _adf_inline_nodes(line[2:]),
+                    }
+                ],
+            }
+            if list_items is None:
+                list_items = []
+            list_items.append(item)
+            continue
+        flush_list()
+        content.append({"type": "paragraph", "content": _adf_inline_nodes(line)})
+
+    flush_list()
+    if in_code and code_lines:
+        # Unterminated fence: keep the content rather than dropping it
+        flush_code()
+    return {"type": "doc", "version": 1, "content": content}
 
 
 async def create_jira_bug(

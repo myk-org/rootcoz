@@ -2492,6 +2492,13 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         overrides["jira_pat"] = SecretStr(body.jira_pat)
     if body.jira_oauth_access_token is not None:
         overrides["jira_oauth_access_token"] = SecretStr(body.jira_oauth_access_token)
+    elif (body.jira_api_token and body.jira_api_token.strip()) or (
+        body.jira_pat and body.jira_pat.strip()
+    ):
+        # Request-level Jira credentials must not be silently bypassed by a
+        # server-configured ATST token (the resolver prefers SA mode).
+        # Mirrors the clearing semantics of _build_effective_jira_settings.
+        overrides["jira_oauth_access_token"] = None
     if body.github_token is not None:
         overrides["github_token"] = SecretStr(body.github_token)
     if body.tests_repo_token is not None:

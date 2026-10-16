@@ -4712,6 +4712,57 @@ class TestPeerAnalysisParams:
         merged = _merge_settings(body, settings)
         assert merged.max_concurrent_ai_calls == 7
 
+    def test_merge_settings_request_jira_creds_clear_server_sa_token(self) -> None:
+        """Request-level Jira credentials must not lose to a server ATST token.
+
+        The resolver prefers SA mode, so a request carrying its own
+        jira_api_token/jira_pat clears the server's jira_oauth_access_token
+        (mirroring _build_effective_jira_settings).
+        """
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+            jira_email="user@example.com",
+            jira_api_token="request-token",
+        )
+        settings = Settings(
+            jira_url="https://myorg.atlassian.net",
+            jira_oauth_access_token=SecretStr("ATST-server-token"),
+        )
+        merged = _merge_settings(body, settings)
+        assert merged.jira_oauth_access_token is None
+        assert merged.jira_api_token.get_secret_value() == "request-token"
+        # And the resolved connection is basic-auth cloud, not the SA.
+        from rootcoz.jira import resolve_jira_connection
+
+        connection = resolve_jira_connection(merged)
+        assert connection.mode == "cloud"
+        assert connection.auth == ("user@example.com", "request-token")
+
+    def test_merge_settings_preserves_server_sa_token_when_request_has_no_jira_creds(
+        self,
+    ) -> None:
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="test",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        settings = Settings(
+            jira_url="https://myorg.atlassian.net",
+            jira_oauth_access_token=SecretStr("ATST-server-token"),
+        )
+        merged = _merge_settings(body, settings)
+        assert merged.jira_oauth_access_token.get_secret_value() == "ATST-server-token"
+
     def test_merge_settings_max_concurrent_ai_calls_preserves_server_setting_when_omitted(
         self,
     ) -> None:

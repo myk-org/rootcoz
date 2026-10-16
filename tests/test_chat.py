@@ -274,19 +274,32 @@ class TestBuildChatCustomTools:
         assert "search_jira" not in names
         assert "get_jira_issue" not in names
 
-    def test_jira_v2_paths_for_server_basic_auth(self):
-        """Server/DC with an email keeps v2 endpoints — host decides the version."""
+    def test_jira_v2_paths_for_server_bearer(self):
+        """Server/DC bearer PAT keeps v2 endpoints with a fields param."""
         tools = build_chat_custom_tools(
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
             jira_url="https://jira.example.com",
-            jira_email="user@example.com",
-            jira_token="jira-tok",
+            jira_token="jira-pat",
         )
         jira_tool = next(t for t in tools if t["name"] == "search_jira")
         assert jira_tool["http"]["url"].endswith("/rest/api/2/search")
         assert "fields" in jira_tool["http"]["query_params"]
+
+    def test_jira_v3_paths_for_custom_domain_cloud(self):
+        """Basic-auth Cloud behind a custom domain keeps v3 — never v2."""
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_url="https://jira.corp.example.com",
+            jira_email="user@example.com",
+            jira_token="jira-tok",
+        )
+        jira_tool = next(t for t in tools if t["name"] == "search_jira")
+        assert jira_tool["http"]["url"].endswith("/rest/api/3/search/jql")
+        assert "fields" not in jira_tool["http"]["query_params"]
 
     def test_github_tools(self):
         tools = build_chat_custom_tools(

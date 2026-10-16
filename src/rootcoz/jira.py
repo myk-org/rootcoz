@@ -12,6 +12,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Self
+from urllib.parse import urlparse
 
 import httpx
 from simple_logger.logger import get_logger
@@ -68,6 +69,19 @@ def _is_scoped_api_url(url: str) -> bool:
     return _SCOPED_URL_MARKER in url.lower()
 
 
+def _is_atlassian_cloud_host(url: str) -> bool:
+    """True when the URL's hostname is atlassian.net or a subdomain of it.
+
+    Hostname-anchored — a Server/DC URL that merely contains the substring
+    ``atlassian.net`` (path or lookalike domain) is NOT Atlassian Cloud.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "atlassian.net" or host.endswith(".atlassian.net")
+
+
 def resolve_jira_connection(settings: Settings) -> JiraConnection:
     """Resolve the Jira connection from settings.
 
@@ -116,9 +130,10 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
 
     is_cloud, token_value = resolve_jira_auth(settings)
     if is_cloud and settings.jira_email and token_value:
-        # REST version is host-based, not mode-based: a Server/DC instance
-        # with basic auth (email set) must not get v3 paths.
-        host_is_atlassian_cloud = "atlassian.net" in url.lower()
+        # Basic auth keeps v3 regardless of host — Atlassian removed the v2
+        # search endpoint, so a Cloud site behind a custom domain or proxy
+        # would hard-fail on v2 paths. (A Server/DC instance configured with
+        # email+token basic auth keeps its historical pre-connection behavior.)
         return JiraConnection(
             mode="cloud",
             api_base=url,
@@ -126,15 +141,14 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
             site_url=url,
             auth=(settings.jira_email, token_value),
             headers={},
-            api_path="/rest/api/3" if host_is_atlassian_cloud else "/rest/api/2",
-            search_path=(
-                "/rest/api/3/search/jql"
-                if host_is_atlassian_cloud
-                else "/rest/api/2/search"
-            ),
+            api_path="/rest/api/3",
+            search_path="/rest/api/3/search/jql",
         )
     if token_value:
-        host_is_atlassian_cloud = "atlassian.net" in url.lower()
+        # Bearer auth (Server/DC PAT, or a Cloud PAT): v3 only when the
+        # hostname is positively Atlassian Cloud — a lookalike or
+        # substring-containing Server/DC host must keep v2.
+        host_is_atlassian_cloud = _is_atlassian_cloud_host(url)
         return JiraConnection(
             mode="server",
             api_base=url,

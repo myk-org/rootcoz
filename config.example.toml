@@ -38,6 +38,9 @@ jira_pat = ""
 # analysis requests; takes precedence over jira_api_token/jira_pat/jira_email
 jira_oauth_access_token = ""
 atlassian_oauth_cloud_id = ""
+# Accepted for configuration-shape compatibility only — ATST service account
+# tokens have no refresh flow, so no OAuth client is used
+atlassian_oauth_client_id = ""
 jira_site_url = ""
 # Per-user tracker token (Profile Settings equivalent), NOT the analysis override
 jira_sa_token = ""
