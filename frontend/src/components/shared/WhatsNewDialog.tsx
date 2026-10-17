@@ -23,6 +23,8 @@ interface ReleaseData {
   server_version: string
   /** null = indeterminate (server version unknown) — never a definite nag */
   update_available: boolean | null
+  /** true when the release denotes the same version the server runs (4.7 == 4.7.0) */
+  running_latest: boolean | null
 }
 
 /** Parse GitHub release markdown body into bullet points */
@@ -66,8 +68,10 @@ export function WhatsNewDialog() {
             // the server is actually updated (#333)
             if (localStorage.getItem(LS_UPDATE_KEY) === data.version) return
           } else {
-            // What's New — only for the version the server actually runs
-            if (data.version !== data.server_version) return
+            // What's New — only for the version the server actually runs.
+            // The backend decides equivalence (4.7 == 4.7.0); never
+            // string-compare versions here.
+            if (!data.running_latest) return
             if (localStorage.getItem(LS_SEEN_KEY) === data.version) return
           }
         } catch {
@@ -75,7 +79,9 @@ export function WhatsNewDialog() {
         }
 
         const parsed = parseReleaseEntries(data.body)
-        if (parsed.length === 0) return // No entries to show
+        // What's New needs entries to show; the update nag opens even for
+        // prose-only or empty release notes (title + link still inform)
+        if (parsed.length === 0 && !data.update_available) return
 
         setRelease(data)
         setEntries(parsed)

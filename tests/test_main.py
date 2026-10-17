@@ -304,6 +304,70 @@ class TestHealthEndpoint:
             payload = main._release_payload("4.7.0-rc1", "v4.7.0-rc1", "body", "", "")
         assert payload["update_available"] is False
 
+    def test_releases_latest_prerelease_ordering(self) -> None:
+        """Later prereleases are updates; numeric identifiers compare numerically."""
+        from rootcoz.main import _is_newer_release
+
+        assert _is_newer_release("4.7.0-rc2", "4.7.0-rc1") is True
+        assert _is_newer_release("4.7.0-rc1", "4.7.0-rc2") is False
+        # Numeric identifiers compare numerically when dot-separated (semver §11.4)
+        assert _is_newer_release("4.7.0-rc.10", "4.7.0-rc.9") is True
+        assert _is_newer_release("4.7.0-rc.9", "4.7.0-rc.10") is False
+        # A single identifier compares lexically: "rc10" < "rc9" (spec-correct)
+        assert _is_newer_release("4.7.0-rc10", "4.7.0-rc9") is False
+        assert _is_newer_release("4.7.0-beta", "4.7.0-alpha") is True
+        # Numeric identifiers sort below alphanumeric ones (semver §11.4)
+        assert _is_newer_release("4.7.0-alpha", "4.7.0-1") is True
+        # A longer identifier list is newer when it is a prefix extension
+        assert _is_newer_release("4.7.0-rc.1.2", "4.7.0-rc.1") is True
+        assert _is_newer_release("4.7.0-rc.1", "4.7.0-rc.1.2") is False
+
+    def test_releases_latest_post_and_local_builds_not_older(self) -> None:
+        """Post-releases and local builds never nag for their own release."""
+        from rootcoz import main
+
+        for running in ("4.7.0.post1", "4.7.0+local", "4.7.0+build.5"):
+            with patch.object(main, "_get_app_version", return_value=running):
+                payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+            assert payload["update_available"] is False, running
+            assert payload["running_latest"] is True, running
+
+        # A genuinely newer release still nags a post/local build
+        with patch.object(main, "_get_app_version", return_value="4.7.0.post1"):
+            payload = main._release_payload("4.7.1", "v4.7.1", "body", "", "")
+        assert payload["update_available"] is True
+
+    def test_releases_latest_running_latest_equivalence(self) -> None:
+        """running_latest decides What's New eligibility server-side."""
+        from rootcoz import main
+
+        # Equivalent spellings
+        with patch.object(main, "_get_app_version", return_value="4.7"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["running_latest"] is True
+        assert payload["update_available"] is False
+
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload("v4.7", "v4.7", "body", "", "")
+        assert payload["running_latest"] is True
+
+        # Same prerelease on both sides
+        with patch.object(main, "_get_app_version", return_value="4.7.0-rc1"):
+            payload = main._release_payload("4.7.0-rc1", "v4.7.0-rc1", "body", "", "")
+        assert payload["running_latest"] is True
+
+        # Prerelease running, release out: not the same, and an update
+        with patch.object(main, "_get_app_version", return_value="4.7.0-rc1"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["running_latest"] is False
+        assert payload["update_available"] is True
+
+        # Indeterminate
+        with patch.object(main, "_get_app_version", return_value="unknown"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["running_latest"] is None
+        assert payload["update_available"] is None
+
     def test_releases_latest_unknown_server_version_is_indeterminate(self) -> None:
         """Unparseable server version must never trigger a definite nag."""
         from rootcoz import main

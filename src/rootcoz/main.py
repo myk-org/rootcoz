@@ -10080,18 +10080,76 @@ _RELEASE_CACHE_TTL = 3600  # 1 hour
 _release_cache_lock = asyncio.Lock()
 
 
-_VERSION_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:[.\-+](.+))?$")
+_VERSION_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:([.\-])(.+))?(?:\+(.*))?$")
+# Suffixes that make a version a PRERELEASE of its numbers (semver §9 + dev)
+_PRERELEASE_PREFIXES = ("dev", "a", "alpha", "b", "beta", "rc", "pre")
+
+# A parsed version: numeric components + prerelease identifiers.
+# ``prerelease`` is None for releases (and for post/local builds, which are
+# never older than their release); a tuple of sortable identifiers for
+# prereleases — numeric identifiers sort below alphanumeric ones (semver §11.4).
+ParsedVersion = tuple[tuple[int, ...], tuple[tuple[int, int, str], ...] | None]
 
 
-def _parse_version(version: str) -> tuple[tuple[int, ...], bool] | None:
-    """Numeric components + prerelease flag; None when unparseable.
+def _prerelease_identifier(identifier: str) -> tuple[int, int, str]:
+    """Sortable semver prerelease identifier (numeric < alphanumeric)."""
+    if identifier.isdigit():
+        return (0, int(identifier), "")
+    return (1, 0, identifier)
 
-    ``v4.7.0`` → ``((4, 7, 0), False)``; ``4.7.0-dev1`` → ``((4, 7, 0), True)``.
+
+def _parse_version(version: str) -> ParsedVersion | None:
+    """Parse a semver-ish version; None when unparseable.
+
+    ``v4.7.0`` → ``((4, 7, 0), None)``; ``4.7.0-rc2`` → ``((4, 7, 0), ((1, 0, "rc"), (0, 2, "")))``.
+    Post-releases (``.post1``) and local/build labels (``+local``) are not
+    prereleases — a server running them is not older than the release.
     """
     match = _VERSION_RE.match(version.strip().lstrip("vV"))
     if not match:
         return None
-    return tuple(int(part) for part in match.group(1).split(".")), bool(match.group(2))
+    nums = tuple(int(part) for part in match.group(1).split("."))
+    # Build metadata ("+local", "+build.5") is ignored entirely; only a
+    # "."/"-" separated suffix can make this a prerelease or post-release
+    suffix = (match.group(3) or "").lower()
+    if not suffix or suffix.startswith("post"):
+        return nums, None
+    identifiers = suffix.split(".")
+    if identifiers[0].isdigit() or any(
+        suffix.startswith(prefix) for prefix in _PRERELEASE_PREFIXES
+    ):
+        return nums, tuple(_prerelease_identifier(i) for i in identifiers)
+    # Unrecognized suffix — treat as the plain release, never older
+    return nums, None
+
+
+def _padded(numbers: tuple[int, ...], width: int) -> tuple[int, ...]:
+    """Zero-pad numeric components so 4.7 compares equal to 4.7.0."""
+    return numbers + (0,) * (width - len(numbers))
+
+
+def _compare_prerelease(
+    first: tuple[tuple[int, int, str], ...] | None,
+    second: tuple[tuple[int, int, str], ...] | None,
+) -> int:
+    """Semver prerelease precedence: negative when first < second.
+
+    A release (None) sorts above any prerelease; identifiers compare
+    left-to-right (numeric numerically, alphanumeric lexically), and a
+    shorter identifier list sorts below a longer one when it is a prefix.
+    """
+    if first is None and second is None:
+        return 0
+    if first is None:
+        return 1
+    if second is None:
+        return -1
+    for left, right in zip(first, second):
+        if left != right:
+            return -1 if left < right else 1
+    if len(first) == len(second):
+        return 0
+    return -1 if len(first) < len(second) else 1
 
 
 def _is_newer_release(release_version: str, server_version: str) -> bool | None:
@@ -10099,20 +10157,33 @@ def _is_newer_release(release_version: str, server_version: str) -> bool | None:
 
     None when either side is unparseable (e.g. ``"unknown"``) — an
     indeterminate comparison must never become a definite update notice.
-    Missing components are zero-padded so ``4.7`` equals ``4.7.0``, and a
-    prerelease (dev/rc) sorts below its own release.
     """
     release = _parse_version(release_version)
     server = _parse_version(server_version)
     if release is None or server is None:
         return None
     width = max(len(release[0]), len(server[0]))
-    rel = release[0] + (0,) * (width - len(release[0]))
-    srv = server[0] + (0,) * (width - len(server[0]))
+    rel = _padded(release[0], width)
+    srv = _padded(server[0], width)
     if rel != srv:
         return rel > srv
-    # Same numbers: a running prerelease (dev build) is older than the release
-    return server[1] and not release[1]
+    return _compare_prerelease(release[1], server[1]) > 0
+
+
+def _is_same_release(release_version: str, server_version: str) -> bool | None:
+    """True when both sides denote the same release (equivalent spellings).
+
+    ``4.7`` == ``4.7.0`` == ``4.7.0.post1``; ``4.7.0-rc1`` != ``4.7.0``.
+    None when either side is unparseable.
+    """
+    release = _parse_version(release_version)
+    server = _parse_version(server_version)
+    if release is None or server is None:
+        return None
+    width = max(len(release[0]), len(server[0]))
+    if _padded(release[0], width) != _padded(server[0], width):
+        return False
+    return _compare_prerelease(release[1], server[1]) == 0
 
 
 def _release_payload(
@@ -10131,6 +10202,9 @@ def _release_payload(
         # server does not have (#333) — compare against the running version.
         # None = indeterminate (unparseable version), never a definite nag.
         "update_available": _is_newer_release(release_version, server_version),
+        # Explicit equivalence decision so the dialog never string-compares
+        # versions: 4.7 and 4.7.0 are the same release. None = indeterminate.
+        "running_latest": _is_same_release(release_version, server_version),
     }
 
 

@@ -17,6 +17,7 @@ const upToDateRelease = {
   html_url: 'https://github.com/myk-org/rootcoz/releases/tag/v4.0.1',
   server_version: '4.0.1',
   update_available: false,
+  running_latest: true,
 }
 
 /** Release payload for a server running an older version */
@@ -24,6 +25,7 @@ const updateAvailableRelease = {
   ...upToDateRelease,
   server_version: '3.9.0',
   update_available: true,
+  running_latest: false,
 }
 
 vi.mock('@/lib/api', () => ({
@@ -94,6 +96,7 @@ describe('WhatsNewDialog', () => {
       mockApiGet.mockResolvedValue({
         ...upToDateRelease,
         server_version: '4.1.0-dev',
+        running_latest: false,
       })
       render(<WhatsNewDialog />)
       await waitFor(() => {
@@ -103,6 +106,19 @@ describe('WhatsNewDialog', () => {
       await new Promise((r) => setTimeout(r, 50))
       expect(screen.queryByText("What's New")).not.toBeInTheDocument()
       expect(screen.queryByText('Update available')).not.toBeInTheDocument()
+    })
+
+    it('shows What\'s New for equivalent version spellings (4.0.1 release, 4.0.1.0 server)', async () => {
+      // The backend decides equivalence via running_latest — the dialog
+      // must not string-compare versions
+      mockApiGet.mockResolvedValue({
+        ...upToDateRelease,
+        server_version: '4.0.1.0',
+      })
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
     })
   })
 
@@ -126,6 +142,17 @@ describe('WhatsNewDialog', () => {
       })
       await new Promise((r) => setTimeout(r, 50))
       expect(screen.queryByText('Update available')).not.toBeInTheDocument()
+    })
+
+    it('shows the nag even when the release notes have no bullet entries', async () => {
+      mockApiGet.mockResolvedValue({
+        ...updateAvailableRelease,
+        body: 'Prose-only release notes with no bullets.',
+      })
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText('Update available')).toBeInTheDocument()
+      })
     })
 
     it('saves version to the update key when "Don\'t show again" is checked', async () => {
