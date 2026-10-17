@@ -21,7 +21,8 @@ interface ReleaseData {
   published_at: string
   html_url: string
   server_version: string
-  update_available: boolean
+  /** null = indeterminate (server version unknown) — never a definite nag */
+  update_available: boolean | null
 }
 
 /** Parse GitHub release markdown body into bullet points */

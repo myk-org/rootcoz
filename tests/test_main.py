@@ -279,10 +279,39 @@ class TestHealthEndpoint:
         assert payload["server_version"] == "4.7.0"
         assert payload["update_available"] is False
 
-        # Dev builds ahead of the latest release are not an update
-        with patch.object(main, "_get_app_version", return_value="4.8.0-dev"):
-            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+    def test_releases_latest_equivalent_spellings_are_not_updates(self) -> None:
+        """4.7 and 4.7.0 are the same release — no update nag."""
+        from rootcoz import main
+
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload("4.7", "v4.7", "body", "", "")
         assert payload["update_available"] is False
+
+        with patch.object(main, "_get_app_version", return_value="4.7"):
+            payload = main._release_payload("v4.7.0", "v4.7.0", "body", "", "")
+        assert payload["update_available"] is False
+
+    def test_releases_latest_dev_build_gets_update_notice(self) -> None:
+        """A running dev prerelease is older than its own stable release."""
+        from rootcoz import main
+
+        with patch.object(main, "_get_app_version", return_value="4.7.0.dev1"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["update_available"] is True
+
+        # A prerelease of the version the server already runs: no nag
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload("4.7.0-rc1", "v4.7.0-rc1", "body", "", "")
+        assert payload["update_available"] is False
+
+    def test_releases_latest_unknown_server_version_is_indeterminate(self) -> None:
+        """Unparseable server version must never trigger a definite nag."""
+        from rootcoz import main
+
+        with patch.object(main, "_get_app_version", return_value="unknown"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["server_version"] == "unknown"
+        assert payload["update_available"] is None
 
     def test_releases_latest_unreachable_fallback_has_server_context(self) -> None:
         """GitHub-unreachable fallback still reports the running version."""
@@ -291,7 +320,7 @@ class TestHealthEndpoint:
         with patch.object(main, "_get_app_version", return_value="4.6.0"):
             payload = main._release_payload("", "", "", "", "")
         assert payload["server_version"] == "4.6.0"
-        assert payload["update_available"] is False
+        assert payload["update_available"] is None
 
     @pytest.mark.parametrize(
         ("newer", "older"),
@@ -299,20 +328,33 @@ class TestHealthEndpoint:
             ("4.7.0", "4.6.9"),
             ("4.10.0", "4.9.0"),
             ("5.0.0", "4.99.99"),
-            ("v4.7.0", "4.7.0-rc1"),
+            ("4.7.0", "4.7.0-rc1"),
+            ("4.7.0", "4.7.0.dev1"),
+            ("4.7.10", "4.7.9"),
         ],
     )
-    def test_version_tuple_orders_versions(self, newer: str, older: str) -> None:
-        from rootcoz.main import _version_tuple
+    def test_is_newer_release_orders_versions(self, newer: str, older: str) -> None:
+        from rootcoz.main import _is_newer_release
 
-        assert _version_tuple(newer) > _version_tuple(older)
+        assert _is_newer_release(newer, older) is True
+        assert _is_newer_release(older, newer) is False
 
-    def test_version_tuple_equal_and_empty(self) -> None:
-        from rootcoz.main import _version_tuple
+    @pytest.mark.parametrize(
+        "version",
+        ["4.7.0", "4.7", "v4.7.0", "4.7.0-dev1", "4.7.0+build.5", "0.0.1"],
+    )
+    def test_parse_version_accepts_valid_versions(self, version: str) -> None:
+        from rootcoz.main import _parse_version
 
-        assert _version_tuple("4.7.0") == _version_tuple("4.7.0")
-        assert _version_tuple("") == ()
-        assert _version_tuple("banana") == ()
+        assert _parse_version(version) is not None
+
+    @pytest.mark.parametrize("version", ["", "banana", "unknown", "v"])
+    def test_parse_version_rejects_unparseable(self, version: str) -> None:
+        from rootcoz.main import _is_newer_release, _parse_version
+
+        assert _parse_version(version) is None
+        assert _is_newer_release(version, "4.7.0") is None
+        assert _is_newer_release("4.7.0", version) is None
 
 
 class TestAnalyzeEndpoint:

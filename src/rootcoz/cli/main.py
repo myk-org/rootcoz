@@ -2938,6 +2938,34 @@ def push_cmd(
                 typer.echo(f"  - {err}")
 
 
+@app.command("release")
+def release_cmd(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Show the latest release and whether the server is up to date."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.get_latest_release(),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    if not data.get("version"):
+        typer.echo("Latest release: unavailable (GitHub unreachable)")
+        return
+    typer.echo(f"Latest release: {data['version']}")
+    typer.echo(f"Server version: {data.get('server_version') or 'unknown'}")
+    update = data.get("update_available")
+    if update is True:
+        typer.echo("Update available: yes")
+    elif update is None:
+        typer.echo("Update available: unknown (server version not determined)")
+    else:
+        typer.echo("Update available: no")
+    if data.get("html_url"):
+        typer.echo(f"Release notes: {data['html_url']}")
+
+
 @app.command("exporters")
 def exporters_cmd(
     json_output: bool = _JSON_OPTION,

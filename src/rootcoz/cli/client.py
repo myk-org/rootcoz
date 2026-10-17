@@ -1200,6 +1200,12 @@ class RootCozClient:
         """Get server-level automation capabilities (GitHub issues, Jira bugs). GET /api/capabilities"""
         return self._request("GET", "/api/capabilities")
 
+    # -- Releases ---------------------------------------------------------------
+
+    def get_latest_release(self) -> dict[str, Any]:
+        """Latest GitHub release with server version context. GET /api/releases/latest"""
+        return self._request("GET", "/api/releases/latest")
+
     # -- Jira Projects --------------------------------------------------------
 
     @staticmethod

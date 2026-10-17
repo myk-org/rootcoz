@@ -10080,18 +10080,39 @@ _RELEASE_CACHE_TTL = 3600  # 1 hour
 _release_cache_lock = asyncio.Lock()
 
 
-def _version_tuple(version: str) -> tuple[int, ...]:
-    """Numeric prefix of a semver-ish string as a comparison tuple.
+_VERSION_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:[.\-+](.+))?$")
 
-    Stops at the first non-numeric component so pre-release suffixes
-    (``7.0.0-rc1``) compare as their numeric prefix.
+
+def _parse_version(version: str) -> tuple[tuple[int, ...], bool] | None:
+    """Numeric components + prerelease flag; None when unparseable.
+
+    ``v4.7.0`` → ``((4, 7, 0), False)``; ``4.7.0-dev1`` → ``((4, 7, 0), True)``.
     """
-    parts: list[int] = []
-    for piece in version.strip().lstrip("vV").split("."):
-        if not piece.isdigit():
-            break
-        parts.append(int(piece))
-    return tuple(parts)
+    match = _VERSION_RE.match(version.strip().lstrip("vV"))
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(1).split(".")), bool(match.group(2))
+
+
+def _is_newer_release(release_version: str, server_version: str) -> bool | None:
+    """True when the release is strictly newer than the running version.
+
+    None when either side is unparseable (e.g. ``"unknown"``) — an
+    indeterminate comparison must never become a definite update notice.
+    Missing components are zero-padded so ``4.7`` equals ``4.7.0``, and a
+    prerelease (dev/rc) sorts below its own release.
+    """
+    release = _parse_version(release_version)
+    server = _parse_version(server_version)
+    if release is None or server is None:
+        return None
+    width = max(len(release[0]), len(server[0]))
+    rel = release[0] + (0,) * (width - len(release[0]))
+    srv = server[0] + (0,) * (width - len(server[0]))
+    if rel != srv:
+        return rel > srv
+    # Same numbers: a running prerelease (dev build) is older than the release
+    return server[1] and not release[1]
 
 
 def _release_payload(
@@ -10108,8 +10129,8 @@ def _release_payload(
         "server_version": server_version,
         # The What's New dialog must not advertise features the running
         # server does not have (#333) — compare against the running version.
-        "update_available": _version_tuple(release_version)
-        > _version_tuple(server_version),
+        # None = indeterminate (unparseable version), never a definite nag.
+        "update_available": _is_newer_release(release_version, server_version),
     }
 
 
