@@ -3160,3 +3160,25 @@ class TestRootCozClientTranscripts:
         with pytest.raises(RootCozError) as exc_info:
             client.admin_download_transcript_to_file(session, str(bad))
         assert "Cannot write" in str(exc_info.value)
+
+    def test_get_latest_release(self):
+        response_data = {
+            "version": "4.7.0",
+            "name": "v4.7.0",
+            "body": "- **Feature** — description (#1)",
+            "published_at": "2026-10-17T00:00:00Z",
+            "html_url": "https://github.com/myk-org/rootcoz/releases/tag/v4.7.0",
+            "server_version": "4.6.0",
+            "update_available": True,
+        }
+
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/releases/latest"
+            return httpx.Response(200, json=response_data)
+
+        client = _make_client(handler)
+        result = client.get_latest_release()
+        assert result["version"] == "4.7.0"
+        assert result["server_version"] == "4.6.0"
+        assert result["update_available"] is True

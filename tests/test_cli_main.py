@@ -6560,3 +6560,83 @@ class TestTranscriptsCommands:
                 ],
             )
         assert result.exit_code == 1
+
+
+class TestReleaseCommand:
+    def test_release(self, mock_client):
+        mock_client.get_latest_release.return_value = {
+            "version": "4.7.0",
+            "name": "v4.7.0",
+            "body": "",
+            "published_at": "2026-10-17T00:00:00Z",
+            "html_url": "https://github.com/myk-org/rootcoz/releases/tag/v4.7.0",
+            "server_version": "4.6.0",
+            "update_available": True,
+        }
+        result = runner.invoke(app, ["release"])
+        assert result.exit_code == 0
+        assert "Latest release: 4.7.0" in result.output
+        assert "Server version: 4.6.0" in result.output
+        assert "Update available: yes" in result.output
+        assert "https://github.com/myk-org/rootcoz/releases/tag/v4.7.0" in result.output
+        mock_client.get_latest_release.assert_called_once_with()
+
+    def test_release_up_to_date(self, mock_client):
+        mock_client.get_latest_release.return_value = {
+            "version": "4.7.0",
+            "name": "v4.7.0",
+            "body": "",
+            "published_at": "",
+            "html_url": "",
+            "server_version": "4.7.0",
+            "update_available": False,
+        }
+        result = runner.invoke(app, ["release"])
+        assert result.exit_code == 0
+        assert "Update available: no" in result.output
+
+    def test_release_unknown_server_version(self, mock_client):
+        mock_client.get_latest_release.return_value = {
+            "version": "4.7.0",
+            "name": "v4.7.0",
+            "body": "",
+            "published_at": "",
+            "html_url": "",
+            "server_version": "unknown",
+            "update_available": None,
+        }
+        result = runner.invoke(app, ["release"])
+        assert result.exit_code == 0
+        assert (
+            "Update available: unknown (server version not determined)" in result.output
+        )
+
+    def test_release_unreachable(self, mock_client):
+        mock_client.get_latest_release.return_value = {
+            "version": "",
+            "name": "",
+            "body": "",
+            "published_at": "",
+            "html_url": "",
+            "server_version": "4.6.0",
+            "update_available": None,
+        }
+        result = runner.invoke(app, ["release"])
+        assert result.exit_code == 0
+        assert "Latest release: unavailable (GitHub unreachable)" in result.output
+
+    def test_release_json(self, mock_client):
+        mock_client.get_latest_release.return_value = {
+            "version": "4.7.0",
+            "name": "v4.7.0",
+            "body": "",
+            "published_at": "",
+            "html_url": "",
+            "server_version": "4.6.0",
+            "update_available": True,
+        }
+        result = runner.invoke(app, ["--json", "release"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["version"] == "4.7.0"
+        assert parsed["update_available"] is True
