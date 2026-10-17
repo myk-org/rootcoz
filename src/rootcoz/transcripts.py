@@ -174,11 +174,34 @@ def transcript_summary(info: TranscriptInfo, context: dict[str, Any]) -> dict[st
     }
 
 
+_DEPLOY_RECORD_TRANSCRIPTS_VAR = "ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS"
+
+
+def deployment_record_transcripts() -> bool | None:
+    """Pristine deployment RECORD_TRANSCRIPTS, captured by the entrypoint
+
+    The entrypoint exports ``ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS`` before
+    sourcing the DB bridge, so it holds the deployment value even after a
+    DB override pollutes ``RECORD_TRANSCRIPTS`` for this boot. Empty means
+    the deployment left it unset (sidecar default: off). None means an
+    older entrypoint never captured it.
+    """
+    raw = os.environ.get(_DEPLOY_RECORD_TRANSCRIPTS_VAR)
+    if raw is None:
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 async def sync_transcript_recording(enabled: bool | None) -> bool:
     """Live-apply the recording state through the sidecar runtime toggle.
 
     Requires pi-sidecar >= 4.14.0 (``POST /transcripts/recording``).
-    ``enabled=None`` drops the override so the boot-time env governs again.
+    ``enabled=None`` drops the DB override: when the entrypoint captured the
+    pristine deployment value (``ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS``), it is
+    pushed explicitly — the sidecar's boot env may still carry the bridged
+    old DB value, and a bare override reset would fall back to that until a
+    restart. Without the capture (older entrypoint) the override is simply
+    dropped so the boot env governs again.
     Best-effort: an older sidecar (no endpoint) or an unreachable sidecar
     leaves the env-governed state in place — the env bridge still applies
     the DB value after a restart.
@@ -188,7 +211,11 @@ async def sync_transcript_recording(enabled: bool | None) -> bool:
     try:
         client = get_sidecar_client()
         if enabled is None:
-            await client.reset_recording()
+            deploy = deployment_record_transcripts()
+            if deploy is not None:
+                await client.set_recording(deploy)
+            else:
+                await client.reset_recording()
         else:
             await client.set_recording(enabled)
         return True

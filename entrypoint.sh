@@ -48,6 +48,12 @@ if [ -f /app/sidecar-helper/dist/server.js ]; then
     # from its process env at start. Rootcoz persists the DB-configured value
     # to /data/pi-sidecar/env; sourcing it here applies the setting to the
     # sidecar after a container restart.
+    #
+    # Capture the pristine deployment value FIRST: once the bridge assigns
+    # RECORD_TRANSCRIPTS, the sidecar's boot env carries the DB value until
+    # restart. Rootcoz reads ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS to push the
+    # deployment value to the running sidecar when a DB override is reset.
+    export ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS="${RECORD_TRANSCRIPTS:-}"
     if [ -f /data/pi-sidecar/env ]; then
         set -a
         . /data/pi-sidecar/env

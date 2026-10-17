@@ -542,11 +542,105 @@ class TestRuntimeSync:
                 calls["reset"] = True
                 return {"enabled": False, "source": "env"}
 
+        monkeypatch.delenv("ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS", raising=False)
         monkeypatch.setattr(
             "rootcoz.ai_client.get_sidecar_client", lambda: FakeClient()
         )
         assert await transcripts_module.sync_transcript_recording(None) is True
         assert calls["reset"] is True
+
+    @pytest.mark.asyncio
+    async def test_sync_reset_applies_captured_deployment_false(self, monkeypatch):
+        """Boot env polluted by a bridged DB true; deployment is false.
+
+        Reset must push false explicitly — a bare override reset would fall
+        back to the polluted boot env and keep recording until a restart.
+        """
+        calls = {}
+
+        class FakeClient:
+            async def set_recording(self, enabled):
+                calls["set"] = enabled
+                return {"enabled": enabled, "source": "override"}
+
+            async def reset_recording(self):
+                calls["reset"] = True
+                return {"enabled": True, "source": "env"}
+
+        monkeypatch.setenv("ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS", "false")
+        monkeypatch.setattr(
+            "rootcoz.ai_client.get_sidecar_client", lambda: FakeClient()
+        )
+        assert await transcripts_module.sync_transcript_recording(None) is True
+        assert calls == {"set": False}
+
+    @pytest.mark.asyncio
+    async def test_sync_reset_applies_captured_deployment_true(self, monkeypatch):
+        calls = {}
+
+        class FakeClient:
+            async def set_recording(self, enabled):
+                calls["set"] = enabled
+                return {"enabled": enabled, "source": "override"}
+
+        monkeypatch.setenv("ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS", "true")
+        monkeypatch.setattr(
+            "rootcoz.ai_client.get_sidecar_client", lambda: FakeClient()
+        )
+        assert await transcripts_module.sync_transcript_recording(None) is True
+        assert calls == {"set": True}
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("", False),
+            ("false", False),
+            ("0", False),
+            ("banana", False),
+            ("true", True),
+            ("1", True),
+            ("YES", True),
+            (" on ", True),
+        ],
+    )
+    def test_deployment_record_transcripts_parses_marker(
+        self, monkeypatch, raw, expected
+    ):
+        monkeypatch.setenv("ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS", raw)
+        assert transcripts_module.deployment_record_transcripts() is expected
+
+    def test_deployment_record_transcripts_uncaptured_is_none(self, monkeypatch):
+        monkeypatch.delenv("ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS", raising=False)
+        assert transcripts_module.deployment_record_transcripts() is None
+
+    def test_entrypoint_captures_deployment_before_bridge(self):
+        """The capture export must precede the bridge sourcing in entrypoint.sh."""
+        from pathlib import Path as _Path
+
+        entrypoint = _Path("entrypoint.sh").read_text()
+        capture = entrypoint.index("ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS=")
+        source = entrypoint.index(". /data/pi-sidecar/env")
+        assert capture < source
+
+    def test_entrypoint_capture_idiom_preserves_deployment_value(self, env_bridge):
+        """The /bin/sh capture idiom holds the pre-bridge deployment value."""
+        write_transcript_env_bridge(True)
+        result = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                (
+                    "RECORD_TRANSCRIPTS=false; "
+                    'export ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS="${RECORD_TRANSCRIPTS:-}"; '
+                    f". {env_bridge} && printf '%s' \"$ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS\""
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "false"
 
     @pytest.mark.asyncio
     async def test_sync_failure_is_best_effort(self, monkeypatch):
