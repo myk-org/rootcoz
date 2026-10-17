@@ -265,6 +265,55 @@ class TestHealthEndpoint:
                 response = client.get("/api/version")
                 assert response.status_code == 401
 
+    def test_releases_latest_reports_server_version_context(self) -> None:
+        """#333: payload carries server_version + update_available."""
+        from rootcoz import main
+
+        with patch.object(main, "_get_app_version", return_value="4.6.0"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["server_version"] == "4.6.0"
+        assert payload["update_available"] is True
+
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["server_version"] == "4.7.0"
+        assert payload["update_available"] is False
+
+        # Dev builds ahead of the latest release are not an update
+        with patch.object(main, "_get_app_version", return_value="4.8.0-dev"):
+            payload = main._release_payload("4.7.0", "v4.7.0", "body", "", "")
+        assert payload["update_available"] is False
+
+    def test_releases_latest_unreachable_fallback_has_server_context(self) -> None:
+        """GitHub-unreachable fallback still reports the running version."""
+        from rootcoz import main
+
+        with patch.object(main, "_get_app_version", return_value="4.6.0"):
+            payload = main._release_payload("", "", "", "", "")
+        assert payload["server_version"] == "4.6.0"
+        assert payload["update_available"] is False
+
+    @pytest.mark.parametrize(
+        ("newer", "older"),
+        [
+            ("4.7.0", "4.6.9"),
+            ("4.10.0", "4.9.0"),
+            ("5.0.0", "4.99.99"),
+            ("v4.7.0", "4.7.0-rc1"),
+        ],
+    )
+    def test_version_tuple_orders_versions(self, newer: str, older: str) -> None:
+        from rootcoz.main import _version_tuple
+
+        assert _version_tuple(newer) > _version_tuple(older)
+
+    def test_version_tuple_equal_and_empty(self) -> None:
+        from rootcoz.main import _version_tuple
+
+        assert _version_tuple("4.7.0") == _version_tuple("4.7.0")
+        assert _version_tuple("") == ()
+        assert _version_tuple("banana") == ()
+
 
 class TestAnalyzeEndpoint:
     """Tests for the /analyze endpoint."""

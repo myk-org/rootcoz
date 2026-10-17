@@ -10080,6 +10080,39 @@ _RELEASE_CACHE_TTL = 3600  # 1 hour
 _release_cache_lock = asyncio.Lock()
 
 
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Numeric prefix of a semver-ish string as a comparison tuple.
+
+    Stops at the first non-numeric component so pre-release suffixes
+    (``7.0.0-rc1``) compare as their numeric prefix.
+    """
+    parts: list[int] = []
+    for piece in version.strip().lstrip("vV").split("."):
+        if not piece.isdigit():
+            break
+        parts.append(int(piece))
+    return tuple(parts)
+
+
+def _release_payload(
+    release_version: str, name: str, body: str, published_at: str, html_url: str
+) -> dict[str, Any]:
+    """Build the /api/releases/latest payload with server-version context."""
+    server_version = _get_app_version()
+    return {
+        "version": release_version,
+        "name": name,
+        "body": body,
+        "published_at": published_at,
+        "html_url": html_url,
+        "server_version": server_version,
+        # The What's New dialog must not advertise features the running
+        # server does not have (#333) — compare against the running version.
+        "update_available": _version_tuple(release_version)
+        > _version_tuple(server_version),
+    }
+
+
 @app.get("/api/releases/latest", operation_id="getLatestRelease")
 async def get_latest_release() -> JSONResponse:
     """Return the latest GitHub release info (cached for 1 hour).
@@ -10110,13 +10143,13 @@ async def get_latest_release() -> JSONResponse:
                 )
                 resp.raise_for_status()
                 release = resp.json()
-                data = {
-                    "version": release.get("tag_name", "").lstrip("v"),
-                    "name": release.get("name", ""),
-                    "body": release.get("body", ""),
-                    "published_at": release.get("published_at", ""),
-                    "html_url": release.get("html_url", ""),
-                }
+                data = _release_payload(
+                    release_version=release.get("tag_name", "").lstrip("v"),
+                    name=release.get("name", ""),
+                    body=release.get("body", ""),
+                    published_at=release.get("published_at", ""),
+                    html_url=release.get("html_url", ""),
+                )
                 _release_cache["data"] = data
                 _release_cache["fetched_at"] = now
                 return JSONResponse(content=data)
@@ -10125,13 +10158,7 @@ async def get_latest_release() -> JSONResponse:
             if _release_cache.get("data"):
                 return JSONResponse(content=_release_cache["data"])
             return JSONResponse(
-                content={
-                    "version": "",
-                    "name": "",
-                    "body": "",
-                    "published_at": "",
-                    "html_url": "",
-                },
+                content=_release_payload("", "", "", "", ""),
             )
 
 

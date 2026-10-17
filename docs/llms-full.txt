@@ -2249,7 +2249,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | GET | `/health` | Liveness, returns immediately |
 | GET | `/api/health` | Detailed health including database and AI sidecar |
 | GET | `/metrics` | Prometheus metrics |
-| GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) |
+| GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
 | POST | `/api/auth/register` | Create a user, returns the raw API key once |
 | POST | `/api/auth/login` | Exchange username + API key for a session cookie |

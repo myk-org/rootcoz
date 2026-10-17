@@ -11,7 +11,8 @@ import { Button } from '@/components/ui/button'
 import { Sparkles } from 'lucide-react'
 import { api } from '@/lib/api'
 
-const LS_KEY = 'rootcoz_last_seen_changelog_version'
+const LS_SEEN_KEY = 'rootcoz_last_seen_changelog_version'
+const LS_UPDATE_KEY = 'rootcoz_last_dismissed_update'
 
 interface ReleaseData {
   version: string
@@ -19,6 +20,8 @@ interface ReleaseData {
   body: string
   published_at: string
   html_url: string
+  server_version: string
+  update_available: boolean
 }
 
 /** Parse GitHub release markdown body into bullet points */
@@ -55,10 +58,17 @@ export function WhatsNewDialog() {
         const data = await api.get<ReleaseData>('/api/releases/latest')
         if (cancelled || !data.version) return
 
-        // Check if user has already seen this version
         try {
-          const seen = localStorage.getItem(LS_KEY)
-          if (seen === data.version) return
+          if (data.update_available) {
+            // Update nag — dismissed separately from the What's New popup,
+            // so dismissing it never suppresses the changelog shown after
+            // the server is actually updated (#333)
+            if (localStorage.getItem(LS_UPDATE_KEY) === data.version) return
+          } else {
+            // What's New — only for the version the server actually runs
+            if (data.version !== data.server_version) return
+            if (localStorage.getItem(LS_SEEN_KEY) === data.version) return
+          }
         } catch {
           return // localStorage unavailable
         }
@@ -81,7 +91,10 @@ export function WhatsNewDialog() {
   function handleDismiss() {
     if (dontShowAgain && release) {
       try {
-        localStorage.setItem(LS_KEY, release.version)
+        localStorage.setItem(
+          release.update_available ? LS_UPDATE_KEY : LS_SEEN_KEY,
+          release.version,
+        )
       } catch {
         // localStorage may be unavailable
       }
@@ -97,10 +110,12 @@ export function WhatsNewDialog() {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Sparkles aria-hidden="true" className="h-5 w-5 text-signal-blue" />
-            What&apos;s New
+            {release.update_available ? 'Update available' : "What's New"}
           </DialogTitle>
           <DialogDescription>
-            Version {release.version}
+            {release.update_available
+              ? `Version ${release.version} — your server runs ${release.server_version || 'an older version'}`
+              : `Version ${release.version}`}
           </DialogDescription>
         </DialogHeader>
 

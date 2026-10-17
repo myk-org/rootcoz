@@ -3,14 +3,27 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { WhatsNewDialog } from '../WhatsNewDialog'
 
-const LS_KEY = 'rootcoz_last_seen_changelog_version'
+const LS_SEEN_KEY = 'rootcoz_last_seen_changelog_version'
+const LS_UPDATE_KEY = 'rootcoz_last_dismissed_update'
 
-const mockRelease = {
+const mockBody = '### Bug Fixes\n- **SQLite concurrent access** — Enable WAL mode (#12)\n- **Dark theme scrollbars** — Add global scrollbar CSS (#13)'
+
+/** Release payload for a server running the latest version */
+const upToDateRelease = {
   version: '4.0.1',
   name: 'v4.0.1',
-  body: '### Bug Fixes\n- **SQLite concurrent access** — Enable WAL mode (#12)\n- **Dark theme scrollbars** — Add global scrollbar CSS (#13)',
+  body: mockBody,
   published_at: '2026-05-04T19:57:51Z',
   html_url: 'https://github.com/myk-org/rootcoz/releases/tag/v4.0.1',
+  server_version: '4.0.1',
+  update_available: false,
+}
+
+/** Release payload for a server running an older version */
+const updateAvailableRelease = {
+  ...upToDateRelease,
+  server_version: '3.9.0',
+  update_available: true,
 }
 
 vi.mock('@/lib/api', () => ({
@@ -27,17 +40,121 @@ describe('WhatsNewDialog', () => {
   beforeEach(() => {
     localStorage.clear()
     vi.clearAllMocks()
-    mockApiGet.mockResolvedValue(mockRelease)
+    mockApiGet.mockResolvedValue(upToDateRelease)
   })
 
-  it('shows the dialog when version has not been seen', async () => {
-    render(<WhatsNewDialog />)
-    await waitFor(() => {
-      expect(screen.getByText("What's New")).toBeInTheDocument()
+  describe('What\'s New mode (server up to date)', () => {
+    it('shows the dialog when the running version has not been seen', async () => {
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+      expect(screen.queryByText('Update available')).not.toBeInTheDocument()
+    })
+
+    it('does not show when the version was already seen', async () => {
+      localStorage.setItem(LS_SEEN_KEY, '4.0.1')
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.queryByText("What's New")).not.toBeInTheDocument()
+      })
+    })
+
+    it('shows for a new version even if a previous version was dismissed', async () => {
+      localStorage.setItem(LS_SEEN_KEY, '3.2.0')
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+    })
+
+    it('saves version to the changelog key when "Don\'t show again" is checked', async () => {
+      const user = userEvent.setup()
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+      await user.click(screen.getByRole('checkbox'))
+      await user.click(screen.getByRole('button', { name: /got it/i }))
+      expect(localStorage.getItem(LS_SEEN_KEY)).toBe('4.0.1')
+      expect(localStorage.getItem(LS_UPDATE_KEY)).toBeNull()
+    })
+
+    it('does not save version when dismissed without checkbox', async () => {
+      const user = userEvent.setup()
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+      await user.click(screen.getByRole('button', { name: /got it/i }))
+      expect(localStorage.getItem(LS_SEEN_KEY)).toBeNull()
+    })
+
+    it('does not show when the server runs a newer version than the latest release (dev builds)', async () => {
+      mockApiGet.mockResolvedValue({
+        ...upToDateRelease,
+        server_version: '4.1.0-dev',
+      })
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(mockApiGet).toHaveBeenCalledWith('/api/releases/latest')
+      })
+      // Give the effect a moment — nothing must render
+      await new Promise((r) => setTimeout(r, 50))
+      expect(screen.queryByText("What's New")).not.toBeInTheDocument()
+      expect(screen.queryByText('Update available')).not.toBeInTheDocument()
     })
   })
 
-  it('parses and displays release entries', async () => {
+  describe('Update available mode (server older than latest)', () => {
+    it('shows the update nag mentioning the running version', async () => {
+      mockApiGet.mockResolvedValue(updateAvailableRelease)
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText('Update available')).toBeInTheDocument()
+      })
+      expect(screen.getByText(/your server runs 3\.9\.0/i)).toBeInTheDocument()
+      expect(screen.queryByText("What's New")).not.toBeInTheDocument()
+    })
+
+    it('does not show the nag after it was dismissed', async () => {
+      localStorage.setItem(LS_UPDATE_KEY, '4.0.1')
+      mockApiGet.mockResolvedValue(updateAvailableRelease)
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(mockApiGet).toHaveBeenCalledWith('/api/releases/latest')
+      })
+      await new Promise((r) => setTimeout(r, 50))
+      expect(screen.queryByText('Update available')).not.toBeInTheDocument()
+    })
+
+    it('saves version to the update key when "Don\'t show again" is checked', async () => {
+      mockApiGet.mockResolvedValue(updateAvailableRelease)
+      const user = userEvent.setup()
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText('Update available')).toBeInTheDocument()
+      })
+      await user.click(screen.getByRole('checkbox'))
+      await user.click(screen.getByRole('button', { name: /got it/i }))
+      expect(localStorage.getItem(LS_UPDATE_KEY)).toBe('4.0.1')
+      expect(localStorage.getItem(LS_SEEN_KEY)).toBeNull()
+    })
+
+    it('a dismissed update nag does not suppress the What\'s New popup after the server is updated', async () => {
+      // User dismissed the 4.0.1 update nag while running 3.9.0...
+      localStorage.setItem(LS_UPDATE_KEY, '4.0.1')
+      // ...then the admin updated the server: 4.0.1 is now running
+      mockApiGet.mockResolvedValue(upToDateRelease)
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+    })
+  })
+
+  it('parses and displays release entries in both modes', async () => {
+    mockApiGet.mockResolvedValue(updateAvailableRelease)
     render(<WhatsNewDialog />)
     await waitFor(() => {
       expect(screen.getByText('SQLite concurrent access')).toBeInTheDocument()
@@ -45,47 +162,10 @@ describe('WhatsNewDialog', () => {
     })
   })
 
-  it('does not show when version was already seen', async () => {
-    localStorage.setItem(LS_KEY, '4.0.1')
-    render(<WhatsNewDialog />)
-    await waitFor(() => {
-      expect(screen.queryByText("What's New")).not.toBeInTheDocument()
-    })
-  })
-
-  it('shows for a new version even if a previous version was dismissed', async () => {
-    localStorage.setItem(LS_KEY, '3.2.0')
-    render(<WhatsNewDialog />)
-    await waitFor(() => {
-      expect(screen.getByText("What's New")).toBeInTheDocument()
-    })
-  })
-
-  it('saves version when "Don\'t show again" is checked', async () => {
-    const user = userEvent.setup()
-    render(<WhatsNewDialog />)
-    await waitFor(() => {
-      expect(screen.getByText("What's New")).toBeInTheDocument()
-    })
-    await user.click(screen.getByRole('checkbox'))
-    await user.click(screen.getByRole('button', { name: /got it/i }))
-    expect(localStorage.getItem(LS_KEY)).toBe('4.0.1')
-  })
-
-  it('does not save version when dismissed without checkbox', async () => {
-    const user = userEvent.setup()
-    render(<WhatsNewDialog />)
-    await waitFor(() => {
-      expect(screen.getByText("What's New")).toBeInTheDocument()
-    })
-    await user.click(screen.getByRole('button', { name: /got it/i }))
-    expect(localStorage.getItem(LS_KEY)).toBeNull()
-  })
-
   it('shows link to full release notes', async () => {
     render(<WhatsNewDialog />)
     await waitFor(() => {
-      expect(screen.getByText('View full release notes →')).toHaveAttribute('href', mockRelease.html_url)
+      expect(screen.getByText('View full release notes →')).toHaveAttribute('href', upToDateRelease.html_url)
     })
   })
 })
