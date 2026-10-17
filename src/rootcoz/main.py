@@ -339,7 +339,6 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
-        "record_transcripts",
     }
 )
 
@@ -1568,6 +1567,25 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
         logger.exception("Failed to resume waiting jobs after startup")
 
 
+async def _apply_transcript_recording_setting() -> None:
+    """Persist + live-apply the record_transcripts DB state.
+
+    An explicit DB override is bridged to the entrypoint AND pushed to the
+    running sidecar through its runtime toggle (pi-sidecar >= 4.14.0 — no
+    restart needed). Without an override nothing is assigned and the
+    deployment environment governs, both on disk and at runtime.
+    """
+    from rootcoz.config import db_setting_is_set
+
+    enabled = (
+        get_settings().record_transcripts
+        if db_setting_is_set("record_transcripts")
+        else None
+    )
+    write_transcript_env_bridge(enabled)
+    await sidecar_transcripts.sync_transcript_recording(enabled)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _install_job_id_filter()
@@ -1580,19 +1598,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Load DB setting overrides BEFORE config validation so
     # validate_startup_config() sees merged env + DB values.
-    from rootcoz.config import db_setting_is_set, load_db_settings
+    from rootcoz.config import load_db_settings
 
     await load_db_settings()
 
-    # Keep the sidecar transcript env bridge in sync with the DB setting —
-    # the entrypoint sources it before starting the sidecar, applying Server
-    # Settings changes after a restart. Only an explicit DB override is
-    # bridged; without one the deployment environment stays in control.
-    write_transcript_env_bridge(
-        get_settings().record_transcripts
-        if db_setting_is_set("record_transcripts")
-        else None
-    )
+    # Keep the transcript recording state in sync everywhere: the env bridge
+    # persists the DB value for the next boot, and the sidecar runtime toggle
+    # applies it to the running sidecar immediately (pi-sidecar >= 4.14.0).
+    await _apply_transcript_recording_setting()
 
     # Startup config validation (after DB settings loaded)
     config_result = validate_startup_config()
@@ -11153,9 +11166,16 @@ async def list_session_transcripts(
             )
         items.append(transcript_summary(info, context))
 
+    live_recording = await sidecar_transcripts.live_recording_enabled()
     return strip_sensitive_from_response(
         {
-            "recording_enabled": get_settings().record_transcripts,
+            # Live sidecar state when reachable; the setting value otherwise.
+            # None (unreachable) is distinct from False (recording off).
+            "recording_enabled": (
+                get_settings().record_transcripts
+                if live_recording is None
+                else live_recording
+            ),
             "count": len(items),
             "items": items,
         }
@@ -11797,13 +11817,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     # the sidecar reads RECORD_TRANSCRIPTS from its process env at start, so
     # the bridge file is how a DB toggle reaches it after a restart.
     if "record_transcripts" in settings_updates:
-        from rootcoz.config import db_setting_is_set
-
-        write_transcript_env_bridge(
-            get_settings().record_transcripts
-            if db_setting_is_set("record_transcripts")
-            else None
-        )
+        await _apply_transcript_recording_setting()
 
     _broadcast_settings_change()
 
@@ -11858,15 +11872,10 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
 
     # Keep the sidecar transcript env bridge in sync with the reset — the
     # bridge must stop assigning the removed override so the deployment
-    # environment controls the sidecar again after the next restart.
+    # environment controls the sidecar again, and the runtime override is
+    # dropped so the boot env governs immediately.
     if key == "record_transcripts":
-        from rootcoz.config import db_setting_is_set
-
-        write_transcript_env_bridge(
-            get_settings().record_transcripts
-            if db_setting_is_set("record_transcripts")
-            else None
-        )
+        await _apply_transcript_recording_setting()
 
     _broadcast_settings_change()
 

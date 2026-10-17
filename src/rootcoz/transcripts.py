@@ -172,3 +172,42 @@ def transcript_summary(info: TranscriptInfo, context: dict[str, Any]) -> dict[st
         "turns": info.turns,
         "context": context,
     }
+
+
+async def sync_transcript_recording(enabled: bool | None) -> bool:
+    """Live-apply the recording state through the sidecar runtime toggle.
+
+    Requires pi-sidecar >= 4.14.0 (``POST /transcripts/recording``).
+    ``enabled=None`` drops the override so the boot-time env governs again.
+    Best-effort: an older sidecar (no endpoint) or an unreachable sidecar
+    leaves the env-governed state in place — the env bridge still applies
+    the DB value after a restart.
+    """
+    from rootcoz.ai_client import get_sidecar_client
+
+    try:
+        client = get_sidecar_client()
+        if enabled is None:
+            await client.reset_recording()
+        else:
+            await client.set_recording(enabled)
+        return True
+    except Exception as exc:  # noqa: BLE001 - best-effort sync; older sidecars stay env-governed
+        logger.warning(
+            "Sidecar recording sync failed (recording stays env-governed; "
+            "pi-sidecar >= 4.14.0 required): %s",
+            exc,
+        )
+        return False
+
+
+async def live_recording_enabled() -> bool | None:
+    """Effective recording state from the sidecar, or None if unreachable."""
+    from rootcoz.ai_client import get_sidecar_client
+
+    try:
+        state = await get_sidecar_client().get_recording()
+        return bool(state.get("enabled"))
+    except Exception as exc:  # noqa: BLE001 - best-effort read; None means unreachable
+        logger.debug("Sidecar recording state unavailable: %s", exc)
+        return None

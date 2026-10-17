@@ -6,10 +6,19 @@ import subprocess
 import uuid
 from collections.abc import Generator
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from rootcoz import transcripts as transcripts_module
+
+# Real implementations bound at import time: the conftest autouse fixture
+# neutralizes the module attributes for hermeticity, and TestRuntimeSync
+# re-binds these to exercise the real sync paths against a fake client.
+from rootcoz.transcripts import live_recording_enabled as _real_live_recording
+from rootcoz.transcripts import (
+    sync_transcript_recording as _real_sync_transcript_recording,
+)
 from rootcoz.transcripts import (
     valid_session_id,
     write_transcript_env_bridge,
@@ -171,9 +180,20 @@ class TestTranscriptEndpoints:
     """Admin-only API: gating, listing with context join, download, traversal."""
 
     @pytest.fixture
-    def client(self, temp_db_path: Path) -> Generator:
+    def client(self, temp_db_path: Path, monkeypatch) -> Generator:
         from tests.conftest import make_app_client
 
+        # Hermetic: the listing's live sidecar probe returns "unreachable"
+        # so recording_enabled falls back to the setting value.
+        monkeypatch.setattr(
+            transcripts_module, "live_recording_enabled", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(
+            transcripts_module,
+            "sync_transcript_recording",
+            AsyncMock(return_value=True),
+        )
+        monkeypatch.setattr("rootcoz.main.sidecar_transcripts", transcripts_module)
         yield from make_app_client(temp_db_path)
 
     @pytest.fixture
@@ -330,10 +350,12 @@ class TestTranscriptEndpoints:
         assert resp.status_code == 400
         assert "Invalid session id" in resp.json()["detail"]
 
-    def test_setting_registered_restart_required(self):
+    def test_setting_registered_live_toggle(self):
         from rootcoz.main import _RESTART_REQUIRED_SETTINGS, _SETTINGS_CATEGORIES
 
-        assert "record_transcripts" in _RESTART_REQUIRED_SETTINGS
+        # Since the pi-sidecar >= 4.14.0 runtime toggle, flipping the setting
+        # applies to the running sidecar — no restart.
+        assert "record_transcripts" not in _RESTART_REQUIRED_SETTINGS
         assert "record_transcripts" in _SETTINGS_CATEGORIES["AI"]
 
     def test_setting_defaults_off(self, mock_env_vars):
@@ -451,6 +473,14 @@ class TestSessionIdRecording:
         """DELETE /api/admin/settings/record_transcripts clears the bridge assignment."""
         from rootcoz import storage
 
+        # Never touch a real sidecar from tests
+        sync_calls: list[bool | None] = []
+
+        async def fake_sync(enabled):
+            sync_calls.append(enabled)
+
+        monkeypatch.setattr(transcripts_module, "sync_transcript_recording", fake_sync)
+
         # Seed a DB override, then reset through the API
         await storage.set_server_setting(
             "record_transcripts", "true", updated_by="admin"
@@ -466,3 +496,85 @@ class TestSessionIdRecording:
         content = env_bridge.read_text()
         # No assignment: the deployment environment controls the sidecar again
         assert "RECORD_TRANSCRIPTS=" not in content
+        # The runtime override is dropped too — env governs immediately
+        assert sync_calls == [None]
+
+
+class TestRuntimeSync:
+    """pi-sidecar >= 4.14.0 runtime toggle: no restart to change recording."""
+
+    @pytest.fixture(autouse=True)
+    def _real_sync(self, monkeypatch):
+        """Re-bind the real implementations the conftest fixture neutralizes."""
+        monkeypatch.setattr(
+            transcripts_module,
+            "sync_transcript_recording",
+            _real_sync_transcript_recording,
+        )
+        monkeypatch.setattr(
+            transcripts_module, "live_recording_enabled", _real_live_recording
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_sets_override(self, monkeypatch):
+        calls = {}
+
+        class FakeClient:
+            async def set_recording(self, enabled):
+                calls["set"] = enabled
+                return {"enabled": enabled, "source": "override"}
+
+        monkeypatch.setattr(
+            "rootcoz.ai_client.get_sidecar_client", lambda: FakeClient()
+        )
+        assert await transcripts_module.sync_transcript_recording(True) is True
+        assert calls["set"] is True
+
+    @pytest.mark.asyncio
+    async def test_sync_reset_drops_override(self, monkeypatch):
+        calls = {}
+
+        class FakeClient:
+            async def reset_recording(self):
+                calls["reset"] = True
+                return {"enabled": False, "source": "env"}
+
+        monkeypatch.setattr(
+            "rootcoz.ai_client.get_sidecar_client", lambda: FakeClient()
+        )
+        assert await transcripts_module.sync_transcript_recording(None) is True
+        assert calls["reset"] is True
+
+    @pytest.mark.asyncio
+    async def test_sync_failure_is_best_effort(self, monkeypatch):
+        class BrokenClient:
+            async def set_recording(self, enabled):
+                raise RuntimeError("sidecar 4.12.0: no such endpoint")
+
+        monkeypatch.setattr(
+            "rootcoz.ai_client.get_sidecar_client", lambda: BrokenClient()
+        )
+        # Must not raise — older sidecars keep the env-governed state
+        assert await transcripts_module.sync_transcript_recording(True) is False
+
+    @pytest.mark.asyncio
+    async def test_live_recording_enabled_unreachable_is_none(self, monkeypatch):
+        class BrokenClient:
+            async def get_recording(self):
+                raise RuntimeError("unreachable")
+
+        monkeypatch.setattr(
+            "rootcoz.ai_client.get_sidecar_client", lambda: BrokenClient()
+        )
+        assert await transcripts_module.live_recording_enabled() is None
+
+    @pytest.mark.asyncio
+    async def test_live_recording_enabled_reflects_sidecar(self, monkeypatch):
+        class FakeClient:
+            async def get_recording(self):
+                return {"enabled": True, "source": "override"}
+
+        monkeypatch.setattr(
+            "rootcoz.ai_client.get_sidecar_client", lambda: FakeClient()
+        )
+        assert await transcripts_module.live_recording_enabled() is True

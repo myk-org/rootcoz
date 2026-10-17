@@ -275,15 +275,17 @@ class Settings(BaseSettings):
     ai_model: str = ""
 
     # pi-sidecar session transcript recording (sidecar >= 4.12.0).
-    # Restart-required: the sidecar reads RECORD_TRANSCRIPTS from its process
-    # env at container start — rootcoz persists the DB-configured value to a
-    # bridge file the container entrypoint sources on boot.
+    # Runtime-toggleable through the sidecar's /transcripts/recording
+    # endpoint (pi-sidecar >= 4.14.0): a Server Settings change applies to
+    # the running sidecar immediately. The env bridge still persists the
+    # DB value for the next boot.
     record_transcripts: bool = Field(
         default=False,
         description=(
             "Record pi-sidecar session transcripts (JSONL, redacted) under "
-            "/data for admin-only retrieval. Restart required: the sidecar "
-            "reads RECORD_TRANSCRIPTS at container start."
+            "/data for admin-only retrieval. Applies immediately via the "
+            "sidecar runtime toggle (pi-sidecar >= 4.14.0) — no restart "
+            "needed."
         ),
     )
 

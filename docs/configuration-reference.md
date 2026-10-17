@@ -221,7 +221,7 @@ These are read straight from the process environment and have no `Settings` fiel
 | `ACPX_AGENTS` | unset | Comma-separated providers exposed through the Cursor ACPX bridge |
 | `CLI_AGENTS` | unset | Comma-separated providers exposed through the local CLI agents |
 | `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
-| `RECORD_TRANSCRIPTS` | `false` | Record one redacted JSONL per AI session (pi-sidecar >= 4.12.0). **Restart required** — the sidecar reads it at container start. Also toggleable in Server Settings → AI (rootcoz persists the value to `/data/pi-sidecar/env`, which the container entrypoint sources on boot) |
+| `RECORD_TRANSCRIPTS` | `false` | Record one redacted JSONL per AI session (pi-sidecar >= 4.12.0). Toggleable in Server Settings → AI — applies **immediately** via the sidecar runtime toggle (pi-sidecar >= 4.14.0, no restart); rootcoz also persists the value to `/data/pi-sidecar/env`, which the container entrypoint sources on boot so restarts keep it |
 | `PI_SIDECAR_TRANSCRIPTS_DIR` | `/data/pi-sidecar/transcripts` | Where transcript JSONL files land — keep it under the persistent `/data` mount so they survive container replacement |
 
 #### Transcript retention
