@@ -1208,7 +1208,8 @@ async def init_db() -> None:
                 credential_source TEXT NOT NULL DEFAULT 'unknown',
                 error_signature TEXT NOT NULL DEFAULT '',
                 child_job_name TEXT NOT NULL DEFAULT '',
-                child_build_number INTEGER NOT NULL DEFAULT 0
+                child_build_number INTEGER NOT NULL DEFAULT 0,
+                session_id TEXT NOT NULL DEFAULT ''
             )
         """)
         await _migrate_add_column(
@@ -1231,6 +1232,14 @@ async def init_db() -> None:
         )
         await _migrate_add_column(
             db, "ai_token_usage", "usage_attempt", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "ai_token_usage", "session_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        # Transcript context lookups (#328/#329) filter and order by session_id
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_token_usage_session "
+            "ON ai_token_usage (session_id, created_at)"
         )
         # NULL (not 0/1) so legacy rows stay "outcome unknown" instead of failed
         await _migrate_add_column(db, "ai_token_usage", "success", "INTEGER")
@@ -1360,6 +1369,11 @@ async def init_db() -> None:
         # Migration: add session_id to chat_messages
         await _migrate_add_column(
             db, "chat_messages", "session_id", "TEXT NOT NULL DEFAULT ''"
+        )
+        # Transcript context lookups (#328/#329) group by session_id
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_session "
+            "ON chat_messages (session_id, created_at)"
         )
 
         # Migration: add status to chat_messages (pending/completed/failed)
@@ -7098,13 +7112,16 @@ async def record_token_usage(
     success: bool | None = None,
     error_signature_v2: str = "",
     cost_partial: bool = False,
+    session_id: str = "",
 ) -> str:
     """Record a single AI call's token usage. Returns the record ID.
 
     ``error_signature`` stays the frozen anchor for legacy attribution;
     ``error_signature_v2`` carries the group's current-rules hash so every
     member of a v2 group resolves to the same usage row (see
-    ``storage.resolve_signature``).
+    ``storage.resolve_signature``). ``session_id`` is the pi-sidecar session
+    that served the call — the join key for recorded transcripts (#328):
+    the transcript filename is ``{session_id}.jsonl``.
     """
     record_id = str(uuid.uuid4())
     total_tokens = input_tokens + output_tokens
@@ -7115,8 +7132,8 @@ async def record_token_usage(
             "cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, duration_ms, "
             "prompt_chars, response_chars, credential_source, error_signature, "
             "child_job_name, child_build_number, failure_id, usage_attempt, "
-            "success, error_signature_v2, cost_partial) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "success, error_signature_v2, cost_partial, session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record_id,
                 job_id,
@@ -7141,6 +7158,7 @@ async def record_token_usage(
                 None if success is None else int(success),
                 error_signature_v2 if call_type in ("primary", "reanalysis") else None,
                 int(bool(cost_partial)),
+                session_id,
             ),
         )
         await db.commit()
@@ -7155,6 +7173,75 @@ async def get_token_usage_for_job(job_id: str) -> list[dict[str, Any]]:
             (job_id,),
         )
         return [dict(row) for row in await cursor.fetchall()]
+
+
+# SQLite's default bound-variable limit is 999; chunk session-id IN lists
+# well below it so transcript listings never hit "too many SQL variables".
+_SESSION_QUERY_CHUNK = 400
+
+
+async def get_usage_context_for_sessions(
+    session_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Latest usage row per session id — business context for transcripts.
+
+    Join contract (#328/#329): a transcript file is named ``{session_id}.jsonl``;
+    this maps each id to its most recent ``ai_token_usage`` row (job_id,
+    call_type, provider, model) so the transcript list can show what the
+    session was for. Chat sessions additionally carry ``chat_messages`` rows.
+
+    The latest row is selected SQL-side per session with a deterministic
+    rowid tie-break (SQLite's created_at has one-second resolution, so ties
+    are real); ids are chunked under SQLite's bound-variable limit.
+    """
+    context: dict[str, dict[str, Any]] = {}
+    async with _connect_db() as db:
+        for start in range(0, len(session_ids), _SESSION_QUERY_CHUNK):
+            chunk = session_ids[start : start + _SESSION_QUERY_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = await db.execute(
+                "SELECT * FROM ai_token_usage u WHERE u.rowid IN ("
+                "SELECT rowid FROM ai_token_usage u2 WHERE u2.session_id = u.session_id "
+                "ORDER BY u2.created_at DESC, u2.rowid DESC LIMIT 1) "
+                f"AND u.session_id IN ({placeholders})",
+                tuple(chunk),
+            )
+            for row in await cursor.fetchall():
+                record = dict(row)
+                if record.get("session_id"):
+                    context[record["session_id"]] = record
+    return context
+
+
+async def get_chat_context_for_sessions(
+    session_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Latest chat message context per session id (chat sessions only).
+
+    The latest message is selected SQL-side per session with a deterministic
+    rowid tie-break — a bare-column GROUP BY would return username/job_id
+    from an arbitrary row among same-second messages.
+    """
+    context: dict[str, dict[str, Any]] = {}
+    if not session_ids:
+        return context
+    async with _connect_db() as db:
+        for start in range(0, len(session_ids), _SESSION_QUERY_CHUNK):
+            chunk = session_ids[start : start + _SESSION_QUERY_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = await db.execute(
+                "SELECT job_id, session_id, username, created_at AS last_activity "
+                "FROM chat_messages c WHERE c.rowid IN ("
+                "SELECT rowid FROM chat_messages c2 WHERE c2.session_id = c.session_id "
+                "ORDER BY c2.created_at DESC, c2.rowid DESC LIMIT 1) "
+                f"AND c.session_id IN ({placeholders})",
+                tuple(chunk),
+            )
+            for row in await cursor.fetchall():
+                record = dict(row)
+                if record.get("session_id"):
+                    context[record["session_id"]] = record
+    return context
 
 
 # --- Cost aggregation contract -----------------------------------------

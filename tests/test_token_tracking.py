@@ -65,6 +65,7 @@ class TestRecordAiUsage:
                 usage_attempt="",
                 success=True,
                 cost_partial=False,
+                session_id="",
             )
 
     @pytest.mark.asyncio

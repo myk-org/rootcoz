@@ -25,7 +25,6 @@ from pi_sidecar_client import (
     set_usage_recorder,
 )
 from pi_sidecar_client import call_ai as _call_ai
-from pi_sidecar_client import call_ai_once as _call_ai_once
 from pi_sidecar_client import list_models as _list_models_raw
 from simple_logger.logger import get_logger
 
@@ -936,13 +935,20 @@ def format_chat_ai_user_error(
             "Select a valid provider and model in Server Settings → AI."
         )
 
-    # True lost-session cases from sidecar ("session not found"), not URL paths
-    if "session not found" in lower or (
-        "not found" in lower and "session" in lower and "/sessions" not in lower
-    ):
+    # True lost-session cases from sidecar ("Session <id> not found"), not URL paths
+    if _is_lost_session_error(lower):
         return "AI session expired. Please try sending your message again."
 
     return text
+
+
+def _is_lost_session_error(lower_detail: str) -> bool:
+    """Match sidecar lost-session errors ("Session <id> not found"), not URL paths."""
+    return "session not found" in lower_detail or (
+        "not found" in lower_detail
+        and "session" in lower_detail
+        and "/sessions" not in lower_detail
+    )
 
 
 def _redact_key_echo(text: str | None, key: str) -> str | None:
@@ -976,18 +982,24 @@ async def _call_with_safe_error(
         result = await sidecar_call(*args, **kwargs)
         if redact_key is None:
             return result
+        # dataclasses.replace() drops non-field attributes — keep the
+        # transcript correlation id across the copy.
+        transcript_session_id = getattr(result, "transcript_session_id", None)
         if result.success:
-            return replace(
+            result = replace(
                 result,
                 text=_redact_key_echo(result.text, redact_key),
                 error=_redact_key_echo(result.error, redact_key),
             )
+            if transcript_session_id is not None:
+                result.transcript_session_id = transcript_session_id
+            return result
         # Encoded keys (URL, JSON, base64) and rotated keys cannot be safely
         # removed by literal replacement. Keep only fixed retry/auth signals.
         detail = f"{result.text} {result.error or ''}".lower()
         text = (
             "session not found"
-            if "session not found" in detail
+            if _is_lost_session_error(detail)
             else "authentication required"
             if any(
                 marker in detail
@@ -999,7 +1011,12 @@ async def _call_with_safe_error(
             )
             else "AI call failed"
         )
-        return replace(result, text=text, error=text if result.error else None)
+        result = replace(result, text=text, error=text if result.error else None)
+        # Failed one-shot calls have already had session_id cleared by
+        # cleanup — the transcript correlation id is the only link left.
+        if transcript_session_id is not None:
+            result.transcript_session_id = transcript_session_id
+        return result
     except Exception as exc:
         if redact_key is None:
             raise
@@ -1181,6 +1198,9 @@ async def _call_user_session(
             client, session_id, prompt, timeout * 60.0 if timeout else None
         )
         result.session_id = session_id
+        # Correlation handle for recorded transcripts (#328): the JSONL
+        # file is keyed by this id and survives session deletion.
+        result.transcript_session_id = session_id
     except (
         httpx.HTTPError,
         OSError,
@@ -1189,6 +1209,9 @@ async def _call_user_session(
         KeyError,
         TypeError,
     ) as exc:
+        # Stash before cleanup clears it: a created-then-deleted session may
+        # still have a transcript (header + partial turn) worth correlating.
+        failed_session_id = session_id
         if created and session_id:
             try:
                 await delete_ai_session(client, session_id)
@@ -1196,9 +1219,14 @@ async def _call_user_session(
             except httpx.HTTPError, OSError, RuntimeError, ValueError:
                 logger.warning("Unable to clean up failed AI session")
         # The outer wrapper replaces all failure details for keyed sessions.
-        return AIResult(
+        failed = AIResult(
             success=False, text=str(exc), error=str(exc), session_id=session_id
         )
+        # The transcript correlation id survives the failure: the JSONL file
+        # is keyed by it and recording is independent of call success.
+        if failed_session_id:
+            failed.transcript_session_id = failed_session_id
+        return failed
     if once or (created and not result.success):
         try:
             await delete_ai_session(client, session_id)
@@ -1331,11 +1359,14 @@ async def call_ai_once(
         key = await session_key(provider)
     if key is not None:
         kwargs["api_key"] = key
-    sidecar_call = _call_user_session if key is not None else _call_ai_once
-    if key is None:
-        await require_server_provider_grant(provider, model)
-    if key is not None:
         kwargs["once"] = True
+        sidecar_call = _call_user_session
+    else:
+        await require_server_provider_grant(provider, model)
+        # The library's call_ai_once wipes result.session_id before usage
+        # recording sees it; use the multi-turn call and clean up here so
+        # the session id survives for transcript correlation (#328).
+        sidecar_call = _call_ai
     result = await _call_with_safe_error(
         sidecar_call,
         *args,
@@ -1344,6 +1375,13 @@ async def call_ai_once(
         ai_model=model,
         **kwargs,
     )
+    if key is None and result.session_id:
+        result.transcript_session_id = result.session_id
+        try:
+            await delete_ai_session(get_sidecar_client(), result.session_id)
+            result.session_id = None
+        except httpx.HTTPError, OSError, RuntimeError, ValueError:
+            logger.warning("Unable to clean up one-shot AI session")
     result.credential_source = "user" if key is not None else "server"
     return result
 

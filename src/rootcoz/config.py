@@ -274,6 +274,21 @@ class Settings(BaseSettings):
     # Default AI model (server-level default, can be overridden per-request)
     ai_model: str = ""
 
+    # pi-sidecar session transcript recording (sidecar >= 4.12.0).
+    # Runtime-toggleable through the sidecar's /transcripts/recording
+    # endpoint (pi-sidecar >= 4.14.0): a Server Settings change applies to
+    # the running sidecar immediately. The env bridge still persists the
+    # DB value for the next boot.
+    record_transcripts: bool = Field(
+        default=False,
+        description=(
+            "Record pi-sidecar session transcripts (JSONL, redacted) under "
+            "/data for admin-only retrieval. Applies immediately via the "
+            "sidecar runtime toggle (pi-sidecar >= 4.14.0) — no restart "
+            "needed."
+        ),
+    )
+
     # Peer analysis configuration
     peer_ai_configs: str = ""  # "provider:model,provider:model" format
     peer_analysis_max_rounds: int = Field(default=3, ge=1, le=10)
@@ -798,6 +813,11 @@ async def load_db_settings() -> None:
             )
     except Exception:
         logger.warning("Failed to load server settings from DB", exc_info=True)
+
+
+def db_setting_is_set(key: str) -> bool:
+    """True when the server_settings DB table holds an explicit value for key."""
+    return key in _db_settings_cache
 
 
 def get_db_setting(key: str) -> str:

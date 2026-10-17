@@ -117,6 +117,12 @@ spec:
             - name: PI_SIDECAR_AGENT_DIR
               value: /etc/pi-sidecar-agent
             {{- end }}
+            {{- if .Values.env.recordTranscripts }}
+            - name: RECORD_TRANSCRIPTS
+              value: {{ .Values.env.recordTranscripts | quote }}
+            {{- end }}
+            - name: PI_SIDECAR_TRANSCRIPTS_DIR
+              value: {{ .Values.env.sidecarTranscriptsDir | default (printf "%s/pi-sidecar/transcripts" .Values.env.xdgDataHome) | quote }}
           envFrom:
             - configMapRef:
                 name: {{ include "rootcoz.configMapName" . }}

@@ -91,6 +91,30 @@ const requestWithJsonBody = <T>(
 export const api = {
   get: <T>(path: string, options?: RequestInit) => request<T>(path, options),
 
+  /** GET returning raw text (e.g. JSONL transcript downloads). */
+  getText: async (path: string): Promise<string> => {
+    const res = await fetch(path)
+    // Read the body once — a failed res.json() consumes it, and reading
+    // res.text() afterwards rejects with "body already used".
+    const raw = await res.text()
+    if (!res.ok) {
+      let body: unknown = raw
+      try {
+        body = JSON.parse(raw)
+      } catch {
+        body = raw
+      }
+      trackFailedCall({
+        status: res.status,
+        endpoint: path,
+        error: typeof body === 'string' ? body : body != null ? JSON.stringify(body) : '',
+        timestamp: Date.now(),
+      })
+      throw new ApiError(res.status, res.statusText, body)
+    }
+    return raw
+  },
+
   post: <T>(path: string, body?: unknown) =>
     requestWithJsonBody<T>('POST', path, body),
 

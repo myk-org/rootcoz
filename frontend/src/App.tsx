@@ -22,6 +22,7 @@ import { ServerSettingsPage } from '@/pages/ServerSettingsPage'
 import { AdminChatPage } from '@/pages/AdminChatPage'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { LogsPage } from '@/pages/LogsPage'
+import { AdminTranscriptsPage } from '@/pages/AdminTranscriptsPage'
 
 export default function App() {
   return (
@@ -48,6 +49,7 @@ export default function App() {
             <Route path="/admin/settings" element={<ProtectedRoute adminOnly><ServerSettingsPage /></ProtectedRoute>} />
             <Route path="/admin/chat" element={<ProtectedRoute adminOnly><AdminChatPage /></ProtectedRoute>} />
             <Route path="/admin/logs" element={<ProtectedRoute adminOnly><LogsPage /></ProtectedRoute>} />
+            <Route path="/admin/transcripts" element={<ProtectedRoute adminOnly><AdminTranscriptsPage /></ProtectedRoute>} />
           </Route>
         </Routes>
         </SSEProvider>

@@ -223,6 +223,9 @@ async def record_ai_usage(
             usage_attempt=reanalysis[1] if reanalysis else "",
             success=result.success,
             cost_partial=_result_cost_partial(result, usage),
+            session_id=getattr(result, "transcript_session_id", None)
+            or getattr(result, "session_id", None)
+            or "",
         )
         if group and group[0] == job_id:
             logger.info(

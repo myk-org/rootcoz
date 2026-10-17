@@ -44,6 +44,24 @@ fi
 SIDECAR_RUNNING=false
 if [ -f /app/sidecar-helper/dist/server.js ]; then
     export SIDECAR_PORT="${SIDECAR_PORT:-9100}"
+    # Rootcoz Server Settings bridge: the sidecar reads RECORD_TRANSCRIPTS
+    # from its process env at start. Rootcoz persists the DB-configured value
+    # to /data/pi-sidecar/env; sourcing it here applies the setting to the
+    # sidecar after a container restart.
+    #
+    # Capture the pristine deployment value FIRST: once the bridge assigns
+    # RECORD_TRANSCRIPTS, the sidecar's boot env carries the DB value until
+    # restart. Rootcoz reads ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS to push the
+    # deployment value to the running sidecar when a DB override is reset.
+    export ROOTCOZ_DEPLOY_RECORD_TRANSCRIPTS="${RECORD_TRANSCRIPTS:-}"
+    if [ -f /data/pi-sidecar/env ]; then
+        set -a
+        . /data/pi-sidecar/env
+        set +a
+    fi
+    # Transcripts must survive container replacement — keep them under /data.
+    export PI_SIDECAR_TRANSCRIPTS_DIR="${PI_SIDECAR_TRANSCRIPTS_DIR:-/data/pi-sidecar/transcripts}"
+    mkdir -p "$PI_SIDECAR_TRANSCRIPTS_DIR" 2>/dev/null || echo "[sidecar] WARN: cannot create transcripts dir" >&2
     # Subagent extension falls back to spawning `pi` when argv[1] is unset;
     # keep the CLI on PATH so that path works in the container.
     export PATH="/app/sidecar-helper/node_modules/.bin:${PATH}"

@@ -371,11 +371,25 @@ def _mock_sidecar_calls():
         patch("pi_sidecar_client.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.peer_analysis.get_sidecar_client", return_value=mock_client),
+        # --- transcript runtime toggle (rootcoz.transcripts reaches the
+        # sidecar through rootcoz.ai_client.get_sidecar_client, which must
+        # NOT be patched globally — credential tests rely on the real
+        # function. Neutralize at the transcripts boundary instead; tests
+        # that exercise the real sync re-bind it (TestRuntimeSync). ---
+        patch(
+            "rootcoz.transcripts.sync_transcript_recording",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.transcripts.live_recording_enabled",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
         # list_models is NOT stubbed: it runs against the mock client above
         # (get_models → []) so catalog/routing tests can still exercise it.
         # --- low-level AI calls inside ai_client ---
         patch("rootcoz.ai_client._call_ai", deny_ai),
-        patch("rootcoz.ai_client._call_ai_once", deny_ai),
         patch(
             "rootcoz.ai_client._list_models_raw",
             new_callable=AsyncMock,

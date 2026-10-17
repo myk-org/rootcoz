@@ -57,6 +57,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import storage
+from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     _get_model_catalog,
     _setup_usage_recorder,
@@ -265,6 +266,11 @@ from rootcoz.token_tracking import (
     reanalysis_usage_scope,
     set_usage_callback,
 )
+from rootcoz.transcripts import (
+    transcript_path,
+    transcript_summary,
+    write_transcript_env_bridge,
+)
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -357,6 +363,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "peer_analysis_max_rounds",
         "enable_free_models",
         "ambient_auth_providers",
+        "record_transcripts",
     ],
     "Jira": [
         "jira_url",
@@ -1560,6 +1567,30 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
         logger.exception("Failed to resume waiting jobs after startup")
 
 
+async def _apply_transcript_recording_setting() -> bool:
+    """Persist + live-apply the record_transcripts DB state.
+
+    An explicit DB override is bridged to the entrypoint AND pushed to the
+    running sidecar through its runtime toggle (pi-sidecar >= 4.14.0 — no
+    restart needed). Without an override nothing is assigned and the
+    deployment environment governs, both on disk and at runtime.
+
+    Returns True when the runtime toggle reached the sidecar (or had nothing
+    to push); False when the sidecar was unreachable/rejected it — callers
+    surface that so admins know the change applies only after a restart or
+    a later successful sync.
+    """
+    from rootcoz.config import db_setting_is_set
+
+    enabled = (
+        get_settings().record_transcripts
+        if db_setting_is_set("record_transcripts")
+        else None
+    )
+    write_transcript_env_bridge(enabled)
+    return await sidecar_transcripts.sync_transcript_recording(enabled)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _install_job_id_filter()
@@ -1575,6 +1606,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from rootcoz.config import load_db_settings
 
     await load_db_settings()
+
+    # Keep the transcript recording state in sync everywhere: the env bridge
+    # persists the DB value for the next boot, and the sidecar runtime toggle
+    # applies it to the running sidecar immediately (pi-sidecar >= 4.14.0).
+    await _apply_transcript_recording_setting()
 
     # Startup config validation (after DB settings loaded)
     config_result = validate_startup_config()
@@ -11083,6 +11119,115 @@ async def get_token_usage_for_job(request: Request, job_id: str) -> dict[str, An
     return {"job_id": job_id, "records": records}
 
 
+@app.get("/api/admin/transcripts", operation_id="listSessionTranscripts")
+async def list_session_transcripts(
+    request: Request,
+    job_id: str = Query("", description="Filter to transcripts of one run"),
+) -> dict[str, Any]:
+    """List recorded pi-sidecar session transcripts with business context.
+
+    Admin only — transcripts contain full (redacted) prompt/response/tool
+    content. ``job_id`` filters to sessions whose ``ai_token_usage`` rows
+    belong to that run (join via session_id, #328).
+    """
+    _require_admin(request)
+
+    infos = await asyncio.to_thread(sidecar_transcripts.list_transcripts)
+    if job_id:
+        usage_rows = await storage.get_token_usage_for_job(job_id)
+        job_sessions = {
+            row["session_id"] for row in usage_rows if row.get("session_id")
+        }
+        infos = [info for info in infos if info.session_id in job_sessions]
+
+    usage_context = await storage.get_usage_context_for_sessions(
+        [info.session_id for info in infos]
+    )
+    chat_context = await storage.get_chat_context_for_sessions(
+        [info.session_id for info in infos]
+    )
+
+    items = []
+    for info in infos:
+        context: dict[str, Any] = {}
+        usage = usage_context.get(info.session_id)
+        if usage:
+            context.update(
+                {
+                    "job_id": usage.get("job_id", ""),
+                    "call_type": usage.get("call_type", ""),
+                    "ai_provider": usage.get("ai_provider", ""),
+                    "ai_model": usage.get("ai_model", ""),
+                    "total_tokens": usage.get("total_tokens", 0),
+                }
+            )
+        chat = chat_context.get(info.session_id)
+        if chat:
+            context.update(
+                {
+                    "chat_username": chat.get("username", ""),
+                    "chat_last_activity": chat.get("last_activity", ""),
+                }
+            )
+        items.append(transcript_summary(info, context))
+
+    live_recording = await sidecar_transcripts.live_recording_enabled()
+    return strip_sensitive_from_response(
+        {
+            # Live sidecar state when reachable; the setting value otherwise.
+            # None (unreachable) is distinct from False (recording off).
+            "recording_enabled": (
+                get_settings().record_transcripts
+                if live_recording is None
+                else live_recording
+            ),
+            "count": len(items),
+            "items": items,
+        }
+    )
+
+
+@app.get(
+    "/api/admin/transcripts/{session_id}", operation_id="downloadSessionTranscript"
+)
+async def download_session_transcript(
+    request: Request,
+    session_id: str,
+) -> Response:
+    """Download one session transcript JSONL file. Admin only, streaming.
+
+    The session_id is validated against the strict UUID pattern before any
+    filesystem access — a malformed value can never traverse paths. Full
+    content, never truncated.
+    """
+    _require_admin(request)
+
+    path = transcript_path(session_id)
+    if path is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid session id — expected a sidecar session UUID",
+        )
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Transcript not found")
+
+    # Sync generator: Starlette iterates sync generators in a threadpool, so
+    # blocking chunk reads never stall the event loop.
+    def file_stream() -> Iterator[bytes]:
+        with path.open("rb") as handle:
+            while chunk := handle.read(64 * 1024):
+                yield chunk
+
+    return StreamingResponse(
+        file_stream(),
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": f'attachment; filename="{session_id}.jsonl"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @app.post("/api/admin/users/create", operation_id="adminCreateUserEndpoint")
 async def admin_create_user_endpoint(
     request: Request, body: AdminCreateUserRequest
@@ -11673,6 +11818,19 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     if cache_updates:
         update_db_settings_cache(cache_updates)
 
+    # Persist the transcript recording switch for the container entrypoint —
+    # the sidecar reads RECORD_TRANSCRIPTS from its process env at start, so
+    # the bridge file is how a DB toggle reaches it after a restart.
+    warnings: list[str] = []
+    if "record_transcripts" in settings_updates:
+        synced = await _apply_transcript_recording_setting()
+        if not synced:
+            warnings.append(
+                "record_transcripts was saved, but the running sidecar could "
+                "not be updated — it applies after a restart or a later "
+                "successful sync"
+            )
+
     _broadcast_settings_change()
 
     logger.info(
@@ -11681,8 +11839,11 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         username,
     )
 
+    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
+    if warnings:
+        content["warnings"] = warnings
     return JSONResponse(
-        content={"updated": list(settings_updates.keys())},
+        content=content,
         status_code=200,
     )
 
@@ -11724,11 +11885,27 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     # Remove from in-memory cache so get_settings() falls back to env/default
     remove_from_db_settings_cache([key])
 
+    # Keep the sidecar transcript env bridge in sync with the reset — the
+    # bridge must stop assigning the removed override so the deployment
+    # environment controls the sidecar again, and the runtime override is
+    # dropped so the boot env governs immediately.
+    content: dict[str, Any] = {"reset": key}
+    if key == "record_transcripts":
+        synced = await _apply_transcript_recording_setting()
+        if not synced:
+            content["warnings"] = [
+                (
+                    "record_transcripts was reset, but the running sidecar could "
+                    "not be updated — it keeps its current recording state until "
+                    "a restart or a later successful sync"
+                )
+            ]
+
     _broadcast_settings_change()
 
     logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
 
-    return JSONResponse(content={"reset": key})
+    return JSONResponse(content=content)
 
 
 # -- Job Metadata Endpoints ---------------------------------------------------

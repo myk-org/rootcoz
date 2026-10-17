@@ -595,6 +595,9 @@ async def test_real_sidecar_http_error_never_logs_user_key(
     [
         ("session not found: review%2Fkey", "session not found"),
         ("not authenticated: review%2Fkey", "authentication required"),
+        # The sidecar's actual lost-session body carries the session UUID between
+        # the words; the retry signal must survive key redaction.
+        ("Session 3a67c516-a2ea-4cb0-869f-0c81a81932ac not found", "session not found"),
     ],
 )
 async def test_keyed_failure_preserves_safe_retry_and_auth_signal(
@@ -611,6 +614,34 @@ async def test_keyed_failure_preserves_safe_retry_and_auth_signal(
     )
     result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
     assert result.text == result.error == expected
+
+
+@pytest.mark.asyncio
+async def test_failed_keyed_call_keeps_transcript_session_id(monkeypatch):
+    """A failed one-shot call still correlates with its recorded transcript.
+
+    The redaction wrapper replaces the failed result; the non-dataclass
+    transcript id must survive that copy, and the usage recorder reads it
+    after session cleanup has cleared ``session_id``.
+    """
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="review/key"))
+
+    async def failing_user_session(*args, **kwargs):
+        result = AIResult(success=False, text="boom", error="boom", session_id="old")
+        result.transcript_session_id = "11111111-2222-3333-4444-555555555555"
+        return result
+
+    monkeypatch.setattr(ai_client, "_call_user_session", failing_user_session)
+    result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+    assert result.success is False
+    assert result.session_id != "11111111-2222-3333-4444-555555555555"
+    assert (
+        getattr(result, "transcript_session_id", None)
+        == "11111111-2222-3333-4444-555555555555"
+    )
 
 
 @pytest.mark.asyncio
