@@ -363,6 +363,41 @@ class TestTranscriptEndpoints:
 
         assert Settings().record_transcripts is False
 
+    async def test_reset_setting_rewrites_bridge_without_override(
+        self, client, admin_headers, env_bridge, monkeypatch
+    ):
+        """DELETE /api/admin/settings/record_transcripts clears the bridge assignment."""
+        from rootcoz import storage
+
+        # Never touch a real sidecar from tests
+        sync_calls: list[bool | None] = []
+
+        async def fake_sync(enabled):
+            sync_calls.append(enabled)
+            return True
+
+        monkeypatch.setattr(transcripts_module, "sync_transcript_recording", fake_sync)
+
+        # Seed a DB override, then reset through the API
+        await storage.set_server_setting(
+            "record_transcripts", "true", updated_by="admin"
+        )
+        write_transcript_env_bridge(True)
+        assert "RECORD_TRANSCRIPTS=true" in env_bridge.read_text()
+
+        monkeypatch.setattr("rootcoz.main.sidecar_transcripts", transcripts_module)
+        resp = client.delete(
+            "/api/admin/settings/record_transcripts", headers=admin_headers
+        )
+        assert resp.status_code == 200
+        content = env_bridge.read_text()
+        # No assignment: the deployment environment controls the sidecar again
+        assert "RECORD_TRANSCRIPTS=" not in content
+        # The runtime override is dropped too — env governs immediately
+        assert sync_calls == [None]
+        # Successful sync → no warning in the response
+        assert "warnings" not in resp.json()
+
 
 class TestSessionIdRecording:
     """#328: usage rows carry the sidecar session id for transcript joins."""
@@ -467,38 +502,6 @@ class TestSessionIdRecording:
         context = await storage.get_chat_context_for_sessions([session])
         assert context[session]["username"] == "second-user"
 
-    async def test_reset_setting_rewrites_bridge_without_override(
-        self, client, admin_headers, env_bridge, monkeypatch
-    ):
-        """DELETE /api/admin/settings/record_transcripts clears the bridge assignment."""
-        from rootcoz import storage
-
-        # Never touch a real sidecar from tests
-        sync_calls: list[bool | None] = []
-
-        async def fake_sync(enabled):
-            sync_calls.append(enabled)
-
-        monkeypatch.setattr(transcripts_module, "sync_transcript_recording", fake_sync)
-
-        # Seed a DB override, then reset through the API
-        await storage.set_server_setting(
-            "record_transcripts", "true", updated_by="admin"
-        )
-        write_transcript_env_bridge(True)
-        assert "RECORD_TRANSCRIPTS=true" in env_bridge.read_text()
-
-        monkeypatch.setattr("rootcoz.main.sidecar_transcripts", transcripts_module)
-        resp = client.delete(
-            "/api/admin/settings/record_transcripts", headers=admin_headers
-        )
-        assert resp.status_code == 200
-        content = env_bridge.read_text()
-        # No assignment: the deployment environment controls the sidecar again
-        assert "RECORD_TRANSCRIPTS=" not in content
-        # The runtime override is dropped too — env governs immediately
-        assert sync_calls == [None]
-
 
 class TestRuntimeSync:
     """pi-sidecar >= 4.14.0 runtime toggle: no restart to change recording."""
@@ -578,3 +581,67 @@ class TestRuntimeSync:
             "rootcoz.ai_client.get_sidecar_client", lambda: FakeClient()
         )
         assert await transcripts_module.live_recording_enabled() is True
+
+
+class TestSyncFailureWarnings:
+    """A failed runtime sync must not silently report success (#329)."""
+
+    @pytest.fixture
+    def client(self, temp_db_path: Path, monkeypatch) -> Generator:
+        from tests.conftest import make_app_client
+
+        # Reachable sidecar whose toggle call always fails
+        async def failing_sync(enabled):
+            return False
+
+        monkeypatch.setattr(
+            transcripts_module, "sync_transcript_recording", failing_sync
+        )
+        monkeypatch.setattr(
+            transcripts_module, "live_recording_enabled", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr("rootcoz.main.sidecar_transcripts", transcripts_module)
+        yield from make_app_client(temp_db_path)
+
+    @pytest.fixture
+    def admin_headers(self, client) -> dict[str, str]:
+        from tests.conftest import admin_login
+
+        cookies = admin_login(client)
+        return {"Cookie": "; ".join(f"{k}={v}" for k, v in cookies.items())}
+
+    def test_put_warns_when_sync_fails(self, client, admin_headers):
+        resp = client.put(
+            "/api/admin/settings",
+            json={"settings": {"record_transcripts": True}},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["updated"] == ["record_transcripts"]
+        assert len(body["warnings"]) == 1
+        assert "sidecar could not be updated" in body["warnings"][0]
+
+    def test_reset_warns_when_sync_fails(self, client, admin_headers):
+        client.put(
+            "/api/admin/settings",
+            json={"settings": {"record_transcripts": True}},
+            headers=admin_headers,
+        )
+        resp = client.delete(
+            "/api/admin/settings/record_transcripts", headers=admin_headers
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["reset"] == "record_transcripts"
+        assert len(body["warnings"]) == 1
+        assert "sidecar could not be updated" in body["warnings"][0]
+
+    def test_no_warning_for_unrelated_settings(self, client, admin_headers):
+        resp = client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": 120}},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200
+        assert "warnings" not in resp.json()

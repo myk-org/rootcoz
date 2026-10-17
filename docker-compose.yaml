@@ -116,10 +116,12 @@ services:
       # ===================
       # Session Transcript Recording (pi-sidecar >= 4.12.0)
       # ===================
-      # RECORD_TRANSCRIPTS can also be toggled in Server Settings (restart
-      # required — rootcoz persists the value to /data/pi-sidecar/env, which
-      # the container entrypoint sources at startup; this env var wins on
-      # first boot). Transcripts land under /data and survive replacement.
+      # RECORD_TRANSCRIPTS can also be toggled in Server Settings — that
+      # applies immediately via the sidecar runtime toggle (pi-sidecar
+      # >= 4.14.0, no restart); rootcoz also persists the value to
+      # /data/pi-sidecar/env, which the container entrypoint sources at
+      # startup (this env var wins on first boot). Transcripts land under
+      # /data and survive replacement.
       - RECORD_TRANSCRIPTS=${RECORD_TRANSCRIPTS:-false}
       - PI_SIDECAR_TRANSCRIPTS_DIR=${PI_SIDECAR_TRANSCRIPTS_DIR:-/data/pi-sidecar/transcripts}
 

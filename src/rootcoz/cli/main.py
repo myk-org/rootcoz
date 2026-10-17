@@ -3809,7 +3809,7 @@ def transcripts_list_cmd(
         return
     if not data.get("recording_enabled"):
         typer.echo(
-            "Note: transcript recording is disabled (Server Settings → AI → Record transcripts, restart required)",
+            "Note: transcript recording is disabled (Server Settings → AI → Record transcripts — applies immediately, no restart)",
             err=True,
         )
     items = data.get("items", [])

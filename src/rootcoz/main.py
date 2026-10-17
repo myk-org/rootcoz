@@ -1567,13 +1567,18 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
         logger.exception("Failed to resume waiting jobs after startup")
 
 
-async def _apply_transcript_recording_setting() -> None:
+async def _apply_transcript_recording_setting() -> bool:
     """Persist + live-apply the record_transcripts DB state.
 
     An explicit DB override is bridged to the entrypoint AND pushed to the
     running sidecar through its runtime toggle (pi-sidecar >= 4.14.0 — no
     restart needed). Without an override nothing is assigned and the
     deployment environment governs, both on disk and at runtime.
+
+    Returns True when the runtime toggle reached the sidecar (or had nothing
+    to push); False when the sidecar was unreachable/rejected it — callers
+    surface that so admins know the change applies only after a restart or
+    a later successful sync.
     """
     from rootcoz.config import db_setting_is_set
 
@@ -1583,7 +1588,7 @@ async def _apply_transcript_recording_setting() -> None:
         else None
     )
     write_transcript_env_bridge(enabled)
-    await sidecar_transcripts.sync_transcript_recording(enabled)
+    return await sidecar_transcripts.sync_transcript_recording(enabled)
 
 
 @asynccontextmanager
@@ -11816,8 +11821,15 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     # Persist the transcript recording switch for the container entrypoint —
     # the sidecar reads RECORD_TRANSCRIPTS from its process env at start, so
     # the bridge file is how a DB toggle reaches it after a restart.
+    warnings: list[str] = []
     if "record_transcripts" in settings_updates:
-        await _apply_transcript_recording_setting()
+        synced = await _apply_transcript_recording_setting()
+        if not synced:
+            warnings.append(
+                "record_transcripts was saved, but the running sidecar could "
+                "not be updated — it applies after a restart or a later "
+                "successful sync"
+            )
 
     _broadcast_settings_change()
 
@@ -11827,8 +11839,11 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         username,
     )
 
+    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
+    if warnings:
+        content["warnings"] = warnings
     return JSONResponse(
-        content={"updated": list(settings_updates.keys())},
+        content=content,
         status_code=200,
     )
 
@@ -11874,14 +11889,23 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     # bridge must stop assigning the removed override so the deployment
     # environment controls the sidecar again, and the runtime override is
     # dropped so the boot env governs immediately.
+    content: dict[str, Any] = {"reset": key}
     if key == "record_transcripts":
-        await _apply_transcript_recording_setting()
+        synced = await _apply_transcript_recording_setting()
+        if not synced:
+            content["warnings"] = [
+                (
+                    "record_transcripts was reset, but the running sidecar could "
+                    "not be updated — it keeps its current recording state until "
+                    "a restart or a later successful sync"
+                )
+            ]
 
     _broadcast_settings_change()
 
     logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
 
-    return JSONResponse(content={"reset": key})
+    return JSONResponse(content=content)
 
 
 # -- Job Metadata Endpoints ---------------------------------------------------
