@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { groupPeerRounds } from '../peerDebate'
-import type { PeerRound } from '@/types'
+import { groupPeerRounds, resolvedPeerConfigs } from '../peerDebate'
+import type { PeerRound, AnalysisResult } from '@/types'
 
 function makeRound(round: number, role: 'orchestrator' | 'peer', provider = 'claude'): PeerRound {
   return {
@@ -67,5 +67,57 @@ describe('groupPeerRounds', () => {
     expect(grouped).toHaveLength(1)
     expect(grouped[0].round).toBe(1)
     expect(grouped[0].entries).toHaveLength(1)
+  })
+})
+
+describe('resolvedPeerConfigs', () => {
+  const failureWithDebate = (provider: string): object => ({
+    test_name: `test-${provider}`,
+    peer_debate: {
+      rounds: [makeRound(1, 'orchestrator', 'claude'), makeRound(1, 'peer', provider)],
+    },
+  })
+
+  it('collects unique peer pairs from top-level failures', () => {
+    const result = {
+      failures: [failureWithDebate('openai'), failureWithDebate('openai')],
+    } as unknown as AnalysisResult
+    expect(resolvedPeerConfigs(result)).toEqual([
+      { ai_provider: 'openai', ai_model: 'test-model' },
+    ])
+  })
+
+  it('collects peer pairs from nested failed_children at any depth', () => {
+    const result = {
+      failures: [],
+      child_job_analyses: [
+        {
+          job_name: 'child',
+          failures: [],
+          failed_children: [
+            {
+              job_name: 'grandchild',
+              failures: [failureWithDebate('gemini')],
+              failed_children: [
+                {
+                  job_name: 'great-grandchild',
+                  failures: [failureWithDebate('cursor')],
+                  failed_children: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    } as unknown as AnalysisResult
+    expect(resolvedPeerConfigs(result)).toEqual([
+      { ai_provider: 'gemini', ai_model: 'test-model' },
+      { ai_provider: 'cursor', ai_model: 'test-model' },
+    ])
+  })
+
+  it('returns empty when no debates exist', () => {
+    const result = { failures: [{ test_name: 'x' }] } as unknown as AnalysisResult
+    expect(resolvedPeerConfigs(result)).toEqual([])
   })
 })
