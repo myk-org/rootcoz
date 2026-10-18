@@ -531,6 +531,19 @@ class TestHealthEndpoint:
         assert payload["version"] == "4.7.2"
         assert [r["version"] for r in payload["releases"]] == ["4.7.1", "4.7.2"]
 
+    def test_releases_payload_unparseable_tag_never_becomes_latest(self) -> None:
+        """An unparseable tag must not hide available updates (#341)."""
+        from rootcoz import main
+
+        releases = [_gh_release("not-a-version"), _gh_release("v4.7.2")]
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload(releases)
+        assert payload["version"] == "4.7.2"
+        assert payload["update_available"] is True
+        # Aggregate keeps only strictly-newer entries — the unparseable tag
+        # is indeterminate, so it never appears among them
+        assert [r["version"] for r in payload["releases"]] == ["4.7.2"]
+
     def test_releases_latest_endpoint_fetches_list_and_filters(
         self, test_client
     ) -> None:

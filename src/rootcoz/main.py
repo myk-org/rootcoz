@@ -10217,11 +10217,12 @@ def _release_sort_key(
     """
     parsed = _parse_version(entry["version"])
     if parsed is None:
-        return (1, (), ())
+        # Rank 0 loses to any parseable version under the descending sort
+        return (0, (), ())
     numbers, prerelease = parsed
     # A release (no prerelease) sorts above any prerelease of the same numbers
     pre_key = (1,) if prerelease is None else (0, *prerelease)
-    return (0, _padded(numbers, width), pre_key)
+    return (1, _padded(numbers, width), pre_key)
 
 
 def _release_payload(
