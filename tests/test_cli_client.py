@@ -3188,6 +3188,15 @@ class TestRootCozClientTranscripts:
             "html_url": "https://github.com/myk-org/rootcoz/releases/tag/v4.7.0",
             "server_version": "4.6.0",
             "update_available": True,
+            "releases": [
+                {
+                    "version": "4.6.1",
+                    "name": "v4.6.1",
+                    "body": "- **Fix** — something (#2)",
+                    "published_at": "2026-10-16T00:00:00Z",
+                    "html_url": "https://github.com/myk-org/rootcoz/releases/tag/v4.6.1",
+                }
+            ],
         }
 
         def handler(request):
@@ -3200,3 +3209,5 @@ class TestRootCozClientTranscripts:
         assert result["version"] == "4.7.0"
         assert result["server_version"] == "4.6.0"
         assert result["update_available"] is True
+        # The new #341 releases array passes through without breaking the CLI
+        assert result["releases"][0]["version"] == "4.6.1"

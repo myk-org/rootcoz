@@ -10086,10 +10086,19 @@ async def prometheus_metrics() -> Response:
     )
 
 
-# Module-level cache for GitHub release data
+# Module-level cache for GitHub release data (raw filtered release list)
 _release_cache: dict[str, Any] = {}
 _RELEASE_CACHE_TTL = 3600  # 1 hour
 _release_cache_lock = asyncio.Lock()
+
+# The release list endpoint and payload shaping constants (#341)
+_RELEASES_LIST_URL = "https://api.github.com/repos/myk-org/rootcoz/releases"
+_RELEASES_PER_PAGE = 20
+_RELEASES_PAYLOAD_BOUND = 15
+# Enough eligible releases to fill the aggregate plus the latest slot
+_RELEASES_FETCH_TARGET = _RELEASES_PAYLOAD_BOUND + 1
+# Hard cap on the page walk so a repo of only drafts/prereleases terminates
+_RELEASES_MAX_PAGES = 5
 
 
 _VERSION_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:([.\-])(.+))?(?:\+(.*))?$")
@@ -10198,75 +10207,163 @@ def _is_same_release(release_version: str, server_version: str) -> bool | None:
     return _compare_prerelease(release[1], server[1]) == 0
 
 
+def _release_sort_key(
+    entry: dict[str, Any], width: int
+) -> tuple[int, tuple[int, ...], tuple[Any, ...]]:
+    """Rank a release entry for a newest-first sort; unparseable last.
+
+    GitHub lists releases by publication date, not version order (#341) —
+    an out-of-order publish must not misreport the latest release.
+    """
+    parsed = _parse_version(entry["version"])
+    if parsed is None:
+        # Rank 0 loses to any parseable version under the descending sort
+        return (0, (), ())
+    numbers, prerelease = parsed
+    # A release (no prerelease) sorts above any prerelease of the same numbers
+    pre_key = (1,) if prerelease is None else (0, *prerelease)
+    return (1, _padded(numbers, width), pre_key)
+
+
 def _release_payload(
-    release_version: str, name: str, body: str, published_at: str, html_url: str
+    releases: list[dict[str, Any]], since: str | None = None
 ) -> dict[str, Any]:
-    """Build the /api/releases/latest payload with server-version context."""
+    """Build the /api/releases/latest payload from a release list.
+
+    Top-level fields describe the newest release (unchanged shape, #333);
+    ``releases`` aggregates every release strictly newer than the baseline,
+    oldest→newest, bounded at 15 entries (#341). The baseline is the running
+    server version in update-nag mode (a stale ``since`` must not resurface
+    already-installed releases); otherwise the older of ``since`` (when
+    parseable) and the server version — a ``since`` newer than the server
+    (browser saved a higher version, server rolled back) is clamped down so
+    releases between the two are not skipped.
+    """
     server_version = _get_app_version()
+    entries = [
+        {
+            # GitHub can send explicit JSON nulls — normalize so the
+            # frontend never trips on them (#341)
+            "version": (r.get("tag_name") or "").lstrip("v"),
+            "name": r.get("name") or "",
+            "body": r.get("body") or "",
+            "published_at": r.get("published_at") or "",
+            "html_url": r.get("html_url") or "",
+        }
+        for r in releases
+    ]
+    width = max(
+        (len(p[0]) for e in entries if (p := _parse_version(e["version"]))),
+        default=0,
+    )
+    # Stable newest-first sort: unparseable and equal versions keep API order
+    entries.sort(key=lambda e: _release_sort_key(e, width), reverse=True)
+    latest = (
+        entries[0]
+        if entries
+        else {
+            "version": "",
+            "name": "",
+            "body": "",
+            "published_at": "",
+            "html_url": "",
+        }
+    )
+    if _is_newer_release(latest["version"], server_version):
+        # Update nag: only what the running server is missing (#341)
+        baseline = server_version
+    elif (
+        since and _parse_version(since) and not _is_newer_release(since, server_version)
+    ):
+        baseline = since
+    else:
+        baseline = server_version
+    newer = [e for e in entries if _is_newer_release(e["version"], baseline)]
+    # The list is newest-first: keep the newest 15, then flip to oldest-first
+    newer = list(reversed(newer[:_RELEASES_PAYLOAD_BOUND]))
     return {
-        "version": release_version,
-        "name": name,
-        "body": body,
-        "published_at": published_at,
-        "html_url": html_url,
+        "version": latest["version"],
+        "name": latest["name"],
+        "body": latest["body"],
+        "published_at": latest["published_at"],
+        "html_url": latest["html_url"],
         "server_version": server_version,
         # The What's New dialog must not advertise features the running
         # server does not have (#333) — compare against the running version.
         # None = indeterminate (unparseable version), never a definite nag.
-        "update_available": _is_newer_release(release_version, server_version),
+        "update_available": _is_newer_release(latest["version"], server_version),
         # Explicit equivalence decision so the dialog never string-compares
         # versions: 4.7 and 4.7.0 are the same release. None = indeterminate.
-        "running_latest": _is_same_release(release_version, server_version),
+        "running_latest": _is_same_release(latest["version"], server_version),
+        "releases": newer,
     }
 
 
 @app.get("/api/releases/latest", operation_id="getLatestRelease")
-async def get_latest_release() -> JSONResponse:
+async def get_latest_release(since: str | None = None) -> JSONResponse:
     """Return the latest GitHub release info (cached for 1 hour).
 
-    Used by the What's New dialog. Falls back gracefully if GitHub is unreachable.
+    Used by the What's New dialog. ``since`` sets the aggregation baseline
+    for the ``releases`` array (#341); it defaults to the running server
+    version. Falls back gracefully if GitHub is unreachable.
     """
+
+    def _cached_response(now: float) -> JSONResponse | None:
+        cached = _release_cache.get("releases")
+        if cached is not None and (
+            now - _release_cache.get("fetched_at", 0) < _RELEASE_CACHE_TTL
+        ):
+            return JSONResponse(content=_release_payload(cached, since))
+        return None
+
     now = _time.monotonic()
-    if (
-        _release_cache
-        and now - _release_cache.get("fetched_at", 0) < _RELEASE_CACHE_TTL
-    ):
-        return JSONResponse(content=_release_cache["data"])
+    if (hit := _cached_response(now)) is not None:
+        return hit
 
     async with _release_cache_lock:
         # Re-check after acquiring lock (another request may have refreshed)
         now = _time.monotonic()
-        if (
-            _release_cache
-            and now - _release_cache.get("fetched_at", 0) < _RELEASE_CACHE_TTL
-        ):
-            return JSONResponse(content=_release_cache["data"])
+        if (hit := _cached_response(now)) is not None:
+            return hit
 
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    "https://api.github.com/repos/myk-org/rootcoz/releases/latest",
-                    headers={"Accept": "application/vnd.github.v3+json"},
-                )
-                resp.raise_for_status()
-                release = resp.json()
-                data = _release_payload(
-                    release_version=release.get("tag_name", "").lstrip("v"),
-                    name=release.get("name", ""),
-                    body=release.get("body", ""),
-                    published_at=release.get("published_at", ""),
-                    html_url=release.get("html_url", ""),
-                )
-                _release_cache["data"] = data
-                _release_cache["fetched_at"] = now
-                return JSONResponse(content=data)
+                # Walk pages until enough ELIGIBLE (non-draft, non-prerelease)
+                # releases are collected: a page full of drafts/prereleases
+                # must not starve the stable list (#341)
+                releases: list[dict[str, Any]] = []
+                for page in range(1, _RELEASES_MAX_PAGES + 1):
+                    resp = await client.get(
+                        _RELEASES_LIST_URL,
+                        params={
+                            "per_page": _RELEASES_PER_PAGE,
+                            "page": page,
+                        },
+                        headers={"Accept": "application/vnd.github.v3+json"},
+                    )
+                    resp.raise_for_status()
+                    batch = resp.json()
+                    releases.extend(
+                        r
+                        for r in batch
+                        if not r.get("draft") and not r.get("prerelease")
+                    )
+                    if (
+                        len(batch) < _RELEASES_PER_PAGE
+                        or len(releases) >= _RELEASES_FETCH_TARGET
+                    ):
+                        break
+            _release_cache["releases"] = releases
+            _release_cache["fetched_at"] = now
+            logger.info("Fetched %d GitHub releases", len(releases))
+            return JSONResponse(content=_release_payload(releases, since))
         except Exception:
-            logger.debug("Failed to fetch latest GitHub release", exc_info=True)
-            if _release_cache.get("data"):
-                return JSONResponse(content=_release_cache["data"])
-            return JSONResponse(
-                content=_release_payload("", "", "", "", ""),
-            )
+            logger.debug("Failed to fetch GitHub releases", exc_info=True)
+            if _release_cache.get("releases") is not None:
+                return JSONResponse(
+                    content=_release_payload(_release_cache["releases"], since)
+                )
+            return JSONResponse(content=_release_payload([]))
 
 
 @app.get("/favicon.ico", include_in_schema=False)
