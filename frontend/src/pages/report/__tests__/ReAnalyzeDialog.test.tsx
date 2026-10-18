@@ -21,6 +21,7 @@ vi.mock('@/lib/useProviderOptions', () => ({
     providers: {
       claude: [{ id: 'claude-sonnet-4', name: 'Sonnet 4', provider: 'claude', credential_sources: ['user'], verified: true }],
       openai: [{ id: 'gpt-5', name: 'GPT-5', provider: 'openai', credential_sources: ['user'], verified: true }],
+      gemini: [{ id: 'gemini-3', name: 'Gemini 3', provider: 'gemini', credential_sources: ['user'], verified: true }],
     },
     providerStatus: {},
   }),
@@ -80,13 +81,13 @@ describe('ReAnalyzeDialog', () => {
     expect(screen.queryByText(/claude/i)).not.toBeInTheDocument()
   })
 
-  it('defers to server resolution when no provider/model is known: submit allowed, body omits them', async () => {
+  it('defers to server resolution when no provider/model is known but a tests repo can resolve: submit allowed, body omits them', async () => {
     mockPost.mockResolvedValue({ job_id: 'job-2' })
     const empty = {
       ...result,
       ai_provider: '',
       ai_model: '',
-      request_params: {},
+      request_params: { tests_repo_url: 'https://github.com/org/repo' },
     } as unknown as AnalysisResult
     render(<ReAnalyzeDialog open onOpenChange={() => {}} result={empty} jobId="job-1" />)
     fireEvent.click(screen.getByRole('button', { name: /re-analyze/i }))
@@ -95,6 +96,18 @@ describe('ReAnalyzeDialog', () => {
     const body = submittedBody()
     expect(body).not.toHaveProperty('ai_provider')
     expect(body).not.toHaveProperty('ai_model')
+  })
+
+  it('blocks an empty provider/model when no tests repo can resolve them (backend would 400)', () => {
+    const empty = {
+      ...result,
+      ai_provider: '',
+      ai_model: '',
+      request_params: {},
+    } as unknown as AnalysisResult
+    render(<ReAnalyzeDialog open onOpenChange={() => {}} result={empty} jobId="job-1" />)
+    expect(screen.getByRole('button', { name: /re-analyze/i })).toBeDisabled()
+    expect(mockPost).not.toHaveBeenCalled()
   })
 
   it('keeps explicit request_params as the prefill source', () => {
@@ -142,5 +155,40 @@ describe('ReAnalyzeDialog', () => {
     render(<ReAnalyzeDialog open onOpenChange={() => {}} result={emptyPeers} jobId="job-1" />)
     expect(screen.getByRole('button', { name: /re-analyze/i })).toBeDisabled()
     expect(mockPost).not.toHaveBeenCalled()
+  })
+
+  it('replays resolved peer configs from peer_debate rounds when request params omitted them', async () => {
+    mockPost.mockResolvedValue({ job_id: 'job-2' })
+    const peerResolved = {
+      ...result,
+      ai_provider: 'claude',
+      ai_model: 'claude-sonnet-4',
+      request_params: {},
+      failures: [
+        {
+          test_name: 'test-x',
+          peer_debate: {
+            rounds_used: 1,
+            max_rounds: 3,
+            rounds: [
+              { round: 1, ai_provider: 'claude', ai_model: 'claude-sonnet-4', role: 'orchestrator', agrees_with_orchestrator: true },
+              { round: 1, ai_provider: 'openai', ai_model: 'gpt-5', role: 'peer', agrees_with_orchestrator: true },
+              { round: 1, ai_provider: 'openai', ai_model: 'gpt-5', role: 'peer', agrees_with_orchestrator: false },
+              { round: 1, ai_provider: 'gemini', ai_model: 'gemini-3', role: 'peer', agrees_with_orchestrator: true },
+            ],
+          },
+        },
+      ],
+    } as unknown as AnalysisResult
+    render(<ReAnalyzeDialog open onOpenChange={() => {}} result={peerResolved} jobId="job-1" />)
+    // Two unique peer pairs from the debate (orchestrator pair excluded, duplicate collapsed)
+    expect(screen.getByTestId('provider-Peer 1 provider')).toHaveTextContent('openai')
+    expect(screen.getByTestId('provider-Peer 2 provider')).toHaveTextContent('gemini')
+    fireEvent.click(screen.getByRole('button', { name: /re-analyze/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1))
+    expect(submittedBody().peer_ai_configs).toEqual([
+      { ai_provider: 'openai', ai_model: 'gpt-5' },
+      { ai_provider: 'gemini', ai_model: 'gemini-3' },
+    ])
   })
 })

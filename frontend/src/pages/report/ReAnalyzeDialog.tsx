@@ -19,6 +19,7 @@ import { FieldLabel } from '@/components/shared/FieldLabel'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { isAnalysisFormAiUnavailable, completeAiPairOverride } from '@/lib/analysisAi'
+import { resolvedPeerConfigs } from '@/lib/peerDebate'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -38,6 +39,10 @@ interface ReAnalyzeDialogProps {
 }
 
 function initFormState(p: AnalysisResult['request_params'], result: AnalysisResult) {
+  // Resolved peer pairs actually used by the completed analysis — replay them
+  // when the request params omitted peer configs (same params → result → empty
+  // chain as the primary provider/model).
+  const resolvedPeers = resolvedPeerConfigs(result)
   return {
     // No hardcoded fallback: explicit request params win, then the values the
     // server actually resolved for the original analysis, else empty (deferred
@@ -47,8 +52,12 @@ function initFormState(p: AnalysisResult['request_params'], result: AnalysisResu
     forceServerCredentials: p?.force_server_credentials === true,
     aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
-    enablePeers: !!(p?.peer_ai_configs?.length),
-    peerConfigs: (p?.peer_ai_configs || []).map(c => ({
+    enablePeers: !!(p?.peer_ai_configs?.length) || resolvedPeers.length > 0,
+    peerConfigs: (
+      p?.peer_ai_configs?.length
+        ? p.peer_ai_configs
+        : resolvedPeers
+    ).map(c => ({
       ...c,
       ai_provider: c.ai_provider ? normalizeProvider(c.ai_provider) : '',
       id: crypto.randomUUID(),
@@ -130,9 +139,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
 
-  // Defer exactly like the submit form: only a fully empty primary defers to
-  // the server-side resolution chain; a partial selection must still validate.
-  const deferPrimary = !aiProvider.trim() && !aiModel.trim()
+  // Defer exactly like the submit form (deferAiToTestsRepo): an empty pair
+  // defers to the server-side resolution chain ONLY when a tests repo can
+  // supply .rootcoz/settings.json after clone — otherwise the backend would
+  // reject the request (no resolution source), so the user must pick.
+  const deferPrimary = !!testsRepoUrl.trim() && !aiProvider.trim() && !aiModel.trim()
   // Empty peer rows carry no selection; they are dropped from the submitted
   // configs, so they must not block validation either. Zero active peers while
   // peer review is enabled still blocks, as on the submit form.
