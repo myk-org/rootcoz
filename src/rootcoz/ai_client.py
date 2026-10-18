@@ -142,33 +142,41 @@ class InactiveServerProviderError(ValueError):
     """Server credentials for this provider are deactivated (ACTIVE_SERVER_PROVIDERS)."""
 
 
-def _fold_provider_name(provider: str) -> str:
-    """Casefolded canonical public name for membership comparisons only.
-
-    Unknown/custom catalog providers pass through :func:`public_provider_name`
-    unchanged (``MyGateway`` stays ``MyGateway`` for display), so the admin
-    restriction list and the catalog can disagree on case alone.  Membership
-    tests fold both sides to lowercase; display paths must NOT use this.
-    """
-    return public_provider_name(provider).lower()
-
-
-def active_server_provider_ids() -> frozenset[str] | None:
-    """Admin-selected active server providers (casefolded); None = all.
+def _active_server_provider_entries() -> frozenset[str] | None:
+    """Admin-selected active server providers (public-normalized); None = all.
 
     Each saved entry is normalized through :func:`public_provider_name`, so a
     public picker name (``claude``) and a legacy catalog ID (``cli-claude``)
     saved by an earlier admin both resolve to the same canonical form that
-    catalog-provider comparisons use.  Names are then lowercased so saved
-    entries match custom catalog providers regardless of spelling case.
+    catalog-provider comparisons use.  Case is preserved here; resolving it
+    against the catalog is :func:`is_server_provider_active`'s job.
     """
     from rootcoz.config import get_settings
 
     raw = get_settings().active_server_providers
-    ids = frozenset(
-        _fold_provider_name(part.strip()) for part in raw.split(",") if part.strip()
+    entries = frozenset(
+        public_provider_name(part.strip()) for part in raw.split(",") if part.strip()
     )
-    return ids or None
+    return entries or None
+
+
+def _catalog_public_provider_names() -> frozenset[str] | None:
+    """Public provider names in the last-known catalog snapshot, or None.
+
+    Membership checks run synchronously (grant guards call them directly),
+    so they cannot await the live catalog; they resolve against
+    ``_model_catalog_cache``, which the async catalog paths keep current.
+    ``None`` means no catalog is known yet and resolution falls back to
+    plain case-insensitive matching.
+    """
+    cache = _model_catalog_cache
+    if cache is None:
+        return None
+    return frozenset(
+        public_provider_name(provider)
+        for entry in cache
+        if isinstance(provider := entry.get("provider"), str) and provider
+    )
 
 
 def is_server_provider_active(provider: str) -> bool:
@@ -177,12 +185,42 @@ def is_server_provider_active(provider: str) -> bool:
     Both sides of the comparison go through :func:`public_provider_name`:
     admins save public picker names (``claude``) while catalog and grant paths
     hold raw provider IDs (``cli-claude``) — one canonical form matches both.
-    The comparison is case-insensitive for custom providers whose saved
-    spelling may differ in case from the catalog's (``mygateway`` vs
-    ``MyGateway``); display spelling is never affected.
+    Saved entries are resolved against the current catalog before matching:
+    an exact match wins, a unique case-insensitive match resolves to that
+    catalog provider, and an ambiguous match (two catalog providers differing
+    only in case, e.g. ``Foo`` and ``foo`` registered as distinct providers)
+    stays unresolved so selecting one never activates the other.  Only when
+    the queried provider's case-insensitive match is unambiguous does the
+    saved spelling's case stop mattering (``mygateway`` vs ``MyGateway``);
+    display spelling is never affected.
     """
-    active = active_server_provider_ids()
-    return active is None or _fold_provider_name(provider) in active
+    entries = _active_server_provider_entries()
+    if entries is None:
+        return True
+    query = public_provider_name(provider)
+    catalog = _catalog_public_provider_names()
+    resolved: set[str] = set()
+    by_fold: dict[str, set[str]] = {}
+    if catalog is not None:
+        for name in catalog:
+            by_fold.setdefault(name.lower(), set()).add(name)
+        for entry in entries:
+            if entry in catalog:
+                resolved.add(entry)
+            elif len(matches := by_fold.get(entry.lower(), ())) == 1:
+                resolved.add(next(iter(matches)))
+    if query in resolved:
+        return True
+    # Two or more catalog providers differing only in case are distinct
+    # providers: a case-insensitive match cannot tell them apart, so only
+    # the exact (resolved) match above may activate the queried one.
+    if len(by_fold.get(query.lower(), ())) > 1:
+        logger.debug(
+            "active_server_providers: case-ambiguous provider=%s requires exact match",
+            provider,
+        )
+        return False
+    return query.lower() in {entry.lower() for entry in entries}
 
 
 def _raise_inactive_server_provider(provider: str) -> None:
@@ -637,7 +675,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     except sqlite3.Error, OSError, RuntimeError, ValueError, KeyError, TypeError:
         allowed = False
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
-    active = active_server_provider_ids()
+    active = _active_server_provider_entries()
     if active is not None:
         logger.debug("active_server_providers filtering active: %s", sorted(active))
     for provider, entries in build_friendly_catalog(catalog).items():

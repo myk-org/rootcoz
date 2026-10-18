@@ -29,15 +29,17 @@ def _set_active(monkeypatch, value: str) -> None:
 
 
 def _catalog(monkeypatch, *providers: str) -> None:
+    entries = [
+        {"provider": provider, "id": f"{provider}-model", "name": provider}
+        for provider in providers
+    ]
+    # Keep the module's sync catalog snapshot in sync with the mocked async
+    # catalog: membership resolution reads the snapshot, not the mock.
+    ai_client.update_model_catalog(entries)
     monkeypatch.setattr(
         ai_client,
         "_get_model_catalog",
-        AsyncMock(
-            return_value=[
-                {"provider": provider, "id": f"{provider}-model", "name": provider}
-                for provider in providers
-            ]
-        ),
+        AsyncMock(return_value=entries),
     )
 
 
@@ -263,6 +265,67 @@ async def test_case_insensitive_match_for_custom_providers(monkeypatch):
     _set_active(monkeypatch, "MyGateway")
     scoped = await ai_client.scoped_models()
     assert scoped["mygateway"][0]["credential_sources"] == ["server"]
+    assert "openai" not in scoped
+
+
+@pytest.mark.asyncio
+async def test_case_distinct_catalog_providers_not_collapsed(monkeypatch):
+    """Selecting only 'foo' must not activate a distinct catalog provider 'Foo'.
+
+    When the catalog registers case-DISTINCT providers (``Foo`` and ``foo``
+    as separate providers), blanket lowercasing would collapse them into one
+    allowlist entry and silently grant the unselected one server-credential
+    access. Resolution must stay exact for such providers.
+    """
+    _catalog(monkeypatch, "Foo", "foo")
+    _set_active(monkeypatch, "foo")
+    assert not ai_client.is_server_provider_active("Foo")
+    assert ai_client.is_server_provider_active("foo")
+    scoped = await ai_client.scoped_models()
+    assert "Foo" not in scoped
+    assert scoped["foo"][0]["credential_sources"] == ["server"]
+
+
+@pytest.mark.asyncio
+async def test_case_distinct_providers_both_selected_stay_active(monkeypatch):
+    """Selecting both case-distinct providers keeps both active."""
+    _catalog(monkeypatch, "Foo", "foo")
+    _set_active(monkeypatch, "foo,Foo")
+    assert ai_client.is_server_provider_active("Foo")
+    assert ai_client.is_server_provider_active("foo")
+    scoped = await ai_client.scoped_models()
+    assert scoped["Foo"][0]["credential_sources"] == ["server"]
+    assert scoped["foo"][0]["credential_sources"] == ["server"]
+
+
+@pytest.mark.asyncio
+async def test_unique_case_variant_still_matches_case_insensitively(monkeypatch):
+    """R5 regression: 'mygateway' keeps a sole 'MyGateway' catalog provider active.
+
+    A single case-variant in the catalog resolves uniquely, so the saved
+    spelling's case still does not matter — the round-6 exactness fix must
+    not reintroduce the round-5 bug.
+    """
+    _catalog(monkeypatch, "MyGateway")
+    _set_active(monkeypatch, "mygateway")
+    assert ai_client.is_server_provider_active("MyGateway")
+    assert ai_client.is_server_provider_active("mygateway")
+    scoped = await ai_client.scoped_models()
+    assert scoped["MyGateway"][0]["credential_sources"] == ["server"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_saved_entry_restricts_nothing_new(monkeypatch):
+    """A saved entry with no catalog match keeps the pre-existing behavior.
+
+    An unknown entry stays unresolved and only ever matches itself; it must
+    not restrict (or activate) catalog providers it does not name.
+    """
+    _catalog(monkeypatch, "openai")
+    _set_active(monkeypatch, "nonexistent")
+    assert ai_client.is_server_provider_active("nonexistent")
+    assert not ai_client.is_server_provider_active("openai")
+    scoped = await ai_client.scoped_models()
     assert "openai" not in scoped
 
 
