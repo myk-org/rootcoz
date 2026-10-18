@@ -170,12 +170,20 @@ _server_capable_cache: tuple[float, list[str]] | None = None
 _SERVER_CAPABLE_CACHE_TTL_SEC = 60.0
 
 
+def _invalidate_server_capable_cache() -> None:
+    """Drop cached settings picker options whenever the catalog changes."""
+    global _server_capable_cache
+    _server_capable_cache = None
+
+
 async def server_capable_providers() -> list[str]:
     """Provider IDs with server-credential models, for admin settings options.
 
     Both success and failure are cached for a short TTL: an unreachable
     sidecar must not slow (or queue behind the catalog lock on) every
-    admin settings page load.
+    admin settings page load. Only public names are ever returned —
+    internal ``cli-*``/``acpx-*`` catalog IDs map through
+    :func:`public_provider_name`, collapsing to one entry per name.
     """
     global _server_capable_cache
     now = time.monotonic()
@@ -186,7 +194,9 @@ async def server_capable_providers() -> list[str]:
         return _server_capable_cache[1]
     try:
         catalog = await _get_model_catalog()
-        providers = sorted(build_friendly_catalog(catalog))
+        providers = sorted(
+            {public_provider_name(p) for p in build_friendly_catalog(catalog)}
+        )
     except httpx.HTTPError, OSError, RuntimeError, ValueError:
         logger.warning("Unable to list server-capable providers for settings")
         providers = []
@@ -412,6 +422,7 @@ async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
         if generation != _model_catalog_generation:
             return _model_catalog_cache if _model_catalog_cache is not None else catalog
         _model_catalog_cache = catalog
+        _invalidate_server_capable_cache()
         logger.debug("Loaded Pi-sidecar model catalog: %d models", len(catalog))
         return catalog
 
@@ -421,6 +432,7 @@ def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
     global _model_catalog_cache, _model_catalog_generation
     _model_catalog_generation += 1
     _model_catalog_cache = models
+    _invalidate_server_capable_cache()
 
 
 async def registered_provider_ids() -> set[str] | None:

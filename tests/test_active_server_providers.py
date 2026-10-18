@@ -199,3 +199,55 @@ async def test_free_pair_on_inactive_provider_not_usable(tmp_path, monkeypatch):
         await ai_client.require_server_provider_grant("gemini", "any-model")
     finally:
         ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_server_capable_providers_returns_public_names(monkeypatch):
+    """Settings picker options never leak internal cli-* catalog IDs."""
+    _catalog(monkeypatch, "cli-claude", "cli-gemini", "cli-cursor", "openai")
+    assert await ai_client.server_capable_providers() == [
+        "claude",
+        "cursor",
+        "gemini",
+        "openai",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_server_capable_providers_dedupes_internal_and_canonical(monkeypatch):
+    """An internal and a canonical ID for the same provider yield one entry."""
+    _catalog(monkeypatch, "cli-claude", "claude", "acpx-cursor")
+    assert await ai_client.server_capable_providers() == ["claude", "cursor"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_update_invalidates_server_capable_cache(monkeypatch):
+    """update_model_catalog() refreshes picker options without the 60s TTL wait."""
+    ai_client.update_model_catalog(None)
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(return_value=[{"provider": "openai", "id": "m", "name": "m"}]),
+    )
+    assert await ai_client.server_capable_providers() == ["openai"]
+    ai_client.update_model_catalog([{"provider": "cli-cursor", "id": "m", "name": "m"}])
+    assert await ai_client.server_capable_providers() == ["cursor"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_refresh_invalidates_server_capable_cache(monkeypatch):
+    """A catalog refresh (not just replacement) also drops the picker cache."""
+    ai_client.update_model_catalog(None)
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(return_value=[{"provider": "openai", "id": "m", "name": "m"}]),
+    )
+    assert await ai_client.server_capable_providers() == ["openai"]
+    monkeypatch.setattr(
+        ai_client,
+        "_list_models_raw",
+        AsyncMock(return_value=[{"provider": "cli-gemini", "id": "m", "name": "m"}]),
+    )
+    await ai_client._get_model_catalog(refresh=True)
+    assert await ai_client.server_capable_providers() == ["gemini"]
