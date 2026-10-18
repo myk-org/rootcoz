@@ -18,7 +18,8 @@ import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
-import { isAnalysisFormAiUnavailable } from '@/lib/analysisAi'
+import { isAnalysisFormAiUnavailable, completeAiPairOverride } from '@/lib/analysisAi'
+import { resolvedPeerConfigs } from '@/lib/peerDebate'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -37,17 +38,28 @@ interface ReAnalyzeDialogProps {
   inPlaceAnalyze?: boolean
 }
 
-function initFormState(p: AnalysisResult['request_params']) {
+function initFormState(p: AnalysisResult['request_params'], result: AnalysisResult) {
+  // Resolved peer pairs actually used by the completed analysis — replay them
+  // when the request params omitted peer configs (same params → result → empty
+  // chain as the primary provider/model).
+  const resolvedPeers = resolvedPeerConfigs(result)
   return {
-    aiProvider: normalizeProvider(p?.ai_provider || 'claude'),
-    aiModel: p?.ai_model || '',
+    // No hardcoded fallback: explicit request params win, then the values the
+    // server actually resolved for the original analysis, else empty (deferred
+    // to the server-side resolution chain on submit).
+    aiProvider: normalizeProvider(p?.ai_provider || result.ai_provider || ''),
+    aiModel: p?.ai_model || result.ai_model || '',
     forceServerCredentials: p?.force_server_credentials === true,
     aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
-    enablePeers: !!(p?.peer_ai_configs?.length),
-    peerConfigs: (p?.peer_ai_configs || []).map(c => ({
+    enablePeers: !!(p?.peer_ai_configs?.length) || resolvedPeers.length > 0,
+    peerConfigs: (
+      p?.peer_ai_configs?.length
+        ? p.peer_ai_configs
+        : resolvedPeers
+    ).map(c => ({
       ...c,
-      ai_provider: normalizeProvider(c.ai_provider || 'claude'),
+      ai_provider: c.ai_provider ? normalizeProvider(c.ai_provider) : '',
       id: crypto.randomUUID(),
     })),
     maxRounds: p?.peer_analysis_max_rounds || 3,
@@ -66,6 +78,10 @@ function initFormState(p: AnalysisResult['request_params']) {
       ? (p.get_job_artifacts as boolean)
       : undefined,
     maxArtifactsSize: p?.jenkins_artifacts_max_size_mb != null ? (p.jenkins_artifacts_max_size_mb as number) : undefined,
+    // Whether the job replays WITH an AI pair absent any override — clearing
+    // it in the form must send an explicit empty pair so the stored one is
+    // overridden instead of silently retained.
+    hadStoredAiPair: !!(p?.ai_provider || result.ai_provider) && !!(p?.ai_model || result.ai_model),
   }
 }
 
@@ -75,7 +91,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const params = result.request_params
   const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
-  const init = initFormState(params)
+  const init = initFormState(params, result)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)
   const [aiModel, setAiModel] = useState(init.aiModel)
   const [forceServerCredentials, setForceServerCredentials] = useState(init.forceServerCredentials)
@@ -96,6 +112,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
 
   const [getArtifacts, setGetArtifacts] = useState<boolean | undefined>(init.getArtifacts)
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(init.maxArtifactsSize)
+  const [hadStoredAiPair, setHadStoredAiPair] = useState(init.hadStoredAiPair)
 
   const effectiveForceServer = forceServerCredentials && canUseServerProviders
   const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
@@ -106,7 +123,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   // Reset form state when dialog opens
   useEffect(() => {
     if (!open) return
-    const s = initFormState(result.request_params)
+    const s = initFormState(result.request_params, result)
     setAiProvider(s.aiProvider)
     setAiModel(s.aiModel)
     setForceServerCredentials(s.forceServerCredentials)
@@ -123,11 +140,21 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setJiraProjectKey(s.jiraProjectKey)
     setGetArtifacts(s.getArtifacts)
     setMaxArtifactsSize(s.maxArtifactsSize)
+    setHadStoredAiPair(s.hadStoredAiPair)
     setSubmitting(false)
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
 
-  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders)
+  // Defer exactly like the submit form (deferAiToTestsRepo): an empty pair
+  // defers to the server-side resolution chain ONLY when a tests repo can
+  // supply .rootcoz/settings.json after clone — otherwise the backend would
+  // reject the request (no resolution source), so the user must pick.
+  const deferPrimary = !!testsRepoUrl.trim() && !aiProvider.trim() && !aiModel.trim()
+  // Empty peer rows carry no selection; they are dropped from the submitted
+  // configs, so they must not block validation either. Zero active peers while
+  // peer review is enabled still blocks, as on the submit form.
+  const activePeers = peerConfigs.filter((c) => c.ai_provider.trim())
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, activePeers, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders, deferPrimary)
 
   const handleSubmit = useCallback(async () => {
     if (aiUnavailable) {
@@ -138,8 +165,16 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
     try {
       const body: Record<string, unknown> = {
-        ai_provider: aiProvider,
-        ai_model: aiModel,
+        // A filled pair is sent as an override; a pair the user CLEARED from a
+        // job that had one is sent as explicit empty strings so the backend
+        // (model_fields_set) overrides the stored pair instead of retaining
+        // it — the empty pair then resolves via the server-side chain. A job
+        // that never had a pair stays omitted (plain deferral).
+        ...(aiProvider && aiModel
+          ? completeAiPairOverride(aiProvider, aiModel)
+          : hadStoredAiPair
+            ? { ai_provider: '', ai_model: '' }
+            : {}),
         force_server_credentials: effectiveForceServer,
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(enableJira !== undefined && { enable_jira: enableJira }),
@@ -149,7 +184,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         ...(maxArtifactsSize !== undefined && { jenkins_artifacts_max_size_mb: maxArtifactsSize }),
         ...(rawPrompt && { raw_prompt: rawPrompt }),
         ...(testsRepoUrl && { tests_repo_url: testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl }),
-        peer_ai_configs: enablePeers ? peerConfigs.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })) : [],
+        peer_ai_configs: enablePeers ? activePeers.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })) : [],
         peer_analysis_max_rounds: maxRounds,
         additional_repos: additionalRepos
           .filter((r) => r.name.trim() && r.url.trim())
@@ -179,6 +214,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   }, [
     aiProvider,
     aiModel,
+    hadStoredAiPair,
     effectiveForceServer,
     aiUnavailable,
     aiCallTimeout,
@@ -276,6 +312,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <FieldLabel>AI Model</FieldLabel>
               <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
             </div>
+            {deferPrimary && (
+              <p className="text-[11px] text-text-tertiary">
+                Left empty, the provider and model are resolved by the server from the repository settings or the admin's server settings.
+              </p>
+            )}
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Use server credentials</span>
               <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
