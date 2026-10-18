@@ -202,6 +202,44 @@ async def test_free_pair_on_inactive_provider_not_usable(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_saved_public_name_keeps_internal_catalog_models(monkeypatch):
+    """Saved public names ('claude'/'cursor') keep cli-*/acpx-* server sources."""
+    _catalog(monkeypatch, "cli-claude", "acpx-cursor", "openai")
+    _set_active(monkeypatch, "claude,cursor")
+    scoped = await ai_client.scoped_models()
+    assert scoped["cli-claude"][0]["credential_sources"] == ["server"]
+    assert scoped["acpx-cursor"][0]["credential_sources"] == ["server"]
+    # Providers not in the saved list still lose their server source.
+    assert "openai" not in scoped
+
+
+@pytest.mark.asyncio
+async def test_saved_catalog_id_matches_internal_provider(monkeypatch):
+    """Reverse direction: a legacy saved catalog ID still matches its models."""
+    _catalog(monkeypatch, "cli-claude", "openai")
+    _set_active(monkeypatch, "cli-claude")
+    scoped = await ai_client.scoped_models()
+    assert scoped["cli-claude"][0]["credential_sources"] == ["server"]
+    assert "openai" not in scoped
+
+
+@pytest.mark.asyncio
+async def test_grant_enforcement_accepts_public_name_for_internal_provider(monkeypatch):
+    """is_server_provider_active matches public names to internal catalog IDs."""
+    _catalog(monkeypatch, "cli-claude", "openai")
+    _set_active(monkeypatch, "claude")
+    # Saved public name matches the internally-prefixed catalog provider.
+    assert ai_client.is_server_provider_active("claude")
+    assert ai_client.is_server_provider_active("cli-claude")
+    # Non-listed providers stay deactivated.
+    assert not ai_client.is_server_provider_active("openai")
+    # Reverse direction: the setting may hold the internal ID instead.
+    _set_active(monkeypatch, "cli-claude")
+    assert ai_client.is_server_provider_active("claude")
+    assert ai_client.is_server_provider_active("cli-claude")
+
+
+@pytest.mark.asyncio
 async def test_server_capable_providers_returns_public_names(monkeypatch):
     """Settings picker options never leak internal cli-* catalog IDs."""
     _catalog(monkeypatch, "cli-claude", "cli-gemini", "cli-cursor", "openai")

@@ -143,18 +143,31 @@ class InactiveServerProviderError(ValueError):
 
 
 def active_server_provider_ids() -> frozenset[str] | None:
-    """Admin-selected active server provider IDs (lowercased); None = all."""
+    """Admin-selected active server providers (canonical public names); None = all.
+
+    Each saved entry is normalized through :func:`public_provider_name`, so a
+    public picker name (``claude``) and a legacy catalog ID (``cli-claude``)
+    saved by an earlier admin both resolve to the same canonical form that
+    catalog-provider comparisons use.
+    """
     from rootcoz.config import get_settings
 
     raw = get_settings().active_server_providers
-    ids = frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    ids = frozenset(
+        public_provider_name(part.strip()) for part in raw.split(",") if part.strip()
+    )
     return ids or None
 
 
 def is_server_provider_active(provider: str) -> bool:
-    """Whether server credentials may serve this provider (empty setting = all)."""
+    """Whether server credentials may serve this provider (empty setting = all).
+
+    Both sides of the comparison go through :func:`public_provider_name`:
+    admins save public picker names (``claude``) while catalog and grant paths
+    hold raw provider IDs (``cli-claude``) — one canonical form matches both.
+    """
     active = active_server_provider_ids()
-    return active is None or provider.lower() in active
+    return active is None or public_provider_name(provider) in active
 
 
 def _raise_inactive_server_provider(provider: str) -> None:
@@ -613,7 +626,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     if active is not None:
         logger.debug("active_server_providers filtering active: %s", sorted(active))
     for provider, entries in build_friendly_catalog(catalog).items():
-        if active is not None and provider.lower() not in active:
+        if active is not None and not is_server_provider_active(provider):
             # Server credential source withdrawn; user-key discovery below
             # can still surface this provider's models with 'user' only.
             continue
