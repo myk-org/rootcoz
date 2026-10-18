@@ -138,12 +138,150 @@ def clear_provider_eligibility_cache() -> None:
     _provider_eligibility_cache = None
 
 
+class InactiveServerProviderError(ValueError):
+    """Server credentials for this provider are deactivated (ACTIVE_SERVER_PROVIDERS)."""
+
+
+def _active_server_provider_entries() -> frozenset[str] | None:
+    """Admin-selected active server providers (public-normalized); None = all.
+
+    Each saved entry is normalized through :func:`public_provider_name`, so a
+    public picker name (``claude``) and a legacy catalog ID (``cli-claude``)
+    saved by an earlier admin both resolve to the same canonical form that
+    catalog-provider comparisons use.  Case is preserved here; resolving it
+    against the catalog is :func:`is_server_provider_active`'s job.
+    """
+    from rootcoz.config import get_settings
+
+    raw = get_settings().active_server_providers
+    entries = frozenset(
+        public_provider_name(part.strip()) for part in raw.split(",") if part.strip()
+    )
+    return entries or None
+
+
+def _catalog_public_provider_names() -> frozenset[str] | None:
+    """Public provider names in the last-known catalog snapshot, or None.
+
+    Membership checks run synchronously (grant guards call them directly),
+    so they cannot await the live catalog; they resolve against
+    ``_model_catalog_cache``, which the async catalog paths keep current.
+    ``None`` means no catalog is known yet and resolution falls back to
+    plain case-insensitive matching.
+    """
+    cache = _model_catalog_cache
+    if cache is None:
+        return None
+    return frozenset(
+        public_provider_name(provider)
+        for entry in cache
+        if isinstance(provider := entry.get("provider"), str) and provider
+    )
+
+
+def is_server_provider_active(provider: str) -> bool:
+    """Whether server credentials may serve this provider (empty setting = all).
+
+    Both sides of the comparison go through :func:`public_provider_name`:
+    admins save public picker names (``claude``) while catalog and grant paths
+    hold raw provider IDs (``cli-claude``) — one canonical form matches both.
+    Saved entries are resolved against the current catalog before matching:
+    an exact match wins, a unique case-insensitive match resolves to that
+    catalog provider, and an ambiguous match (two catalog providers differing
+    only in case, e.g. ``Foo`` and ``foo`` registered as distinct providers)
+    stays unresolved so selecting one never activates the other.  Only when
+    the queried provider's case-insensitive match is unambiguous does the
+    saved spelling's case stop mattering (``mygateway`` vs ``MyGateway``);
+    display spelling is never affected.
+    """
+    entries = _active_server_provider_entries()
+    if entries is None:
+        return True
+    query = public_provider_name(provider)
+    catalog = _catalog_public_provider_names()
+    resolved: set[str] = set()
+    by_fold: dict[str, set[str]] = {}
+    if catalog is not None:
+        for name in catalog:
+            by_fold.setdefault(name.lower(), set()).add(name)
+        for entry in entries:
+            if entry in catalog:
+                resolved.add(entry)
+            elif len(matches := by_fold.get(entry.lower(), ())) == 1:
+                resolved.add(next(iter(matches)))
+    if query in resolved:
+        return True
+    # Two or more catalog providers differing only in case are distinct
+    # providers: a case-insensitive match cannot tell them apart, so only
+    # the exact (resolved) match above may activate the queried one.
+    if len(by_fold.get(query.lower(), ())) > 1:
+        logger.debug(
+            "active_server_providers: case-ambiguous provider=%s requires exact match",
+            provider,
+        )
+        return False
+    return query.lower() in {entry.lower() for entry in entries}
+
+
+def _raise_inactive_server_provider(provider: str) -> None:
+    raise InactiveServerProviderError(
+        f"Server credentials for provider '{provider}' are deactivated "
+        "by the administrator (active_server_providers)"
+    )
+
+
+# Cached settings picker options (monotonic_ts, provider list) — success and
+# failure alike, so a sidecar outage costs one attempt, not one per page load.
+_server_capable_cache: tuple[float, list[str]] | None = None
+_SERVER_CAPABLE_CACHE_TTL_SEC = 60.0
+
+
+def _invalidate_server_capable_cache() -> None:
+    """Drop cached settings picker options whenever the catalog changes."""
+    global _server_capable_cache
+    _server_capable_cache = None
+
+
+async def server_capable_providers() -> list[str]:
+    """Provider IDs with server-credential models, for admin settings options.
+
+    Both success and failure are cached for a short TTL: an unreachable
+    sidecar must not slow (or queue behind the catalog lock on) every
+    admin settings page load. Only public names are ever returned —
+    internal ``cli-*``/``acpx-*`` catalog IDs map through
+    :func:`public_provider_name`, collapsing to one entry per name.
+    """
+    global _server_capable_cache
+    now = time.monotonic()
+    if (
+        _server_capable_cache is not None
+        and now - _server_capable_cache[0] < _SERVER_CAPABLE_CACHE_TTL_SEC
+    ):
+        return _server_capable_cache[1]
+    try:
+        catalog = await _get_model_catalog()
+        providers = sorted(
+            {public_provider_name(p) for p in build_friendly_catalog(catalog)}
+        )
+    except httpx.HTTPError, OSError, RuntimeError, ValueError:
+        logger.warning("Unable to list server-capable providers for settings")
+        providers = []
+    _server_capable_cache = (now, providers)
+    return providers
+
+
 async def require_server_provider_grant(provider: str = "", model: str = "") -> None:
     """Recheck the initiator on every server AI operation, including resumed turns.
 
     A user without the full server grant may still run one admin-declared
     free provider+model pair when they hold the free-providers grant.
     """
+    if provider and not is_server_provider_active(provider):
+        logger.debug(
+            "Server credentials for provider=%s deactivated by active_server_providers",
+            provider,
+        )
+        _raise_inactive_server_provider(provider)
     from rootcoz.storage import (
         can_user_use_free_providers,
         can_user_use_server_providers,
@@ -350,6 +488,7 @@ async def _get_model_catalog(*, refresh: bool = False) -> list[dict[str, Any]]:
         if generation != _model_catalog_generation:
             return _model_catalog_cache if _model_catalog_cache is not None else catalog
         _model_catalog_cache = catalog
+        _invalidate_server_capable_cache()
         logger.debug("Loaded Pi-sidecar model catalog: %d models", len(catalog))
         return catalog
 
@@ -359,6 +498,7 @@ def update_model_catalog(models: list[dict[str, Any]] | None = None) -> None:
     global _model_catalog_cache, _model_catalog_generation
     _model_catalog_generation += 1
     _model_catalog_cache = models
+    _invalidate_server_capable_cache()
 
 
 async def registered_provider_ids() -> set[str] | None:
@@ -535,7 +675,14 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     except sqlite3.Error, OSError, RuntimeError, ValueError, KeyError, TypeError:
         allowed = False
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
+    active = _active_server_provider_entries()
+    if active is not None:
+        logger.debug("active_server_providers filtering active: %s", sorted(active))
     for provider, entries in build_friendly_catalog(catalog).items():
+        if active is not None and not is_server_provider_active(provider):
+            # Server credential source withdrawn; user-key discovery below
+            # can still surface this provider's models with 'user' only.
+            continue
         for entry in entries:
             pairs[(provider, entry["id"])] = {
                 **entry,
@@ -658,6 +805,14 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
             (*scoped.keys(), *status.keys()), provider
         )
         if (
+            force_server_credentials.get()
+            and not is_server_provider_active(provider)
+            and provider in build_friendly_catalog(await _get_model_catalog())
+        ):
+            # scoped_models withdrew the deactivated provider's server
+            # source, so its models cannot match below — say why.
+            _raise_inactive_server_provider(provider)
+        if (
             status.get(provider, {}).get("unavailable")
             and not force_server_credentials.get()
         ):
@@ -674,6 +829,8 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
                     else entry["credential_sources"][0]
                 )
                 if source not in entry["credential_sources"]:
+                    if source == "server" and not is_server_provider_active(provider):
+                        _raise_inactive_server_provider(provider)
                     raise ValueError(
                         f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
                     )
@@ -1336,6 +1493,9 @@ async def call_ai(
     if source == "server" and result.success and chat_session_source.get():
         try:
             await require_server_provider_grant(provider, model)
+        except InactiveServerProviderError as exc:
+            logger.info("Chat AI reply discarded: provider deactivated mid-chat")
+            return AIResult(success=False, text=str(exc), error=str(exc))
         except ValueError:
             logger.info("Chat AI reply discarded after server grant changed")
             return AIResult(

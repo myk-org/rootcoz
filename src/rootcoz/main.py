@@ -138,6 +138,7 @@ from rootcoz.feedback import (
     generate_feedback_preview,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
+from rootcoz.jenkins import JenkinsClient
 from rootcoz.jira import (
     JiraClient,
     JiraConnection,
@@ -271,6 +272,7 @@ from rootcoz.transcripts import (
     transcript_summary,
     write_transcript_env_bridge,
 )
+from rootcoz.url_utils import redact_urls_in_text
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -363,6 +365,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "peer_analysis_max_rounds",
         "enable_free_models",
         "ambient_auth_providers",
+        "active_server_providers",
         "record_transcripts",
     ],
     "Jira": [
@@ -2335,8 +2338,17 @@ def _resolve_ai_config_values(
 
 async def _validate_catalog_pair(provider: str, model: str) -> tuple[str, str]:
     """Return a catalog-backed AI pair or a clear client error."""
+    from rootcoz.ai_client import InactiveServerProviderError
+
     try:
         return await resolve_catalog_pair(provider, model)
+    except InactiveServerProviderError as exc:
+        logger.info(
+            "Rejected server credentials for deactivated provider: %s/%s",
+            provider,
+            model,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         logger.info("Rejected unknown AI provider/model pair: %s/%s", provider, model)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -11764,6 +11776,23 @@ async def get_admin_settings(
     _require_admin(request)
     metadata = _get_settings_metadata()
 
+    # The admin picker for server providers lists what the sidecar can serve.
+    for item in metadata:
+        if item["key"] == "active_server_providers":
+            from rootcoz.ai_client import server_capable_providers
+
+            item["options"] = await server_capable_providers()
+
+    # Authoritative Jira auth mode (nonsecret) — the frontend must not infer
+    # it from possibly-masked credential values.
+    for item in metadata:
+        if item["key"] == "jira_url":
+            item["jira_auth_mode"] = {
+                "sa": "oauth",
+                "cloud": "basic",
+                "server": "pat",
+            }.get(resolve_jira_connection(get_settings()).mode, "")
+
     # Get DB overrides
     db_overrides = await storage.get_server_settings()
 
@@ -12028,6 +12057,304 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
 
     return JSONResponse(content=content)
+
+
+# -- Integration connection tests --------------------------------------------
+
+
+class _IntegrationTestError(Exception):
+    """A failed integration connection test — message is safe to return."""
+
+
+#: Short timeout so an admin "Test connection" click never hangs the UI.
+_INTEGRATION_TEST_TIMEOUT = 10.0
+
+
+def _test_result(ok: bool, message: str, **details: Any) -> dict[str, Any]:
+    """Build the wire shape of a connection test result."""
+    result: dict[str, Any] = {"ok": ok, "message": message}
+    if details:
+        result["details"] = details
+    return result
+
+
+async def _integration_test_request(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    auth: tuple[str, str] | None = None,
+    verify: bool = True,
+    params: dict[str, Any] | None = None,
+) -> httpx.Response:
+    """GET a URL for a connection test; never follows redirects into errors.
+
+    Raises :class:`_IntegrationTestError` with a human-readable, secret-free
+    message on transport failure — the caller turns that into ``ok: false``.
+    """
+    try:
+        async with httpx.AsyncClient(
+            verify=verify,
+            timeout=_INTEGRATION_TEST_TIMEOUT,
+            auth=auth,
+            headers=headers,
+            follow_redirects=True,
+        ) as client:
+            return await client.get(url, params=params)
+    except httpx.HTTPError as exc:
+        raise _IntegrationTestError(
+            redact_urls_in_text(f"connection failed ({type(exc).__name__}): {exc}")
+        ) from exc
+
+
+async def _integration_test_get_json(url: str, **kwargs: Any) -> dict[str, Any]:
+    """GET a JSON payload for a connection test.
+
+    Raises :class:`_IntegrationTestError` on HTTP >= 400 or non-JSON bodies.
+    """
+    response = await _integration_test_request(url, **kwargs)
+    if response.status_code in (401, 403):
+        raise _IntegrationTestError(
+            f"authentication failed (HTTP {response.status_code})"
+        )
+    if response.status_code >= 400:
+        raise _IntegrationTestError(
+            f"HTTP {response.status_code} from {redact_urls_in_text(url)}"
+        )
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise _IntegrationTestError("response was not valid JSON") from exc
+
+
+async def _test_jenkins_connection(settings: Settings) -> dict[str, Any]:
+    """Authenticated whoAmI ping against the effective Jenkins settings."""
+    if not settings.jenkins_url:
+        return _test_result(False, "Jenkins URL is not configured")
+    try:
+        client = JenkinsClient(
+            url=settings.jenkins_url,
+            username=settings.jenkins_user,
+            password=settings.jenkins_password,
+            ssl_verify=settings.jenkins_ssl_verify,
+            timeout=int(_INTEGRATION_TEST_TIMEOUT),
+        )
+    except Exception as exc:
+        logger.debug("Jenkins client init failed", exc_info=True)
+        return _test_result(
+            False,
+            redact_urls_in_text(
+                f"Failed to initialize Jenkins client: {type(exc).__name__}: {exc}"
+            ),
+        )
+    try:
+        whoami = await asyncio.to_thread(client.get_whoami)
+    except Exception as exc:
+        logger.debug("Jenkins whoAmI ping failed", exc_info=True)
+        return _test_result(
+            False, f"Jenkins connection failed: {type(exc).__name__}: {exc}"
+        )
+    user = ""
+    if isinstance(whoami, dict):
+        user = str(whoami.get("name") or whoami.get("id") or "")
+    if not (isinstance(whoami, dict) and whoami.get("authenticated") is True):
+        # Anonymous-enabled Jenkins answers whoAmI without authenticating.
+        return _test_result(
+            False,
+            "Jenkins reachable but credentials are invalid "
+            "(anonymous access — check the configured username/password)",
+            authenticated_user=user,
+        )
+    message = "Jenkins reachable and credentials valid"
+    if not user:
+        message += " (server did not report an authenticated user)"
+    return _test_result(True, message, authenticated_user=user)
+
+
+async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
+    """Current-user ping against the effective Jira connection resolution."""
+    if not settings.jira_url:
+        return _test_result(False, "Jira URL is not configured")
+    connection = resolve_jira_connection(settings)
+    if connection.mode == "none":
+        return _test_result(
+            False,
+            "No Jira credentials configured (set jira_api_token, jira_pat, "
+            "or jira_oauth_access_token)",
+        )
+    connection = await complete_jira_connection(connection, settings.jira_ssl_verify)
+    if not connection.api_base:
+        return _test_result(
+            False,
+            "Jira service account mode could not resolve the Atlassian "
+            "cloud ID (set atlassian_oauth_cloud_id or jira_site_url)",
+        )
+    try:
+        data = await _integration_test_get_json(
+            f"{connection.api_base}{connection.api_path}/myself",
+            headers=dict(connection.headers),
+            auth=connection.auth,
+            verify=settings.jira_ssl_verify,
+        )
+    except _IntegrationTestError as exc:
+        return _test_result(False, f"Jira connection failed: {exc}")
+    auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat"}[connection.mode]
+    user = str(
+        data.get("displayName") or data.get("name") or data.get("accountId") or ""
+    )
+    return _test_result(
+        True, "Jira connection successful", auth_mode=auth_mode, user=user
+    )
+
+
+async def _test_github_connection(settings: Settings) -> dict[str, Any]:
+    """Current-user ping against api.github.com with the effective token."""
+    if not settings.github_token:
+        return _test_result(False, "GitHub token is not configured")
+    token = settings.github_token.get_secret_value()
+    try:
+        data = await _integration_test_get_json(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    except _IntegrationTestError as exc:
+        return _test_result(False, f"GitHub connection failed: {exc}")
+    return _test_result(
+        True, "GitHub connection successful", login=str(data.get("login") or "")
+    )
+
+
+async def _test_reportportal_connection(settings: Settings) -> dict[str, Any]:
+    """Project-visibility ping against the effective Report Portal settings."""
+    token = settings.reportportal_api_token
+    missing = [
+        name
+        for name, value in (
+            ("reportportal_url", settings.reportportal_url),
+            ("reportportal_api_token", token),
+            ("reportportal_project", settings.reportportal_project),
+        )
+        if not value
+    ]
+    if missing:
+        return _test_result(
+            False, f"Report Portal is not configured (missing: {', '.join(missing)})"
+        )
+    assert token is not None  # guaranteed by the missing-settings check above
+    url = str(settings.reportportal_url).rstrip("/")
+    project = str(settings.reportportal_project)
+    try:
+        await _integration_test_get_json(
+            f"{url}/api/v1/project/{project}",
+            headers={"Authorization": f"Bearer {token.get_secret_value()}"},
+            verify=settings.reportportal_verify_ssl,
+        )
+    except _IntegrationTestError as exc:
+        return _test_result(False, f"Report Portal connection failed: {exc}")
+    return _test_result(
+        True, f"Report Portal project '{project}' is visible", project=project
+    )
+
+
+async def _test_prow_connection(settings: Settings) -> dict[str, Any]:
+    """Prow deck reachability plus GCS bucket listability check.
+
+    The analysis path reads artifacts from the GCS bucket via public HTTP,
+    so the bucket check is the authoritative one; the deck check is a
+    lightweight reachability ping (any HTTP response below 500 counts).
+    """
+    if not settings.prow_url:
+        return _test_result(False, "Prow URL is not configured")
+    if not settings.gcs_bucket:
+        return _test_result(False, "GCS bucket is not configured")
+    prow_url = str(settings.prow_url).rstrip("/")
+    try:
+        deck_response = await _integration_test_request(f"{prow_url}/api/jobs")
+    except _IntegrationTestError as exc:
+        return _test_result(False, f"Prow unreachable: {exc}")
+    deck_reachable = deck_response.status_code < 500
+    try:
+        # Same public-HTTP GCS mechanism the Prow source uses; maxResults=1
+        # keeps it a visibility probe, not a listing.
+        await _integration_test_get_json(
+            f"https://storage.googleapis.com/storage/v1/b/{settings.gcs_bucket}/o",
+            params={"maxResults": 1},
+        )
+    except _IntegrationTestError as exc:
+        return _test_result(
+            False,
+            f"GCS bucket '{settings.gcs_bucket}' is not listable: {exc}",
+            prow_http_status=deck_response.status_code,
+        )
+    message = f"GCS bucket '{settings.gcs_bucket}' is listable"
+    if deck_reachable:
+        message += f" and Prow is reachable (HTTP {deck_response.status_code})"
+    else:
+        message += (
+            f"; Prow deck returned HTTP {deck_response.status_code} but the "
+            "GCS artifact path (used for analysis) works"
+        )
+    return _test_result(True, message, prow_http_status=deck_response.status_code)
+
+
+_INTEGRATION_TESTERS: dict[str, Callable[[Settings], Awaitable[dict[str, Any]]]] = {
+    "jenkins": _test_jenkins_connection,
+    "jira": _test_jira_connection,
+    "github": _test_github_connection,
+    "reportportal": _test_reportportal_connection,
+    "prow": _test_prow_connection,
+}
+
+
+@app.post(
+    "/api/admin/settings/test/{integration}", operation_id="testIntegrationConnection"
+)
+async def test_integration_connection(
+    request: Request, integration: str
+) -> JSONResponse:
+    """Test connectivity and credentials for an external integration.
+
+    Always returns HTTP 200 with ``{ok, message, details?}`` — a failed
+    connection is a test result, not a transport error. Tests run against
+    the current effective settings (DB overrides applied).
+    """
+    _require_admin(request)
+    key = integration.lower().strip()
+    tester = _INTEGRATION_TESTERS.get(key)
+    if tester is None:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown integration: {integration}"
+        )
+    settings = get_settings()
+    try:
+        # Overall deadline: testers may make several sequential requests
+        # (Prow deck + GCS, Jira cloud-ID resolution), each with its own
+        # timeout — one click must never consume several timeout periods.
+        result = await asyncio.wait_for(
+            tester(settings), timeout=_INTEGRATION_TEST_TIMEOUT
+        )
+    except TimeoutError:
+        result = _test_result(
+            False,
+            f"Connection test timed out after {_INTEGRATION_TEST_TIMEOUT:.0f} seconds",
+        )
+    except Exception as exc:  # noqa: BLE001 - a broken integration must never 500
+        message = redact_urls_in_text(
+            f"Connection test failed unexpectedly: {type(exc).__name__}: {exc}"
+        )
+        logger.warning(
+            "Integration connection test crashed for %s: %s: %s",
+            key,
+            type(exc).__name__,
+            message,
+        )
+        result = _test_result(False, message)
+    logger.info(
+        "Integration connection test: integration=%s ok=%s by=%s",
+        key,
+        result["ok"],
+        request.state.username,
+    )
+    return JSONResponse(content=result)
 
 
 # -- Job Metadata Endpoints ---------------------------------------------------
@@ -12906,9 +13233,14 @@ async def _validate_chat_selection(
     if source == "server":
         token = ai_username.set(username)
         try:
-            from rootcoz.ai_client import require_server_provider_grant
+            from rootcoz.ai_client import (
+                InactiveServerProviderError,
+                require_server_provider_grant,
+            )
 
             await require_server_provider_grant(provider, model)
+        except InactiveServerProviderError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         finally:

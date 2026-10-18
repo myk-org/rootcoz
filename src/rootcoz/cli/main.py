@@ -3573,6 +3573,31 @@ def admin_settings_reset(
         typer.echo(f"Reset: {key}")
 
 
+@admin_settings_app.command("test")
+def admin_settings_test(
+    integration: str = typer.Argument(
+        help="Integration to test (jenkins, jira, github, reportportal, prow)."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Test connection to an integration using current effective settings."""
+    integration = integration.lower()
+    data = _run_client_command(
+        json_output,
+        lambda c: c.test_integration(integration),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        status = "OK" if data.get("ok") else "FAILED"
+        typer.echo(f"{integration}: {status} - {data.get('message', '')}")
+        for detail_key, value in (data.get("details") or {}).items():
+            typer.echo(f"  {detail_key}: {value}")
+    if not data.get("ok"):
+        # The endpoint always returns HTTP 200 — a nonzero exit is the only
+        # machine-readable failure signal for scripts.
+        raise typer.Exit(code=1)
+
+
 # -- AI Models (Admin) --------------------------------------------------------
 
 

@@ -8,7 +8,7 @@ interface TokenValidationResult {
   message: string
 }
 
-export function TokenField({ id, label, value, onChange, show, onToggleShow, validation, error, placeholder, helpContent, optionalLabel = true, autoFocus, inputType = 'password' }: {
+export function TokenField({ id, label, value, onChange, show, onToggleShow, validation, error, placeholder, helpContent, optionalLabel = true, autoFocus, inputType = 'password', newPasswordAutoComplete = false }: {
   id: string
   label: string
   value: string
@@ -22,6 +22,9 @@ export function TokenField({ id, label, value, onChange, show, onToggleShow, val
   optionalLabel?: boolean
   autoFocus?: boolean
   inputType?: 'password' | 'email' | 'text'
+  /** Opt in to browser new-password handling (token management forms);
+   * auth flows keep the default so login/register autofill is untouched. */
+  newPasswordAutoComplete?: boolean
 }) {
   return (
     <div className="space-y-1.5">
@@ -29,7 +32,7 @@ export function TokenField({ id, label, value, onChange, show, onToggleShow, val
         {label} {optionalLabel && <span className="text-text-tertiary font-normal normal-case tracking-normal">(optional)</span>}
       </label>
       <div className="relative">
-        <Input id={id} type={inputType !== 'password' ? inputType : show ? 'text' : 'password'} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoComplete={inputType === 'email' ? 'email' : 'off'} autoFocus={autoFocus} className={`h-10 font-mono${inputType === 'password' ? ' pr-10' : ''}`} />
+        <Input id={id} type={inputType !== 'password' ? inputType : show ? 'text' : 'password'} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoComplete={inputType === 'email' ? 'email' : newPasswordAutoComplete ? 'new-password' : 'off'} autoFocus={autoFocus} className={`h-10 font-mono${inputType === 'password' ? ' pr-10' : ''}`} />
         {inputType === 'password' && onToggleShow && (
           <button type="button" onClick={onToggleShow} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-text-tertiary hover:text-text-secondary transition-colors" aria-label={show ? 'Hide token' : 'Show token'}>
             {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}

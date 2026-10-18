@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, expect, it, vi } from 'vitest'
 import { ChatUI } from '@/components/shared/ChatUI'
 import { ApiError } from '@/lib/api'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
@@ -22,6 +22,31 @@ HTMLElement.prototype.setPointerCapture = () => {}
 HTMLElement.prototype.releasePointerCapture = () => {}
 HTMLElement.prototype.scrollIntoView = () => {}
 
+// ChatUI cancels its poll timer on SSE events and New Session, but never on
+// unmount — a test that sends a message leaks a live 2s setTimeout into
+// whichever test runs 2s later. On slow CI it fires mid-test, its fetch lands
+// in the current get() mock, and index-based expectations shift. Track every
+// real timer and clear the survivors between tests.
+const liveTimers = new Set<ReturnType<typeof setTimeout>>()
+const rawSetTimeout = globalThis.setTimeout.bind(globalThis)
+const rawClearTimeout = globalThis.clearTimeout.bind(globalThis)
+globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+  const id = rawSetTimeout(handler, timeout, ...args)
+  liveTimers.add(id)
+  return id
+}) as typeof setTimeout
+globalThis.clearTimeout = ((id?: ReturnType<typeof setTimeout>) => {
+  if (id !== undefined) liveTimers.delete(id)
+  rawClearTimeout(id)
+}) as typeof clearTimeout
+// RTL's asyncWrapper/waitFor only advance mocked timers through a `jest`
+// global (testing-library/dom checks `typeof jest`); without it every
+// userEvent/waitFor call hangs forever under vi.useFakeTimers(). Give it the
+// one method it calls — inert while real timers are active.
+beforeAll(() => {
+  ;(globalThis as unknown as { jest?: unknown }).jest = { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) }
+})
+
 const history = { messages: [] as Array<{ id: number; job_id: string; role: string; content: string; username: string; ai_provider: string; ai_model: string; status: string; created_at: string }>, total: 0, active_session_version: 'no-session-version' }
 const catalog = { providers: {
   openai: [{ id: 'gpt', name: 'GPT', provider: 'openai', credential_sources: ['user'] }],
@@ -36,7 +61,12 @@ function setup(chat: Omit<typeof history, 'active_session_version'> & { active_s
 function page(provider = 'openai', model = 'gpt') {
   return <ChatUI apiBasePath="/api/chat/job" sseTopic="chat:job" header={<h1>Job chat</h1>} defaultProvider={provider} defaultModel={model} />
 }
-afterEach(() => { cleanup(); grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); remove.mockReset() })
+afterEach(() => {
+  vi.useRealTimers()
+  for (const id of liveTimers) rawClearTimeout(id)
+  liveTimers.clear()
+  cleanup(); grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); remove.mockReset()
+})
 
 it('loads history without POST init and starts only with a valid catalog pair', async () => {
   setup()
@@ -510,23 +540,30 @@ it('shows the server-reported workspace preparation phase while init runs', asyn
     ? new Promise(resolve => { finishInit = resolve })
     : Promise.resolve({}))
   render(page())
-  expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeEnabled()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  // Fake timers from here on: no leaked or component-scheduled real timer can
+  // fire into the mocks below (testing-library's jest-only fake-timer support
+  // means every wait after this point must already hold on its first check,
+  // which the act() drains below guarantee).
+  vi.useFakeTimers()
   get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models')
     ? catalog
     : { messages: [], total: 0, active_session_version: 'no-session-version', preparing: { phase: 'cloning', detail: 'tests-repo' } }))
-  await userEvent.setup().click(screen.getByRole('button', { name: 'Start Chat' }))
-  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
-  expect(await screen.findByText('Cloning repositories: tests-repo...')).toBeInTheDocument()
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(screen.getByRole('button', { name: 'Start Chat' }))
+  await act(async () => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  expect(screen.getByText('Cloning repositories: tests-repo...')).toBeInTheDocument()
   expect(screen.getByText('Preparing workspace')).toBeInTheDocument()
   expect(screen.getByText('Indexing repositories for search')).toBeInTheDocument()
   await act(async () => { finishInit({ ready: true, session_id: 'session' }) })
-  await waitFor(() => expect(screen.queryByText('Indexing repositories for search')).not.toBeInTheDocument())
+  expect(screen.queryByText('Indexing repositories for search')).not.toBeInTheDocument()
 })
 
 it('ignores an out-of-order history response instead of rewinding preparation', async () => {
   setup()
   render(page())
-  expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeEnabled()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  // Fake timers from here on — see the sibling preparation test above.
+  vi.useFakeTimers()
   let finishInit: (v: unknown) => void = () => {}
   post.mockImplementation((path: string) => path.endsWith('/init')
     ? new Promise(resolve => { finishInit = resolve })
@@ -535,15 +572,20 @@ it('ignores an out-of-order history response instead of rewinding preparation', 
   get.mockImplementation((path: string) => path.startsWith('/api/ai-models')
     ? Promise.resolve(catalog)
     : new Promise(resolve => pending.push(resolve)))
-  await userEvent.setup().click(screen.getByRole('button', { name: 'Start Chat' }))
+  await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(screen.getByRole('button', { name: 'Start Chat' }))
   const sse = vi.mocked(useSSE).mock.lastCall!
-  act(() => { sse[1]['chat-changed']('') })
-  act(() => { sse[1]['chat-changed']('') })
+  // Grab each event's resolver by position inside the same synchronous act —
+  // index arithmetic across awaits could be shifted by any stray fetch.
+  let stale!: (h: unknown) => void
+  let fresh!: (h: unknown) => void
+  act(() => { const n = pending.length; sse[1]['chat-changed'](''); stale = pending[n] })
+  act(() => { const n = pending.length; sse[1]['chat-changed'](''); fresh = pending[n] })
+  await waitFor(() => expect(pending.length).toBeGreaterThanOrEqual(2))
   const base = { messages: [], total: 0, active_session_version: 'no-session-version' }
   // Newer response lands first; the stale one must not move progress backwards.
-  await act(async () => { pending[1]({ ...base, preparing: { phase: 'starting_session', detail: '' } }) })
-  expect(await screen.findByText('Starting AI session...')).toBeInTheDocument()
-  await act(async () => { pending[0]({ ...base, preparing: { phase: 'cloning', detail: 'tests-repo' } }) })
+  await act(async () => { fresh({ ...base, preparing: { phase: 'starting_session', detail: '' } }) })
+  expect(screen.getByText('Starting AI session...')).toBeInTheDocument()
+  await act(async () => { stale({ ...base, preparing: { phase: 'cloning', detail: 'tests-repo' } }) })
   expect(screen.getByText('Starting AI session...')).toBeInTheDocument()
   expect(screen.queryByText('Cloning repositories: tests-repo...')).not.toBeInTheDocument()
   await act(async () => { finishInit({ ready: true, session_id: 'session' }) })

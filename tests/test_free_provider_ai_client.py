@@ -24,6 +24,7 @@ def _enable_free_models(monkeypatch, enabled: bool) -> None:
 
     class _Settings:
         enable_free_models = enabled
+        active_server_providers = ""
 
     monkeypatch.setattr(config, "get_settings", lambda: _Settings())
 

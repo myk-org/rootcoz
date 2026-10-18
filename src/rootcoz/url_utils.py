@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse, urlunparse
 
 
@@ -43,3 +44,21 @@ def sanitize_clone_url(url: str) -> str:
         return urlunparse(parsed._replace(query="", fragment=""))
     except ValueError:  # Malformed authority, e.g. an unmatched IPv6 bracket or port.
         return ""
+
+
+def strip_url_query(url: str) -> str:
+    """Remove the query string and fragment from a URL."""
+    parsed = urlparse(url)
+    return urlunparse(parsed._replace(query="", fragment=""))
+
+
+_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>`]+")
+
+
+def redact_urls_in_text(text: str) -> str:
+    """Replace http(s) URLs in free text with credential- and query-free forms."""
+    if not text:
+        return text
+    return _URL_IN_TEXT.sub(
+        lambda match: strip_url_query(strip_url_userinfo(match.group(0))), text
+    )

@@ -36,6 +36,7 @@ def _set_free_toggle(monkeypatch, enabled: bool) -> None:
 
     class _Settings:
         enable_free_models = enabled
+        active_server_providers = ""
 
     monkeypatch.setattr(config, "get_settings", lambda: _Settings())
 

@@ -88,6 +88,13 @@ const requestWithJsonBody = <T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
 
+/** Result of POST /api/admin/settings/test/{integration} — always HTTP 200. */
+export interface TestIntegrationResult {
+  ok: boolean
+  message: string
+  details?: Record<string, unknown>
+}
+
 export const api = {
   get: <T>(path: string, options?: RequestInit) => request<T>(path, options),
 
@@ -120,6 +127,13 @@ export const api = {
 
   put: <T>(path: string, body?: unknown) =>
     requestWithJsonBody<T>('PUT', path, body),
+
+  /** Test an integration connection with the currently saved settings. */
+  testIntegration: (integration: string) =>
+    requestWithJsonBody<TestIntegrationResult>(
+      'POST',
+      `/api/admin/settings/test/${encodeURIComponent(integration)}`,
+    ),
 
   delete: <T>(path: string, body?: unknown, options?: RequestInit) =>
     requestWithJsonBody<T>('DELETE', path, body, options),

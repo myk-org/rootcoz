@@ -364,6 +364,10 @@ class RootCozClient:
             params["key"] = key
         return self._request("GET", "/api/admin/settings/history", params=params)
 
+    def test_integration(self, integration: str) -> dict[str, Any]:
+        """Test an integration connection. POST /api/admin/settings/test/{integration}"""
+        return self._request("POST", f"/api/admin/settings/test/{integration}")
+
     def approve_user(
         self, username: str, can_use_server_providers: bool | None = None
     ) -> dict[str, Any]:

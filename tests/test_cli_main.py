@@ -5023,6 +5023,53 @@ class TestAdminSettingsCommand:
         parsed = json.loads(result.output)
         assert parsed["reset"] == "jenkins_url"
 
+    def test_admin_settings_test(self, mock_client):
+        mock_client.test_integration.return_value = {
+            "ok": True,
+            "message": "Jenkins reachable and credentials valid",
+            "details": {"authenticated_user": "testuser"},
+        }
+        result = runner.invoke(app, ["admin", "settings", "test", "JENKINS"])
+        assert result.exit_code == 0
+        assert "OK" in result.output
+        assert "Jenkins reachable" in result.output
+        assert "authenticated_user: testuser" in result.output
+        mock_client.test_integration.assert_called_once_with("jenkins")
+
+    def test_admin_settings_test_failure(self, mock_client):
+        mock_client.test_integration.return_value = {
+            "ok": False,
+            "message": "Jenkins connection failed: connection refused",
+        }
+        result = runner.invoke(app, ["admin", "settings", "test", "jenkins"])
+        assert result.exit_code == 1
+        assert "FAILED" in result.output
+        assert "connection refused" in result.output
+
+    def test_admin_settings_test_json_failure_exits_nonzero(self, mock_client):
+        """--json mode still exits 1 when the connection test fails."""
+        mock_client.test_integration.return_value = {
+            "ok": False,
+            "message": "Jenkins connection failed: connection refused",
+        }
+        result = runner.invoke(app, ["--json", "admin", "settings", "test", "jenkins"])
+        assert result.exit_code == 1
+        parsed = json.loads(result.output)
+        assert parsed["ok"] is False
+        assert parsed["message"] == "Jenkins connection failed: connection refused"
+
+    def test_admin_settings_test_json(self, mock_client):
+        mock_client.test_integration.return_value = {
+            "ok": True,
+            "message": "GitHub connection successful",
+            "details": {"login": "octocat"},
+        }
+        result = runner.invoke(app, ["--json", "admin", "settings", "test", "github"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["ok"] is True
+        assert parsed["details"] == {"login": "octocat"}
+
 
 class TestTokenUsageCommand:
     def test_token_usage_summary_default(self, mock_client):

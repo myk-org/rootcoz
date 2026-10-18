@@ -175,7 +175,7 @@ export function AiCredentials() {
                 <Input
                   id="ai-provider-key"
                   type="password"
-                  autoComplete="off"
+                  autoComplete="new-password"
                   value={key}
                   disabled={busy !== null}
                   onChange={(event) => { keyRef.current = event.target.value; setKey(event.target.value) }}

@@ -347,6 +347,9 @@ export function ChatUI({
   fetchMessagesRef.current = fetchMessages
   const cancelPollRef = useRef(cancelPoll)
   cancelPollRef.current = cancelPoll
+  // Stop the response poll on unmount — without this the leaked timer keeps
+  // issuing history GETs for up to 5 minutes after leaving the chat page.
+  useEffect(() => cancelPollRef.current, [])
   const historyIsCurrentRef = useRef(historyIsCurrent)
   historyIsCurrentRef.current = historyIsCurrent
 

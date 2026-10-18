@@ -2136,6 +2136,24 @@ class TestAdminSettings:
         result = client.admin_reset_setting("jenkins_url")
         assert result["reset"] == "jenkins_url"
 
+    def test_test_integration(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/admin/settings/test/jenkins"
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "message": "Jenkins reachable and credentials valid",
+                    "details": {"authenticated_user": "testuser"},
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.test_integration("jenkins")
+        assert result["ok"] is True
+        assert result["details"]["authenticated_user"] == "testuser"
+
 
 class TestTokenUsage:
     def test_get_token_usage_no_params(self):

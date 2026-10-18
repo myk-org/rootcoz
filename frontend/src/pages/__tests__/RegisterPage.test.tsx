@@ -52,6 +52,29 @@ async function openRegisterForm() {
   return screen.findByLabelText(/username/i)
 }
 
+describe('RegisterPage autofill', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    apiMock.get.mockClear()
+    apiMock.post.mockClear()
+    apiMock.put.mockClear()
+  })
+
+  it('keeps autocomplete off on the login API key field (auth flows untouched)', async () => {
+    renderRegister()
+    expect(await screen.findByLabelText(/api key/i)).toHaveAttribute('autocomplete', 'off')
+  })
+
+  it('keeps autocomplete off on the register tracker-token fields', async () => {
+    renderRegister()
+    await openRegisterForm()
+    expect(screen.getByLabelText(/github token/i)).toHaveAttribute('autocomplete', 'off')
+    expect(screen.getByLabelText(/jira token/i)).toHaveAttribute('autocomplete', 'off')
+    expect(screen.getByLabelText(/jira service account token/i)).toHaveAttribute('autocomplete', 'off')
+    expect(screen.getByLabelText(/jira email/i)).toHaveAttribute('autocomplete', 'email')
+  })
+})
+
 describe('RegisterPage token persistence', () => {
   beforeEach(() => {
     localStorage.clear()

@@ -355,6 +355,9 @@ def _mock_sidecar_calls():
     from rootcoz import ai_client
 
     ai_client.update_model_catalog(_TEST_SIDECAR_CATALOG)
+    # Reset the settings-picker TTL cache alongside the catalog it derives
+    # from, so tests never see a stale cross-test provider list.
+    ai_client._server_capable_cache = None
     mock_client = MagicMock()
     mock_client.delete_session = AsyncMock()
     mock_client.get_models = AsyncMock(return_value=_TEST_SIDECAR_CATALOG)
