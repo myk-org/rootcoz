@@ -430,7 +430,8 @@ class TestHealthEndpoint:
             _gh_release("v4.7.1"),
             _gh_release("v4.7.0"),
         ]
-        payload = main._release_payload(releases, since="4.7")
+        with patch.object(main, "_get_app_version", return_value="4.7.2"):
+            payload = main._release_payload(releases, since="4.7")
         assert [r["version"] for r in payload["releases"]] == ["4.7.1", "4.7.2"]
 
     def test_releases_payload_unparseable_since_falls_back_to_server(self) -> None:
@@ -465,6 +466,71 @@ class TestHealthEndpoint:
         assert len(versions) == 15
         assert versions == [f"4.7.{i}" for i in range(3, 18)]
 
+    def test_releases_payload_rollback_clamps_since_down_to_server(self) -> None:
+        """A since newer than the server (rollback) is clamped down (#341)."""
+        from rootcoz import main
+
+        releases = [_gh_release("v4.7.2"), _gh_release("v4.7.1")]
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload(releases, since="4.7.2")
+        # Baseline is the server version, not the saved 4.7.2
+        assert [r["version"] for r in payload["releases"]] == ["4.7.1", "4.7.2"]
+
+    def test_releases_payload_nag_mode_ignores_stale_since(self) -> None:
+        """Nag mode: a since older than the server never resurfaces it (#341)."""
+        from rootcoz import main
+
+        releases = [_gh_release("v4.7.2"), _gh_release("v4.7.1"), _gh_release("v4.7.0")]
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload(releases, since="4.6.0")
+        assert payload["update_available"] is True
+        # 4.7.0 is already installed — not listed despite since=4.6.0
+        assert [r["version"] for r in payload["releases"]] == ["4.7.1", "4.7.2"]
+
+    def test_releases_payload_whats_new_mode_keeps_since_aggregate(self) -> None:
+        """Running latest: since older than server still aggregates (#341)."""
+        from rootcoz import main
+
+        releases = [_gh_release("v4.7.2"), _gh_release("v4.7.1"), _gh_release("v4.7.0")]
+        with patch.object(main, "_get_app_version", return_value="4.7.2"):
+            payload = main._release_payload(releases, since="4.7.0")
+        assert payload["update_available"] is False
+        assert [r["version"] for r in payload["releases"]] == ["4.7.1", "4.7.2"]
+
+    def test_releases_payload_normalizes_null_fields(self) -> None:
+        """Explicit JSON nulls become empty strings, never crash the dialog."""
+        from rootcoz import main
+
+        releases = [
+            _gh_release("v4.7.2", "v4.7.2", "notes 4.7.2"),
+            {
+                **_gh_release("v4.7.1"),
+                "body": None,
+                "name": None,
+                "published_at": None,
+                "html_url": None,
+            },
+        ]
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload(releases)
+        entry = payload["releases"][0]
+        assert entry["version"] == "4.7.1"
+        assert entry["body"] == ""
+        assert entry["name"] == ""
+        assert entry["published_at"] == ""
+        assert entry["html_url"] == ""
+
+    def test_releases_payload_sorts_out_of_order_releases(self) -> None:
+        """Publication order is not version order (#341)."""
+        from rootcoz import main
+
+        # 4.7.1 published AFTER 4.7.2 — API returns it first
+        releases = [_gh_release("v4.7.1"), _gh_release("v4.7.2")]
+        with patch.object(main, "_get_app_version", return_value="4.7.0"):
+            payload = main._release_payload(releases)
+        assert payload["version"] == "4.7.2"
+        assert [r["version"] for r in payload["releases"]] == ["4.7.1", "4.7.2"]
+
     def test_releases_latest_endpoint_fetches_list_and_filters(
         self, test_client
     ) -> None:
@@ -484,6 +550,7 @@ class TestHealthEndpoint:
         )
         with (
             patch.dict(main._release_cache, {}, clear=True),
+            patch.object(main, "_get_app_version", return_value="4.7.0"),
             patch("rootcoz.main.httpx.AsyncClient") as MockClient,
         ):
             mock_client_instance = AsyncMock()
@@ -504,6 +571,52 @@ class TestHealthEndpoint:
         assert call_args.args[0] == main._RELEASES_LIST_URL
         assert call_args.kwargs["params"]["per_page"] == main._RELEASES_PER_PAGE
 
+    def test_releases_latest_endpoint_walks_prerelease_pages(self, test_client) -> None:
+        """A page full of prereleases must not starve the stable list (#341)."""
+        from rootcoz import main
+
+        prerelease_page = [
+            {**_gh_release(f"v4.7.{i}-rc1"), "prerelease": True}
+            for i in range(main._RELEASES_PER_PAGE)
+        ]
+        stable_page = [
+            _gh_release("v4.7.2", "v4.7.2", "notes 4.7.2"),
+            _gh_release("v4.7.1", "v4.7.1", "notes 4.7.1"),
+        ]
+        responses = [
+            httpx.Response(
+                200,
+                json=prerelease_page,
+                request=httpx.Request("GET", main._RELEASES_LIST_URL),
+            ),
+            httpx.Response(
+                200,
+                json=stable_page,
+                request=httpx.Request("GET", main._RELEASES_LIST_URL),
+            ),
+        ]
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch.object(main, "_get_app_version", return_value="4.7.0"),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+        ):
+            mock_client_instance = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(
+                return_value=mock_client_instance
+            )
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+            mock_client_instance.get.side_effect = responses
+
+            response = test_client.get("/api/releases/latest?since=4.7.0")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [r["version"] for r in data["releases"]] == ["4.7.1", "4.7.2"]
+        assert data["version"] == "4.7.2"
+        # Page 2 was fetched after page 1 yielded no eligible releases
+        assert mock_client_instance.get.call_count == 2
+        assert mock_client_instance.get.call_args_list[1].kwargs["params"]["page"] == 2
+
     def test_releases_latest_endpoint_serves_cache_per_since(self, test_client) -> None:
         """Cached list is re-filtered per request without refetching."""
         from rootcoz import main
@@ -520,7 +633,7 @@ class TestHealthEndpoint:
         )
         with (
             patch.dict(main._release_cache, {}, clear=True),
-            patch.object(main, "_get_app_version", return_value="4.7.0"),
+            patch.object(main, "_get_app_version", return_value="4.7.2"),
             patch("rootcoz.main.httpx.AsyncClient") as MockClient,
         ):
             mock_client_instance = AsyncMock()
@@ -531,11 +644,11 @@ class TestHealthEndpoint:
             mock_client_instance.get.return_value = mock_response
 
             first = test_client.get("/api/releases/latest").json()
-            second = test_client.get("/api/releases/latest?since=4.7.1").json()
+            second = test_client.get("/api/releases/latest?since=4.7.0").json()
 
         mock_client_instance.get.assert_called_once()
-        assert [r["version"] for r in first["releases"]] == ["4.7.1", "4.7.2"]
-        assert [r["version"] for r in second["releases"]] == ["4.7.2"]
+        assert [r["version"] for r in first["releases"]] == []
+        assert [r["version"] for r in second["releases"]] == ["4.7.1", "4.7.2"]
 
     def test_releases_latest_endpoint_unreachable_serves_cached_list(
         self, test_client
@@ -552,6 +665,7 @@ class TestHealthEndpoint:
                 },
                 clear=True,
             ),
+            patch.object(main, "_get_app_version", return_value="4.7.0"),
             patch("rootcoz.main.httpx.AsyncClient") as MockClient,
         ):
             mock_client_instance = AsyncMock()

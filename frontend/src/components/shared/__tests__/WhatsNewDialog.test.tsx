@@ -282,7 +282,8 @@ describe('WhatsNewDialog', () => {
       expect(localStorage.getItem(LS_SEEN_KEY)).toBeNull()
     })
 
-    it('plain dismissal writes only the baseline, not the seen/update keys', async () => {
+    it('plain dismissal does not advance the baseline past what the fetch used', async () => {
+      localStorage.setItem(LS_BASELINE_KEY, '4.6.0')
       mockApiGet.mockResolvedValue(nagAggregated)
       const user = userEvent.setup()
       render(<WhatsNewDialog />)
@@ -290,9 +291,93 @@ describe('WhatsNewDialog', () => {
         expect(screen.getByText('Update available')).toBeInTheDocument()
       })
       await user.click(screen.getByRole('button', { name: /got it/i }))
-      expect(localStorage.getItem(LS_BASELINE_KEY)).toBe('4.7.0')
+      // Baseline keeps the since value used for the fetch — not server_version
+      expect(localStorage.getItem(LS_BASELINE_KEY)).toBe('4.6.0')
       expect(localStorage.getItem(LS_UPDATE_KEY)).toBeNull()
       expect(localStorage.getItem(LS_SEEN_KEY)).toBeNull()
+    })
+
+    it('writes the baseline on payload processing even when the popup is suppressed', async () => {
+      localStorage.setItem(LS_BASELINE_KEY, '4.6.0')
+      localStorage.setItem(LS_SEEN_KEY, '4.7.2')
+      mockApiGet.mockResolvedValue(whatsNewAggregated)
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(mockApiGet).toHaveBeenCalledWith('/api/releases/latest?since=4.6.0')
+      })
+      // Suppressed popup still persisted the baseline-used value — a reload
+      // must not lose it (finding 1)
+      expect(localStorage.getItem(LS_BASELINE_KEY)).toBe('4.6.0')
+    })
+
+    it('fresh mount with no baseline fetches without ?since and writes server_version after processing', async () => {
+      mockApiGet.mockResolvedValue(whatsNewAggregated)
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(mockApiGet).toHaveBeenCalledWith('/api/releases/latest')
+      })
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+      expect(localStorage.getItem(LS_BASELINE_KEY)).toBe('4.7.2')
+    })
+
+    it('"Don\'t show again" advances the baseline to server_version and writes the seen key', async () => {
+      localStorage.setItem(LS_BASELINE_KEY, '4.7.0')
+      mockApiGet.mockResolvedValue(whatsNewAggregated)
+      const user = userEvent.setup()
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+      await user.click(screen.getByRole('checkbox'))
+      await user.click(screen.getByRole('button', { name: /got it/i }))
+      expect(localStorage.getItem(LS_BASELINE_KEY)).toBe('4.7.2')
+      expect(localStorage.getItem(LS_SEEN_KEY)).toBe('4.7.2')
+    })
+
+    it('post-upgrade: plain dismiss keeps the baseline, re-show fetches the same since and identical groups', async () => {
+      localStorage.setItem(LS_BASELINE_KEY, '4.7.0')
+      mockApiGet.mockResolvedValue(whatsNewAggregated)
+      const user = userEvent.setup()
+      const { unmount } = render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText('SQLite concurrent access')).toBeInTheDocument()
+        expect(screen.getByText('Dark theme scrollbars')).toBeInTheDocument()
+      })
+      await user.click(screen.getByRole('button', { name: /got it/i }))
+      // Plain dismissal keeps the old since (finding 4)
+      expect(localStorage.getItem(LS_BASELINE_KEY)).toBe('4.7.0')
+      unmount()
+
+      mockApiGet.mockClear()
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(mockApiGet).toHaveBeenCalledWith('/api/releases/latest?since=4.7.0')
+      })
+      // Re-shown dialog shows the SAME aggregated groups
+      await waitFor(() => {
+        expect(screen.getByText('v4.7.1')).toBeInTheDocument()
+        expect(screen.getByText('SQLite concurrent access')).toBeInTheDocument()
+        expect(screen.getByText('v4.7.2')).toBeInTheDocument()
+        expect(screen.getByText('Dark theme scrollbars')).toBeInTheDocument()
+      })
+    })
+
+    it('a null release body does not crash — other groups still render', async () => {
+      mockApiGet.mockResolvedValue({
+        ...whatsNewAggregated,
+        releases: [
+          { ...whatsNewAggregated.releases[0], body: null as unknown as string },
+          whatsNewAggregated.releases[1],
+        ],
+      })
+      render(<WhatsNewDialog />)
+      await waitFor(() => {
+        expect(screen.getByText("What's New")).toBeInTheDocument()
+      })
+      expect(screen.getByText('v4.7.1')).toBeInTheDocument()
+      expect(screen.getByText('Dark theme scrollbars')).toBeInTheDocument()
     })
 
     it('a dismissed nag for the latest version does not re-show, even with releases', async () => {

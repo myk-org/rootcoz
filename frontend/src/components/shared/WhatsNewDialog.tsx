@@ -40,9 +40,9 @@ interface ReleaseGroup extends ReleaseSummary {
 }
 
 /** Parse GitHub release markdown body into bullet points */
-function parseReleaseEntries(body: string): { title: string; description: string }[] {
+function parseReleaseEntries(body: string | null | undefined): { title: string; description: string }[] {
   const entries: { title: string; description: string }[] = []
-  for (const line of body.split('\n')) {
+  for (const line of (body ?? '').split('\n')) {
     // Match "- **Title** — Description (#123)" or "- **Title** - Description"
     const match = line.match(/^-\s+\*\*(.+?)\*\*\s*[—\-–]\s*(.+)/)
     if (match) {
@@ -86,6 +86,16 @@ export function WhatsNewDialog() {
       try {
         const data = await api.get<ReleaseData>(url)
         if (cancelled || !data.version) return
+
+        // Persist the baseline used for THIS fetch so it survives reloads and
+        // suppressed popups (#341) — without advancing past what this browser
+        // was actually offered
+        try {
+          const baselineUsed = baseline ?? data.server_version
+          if (baselineUsed) localStorage.setItem(LS_BASELINE_KEY, baselineUsed)
+        } catch {
+          // localStorage unavailable
+        }
 
         try {
           if (data.update_available) {
@@ -135,12 +145,12 @@ export function WhatsNewDialog() {
   function handleDismiss() {
     if (release) {
       try {
-        // Always record the baseline so the next upgrade aggregates
-        // from the version this browser just saw
-        if (release.server_version) {
-          localStorage.setItem(LS_BASELINE_KEY, release.server_version)
-        }
         if (dontShowAgain) {
+          // Full acknowledgment — advance the baseline to the running
+          // version so the next upgrade aggregates from here (#341)
+          if (release.server_version) {
+            localStorage.setItem(LS_BASELINE_KEY, release.server_version)
+          }
           localStorage.setItem(
             release.update_available ? LS_UPDATE_KEY : LS_SEEN_KEY,
             release.version,
