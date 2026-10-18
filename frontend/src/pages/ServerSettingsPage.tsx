@@ -152,6 +152,9 @@ interface PageState {
   resettingKey: string | null
   revealedKeys: Set<string>
   revealedValues: Record<string, string>
+  // Bumped by CLEAR_REVEALED: a reveal response whose captured generation no
+  // longer matches is dropped, so a late response can't resurrect an old secret.
+  revealGenerations: Record<string, number>
   historyKey: string
   history: HistoryEntry[]
   historyLoading: boolean
@@ -171,8 +174,9 @@ type PageAction =
   | { type: 'SAVE_ERROR'; error: string }
   | { type: 'RESET_START'; key: string }
   | { type: 'RESET_DONE' }
-  | { type: 'REVEAL_VALUE'; key: string; value: string }
+  | { type: 'REVEAL_VALUE'; key: string; value: string; generation: number }
   | { type: 'HIDE_VALUE'; key: string }
+  | { type: 'CLEAR_REVEALED'; keys: string[] }
   | { type: 'EXPAND_ALL' }
   | { type: 'COLLAPSE_ALL'; categories: string[] }
   | { type: 'SHOW_HISTORY'; key: string }
@@ -213,6 +217,9 @@ function reducer(state: PageState, action: PageAction): PageState {
     case 'RESET_DONE':
       return { ...state, resettingKey: null }
     case 'REVEAL_VALUE': {
+      // A reveal whose generation was invalidated (save/reset cleared the key
+      // while the request was in flight) must not re-cache the old secret (#343).
+      if ((state.revealGenerations[action.key] ?? 0) !== action.generation) return state
       const nextKeys = new Set(state.revealedKeys)
       nextKeys.add(action.key)
       return {
@@ -227,6 +234,19 @@ function reducer(state: PageState, action: PageAction): PageState {
       const revealedValues = { ...state.revealedValues }
       delete revealedValues[action.key]
       return { ...state, revealedKeys: nextKeys, revealedValues }
+    }
+    case 'CLEAR_REVEALED': {
+      // Saved/reset values invalidate cached reveals — the row must fall back to
+      // the fresh (masked) refetched value until the user reveals again (#343).
+      const keys = new Set(action.keys)
+      const nextKeys = new Set([...state.revealedKeys].filter(k => !keys.has(k)))
+      const revealedValues = { ...state.revealedValues }
+      const revealGenerations = { ...state.revealGenerations }
+      for (const k of keys) {
+        delete revealedValues[k]
+        revealGenerations[k] = (revealGenerations[k] ?? 0) + 1
+      }
+      return { ...state, revealedKeys: nextKeys, revealedValues, revealGenerations }
     }
     case 'EXPAND_ALL':
       return { ...state, collapsedCategories: new Set<string>() }
@@ -258,6 +278,7 @@ const initialState: PageState = {
   resettingKey: null,
   revealedKeys: new Set(),
   revealedValues: {},
+  revealGenerations: {},
   historyKey: '',
   history: [],
   historyLoading: false,
@@ -501,6 +522,8 @@ export function ServerSettingsPage() {
       // Keep controls disabled until the refetched values are rendered —
       // otherwise a re-opened editor can save the stale value over the fresh one.
       await fetchSettings(true)
+      // A saved key's cached reveal is stale — clear it so the fresh masked value shows (#343).
+      dispatch({ type: 'CLEAR_REVEALED', keys: Object.keys(updates) })
       dispatch({ type: 'SAVE_SUCCESS' })
       return true
     } catch (err) {
@@ -529,6 +552,7 @@ export function ServerSettingsPage() {
     try {
       await api.delete(`/api/admin/settings/${encodeURIComponent(key)}`)
       const fresh = await fetchSettings(true)
+      dispatch({ type: 'CLEAR_REVEALED', keys: [key] })
       // A reset while the provider editor is open must not leave the pre-reset
       // checkbox selection saveable over the fresh value (#339/#340).
       if (key === 'active_server_providers') {
@@ -650,12 +674,15 @@ export function ServerSettingsPage() {
       return
     }
     try {
+      // Capture the generation before awaiting: if a save/reset clears this key
+      // while the GET is in flight, the reducer drops this stale response.
+      const generation = state.revealGenerations[key] ?? 0
       const data = await api.get<ServerSetting[]>(
         `/api/admin/settings?reveal_key=${encodeURIComponent(key)}`
       )
       const item = data.find(s => s.key === key)
       if (item) {
-        dispatch({ type: 'REVEAL_VALUE', key, value: item.value })
+        dispatch({ type: 'REVEAL_VALUE', key, value: item.value, generation })
       }
     } catch {
       // Silently fail — can't reveal

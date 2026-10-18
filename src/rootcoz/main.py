@@ -12147,17 +12147,27 @@ async def _test_jenkins_connection(settings: Settings) -> dict[str, Any]:
             ),
         )
     try:
-        whoami = await asyncio.to_thread(client.get_whoami)
+        whoami = await asyncio.to_thread(client.get_whoami_security)
     except Exception as exc:
         logger.debug("Jenkins whoAmI ping failed", exc_info=True)
+        if "authentication failed" in str(exc):
+            return _test_result(
+                False,
+                "Jenkins reachable but credentials are invalid "
+                f"({exc} — check the configured username/password)",
+            )
         return _test_result(
             False, f"Jenkins connection failed: {type(exc).__name__}: {exc}"
         )
-    user = ""
-    if isinstance(whoami, dict):
-        user = str(whoami.get("name") or whoami.get("id") or "")
-    if not (isinstance(whoami, dict) and whoami.get("authenticated") is True):
-        # Anonymous-enabled Jenkins answers whoAmI without authenticating.
+    if not isinstance(whoami, dict):
+        return _test_result(
+            False, "Jenkins connection failed: unexpected whoAmI response"
+        )
+    user = str(whoami.get("name") or "")
+    # SSO Jenkins reports authenticated:true even for anonymous requests, so
+    # only the anonymous flag and the reported name are trusted. A missing
+    # anonymous flag is treated as anonymous (conservative).
+    if whoami.get("anonymous") is not False or user == "anonymous":
         return _test_result(
             False,
             "Jenkins reachable but credentials are invalid "
