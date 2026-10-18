@@ -387,4 +387,148 @@ describe('ServerSettingsPage active server providers', () => {
     expect(screen.getByText('No server providers available')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Configure providers' })).not.toBeInTheDocument()
   })
+
+  it('shows a reset affordance when a restriction is stored but discovery is unavailable', async () => {
+    const settings = baseSettings()
+    const providers = settings.find((s) => s.key === 'active_server_providers')!
+    providers.options = []
+    providers.value = 'gemini'
+    providers.source = 'db'
+    providers.updated_by = 'admin'
+    get.mockResolvedValue(settings as never)
+
+    await openAiTab()
+    expect(screen.getByText('Restricted to:')).toBeInTheDocument()
+    expect(
+      screen.getByText(/Provider discovery is currently unavailable/),
+    ).toBeInTheDocument()
+
+    const del = vi.mocked(api.delete)
+    del.mockResolvedValue({} as never)
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
+    await waitFor(() =>
+      expect(del).toHaveBeenCalledWith('/api/admin/settings/active_server_providers'),
+    )
+    // Silent refetch after reset
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+  })
+
+  it('matches saved provider IDs case-insensitively and saves canonical spelling', async () => {
+    const settings = baseSettings()
+    settings.find((s) => s.key === 'active_server_providers')!.value = 'Gemini,OpenAI'
+    get.mockResolvedValue(settings as never)
+
+    await openAiTab()
+    // Mixed-case saved IDs are active (no struck-through chip anywhere)
+    for (const el of screen.getAllByText('gemini')) expect(el).not.toHaveClass('line-through')
+    for (const el of screen.getAllByText('openai')) expect(el).not.toHaveClass('line-through')
+    expect(screen.getByText('vertex-claude')).toHaveClass('line-through')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    expect(screen.getByRole('checkbox', { name: 'gemini' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'vertex-claude' })).not.toBeChecked()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: 'gemini,openai' },
+      }),
+    )
+  })
+})
+
+describe('ServerSettingsPage save refetch gating', () => {
+  it('keeps controls disabled until the post-save refetch resolves', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_USER' }))
+
+    // The post-save silent refetch stays pending until we resolve it
+    let resolveRefetch!: (value: TestSetting[]) => void
+    const refetch = new Promise<TestSetting[]>((r) => {
+      resolveRefetch = r
+    })
+    get.mockReturnValueOnce(refetch as never)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+
+    // Save succeeded but the refetch is in flight: the editor stays disabled
+    const savingButton = await screen.findByRole('button', { name: /saving/i })
+    expect(savingButton).toBeDisabled()
+
+    resolveRefetch(baseSettings())
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /saving/i })).toBeNull(),
+    )
+    expect(screen.getByText('JENKINS_USER')).toBeInTheDocument()
+  })
+})
+
+describe('ServerSettingsPage Jira method resolution', () => {
+  async function openJiraTabWith(settings: TestSetting[]) {
+    get.mockResolvedValue(settings as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+    await screen.findByText('JIRA_URL')
+  }
+
+  it('treats a masked oauth token as the active oauth method', async () => {
+    const settings = baseSettings()
+    settings.find((s) => s.key === 'jira_oauth_access_token')!.value = '••••••••'
+    await openJiraTabWith(settings)
+    expect(screen.getByText('Active: Atlassian OAuth (token / cloud ID)')).toBeInTheDocument()
+  })
+
+  it('resolves email paired with only a PAT as pat (basic needs email AND api token)', async () => {
+    const settings = baseSettings()
+    settings.find((s) => s.key === 'jira_api_token')!.value = ''
+    settings.find((s) => s.key === 'jira_pat')!.value = 'pat-without-prefix'
+    await openJiraTabWith(settings)
+    expect(screen.getByText('Active: PAT (Bearer)')).toBeInTheDocument()
+  })
+
+  it('shows no active method for an api token without email', async () => {
+    const settings = baseSettings()
+    settings.find((s) => s.key === 'jira_email')!.value = ''
+    await openJiraTabWith(settings)
+    expect(screen.queryByText(/^Active:/)).not.toBeInTheDocument()
+  })
+})
+
+describe('ServerSettingsPage Jira field visibility', () => {
+  it('finds auth-method-hidden Jira fields in search results', async () => {
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    // jira_pat is hidden while Email+token is the selected method
+    fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
+    expect(await screen.findByText('JIRA_URL')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+
+    // Search shows every matching Jira field regardless of method hiding
+    fireEvent.change(screen.getByLabelText('Search settings'), { target: { value: 'jira_pat' } })
+    expect(await screen.findByText('JIRA_PAT')).toBeInTheDocument()
+    // Header count matches the visible rows
+    expect(screen.getByText('(1 setting)')).toBeInTheDocument()
+  })
+
+  it('cancels an open edit on a field hidden by the newly selected method', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+    await screen.findByText('JIRA_URL')
+
+    // Open an edit on a basic-method field
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_EMAIL' }))
+    const testButton = screen.getByRole('button', { name: /test connection/i })
+    expect(testButton).toBeDisabled()
+
+    // Switching to PAT hides JIRA_EMAIL — the edit is canceled, not stranded
+    fireEvent.click(screen.getByRole('button', { name: 'PAT (Bearer)' }))
+    await waitFor(() => expect(testButton).toBeEnabled())
+    expect(screen.queryByLabelText('Edit JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+  })
 })

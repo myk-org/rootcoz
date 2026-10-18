@@ -8806,6 +8806,73 @@ class TestIntegrationConnectionEndpoints:
         assert data["ok"] is False
         assert "Report Portal connection failed" in data["message"]
 
+    def test_overall_deadline_bounds_hanging_tester(self, test_client) -> None:
+        """A hanging tester returns a failed result, bounded by the route deadline."""
+
+        async def _hang(settings: Settings) -> dict[str, Any]:
+            await asyncio.sleep(60)
+            return {"ok": True, "message": "never reached"}
+
+        with (
+            patch.dict("rootcoz.main._INTEGRATION_TESTERS", {"jenkins": _hang}),
+            patch("rootcoz.main._INTEGRATION_TEST_TIMEOUT", 0.05),
+        ):
+            response = test_client.post("/api/admin/settings/test/jenkins")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "timed out" in data["message"]
+
+    def test_http_error_message_has_no_url_credentials(self, test_client) -> None:
+        """A configured URL with userinfo/query never leaks into failure messages."""
+        secret_url = "https://user:pass@rp.example.com/?token=topsecret"  # pragma: allowlist secret
+        settings = Settings(
+            reportportal_url=secret_url,
+            reportportal_api_token=SecretStr("not-a-real-token"),
+            reportportal_project="my-project",
+        )
+        response_payload = self._http_response(
+            500, {"message": "boom"}, f"{secret_url}/api/v1/project/my-project"
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(response_payload)[0],
+        ):
+            response = test_client.post("/api/admin/settings/test/reportportal")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        body = json.dumps(data)
+        assert "user:pass" not in body
+        assert "topsecret" not in body
+        assert "token=" not in body
+        assert "rp.example.com" in data["message"]
+
+    def test_transport_error_message_has_no_url_credentials(self, test_client) -> None:
+        """Transport-failure messages never echo userinfo or query strings."""
+        secret_url = "https://user:pass@rp.example.com/?token=topsecret"  # pragma: allowlist secret
+        settings = Settings(
+            reportportal_url=secret_url,
+            reportportal_api_token=SecretStr("not-a-real-token"),
+            reportportal_project="my-project",
+        )
+        transport_error = httpx.ConnectError(
+            f"connection refused to {secret_url}/api/v1/project/my-project"
+        )
+        mock_patch, _ = self._mock_async_client([transport_error])
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            mock_patch,
+        ):
+            response = test_client.post("/api/admin/settings/test/reportportal")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        body = json.dumps(data)
+        assert "user:pass" not in body
+        assert "topsecret" not in body
+        assert "token=" not in body
+
     def test_prow_success_checks_deck_and_gcs(self, test_client) -> None:
         """Prow test verifies deck reachability and GCS bucket listability."""
         settings = Settings(

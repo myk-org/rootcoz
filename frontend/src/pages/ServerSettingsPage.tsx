@@ -105,6 +105,22 @@ const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
 
 const jiraMethodLabel = (id: JiraMethod) => JIRA_METHODS.find(m => m.id === id)!.label
 
+function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
+  return new Set(JIRA_METHODS.filter(m => m.id !== method).flatMap(m => m.fields))
+}
+
+// Mirrors the backend resolve_jira_connection precedence: the oauth token
+// wins (masked values cannot be prefix-checked, so presence is the signal),
+// then email+api token basic auth, then PAT, else none. The badge, initial
+// method selection and precedence warning all derive from this function.
+function resolveActiveJiraMethod(settings: ServerSetting[]): JiraMethod | null {
+  const value = (key: string) => settings.find(s => s.key === key)?.value?.trim() ?? ''
+  if (value('jira_oauth_access_token')) return 'oauth'
+  if (value('jira_email') && value('jira_api_token')) return 'basic'
+  if (value('jira_pat')) return 'pat'
+  return null
+}
+
 // ---------------------------------------------------------------------------
 // State reducer
 // ---------------------------------------------------------------------------
@@ -332,9 +348,15 @@ function serializeAdditionalRepos(repos: RepoWithId[]): string {
 }
 
 // Empty value means ALL server providers are active (backward compatible).
+// The backend matches provider IDs case-insensitively, so canonicalize each
+// saved ID to its catalog spelling; unknown IDs are preserved as-is.
+function canonicalProvider(id: string, options: string[]): string {
+  return options.find(o => o.toLowerCase() === id.toLowerCase()) ?? id
+}
+
 function parseActiveServerProviders(raw: string, options: string[]): string[] {
   if (!raw.trim()) return [...options]
-  return raw.split(',').map(s => s.trim()).filter(Boolean)
+  return [...new Set(raw.split(',').map(s => canonicalProvider(s.trim(), options)).filter(Boolean))]
 }
 
 // ---------------------------------------------------------------------------
@@ -471,8 +493,10 @@ export function ServerSettingsPage() {
     dispatch({ type: 'SAVE_START' })
     try {
       await api.put('/api/admin/settings', { settings: updates })
+      // Keep controls disabled until the refetched values are rendered —
+      // otherwise a re-opened editor can save the stale value over the fresh one.
+      await fetchSettings(true)
       dispatch({ type: 'SAVE_SUCCESS' })
-      fetchSettings(true)
       return true
     } catch (err) {
       let msg = 'Failed to save'
@@ -499,7 +523,7 @@ export function ServerSettingsPage() {
     dispatch({ type: 'RESET_START', key })
     try {
       await api.delete(`/api/admin/settings/${encodeURIComponent(key)}`)
-      fetchSettings(true)
+      await fetchSettings(true)
     } catch {
       // silently fail – data will refetch anyway
     } finally {
@@ -683,18 +707,9 @@ export function ServerSettingsPage() {
   }, [allGroups, state.search])
 
   // ---- Jira auth method (presentational grouping, same precedence as backend) ----
-  const jiraValue = (key: string) => state.settings.find(s => s.key === key)?.value?.trim() ?? ''
-  const activeJiraMethod: JiraMethod | null = jiraValue('jira_oauth_access_token')
-    ? 'oauth'
-    : jiraValue('jira_email') && jiraValue('jira_api_token')
-      ? 'basic'
-      : jiraValue('jira_pat')
-        ? 'pat'
-        : null
+  const activeJiraMethod = resolveActiveJiraMethod(state.settings)
   const effectiveJiraMethod = jiraMethod ?? activeJiraMethod ?? 'basic'
-  const jiraHiddenFields = new Set(
-    JIRA_METHODS.filter(m => m.id !== effectiveJiraMethod).flatMap(m => m.fields)
-  )
+  const jiraHiddenFields = hiddenJiraFieldsFor(effectiveJiraMethod)
   // Editing a lower-precedence method while higher-precedence credentials are stored
   const jiraPrecedenceWarning =
     activeJiraMethod &&
@@ -744,7 +759,9 @@ export function ServerSettingsPage() {
   // ---- Per-category card (shared by the tab view and search results) ----
   function renderCategory(category: string, settings: ServerSetting[]) {
     const isCollapsed = state.collapsedCategories.has(category)
-    const rowSettings = category === 'Jira'
+    // Search must be able to find every Jira field, so auth-method hiding
+    // only applies in the tab view.
+    const rowSettings = category === 'Jira' && !state.search
       ? settings.filter(s => !jiraHiddenFields.has(s.key))
       : settings
     return (
@@ -797,7 +814,15 @@ export function ServerSettingsPage() {
             {category === 'Jira' && (
               <JiraAuthMethodControl
                 selected={effectiveJiraMethod}
-                onSelect={setJiraMethod}
+                onSelect={(method) => {
+                  // Cancel any open edit on a field the new method hides —
+                  // otherwise the Jira test button stays disabled with no
+                  // visible editor to save or cancel.
+                  if (state.editingKey && hiddenJiraFieldsFor(method).has(state.editingKey)) {
+                    dispatch({ type: 'CANCEL_EDIT' })
+                  }
+                  setJiraMethod(method)
+                }}
                 activeMethod={activeJiraMethod}
                 warningMethod={jiraPrecedenceWarning}
               />
@@ -956,7 +981,24 @@ export function ServerSettingsPage() {
                       ) : (
                         <div>
                           {options.length === 0 ? (
-                            <span className="text-xs text-text-tertiary italic">No server providers available</span>
+                            setting.value.trim() ? (
+                              <div className="space-y-1.5">
+                                <span className="text-xs text-text-secondary">
+                                  Restricted to: <span className="font-mono">{setting.value}</span>
+                                </span>
+                                <p className="flex items-center gap-1.5 text-xs text-signal-amber">
+                                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                                  Provider discovery is currently unavailable — the stored restriction above stays in effect.
+                                </p>
+                                {setting.source === 'db' && (
+                                  <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                                    <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                                  </Button>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-text-tertiary italic">No server providers available</span>
+                            )
                           ) : !setting.value.trim() ? (
                             <span className="text-xs text-text-secondary">
                               All server providers are active <span className="text-text-quaternary">(empty value = all)</span>

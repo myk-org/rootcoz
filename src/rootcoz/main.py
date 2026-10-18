@@ -272,6 +272,7 @@ from rootcoz.transcripts import (
     transcript_summary,
     write_transcript_env_bridge,
 )
+from rootcoz.url_utils import redact_urls_in_text
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -12091,7 +12092,7 @@ async def _integration_test_request(
             return await client.get(url, params=params)
     except httpx.HTTPError as exc:
         raise _IntegrationTestError(
-            f"connection failed ({type(exc).__name__}): {exc}"
+            redact_urls_in_text(f"connection failed ({type(exc).__name__}): {exc}")
         ) from exc
 
 
@@ -12106,7 +12107,9 @@ async def _integration_test_get_json(url: str, **kwargs: Any) -> dict[str, Any]:
             f"authentication failed (HTTP {response.status_code})"
         )
     if response.status_code >= 400:
-        raise _IntegrationTestError(f"HTTP {response.status_code} from {url}")
+        raise _IntegrationTestError(
+            f"HTTP {response.status_code} from {redact_urls_in_text(url)}"
+        )
     try:
         return response.json()
     except ValueError as exc:
@@ -12128,7 +12131,10 @@ async def _test_jenkins_connection(settings: Settings) -> dict[str, Any]:
     except Exception as exc:
         logger.debug("Jenkins client init failed", exc_info=True)
         return _test_result(
-            False, f"Failed to initialize Jenkins client: {type(exc).__name__}: {exc}"
+            False,
+            redact_urls_in_text(
+                f"Failed to initialize Jenkins client: {type(exc).__name__}: {exc}"
+            ),
         )
     try:
         whoami = await asyncio.to_thread(client.get_whoami)
@@ -12302,18 +12308,29 @@ async def test_integration_connection(
         )
     settings = get_settings()
     try:
-        result = await tester(settings)
+        # Overall deadline: testers may make several sequential requests
+        # (Prow deck + GCS, Jira cloud-ID resolution), each with its own
+        # timeout — one click must never consume several timeout periods.
+        result = await asyncio.wait_for(
+            tester(settings), timeout=_INTEGRATION_TEST_TIMEOUT
+        )
+    except TimeoutError:
+        result = _test_result(
+            False,
+            f"Connection test timed out after {_INTEGRATION_TEST_TIMEOUT:.0f} seconds",
+        )
     except Exception as exc:  # a broken integration must never 500
+        message = redact_urls_in_text(
+            f"Connection test failed unexpectedly: {type(exc).__name__}: {exc}"
+        )
         logger.warning(
             "Integration connection test crashed for %s: %s: %s",
             key,
             type(exc).__name__,
-            exc,
+            message,
             exc_info=True,
         )
-        result = _test_result(
-            False, f"Connection test failed unexpectedly: {type(exc).__name__}: {exc}"
-        )
+        result = _test_result(False, message)
     logger.info(
         "Integration connection test: integration=%s ok=%s by=%s",
         key,
