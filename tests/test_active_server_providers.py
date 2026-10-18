@@ -240,6 +240,47 @@ async def test_grant_enforcement_accepts_public_name_for_internal_provider(monke
 
 
 @pytest.mark.asyncio
+async def test_case_insensitive_match_for_custom_providers(monkeypatch):
+    """Saved 'mygateway' keeps models of a catalog provider 'MyGateway'.
+
+    Custom catalog providers pass through public_provider_name unchanged
+    (preserving case), so the saved restriction may differ in case only.
+    The membership test folds case; the display spelling (picker output)
+    keeps the catalog's canonical 'MyGateway'.
+    """
+    _catalog(monkeypatch, "MyGateway", "openai")
+    _set_active(monkeypatch, "mygateway")
+    # Saved lowercase restriction matches the catalog's mixed-case provider.
+    assert ai_client.is_server_provider_active("MyGateway")
+    assert ai_client.is_server_provider_active("mygateway")
+    # Scoped models keep the mixed-case provider's server source.
+    scoped = await ai_client.scoped_models()
+    assert scoped["MyGateway"][0]["credential_sources"] == ["server"]
+    # Non-listed providers are still excluded.
+    assert "openai" not in scoped
+    # Reverse direction: catalog saves lowercase, admin saved mixed case.
+    _catalog(monkeypatch, "mygateway", "openai")
+    _set_active(monkeypatch, "MyGateway")
+    scoped = await ai_client.scoped_models()
+    assert scoped["mygateway"][0]["credential_sources"] == ["server"]
+    assert "openai" not in scoped
+
+
+@pytest.mark.asyncio
+async def test_case_insensitive_grant_for_custom_provider(monkeypatch):
+    """require_server_provider_grant accepts a case-variant custom provider."""
+    _catalog(monkeypatch, "MyGateway", "openai")
+    _set_active(monkeypatch, "mygateway")
+    # Active case-variant provider passes the deactivation check; the
+    # failure below must come from the grant layer, not deactivation.
+    with pytest.raises(ValueError, match="administrator grant"):
+        await ai_client.require_server_provider_grant("MyGateway", "m")
+    # A non-listed provider is still rejected as deactivated.
+    with pytest.raises(ai_client.InactiveServerProviderError, match="deactivated"):
+        await ai_client.require_server_provider_grant("openai", "m")
+
+
+@pytest.mark.asyncio
 async def test_server_capable_providers_returns_public_names(monkeypatch):
     """Settings picker options never leak internal cli-* catalog IDs."""
     _catalog(monkeypatch, "cli-claude", "cli-gemini", "cli-cursor", "openai")

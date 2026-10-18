@@ -142,19 +142,31 @@ class InactiveServerProviderError(ValueError):
     """Server credentials for this provider are deactivated (ACTIVE_SERVER_PROVIDERS)."""
 
 
+def _fold_provider_name(provider: str) -> str:
+    """Casefolded canonical public name for membership comparisons only.
+
+    Unknown/custom catalog providers pass through :func:`public_provider_name`
+    unchanged (``MyGateway`` stays ``MyGateway`` for display), so the admin
+    restriction list and the catalog can disagree on case alone.  Membership
+    tests fold both sides to lowercase; display paths must NOT use this.
+    """
+    return public_provider_name(provider).lower()
+
+
 def active_server_provider_ids() -> frozenset[str] | None:
-    """Admin-selected active server providers (canonical public names); None = all.
+    """Admin-selected active server providers (casefolded); None = all.
 
     Each saved entry is normalized through :func:`public_provider_name`, so a
     public picker name (``claude``) and a legacy catalog ID (``cli-claude``)
     saved by an earlier admin both resolve to the same canonical form that
-    catalog-provider comparisons use.
+    catalog-provider comparisons use.  Names are then lowercased so saved
+    entries match custom catalog providers regardless of spelling case.
     """
     from rootcoz.config import get_settings
 
     raw = get_settings().active_server_providers
     ids = frozenset(
-        public_provider_name(part.strip()) for part in raw.split(",") if part.strip()
+        _fold_provider_name(part.strip()) for part in raw.split(",") if part.strip()
     )
     return ids or None
 
@@ -165,9 +177,12 @@ def is_server_provider_active(provider: str) -> bool:
     Both sides of the comparison go through :func:`public_provider_name`:
     admins save public picker names (``claude``) while catalog and grant paths
     hold raw provider IDs (``cli-claude``) — one canonical form matches both.
+    The comparison is case-insensitive for custom providers whose saved
+    spelling may differ in case from the catalog's (``mygateway`` vs
+    ``MyGateway``); display spelling is never affected.
     """
     active = active_server_provider_ids()
-    return active is None or public_provider_name(provider) in active
+    return active is None or _fold_provider_name(provider) in active
 
 
 def _raise_inactive_server_provider(provider: str) -> None:
