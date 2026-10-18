@@ -1,5 +1,6 @@
 """Jenkins API client wrapper."""
 
+import json
 import os
 from typing import Any
 from urllib.parse import urlparse
@@ -44,6 +45,36 @@ class JenkinsClient(jenkins.Jenkins):
     def session(self) -> requests.Session:
         """Authenticated requests session for direct API calls."""
         return self._session
+
+    def get_whoami_security(self) -> dict[str, Any]:
+        """Get the ``/whoAmI/api/json`` security identity.
+
+        Unlike :meth:`get_whoami` (the hudson.model.User API, which never
+        reports an auth signal), this endpoint says whether the request was
+        served anonymously — on SSO Jenkins ``authenticated`` is true even
+        for anonymous requests, so only ``anonymous``/``name`` are reliable.
+
+        Raises:
+            jenkins.JenkinsException: ``authentication failed (HTTP N)`` on
+                401/403, or the underlying transport error otherwise.
+        """
+        request = requests.Request("GET", self._build_url("whoAmI/api/json"))
+        try:
+            response = self.jenkins_request(request)
+        except jenkins.JenkinsException as exc:
+            # python-jenkins folds 401/403 into a generic JenkinsException;
+            # recover the HTTP status from the chained HTTPError.
+            cause = exc.__context__
+            if (
+                isinstance(cause, requests.HTTPError)
+                and cause.response is not None
+                and cause.response.status_code in (401, 403)
+            ):
+                raise jenkins.JenkinsException(
+                    f"authentication failed (HTTP {cause.response.status_code})"
+                ) from exc
+            raise
+        return json.loads(response.text)
 
     def get_build_console(self, job_name: str, build_number: int) -> str:
         """Get console output for a build.

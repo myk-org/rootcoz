@@ -567,6 +567,125 @@ describe('ServerSettingsPage Jira method resolution', () => {
   })
 })
 
+describe('ServerSettingsPage revealed value cache (#343)', () => {
+  // get mock serving the settings list, and decrypted values for reveal_key calls.
+  // The returned `revealed` map is mutable so a test can change what the next
+  // reveal returns (e.g. after a save changed the stored value).
+  function mockGet(opts: { revealed?: Record<string, string>; base?: TestSetting[] } = {}) {
+    const base = opts.base ?? baseSettings()
+    const revealed = opts.revealed ?? {}
+    get.mockImplementation(async (url: unknown) => {
+      const key = typeof url === 'string' ? url.match(/reveal_key=([^&]+)/)?.[1] : undefined
+      if (key) {
+        const settings = baseSettings()
+        const item = settings.find((s) => s.key === decodeURIComponent(key))
+        if (item) item.value = revealed[key] ?? ''
+        return settings
+      }
+      return base
+    })
+    return revealed
+  }
+
+  async function openTab(name: string, marker: string) {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name }))
+    await screen.findByText(marker)
+  }
+
+  it('clears the cached reveal on save — row shows the fresh value without a remount, and a new reveal shows the new value', async () => {
+    const revealed = mockGet({ revealed: { jenkins_password: 'decrypted-old' } })
+    await openTab('Jenkins', 'JENKINS_PASSWORD')
+
+    // Reveal → row shows the decrypted value
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('decrypted-old'),
+    )
+
+    // Save a new value
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }))
+    fireEvent.change(screen.getByLabelText('Edit JENKINS_PASSWORD'), {
+      target: { value: 'new-pass' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { jenkins_password: 'new-pass' }, // pragma: allowlist secret
+      }),
+    )
+
+    // Silent refetch + cleared reveal: the row falls back to the fresh masked value
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('••••••••'),
+    )
+    expect(screen.queryByText('decrypted-old')).not.toBeInTheDocument()
+    // Row stayed mounted (no skeleton) and is masked again
+    expect(document.querySelector('.animate-pulse')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Reveal value' })).toBeInTheDocument()
+
+    // Revealing again fetches the NEW decrypted value
+    revealed.jenkins_password = 'decrypted-new' // pragma: allowlist secret
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('decrypted-new'),
+    )
+  })
+
+  it('clears the cached reveal on reset', async () => {
+    const settings = baseSettings()
+    const pw = settings.find((s) => s.key === 'jenkins_password')!
+    pw.source = 'db'
+    mockGet({ revealed: { jenkins_password: 'decrypted-old' }, base: settings }) // pragma: allowlist secret
+    await openTab('Jenkins', 'JENKINS_PASSWORD')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('decrypted-old'),
+    )
+
+    // Reset via the editor (the reset affordance lives in edit mode)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }))
+    const del = vi.mocked(api.delete)
+    del.mockResolvedValue({} as never)
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }))
+    await waitFor(() => expect(del).toHaveBeenCalledWith('/api/admin/settings/jenkins_password'))
+
+    // The generic row stays in edit mode after a reset — close it to see the display value
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+
+    // Fresh refetched value wins over the stale cached reveal
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('••••••••'),
+    )
+    expect(screen.queryByText('decrypted-old')).not.toBeInTheDocument()
+  })
+
+  it('keeps reveals of other keys when saving an unrelated setting', async () => {
+    mockGet({ revealed: { jira_api_token: 'decrypted-jira' } })
+    await openTab('Jira', 'JIRA_API_TOKEN')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JIRA_API_TOKEN' }).textContent).toBe('decrypted-jira'),
+    )
+
+    // Save jenkins_password — an unrelated key — on another tab
+    fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }))
+    fireEvent.change(screen.getByLabelText('Edit JENKINS_PASSWORD'), {
+      target: { value: 'new-pass' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+
+    // The jira_api_token reveal survives: only the saved key was cleared
+    fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
+    expect(screen.getByRole('button', { name: 'Edit JIRA_API_TOKEN' }).textContent).toBe('decrypted-jira')
+    expect(screen.getByRole('button', { name: 'Hide value' })).toBeInTheDocument()
+  })
+})
+
 describe('ServerSettingsPage Jira field visibility', () => {
   it('finds auth-method-hidden Jira fields in search results', async () => {
     renderPage()

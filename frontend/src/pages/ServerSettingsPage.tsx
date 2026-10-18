@@ -173,6 +173,7 @@ type PageAction =
   | { type: 'RESET_DONE' }
   | { type: 'REVEAL_VALUE'; key: string; value: string }
   | { type: 'HIDE_VALUE'; key: string }
+  | { type: 'CLEAR_REVEALED'; keys: string[] }
   | { type: 'EXPAND_ALL' }
   | { type: 'COLLAPSE_ALL'; categories: string[] }
   | { type: 'SHOW_HISTORY'; key: string }
@@ -226,6 +227,15 @@ function reducer(state: PageState, action: PageAction): PageState {
       nextKeys.delete(action.key)
       const revealedValues = { ...state.revealedValues }
       delete revealedValues[action.key]
+      return { ...state, revealedKeys: nextKeys, revealedValues }
+    }
+    case 'CLEAR_REVEALED': {
+      // Saved/reset values invalidate cached reveals — the row must fall back to
+      // the fresh (masked) refetched value until the user reveals again (#343).
+      const keys = new Set(action.keys)
+      const nextKeys = new Set([...state.revealedKeys].filter(k => !keys.has(k)))
+      const revealedValues = { ...state.revealedValues }
+      for (const k of keys) delete revealedValues[k]
       return { ...state, revealedKeys: nextKeys, revealedValues }
     }
     case 'EXPAND_ALL':
@@ -501,6 +511,8 @@ export function ServerSettingsPage() {
       // Keep controls disabled until the refetched values are rendered —
       // otherwise a re-opened editor can save the stale value over the fresh one.
       await fetchSettings(true)
+      // A saved key's cached reveal is stale — clear it so the fresh masked value shows (#343).
+      dispatch({ type: 'CLEAR_REVEALED', keys: Object.keys(updates) })
       dispatch({ type: 'SAVE_SUCCESS' })
       return true
     } catch (err) {
@@ -529,6 +541,7 @@ export function ServerSettingsPage() {
     try {
       await api.delete(`/api/admin/settings/${encodeURIComponent(key)}`)
       const fresh = await fetchSettings(true)
+      dispatch({ type: 'CLEAR_REVEALED', keys: [key] })
       // A reset while the provider editor is open must not leave the pre-reset
       // checkbox selection saveable over the fresh value (#339/#340).
       if (key === 'active_server_providers') {

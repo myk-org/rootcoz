@@ -1,8 +1,11 @@
 """Tests for Jenkins client."""
 
+import json
 from unittest.mock import patch
 
+import jenkins
 import pytest
+import requests
 
 from rootcoz.jenkins import JenkinsClient
 
@@ -40,6 +43,64 @@ class TestJenkinsClientInit:
             password="pass",  # pragma: allowlist secret
             timeout=30,
         )
+
+
+class TestGetWhoamiSecurity:
+    """Tests for the /whoAmI/api/json security identity helper."""
+
+    @patch("rootcoz.jenkins.jenkins.Jenkins.__init__", return_value=None)
+    def _make_client(self, _mock_init) -> JenkinsClient:
+        client = JenkinsClient(
+            url="http://jenkins.example.com",
+            username="user",
+            password="pass",  # pragma: allowlist secret
+        )
+        client.server = "http://jenkins.example.com/"
+        return client
+
+    def test_parses_whoami_response(self) -> None:
+        """The helper returns the parsed whoAmI security payload."""
+        client = self._make_client()
+        payload = {
+            "_class": "hudson.security.WhoAmI",
+            "anonymous": False,
+            "authenticated": True,
+            "name": "myakove",
+        }
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(payload).encode()
+        with patch.object(client, "jenkins_request", return_value=response) as req:
+            assert client.get_whoami_security() == payload
+        assert req.call_args[0][0].url == ("http://jenkins.example.com/whoAmI/api/json")
+
+    def test_401_normalized_to_authentication_failed(self) -> None:
+        """python-jenkins's generic 401 error becomes authentication failed."""
+        client = self._make_client()
+        http_error = requests.HTTPError("401")
+        http_error.response = requests.Response()
+        http_error.response.status_code = 401
+        try:
+            raise http_error
+        except requests.HTTPError:
+            generic = jenkins.JenkinsException(
+                "Error in request. Possibly authentication failed [401]:"
+            )
+        with (
+            patch.object(client, "jenkins_request", side_effect=generic),
+            pytest.raises(jenkins.JenkinsException, match="authentication failed"),
+        ):
+            client.get_whoami_security()
+
+    def test_transport_error_reraised_unchanged(self) -> None:
+        """Non-auth errors (e.g. timeouts) pass through untouched."""
+        client = self._make_client()
+        timeout = jenkins.TimeoutException("timed out")
+        with (
+            patch.object(client, "jenkins_request", side_effect=timeout),
+            pytest.raises(jenkins.TimeoutException),
+        ):
+            client.get_whoami_security()
 
 
 class TestParseJenkinsUrl:

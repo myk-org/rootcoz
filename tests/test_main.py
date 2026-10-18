@@ -8703,10 +8703,15 @@ class TestIntegrationConnectionEndpoints:
 
     def test_jenkins_anonymous_access_fails(self, test_client) -> None:
         """Anonymous-enabled Jenkins must not validate missing credentials."""
+        # Real /whoAmI/api/json shape on RedHat SSO Jenkins: authenticated is
+        # true even for anonymous requests, so it must not be trusted.
         with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
-            mock_client_cls.return_value.get_whoami.return_value = {
+            mock_client_cls.return_value.get_whoami_security.return_value = {
+                "_class": "hudson.security.WhoAmI",
+                "anonymous": True,
+                "authenticated": True,
                 "name": "anonymous",
-                "authenticated": False,
+                "authorities": ["anonymous"],
             }
             response = test_client.post("/api/admin/settings/test/jenkins")
         assert response.status_code == 200
@@ -8715,12 +8720,27 @@ class TestIntegrationConnectionEndpoints:
         assert "anonymous" in data["message"]
         assert data["details"]["authenticated_user"] == "anonymous"
 
+    def test_jenkins_anonymous_flag_absent_fails(self, test_client) -> None:
+        """A whoAmI response without an anonymous flag fails conservatively."""
+        with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
+            mock_client_cls.return_value.get_whoami_security.return_value = {
+                "name": "myakove",
+            }
+            response = test_client.post("/api/admin/settings/test/jenkins")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+
     def test_jenkins_success(self, test_client) -> None:
         """Jenkins test pings whoAmI with the effective settings."""
+        # Real /whoAmI/api/json shape for a valid authenticated request.
         with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
-            mock_client_cls.return_value.get_whoami.return_value = {
-                "name": "testuser",
+            mock_client_cls.return_value.get_whoami_security.return_value = {
+                "_class": "hudson.security.WhoAmI",
+                "anonymous": False,
                 "authenticated": True,
+                "name": "testuser",
+                "authorities": ["authenticated"],
             }
             response = test_client.post("/api/admin/settings/test/jenkins")
         assert response.status_code == 200
@@ -8737,10 +8757,23 @@ class TestIntegrationConnectionEndpoints:
             timeout=10,
         )
 
+    def test_jenkins_invalid_credentials_http_401(self, test_client) -> None:
+        """A 401 from whoAmI yields an invalid-credentials failure, not a 500."""
+        with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
+            mock_client_cls.return_value.get_whoami_security.side_effect = (
+                jenkins.JenkinsException("authentication failed (HTTP 401)")
+            )
+            response = test_client.post("/api/admin/settings/test/jenkins")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "credentials are invalid" in data["message"]
+        assert "HTTP 401" in data["message"]
+
     def test_jenkins_failure_returns_result_not_500(self, test_client) -> None:
         """A failing Jenkins connection is a test result, never a 500."""
         with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
-            mock_client_cls.return_value.get_whoami.side_effect = (
+            mock_client_cls.return_value.get_whoami_security.side_effect = (
                 jenkins.JenkinsException("connection refused")
             )
             response = test_client.post("/api/admin/settings/test/jenkins")
