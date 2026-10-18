@@ -61,6 +61,7 @@ interface ServerSetting {
   has_env_var?: boolean
   env_var_value?: string
   options?: string[]
+  jira_auth_mode?: string
 }
 
 interface CategoryGroup {
@@ -109,11 +110,14 @@ function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
   return new Set(JIRA_METHODS.filter(m => m.id !== method).flatMap(m => m.fields))
 }
 
-// Mirrors the backend resolve_jira_connection precedence: the oauth token
-// wins (masked values cannot be prefix-checked, so presence is the signal),
-// then email+api token basic auth, then PAT, else none. The badge, initial
-// method selection and precedence warning all derive from this function.
+// Active Jira auth method. The backend exposes the authoritative mode on the
+// jira_url settings item (`jira_auth_mode`: sa→oauth, cloud→basic, server→pat);
+// the local inference below is only a fallback for older servers without it.
+// The badge, initial method selection and precedence warning all derive from
+// this function.
 function resolveActiveJiraMethod(settings: ServerSetting[]): JiraMethod | null {
+  const backendMode = settings.find(s => s.key === 'jira_url')?.jira_auth_mode
+  if (backendMode === 'oauth' || backendMode === 'basic' || backendMode === 'pat') return backendMode
   const value = (key: string) => settings.find(s => s.key === key)?.value?.trim() ?? ''
   if (value('jira_oauth_access_token')) return 'oauth'
   if (value('jira_email') && value('jira_api_token')) return 'basic'
@@ -463,6 +467,7 @@ export function ServerSettingsPage() {
     try {
       const data = await api.get<ServerSetting[]>('/api/admin/settings')
       dispatch({ type: 'FETCH_SUCCESS', settings: data })
+      return data
     } catch (err) {
       dispatch({
         type: 'FETCH_ERROR',
@@ -523,7 +528,14 @@ export function ServerSettingsPage() {
     dispatch({ type: 'RESET_START', key })
     try {
       await api.delete(`/api/admin/settings/${encodeURIComponent(key)}`)
-      await fetchSettings(true)
+      const fresh = await fetchSettings(true)
+      // A reset while the provider editor is open must not leave the pre-reset
+      // checkbox selection saveable over the fresh value (#339/#340).
+      if (key === 'active_server_providers') {
+        const setting = fresh?.find(s => s.key === key)
+        setServerProvidersChecked(parseActiveServerProviders(setting?.value ?? '', setting?.options ?? []))
+        setServerProvidersEditing(false)
+      }
     } catch {
       // silently fail – data will refetch anyway
     } finally {
@@ -723,26 +735,33 @@ export function ServerSettingsPage() {
   const editedCategory = state.editingKey
     ? state.settings.find(s => s.key === state.editingKey)?.category ?? null
     : null
+  // Generation guard: a test resolving after a tab change must not re-show
+  // its stale banner when the admin returns to that tab.
+  const testGenerationRef = useRef(0)
 
   async function handleTestConnection(category: string) {
     const integration = TEST_INTEGRATIONS[category]
     if (!integration) return
+    const generation = ++testGenerationRef.current
     setTestResult(null)
     setTestingCategory(category)
     try {
       const result = await api.testIntegration(integration)
-      setTestResult({ category, result })
+      if (generation === testGenerationRef.current) setTestResult({ category, result })
     } catch (err) {
-      setTestResult({
-        category,
-        result: { ok: false, message: err instanceof Error ? err.message : 'Test failed' },
-      })
+      if (generation === testGenerationRef.current) {
+        setTestResult({
+          category,
+          result: { ok: false, message: err instanceof Error ? err.message : 'Test failed' },
+        })
+      }
     } finally {
       setTestingCategory(null)
     }
   }
 
   function handleTabChange(tab: string) {
+    testGenerationRef.current++ // invalidate in-flight test results
     setActiveTab(tab)
     setTestResult(null) // dismiss test banners on tab change
     try {

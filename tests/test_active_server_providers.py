@@ -12,6 +12,10 @@ import pytest
 from fastapi import HTTPException
 
 from rootcoz import ai_client, config, main, storage
+from rootcoz.ai_client import AIResult
+from rootcoz.ai_client import (
+    call_ai as call_ai_under_test,  # real fn: conftest denies the module attr
+)
 
 
 def _set_active(monkeypatch, value: str) -> None:
@@ -82,6 +86,53 @@ async def test_inactive_provider_loses_server_source(monkeypatch):
         assert "cursor" not in scoped
     finally:
         ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_deactivated_provider_mid_chat_gets_deactivation_message(
+    tmp_path, monkeypatch
+):
+    """Post-reply recheck surfaces the deactivation message, not the grant one."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sessions.db")
+    await storage.init_db()
+    monkeypatch.setattr(
+        ai_client,
+        "resolve_catalog_pair",
+        AsyncMock(return_value=("cursor", "cursor-model")),
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "_call_with_safe_error",
+        AsyncMock(return_value=AIResult(success=True, text="ok")),
+    )
+    # First check (before the call) passes; the post-reply recheck sees the
+    # admin deactivate the provider mid-chat.
+    monkeypatch.setattr(
+        ai_client,
+        "require_server_provider_grant",
+        AsyncMock(
+            side_effect=[
+                None,
+                ai_client.InactiveServerProviderError(
+                    "Server credentials for provider 'cursor' are deactivated "
+                    "by the administrator (active_server_providers)"
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        storage, "get_ai_session_source", AsyncMock(return_value="server")
+    )
+    token = ai_client.chat_session_source.set("server")
+    try:
+        result = await call_ai_under_test(
+            "prompt", session_id="s1", ai_provider="cursor", ai_model="cursor-model"
+        )
+    finally:
+        ai_client.chat_session_source.reset(token)
+    assert result.success is False
+    assert "deactivated" in result.text
+    assert "administrator grant" not in result.text
 
 
 @pytest.mark.asyncio

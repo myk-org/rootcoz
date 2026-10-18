@@ -11783,6 +11783,16 @@ async def get_admin_settings(
 
             item["options"] = await server_capable_providers()
 
+    # Authoritative Jira auth mode (nonsecret) — the frontend must not infer
+    # it from possibly-masked credential values.
+    for item in metadata:
+        if item["key"] == "jira_url":
+            item["jira_auth_mode"] = {
+                "sa": "oauth",
+                "cloud": "basic",
+                "server": "pat",
+            }.get(resolve_jira_connection(get_settings()).mode, "")
+
     # Get DB overrides
     db_overrides = await storage.get_server_settings()
 
@@ -12146,6 +12156,14 @@ async def _test_jenkins_connection(settings: Settings) -> dict[str, Any]:
     user = ""
     if isinstance(whoami, dict):
         user = str(whoami.get("name") or whoami.get("id") or "")
+    if not (isinstance(whoami, dict) and whoami.get("authenticated") is True):
+        # Anonymous-enabled Jenkins answers whoAmI without authenticating.
+        return _test_result(
+            False,
+            "Jenkins reachable but credentials are invalid "
+            "(anonymous access — check the configured username/password)",
+            authenticated_user=user,
+        )
     message = "Jenkins reachable and credentials valid"
     if not user:
         message += " (server did not report an authenticated user)"
@@ -12319,7 +12337,7 @@ async def test_integration_connection(
             False,
             f"Connection test timed out after {_INTEGRATION_TEST_TIMEOUT:.0f} seconds",
         )
-    except Exception as exc:  # a broken integration must never 500
+    except Exception as exc:  # noqa: BLE001 - a broken integration must never 500
         message = redact_urls_in_text(
             f"Connection test failed unexpectedly: {type(exc).__name__}: {exc}"
         )
@@ -12328,7 +12346,6 @@ async def test_integration_connection(
             key,
             type(exc).__name__,
             message,
-            exc_info=True,
         )
         result = _test_result(False, message)
     logger.info(

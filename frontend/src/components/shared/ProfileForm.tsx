@@ -328,6 +328,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             jiraSaValidation={jiraSaValidation}
             githubValidation={githubValidation}
             jiraValidation={jiraValidation}
+            newPasswordAutoComplete
           />}
 
           <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || validatingJiraSa || !tokensLoaded}>

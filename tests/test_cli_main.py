@@ -5042,9 +5042,21 @@ class TestAdminSettingsCommand:
             "message": "Jenkins connection failed: connection refused",
         }
         result = runner.invoke(app, ["admin", "settings", "test", "jenkins"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         assert "FAILED" in result.output
         assert "connection refused" in result.output
+
+    def test_admin_settings_test_json_failure_exits_nonzero(self, mock_client):
+        """--json mode still exits 1 when the connection test fails."""
+        mock_client.test_integration.return_value = {
+            "ok": False,
+            "message": "Jenkins connection failed: connection refused",
+        }
+        result = runner.invoke(app, ["--json", "admin", "settings", "test", "jenkins"])
+        assert result.exit_code == 1
+        parsed = json.loads(result.output)
+        assert parsed["ok"] is False
+        assert parsed["message"] == "Jenkins connection failed: connection refused"
 
     def test_admin_settings_test_json(self, mock_client):
         mock_client.test_integration.return_value = {

@@ -18,6 +18,9 @@ interface TrackerTokensFieldsProps {
   jiraValidation?: TokenValidationResult | null
   /** ID prefix to avoid duplicate IDs when used on multiple pages */
   idPrefix?: string
+  /** Opt secret/token fields into new-password autocomplete (management forms only;
+   * registration keeps the plain default so browser login autofill is untouched). */
+  newPasswordAutoComplete?: boolean
 }
 
 export function TrackerTokensFields({
@@ -33,6 +36,7 @@ export function TrackerTokensFields({
   githubValidation,
   jiraValidation,
   idPrefix = '',
+  newPasswordAutoComplete = false,
 }: TrackerTokensFieldsProps) {
   const [showGithubToken, setShowGithubToken] = useState(false)
   const [showJiraToken, setShowJiraToken] = useState(false)
@@ -60,6 +64,7 @@ export function TrackerTokensFields({
         show={showGithubToken}
         onToggleShow={() => setShowGithubToken(!showGithubToken)}
         validation={githubValidation}
+        newPasswordAutoComplete={newPasswordAutoComplete}
         placeholder="ghp_..."
         helpContent={<>Personal Access Token with{' '}<code className="text-text-secondary">repo</code> scope.{' '}<a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Generate token →</a></>}
       />
@@ -84,6 +89,7 @@ export function TrackerTokensFields({
         show={showJiraToken}
         onToggleShow={() => setShowJiraToken(!showJiraToken)}
         validation={jiraValidation}
+        newPasswordAutoComplete={newPasswordAutoComplete}
         placeholder="Token..."
         helpContent={<>Jira Cloud: API token from{' '}<a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Atlassian account →</a>{' '}· Jira Server/DC: Personal Access Token</>}
       />
@@ -97,6 +103,7 @@ export function TrackerTokensFields({
         show={showJiraSaToken}
         onToggleShow={() => setShowJiraSaToken(!showJiraSaToken)}
         validation={jiraSaValidation ?? null}
+        newPasswordAutoComplete={newPasswordAutoComplete}
         placeholder="ATST..."
         helpContent={<>Optional Atlassian service account (ATST) token — an additional connection method that takes precedence over the regular Jira token. Created by an admin in Atlassian Administration → Directory → Service accounts.</>}
       />

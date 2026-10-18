@@ -164,14 +164,34 @@ def _raise_inactive_server_provider(provider: str) -> None:
     )
 
 
+# Cached settings picker options (monotonic_ts, provider list) — success and
+# failure alike, so a sidecar outage costs one attempt, not one per page load.
+_server_capable_cache: tuple[float, list[str]] | None = None
+_SERVER_CAPABLE_CACHE_TTL_SEC = 60.0
+
+
 async def server_capable_providers() -> list[str]:
-    """Provider IDs with server-credential models, for admin settings options."""
+    """Provider IDs with server-credential models, for admin settings options.
+
+    Both success and failure are cached for a short TTL: an unreachable
+    sidecar must not slow (or queue behind the catalog lock on) every
+    admin settings page load.
+    """
+    global _server_capable_cache
+    now = time.monotonic()
+    if (
+        _server_capable_cache is not None
+        and now - _server_capable_cache[0] < _SERVER_CAPABLE_CACHE_TTL_SEC
+    ):
+        return _server_capable_cache[1]
     try:
         catalog = await _get_model_catalog()
+        providers = sorted(build_friendly_catalog(catalog))
     except httpx.HTTPError, OSError, RuntimeError, ValueError:
         logger.warning("Unable to list server-capable providers for settings")
-        return []
-    return sorted(build_friendly_catalog(catalog))
+        providers = []
+    _server_capable_cache = (now, providers)
+    return providers
 
 
 async def require_server_provider_grant(provider: str = "", model: str = "") -> None:
@@ -1395,6 +1415,9 @@ async def call_ai(
     if source == "server" and result.success and chat_session_source.get():
         try:
             await require_server_provider_grant(provider, model)
+        except InactiveServerProviderError as exc:
+            logger.info("Chat AI reply discarded: provider deactivated mid-chat")
+            return AIResult(success=False, text=str(exc), error=str(exc))
         except ValueError:
             logger.info("Chat AI reply discarded after server grant changed")
             return AIResult(

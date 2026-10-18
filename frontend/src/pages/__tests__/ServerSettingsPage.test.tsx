@@ -39,6 +39,7 @@ interface TestSetting {
   updated_by: string
   updated_at: string
   options?: string[]
+  jira_auth_mode?: string
 }
 
 function mk(key: string, category: string, value = '', extra: Partial<TestSetting> = {}): TestSetting {
@@ -260,6 +261,29 @@ describe('ServerSettingsPage test connection buttons', () => {
     expect(testIntegration).toHaveBeenCalledWith('jira')
   })
 
+  it('does not re-show a test banner that resolves after a tab change', async () => {
+    let resolveTest!: (value: { ok: boolean; message: string }) => void
+    testIntegration.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveTest = r
+      }) as never,
+    )
+
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    fireEvent.click(await screen.findByRole('button', { name: /test connection/i }))
+
+    // Switch tabs while the test is still in flight
+    fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
+    resolveTest({ ok: true, message: 'late success' })
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+
+    // Returning to the tab must not show the stale result
+    fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
+    expect(await screen.findByRole('button', { name: /test connection/i })).toBeEnabled()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
   it('disables the test button while a field in that section is being edited', async () => {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
@@ -378,6 +402,43 @@ describe('ServerSettingsPage active server providers', () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
   })
 
+  it('closes the provider editor and resyncs selection after a setting reset, so Save cannot restore the old restriction', async () => {
+    const settings = baseSettings()
+    const providers = settings.find((s) => s.key === 'active_server_providers')!
+    providers.value = 'gemini'
+    providers.source = 'db'
+    let reset = false
+    get.mockImplementation(async () => (reset ? baseSettings() : settings))
+    const del = vi.mocked(api.delete)
+    del.mockImplementation(async () => {
+      reset = true
+      return {}
+    })
+
+    await openAiTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+
+    // Editor closed after the reset: no Save button to click with stale state
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument(),
+    )
+    expect(screen.getByRole('button', { name: 'Configure providers' })).toBeInTheDocument()
+
+    // Re-opening starts from the refetched (reset) value, not the pre-reset selection
+    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: '' },
+      }),
+    )
+  })
+
   it('shows a hint when no server providers are available', async () => {
     const settings = baseSettings()
     settings.find((s) => s.key === 'active_server_providers')!.options = []
@@ -494,6 +555,15 @@ describe('ServerSettingsPage Jira method resolution', () => {
     settings.find((s) => s.key === 'jira_email')!.value = ''
     await openJiraTabWith(settings)
     expect(screen.queryByText(/^Active:/)).not.toBeInTheDocument()
+  })
+
+  it('prefers the backend-resolved jira_auth_mode over local inference', async () => {
+    // Credentials alone would infer basic (email + api token), but the
+    // backend's authoritative mode says pat — the badge must follow it.
+    const settings = baseSettings()
+    settings.find((s) => s.key === 'jira_url')!.jira_auth_mode = 'pat'
+    await openJiraTabWith(settings)
+    expect(screen.getByText('Active: PAT (Bearer)')).toBeInTheDocument()
   })
 })
 

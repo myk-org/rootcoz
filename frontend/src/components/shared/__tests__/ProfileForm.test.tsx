@@ -45,6 +45,15 @@ describe('ProfileForm tracker tokens', () => {
     expect(screen.queryByLabelText(/GitHub Token/i)).not.toBeInTheDocument()
   })
 
+  it('opts tracker-token management fields into new-password autofill (Chrome does not insert saved logins)', () => {
+    role.value = 'reviewer'
+    renderForm()
+    expect(screen.getByLabelText(/GitHub Token/i)).toHaveAttribute('autocomplete', 'new-password')
+    expect(screen.getByLabelText(/Jira Token/i)).toHaveAttribute('autocomplete', 'new-password')
+    expect(screen.getByLabelText(/Jira Service Account Token/i)).toHaveAttribute('autocomplete', 'new-password')
+    expect(screen.getByLabelText(/jira email/i)).toHaveAttribute('autocomplete', 'email')
+  })
+
   it('shows tracker token fields to reviewers', () => {
     role.value = 'reviewer'
     renderForm()

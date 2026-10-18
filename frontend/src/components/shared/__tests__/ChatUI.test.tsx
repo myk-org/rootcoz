@@ -44,7 +44,7 @@ globalThis.clearTimeout = ((id?: ReturnType<typeof setTimeout>) => {
 // userEvent/waitFor call hangs forever under vi.useFakeTimers(). Give it the
 // one method it calls — inert while real timers are active.
 beforeAll(() => {
-  globalThis.jest = { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) } as never
+  ;(globalThis as unknown as { jest?: unknown }).jest = { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) }
 })
 
 const history = { messages: [] as Array<{ id: number; job_id: string; role: string; content: string; username: string; ai_provider: string; ai_model: string; status: string; created_at: string }>, total: 0, active_session_version: 'no-session-version' }

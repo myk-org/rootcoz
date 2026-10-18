@@ -8354,6 +8354,60 @@ class TestAdminSettingsEndpoints:
         )
         assert (item["value"], item["source"]) == ("3", "db")
 
+    def test_jira_url_metadata_carries_auth_mode(self, test_client) -> None:
+        """The jira_url item exposes the backend-resolved auth mode per branch."""
+        cases = [
+            (Settings(jira_url=""), ""),
+            (
+                Settings(
+                    jira_url="https://x.atlassian.net",
+                    jira_email="user@example.com",
+                    jira_api_token=SecretStr("not-a-real-token"),
+                ),
+                "basic",
+            ),
+            (
+                Settings(
+                    jira_url="https://jira.example.com",
+                    jira_pat=SecretStr("not-a-real-token"),
+                ),
+                "pat",
+            ),
+            (
+                Settings(
+                    jira_url="https://jira.example.com",
+                    jira_oauth_access_token=SecretStr("ATST-not-a-real-token"),
+                ),
+                "oauth",
+            ),
+        ]
+        for settings, expected in cases:
+            with patch("rootcoz.main.get_settings", return_value=settings):
+                response = test_client.get("/api/admin/settings")
+            assert response.status_code == 200
+            item = next(s for s in response.json() if s["key"] == "jira_url")
+            assert item.get("jira_auth_mode") == expected, (
+                f"{settings.jira_url!r} should resolve to {expected!r}"
+            )
+
+    def test_settings_provider_options_survive_sidecar_outage(
+        self, test_client, monkeypatch
+    ) -> None:
+        """Settings load stays fast and complete when sidecar discovery fails."""
+        from rootcoz import ai_client
+
+        discover = AsyncMock(side_effect=httpx.ConnectError("sidecar down"))
+        monkeypatch.setattr(ai_client, "_list_models_raw", discover)
+        monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+        response = test_client.get("/api/admin/settings")
+        assert response.status_code == 200
+        item = next(s for s in response.json() if s["key"] == "active_server_providers")
+        assert item["options"] == []
+        # Cached failure: a second settings load does not re-attempt discovery.
+        second = test_client.get("/api/admin/settings")
+        assert second.status_code == 200
+        discover.assert_awaited_once()
+
     def test_get_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot access settings."""
         response = test_client.get(
@@ -8647,6 +8701,20 @@ class TestIntegrationConnectionEndpoints:
         assert response.status_code == 400
         assert response.json() == {"detail": "Unknown integration: nonsense"}
 
+    def test_jenkins_anonymous_access_fails(self, test_client) -> None:
+        """Anonymous-enabled Jenkins must not validate missing credentials."""
+        with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
+            mock_client_cls.return_value.get_whoami.return_value = {
+                "name": "anonymous",
+                "authenticated": False,
+            }
+            response = test_client.post("/api/admin/settings/test/jenkins")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "anonymous" in data["message"]
+        assert data["details"]["authenticated_user"] == "anonymous"
+
     def test_jenkins_success(self, test_client) -> None:
         """Jenkins test pings whoAmI with the effective settings."""
         with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
@@ -8805,6 +8873,39 @@ class TestIntegrationConnectionEndpoints:
         data = response.json()
         assert data["ok"] is False
         assert "Report Portal connection failed" in data["message"]
+
+    def test_crash_log_and_message_have_no_credentials(
+        self, test_client, caplog
+    ) -> None:
+        """The catch-all log keeps the redacted message, never a raw traceback."""
+        import logging
+
+        secret_url = (
+            "https://user:secretpass@jenkins.example.com/"  # pragma: allowlist secret
+        )
+
+        async def _crash(settings: Settings) -> dict[str, Any]:
+            raise RuntimeError(f"boom at {secret_url}")
+
+        with (
+            patch.dict("rootcoz.main._INTEGRATION_TESTERS", {"jenkins": _crash}),
+            # python-simple-logger disables propagation; re-enable so caplog sees records
+            caplog.at_level(logging.WARNING, logger="rootcoz.main"),
+        ):
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                response = test_client.post("/api/admin/settings/test/jenkins")
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "secretpass" not in json.dumps(data)
+        crash_logs = [r for r in caplog.records if "crashed" in r.getMessage()]
+        assert crash_logs, "expected the catch-all crash warning in logs"
+        for record in crash_logs:
+            assert "secretpass" not in record.getMessage()
+            assert record.exc_info is None
 
     def test_overall_deadline_bounds_hanging_tester(self, test_client) -> None:
         """A hanging tester returns a failed result, bounded by the route deadline."""
