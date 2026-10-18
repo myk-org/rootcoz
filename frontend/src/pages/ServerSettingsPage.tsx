@@ -152,6 +152,9 @@ interface PageState {
   resettingKey: string | null
   revealedKeys: Set<string>
   revealedValues: Record<string, string>
+  // Bumped by CLEAR_REVEALED: a reveal response whose captured generation no
+  // longer matches is dropped, so a late response can't resurrect an old secret.
+  revealGenerations: Record<string, number>
   historyKey: string
   history: HistoryEntry[]
   historyLoading: boolean
@@ -171,7 +174,7 @@ type PageAction =
   | { type: 'SAVE_ERROR'; error: string }
   | { type: 'RESET_START'; key: string }
   | { type: 'RESET_DONE' }
-  | { type: 'REVEAL_VALUE'; key: string; value: string }
+  | { type: 'REVEAL_VALUE'; key: string; value: string; generation: number }
   | { type: 'HIDE_VALUE'; key: string }
   | { type: 'CLEAR_REVEALED'; keys: string[] }
   | { type: 'EXPAND_ALL' }
@@ -214,6 +217,9 @@ function reducer(state: PageState, action: PageAction): PageState {
     case 'RESET_DONE':
       return { ...state, resettingKey: null }
     case 'REVEAL_VALUE': {
+      // A reveal whose generation was invalidated (save/reset cleared the key
+      // while the request was in flight) must not re-cache the old secret (#343).
+      if ((state.revealGenerations[action.key] ?? 0) !== action.generation) return state
       const nextKeys = new Set(state.revealedKeys)
       nextKeys.add(action.key)
       return {
@@ -235,8 +241,12 @@ function reducer(state: PageState, action: PageAction): PageState {
       const keys = new Set(action.keys)
       const nextKeys = new Set([...state.revealedKeys].filter(k => !keys.has(k)))
       const revealedValues = { ...state.revealedValues }
-      for (const k of keys) delete revealedValues[k]
-      return { ...state, revealedKeys: nextKeys, revealedValues }
+      const revealGenerations = { ...state.revealGenerations }
+      for (const k of keys) {
+        delete revealedValues[k]
+        revealGenerations[k] = (revealGenerations[k] ?? 0) + 1
+      }
+      return { ...state, revealedKeys: nextKeys, revealedValues, revealGenerations }
     }
     case 'EXPAND_ALL':
       return { ...state, collapsedCategories: new Set<string>() }
@@ -268,6 +278,7 @@ const initialState: PageState = {
   resettingKey: null,
   revealedKeys: new Set(),
   revealedValues: {},
+  revealGenerations: {},
   historyKey: '',
   history: [],
   historyLoading: false,
@@ -663,12 +674,15 @@ export function ServerSettingsPage() {
       return
     }
     try {
+      // Capture the generation before awaiting: if a save/reset clears this key
+      // while the GET is in flight, the reducer drops this stale response.
+      const generation = state.revealGenerations[key] ?? 0
       const data = await api.get<ServerSetting[]>(
         `/api/admin/settings?reveal_key=${encodeURIComponent(key)}`
       )
       const item = data.find(s => s.key === key)
       if (item) {
-        dispatch({ type: 'REVEAL_VALUE', key, value: item.value })
+        dispatch({ type: 'REVEAL_VALUE', key, value: item.value, generation })
       }
     } catch {
       // Silently fail — can't reveal

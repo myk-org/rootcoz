@@ -632,6 +632,45 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
     )
   })
 
+  it('drops a reveal response that arrives after a save cleared the cache', async () => {
+    // The reveal GET stays pending until the test resolves it — after the save
+    // has already refetched and cleared the cached reveal.
+    let resolveReveal!: (value: TestSetting[]) => void
+    get.mockImplementation(async (url: unknown) => {
+      const key = typeof url === 'string' ? url.match(/reveal_key=([^&]+)/)?.[1] : undefined
+      if (key) return new Promise<TestSetting[]>((r) => { resolveReveal = r })
+      return baseSettings()
+    })
+    await openTab('Jenkins', 'JENKINS_PASSWORD')
+
+    // Start the reveal — its response is deferred
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+
+    // Save a new value while the reveal is still in flight
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }))
+    fireEvent.change(screen.getByLabelText('Edit JENKINS_PASSWORD'), {
+      target: { value: 'new-pass' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+
+    // Save completed: the row shows the fresh masked value
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('••••••••'),
+    )
+
+    // The stale reveal response finally arrives with the OLD secret
+    const stale = baseSettings()
+    stale.find((s) => s.key === 'jenkins_password')!.value = 'decrypted-old' // pragma: allowlist secret
+    resolveReveal(stale)
+
+    // The late response must not resurrect the old secret — the row stays masked
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('••••••••'),
+    )
+    expect(screen.queryByText('decrypted-old')).not.toBeInTheDocument()
+  })
+
   it('clears the cached reveal on reset', async () => {
     const settings = baseSettings()
     const pw = settings.find((s) => s.key === 'jenkins_password')!
