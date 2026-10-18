@@ -8553,6 +8553,38 @@ class TestAdminSettingsEndpoints:
         ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
         assert ai_timeout["source"] != "db"
 
+    def test_active_server_providers_setting(self, test_client) -> None:
+        """active_server_providers: metadata with options, PUT/GET round-trip."""
+        from rootcoz.config import get_settings
+
+        key = "active_server_providers"
+        item = next(
+            s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
+        )
+        assert (item["category"], item["type"], item["default"]) == ("AI", "string", "")
+        assert not item["sensitive"] and not item["restart_required"]
+        # Options come from the sidecar catalog (test fixture: claude, gemini).
+        assert item["options"] == ["claude", "gemini"]
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: "claude"}}
+            ).status_code
+            == 200
+        )
+        assert get_settings().active_server_providers == "claude"
+        item = next(
+            s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
+        )
+        assert (item["value"], item["source"]) == ("claude", "db")
+        # Empty value resets to the default (all providers active).
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: ""}}
+            ).status_code
+            == 200
+        )
+        assert get_settings().active_server_providers == ""
+
     def test_put_settings_non_admin_forbidden(self, test_client) -> None:
         """Non-admin users cannot update settings."""
         response = test_client.put(
@@ -8569,6 +8601,263 @@ class TestAdminSettingsEndpoints:
             headers={"Authorization": ""},
         )
         assert response.status_code in (401, 403)
+
+
+class TestIntegrationConnectionEndpoints:
+    """Tests for POST /api/admin/settings/test/{integration}."""
+
+    _NO_ADMIN_HEADERS: ClassVar[dict[str, str]] = {"Authorization": ""}
+
+    @staticmethod
+    def _mock_async_client(get_responses):
+        """Patch rootcoz.main.httpx.AsyncClient with canned GET responses.
+
+        Returns ``(patcher, mock_client_cls)`` — the instance is
+        ``mock_client_cls.return_value.__aenter__.return_value``.
+        """
+        mock_instance = AsyncMock()
+        if isinstance(get_responses, list):
+            mock_instance.get.side_effect = get_responses
+        else:
+            mock_instance.get.return_value = get_responses
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        return (
+            patch("rootcoz.main.httpx.AsyncClient", mock_client_cls),
+            mock_client_cls,
+        )
+
+    @staticmethod
+    def _http_response(status: int, payload: Any, url: str) -> httpx.Response:
+        """Build a real httpx.Response (raise_for_status/json need a request)."""
+        return httpx.Response(status, json=payload, request=httpx.Request("GET", url))
+
+    def test_non_admin_forbidden(self, test_client) -> None:
+        """Non-admin users cannot run connection tests."""
+        response = test_client.post(
+            "/api/admin/settings/test/jenkins",
+            headers=self._NO_ADMIN_HEADERS,
+        )
+        assert response.status_code in (401, 403)
+
+    def test_unknown_integration_400(self, test_client) -> None:
+        """Unknown integration returns 400 with the exact contract detail."""
+        response = test_client.post("/api/admin/settings/test/nonsense")
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Unknown integration: nonsense"}
+
+    def test_jenkins_success(self, test_client) -> None:
+        """Jenkins test pings whoAmI with the effective settings."""
+        with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
+            mock_client_cls.return_value.get_whoami.return_value = {
+                "name": "testuser",
+                "authenticated": True,
+            }
+            response = test_client.post("/api/admin/settings/test/jenkins")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["authenticated_user"] == "testuser"
+        # Effective credentials come from the fixture env — compare against
+        # the live Settings rather than a hardcoded password literal.
+        mock_client_cls.assert_called_once_with(
+            url="https://jenkins.example.com",
+            username="testuser",
+            password=Settings().jenkins_password,
+            ssl_verify=True,
+            timeout=10,
+        )
+
+    def test_jenkins_failure_returns_result_not_500(self, test_client) -> None:
+        """A failing Jenkins connection is a test result, never a 500."""
+        with patch("rootcoz.main.JenkinsClient") as mock_client_cls:
+            mock_client_cls.return_value.get_whoami.side_effect = (
+                jenkins.JenkinsException("connection refused")
+            )
+            response = test_client.post("/api/admin/settings/test/jenkins")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "Jenkins connection failed" in data["message"]
+
+    def test_jenkins_not_configured(self, test_client) -> None:
+        """Missing Jenkins URL reports not configured instead of erroring."""
+        with patch("rootcoz.main.get_settings", return_value=Settings(jenkins_url="")):
+            response = test_client.post("/api/admin/settings/test/jenkins")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "not configured" in data["message"]
+
+    def test_jira_success_reports_auth_mode(self, test_client) -> None:
+        """Jira test fetches /myself and reports the exercised auth mode."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+        )
+        response_payload = self._http_response(
+            200,
+            {"displayName": "Test User"},
+            "https://jira.example.com/rest/api/3/myself",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(response_payload)[0] as _,
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"] == {"auth_mode": "basic", "user": "Test User"}
+
+    def test_jira_failure_no_secrets_in_response(self, test_client) -> None:
+        """A 401 from Jira yields ok:false without leaking the token."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("super-secret-token"),
+        )
+        response_payload = self._http_response(
+            401,
+            {"message": "Unauthorized"},
+            "https://jira.example.com/rest/api/3/myself",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(response_payload)[0] as _,
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "authentication failed" in data["message"]
+        assert "super-secret-token" not in json.dumps(data)
+
+    def test_github_success(self, test_client) -> None:
+        """GitHub test hits api.github.com/user with the effective token."""
+        settings = Settings(github_token=SecretStr("not-a-real-token"))
+        response_payload = self._http_response(
+            200, {"login": "octocat"}, "https://api.github.com/user"
+        )
+        mock_patch, mock_client_cls = self._mock_async_client(response_payload)
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            mock_patch,
+        ):
+            response = test_client.post("/api/admin/settings/test/github")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"] == {"login": "octocat"}
+        assert (
+            mock_client_cls.call_args.kwargs["headers"]["Authorization"]
+            == "Bearer not-a-real-token"
+        )
+
+    def test_github_not_configured(self, test_client) -> None:
+        """Missing GitHub token reports not configured."""
+        response = test_client.post("/api/admin/settings/test/github")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "not configured" in data["message"]
+
+    def test_reportportal_success(self, test_client) -> None:
+        """Report Portal test pings the project endpoint with the token."""
+        settings = Settings(
+            reportportal_url="https://rp.example.com",
+            reportportal_api_token=SecretStr("not-a-real-token"),
+            reportportal_project="my-project",
+        )
+        response_payload = self._http_response(
+            200, {"id": 1}, "https://rp.example.com/api/v1/project/my-project"
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(response_payload)[0],
+        ):
+            response = test_client.post("/api/admin/settings/test/reportportal")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"] == {"project": "my-project"}
+
+    def test_reportportal_failure(self, test_client) -> None:
+        """A 403 from Report Portal yields ok:false, not a 500."""
+        settings = Settings(
+            reportportal_url="https://rp.example.com",
+            reportportal_api_token=SecretStr("not-a-real-token"),
+            reportportal_project="my-project",
+        )
+        response_payload = self._http_response(
+            403,
+            {"message": "Forbidden"},
+            "https://rp.example.com/api/v1/project/my-project",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(response_payload)[0],
+        ):
+            response = test_client.post("/api/admin/settings/test/reportportal")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "Report Portal connection failed" in data["message"]
+
+    def test_prow_success_checks_deck_and_gcs(self, test_client) -> None:
+        """Prow test verifies deck reachability and GCS bucket listability."""
+        settings = Settings(
+            prow_url="https://prow.example.com",
+            gcs_bucket="test-bucket",
+        )
+        responses = [
+            self._http_response(200, {}, "https://prow.example.com/api/jobs"),
+            self._http_response(
+                200,
+                {"items": []},
+                "https://storage.googleapis.com/storage/v1/b/test-bucket/o",
+            ),
+        ]
+        mock_patch, mock_client_cls = self._mock_async_client(responses)
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            mock_patch,
+        ):
+            response = test_client.post("/api/admin/settings/test/prow")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert "listable" in data["message"]
+        assert data["details"]["prow_http_status"] == 200
+        mock_instance = mock_client_cls.return_value.__aenter__.return_value
+        gcs_call = mock_instance.get.call_args_list[1]
+        assert gcs_call.kwargs["params"] == {"maxResults": 1}
+
+    def test_prow_gcs_failure(self, test_client) -> None:
+        """An unlistable GCS bucket fails the Prow test."""
+        settings = Settings(
+            prow_url="https://prow.example.com",
+            gcs_bucket="private-bucket",
+        )
+        responses = [
+            self._http_response(200, {}, "https://prow.example.com/api/jobs"),
+            self._http_response(
+                403,
+                {"error": "Forbidden"},
+                "https://storage.googleapis.com/storage/v1/b/private-bucket/o",
+            ),
+        ]
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(responses)[0],
+        ):
+            response = test_client.post("/api/admin/settings/test/prow")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "not listable" in data["message"]
 
 
 class TestSubmitterAutoTag:

@@ -138,12 +138,54 @@ def clear_provider_eligibility_cache() -> None:
     _provider_eligibility_cache = None
 
 
+class InactiveServerProviderError(ValueError):
+    """Server credentials for this provider are deactivated (ACTIVE_SERVER_PROVIDERS)."""
+
+
+def active_server_provider_ids() -> frozenset[str] | None:
+    """Admin-selected active server provider IDs (lowercased); None = all."""
+    from rootcoz.config import get_settings
+
+    raw = get_settings().active_server_providers
+    ids = frozenset(part.strip().lower() for part in raw.split(",") if part.strip())
+    return ids or None
+
+
+def is_server_provider_active(provider: str) -> bool:
+    """Whether server credentials may serve this provider (empty setting = all)."""
+    active = active_server_provider_ids()
+    return active is None or provider.lower() in active
+
+
+def _raise_inactive_server_provider(provider: str) -> None:
+    raise InactiveServerProviderError(
+        f"Server credentials for provider '{provider}' are deactivated "
+        "by the administrator (active_server_providers)"
+    )
+
+
+async def server_capable_providers() -> list[str]:
+    """Provider IDs with server-credential models, for admin settings options."""
+    try:
+        catalog = await _get_model_catalog()
+    except httpx.HTTPError, OSError, RuntimeError, ValueError:
+        logger.warning("Unable to list server-capable providers for settings")
+        return []
+    return sorted(build_friendly_catalog(catalog))
+
+
 async def require_server_provider_grant(provider: str = "", model: str = "") -> None:
     """Recheck the initiator on every server AI operation, including resumed turns.
 
     A user without the full server grant may still run one admin-declared
     free provider+model pair when they hold the free-providers grant.
     """
+    if provider and not is_server_provider_active(provider):
+        logger.debug(
+            "Server credentials for provider=%s deactivated by active_server_providers",
+            provider,
+        )
+        _raise_inactive_server_provider(provider)
     from rootcoz.storage import (
         can_user_use_free_providers,
         can_user_use_server_providers,
@@ -535,7 +577,14 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     except sqlite3.Error, OSError, RuntimeError, ValueError, KeyError, TypeError:
         allowed = False
     pairs: dict[tuple[str, str], dict[str, Any]] = {}
+    active = active_server_provider_ids()
+    if active is not None:
+        logger.debug("active_server_providers filtering active: %s", sorted(active))
     for provider, entries in build_friendly_catalog(catalog).items():
+        if active is not None and provider.lower() not in active:
+            # Server credential source withdrawn; user-key discovery below
+            # can still surface this provider's models with 'user' only.
+            continue
         for entry in entries:
             pairs[(provider, entry["id"])] = {
                 **entry,
@@ -658,6 +707,14 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
             (*scoped.keys(), *status.keys()), provider
         )
         if (
+            force_server_credentials.get()
+            and not is_server_provider_active(provider)
+            and provider in build_friendly_catalog(await _get_model_catalog())
+        ):
+            # scoped_models withdrew the deactivated provider's server
+            # source, so its models cannot match below — say why.
+            _raise_inactive_server_provider(provider)
+        if (
             status.get(provider, {}).get("unavailable")
             and not force_server_credentials.get()
         ):
@@ -674,6 +731,8 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
                     else entry["credential_sources"][0]
                 )
                 if source not in entry["credential_sources"]:
+                    if source == "server" and not is_server_provider_active(provider):
+                        _raise_inactive_server_provider(provider)
                     raise ValueError(
                         f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
                     )

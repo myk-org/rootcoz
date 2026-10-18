@@ -463,6 +463,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    active_server_providers: str = Field(
+        default="",
+        description=(
+            "Comma-separated server provider IDs exposed to users on server "
+            "credentials (model catalog, admin-declared free pairs, and "
+            "ambient-auth models). Empty = all providers. A deactivated "
+            "provider's models lose their server credential source — free "
+            "pairs on it stop working with server credentials too — but stay "
+            "usable with a user's own API key."
+        ),
+    )
+
     # Auto-review: automatically mark failures as reviewed when they match
     # a previous human-reviewed failure with the same error signature
     enable_auto_review: bool = Field(

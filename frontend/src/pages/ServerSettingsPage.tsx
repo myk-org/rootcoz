@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, type TestIntegrationResult } from '@/lib/api'
 import { useLatestRef } from '@/lib/useLatestRef'
 import { useSSE } from '@/lib/useSSE'
 import { useAuth } from '@/lib/auth'
 import { Card, CardContent } from '@/components/ui/card'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -27,6 +28,7 @@ import {
   Loader2,
   Clock,
   RefreshCw,
+  Zap,
 } from 'lucide-react'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -58,12 +60,50 @@ interface ServerSetting {
   updated_at: string
   has_env_var?: boolean
   env_var_value?: string
+  options?: string[]
 }
 
 interface CategoryGroup {
   category: string
   settings: ServerSetting[]
 }
+
+// Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
+const CATEGORY_ORDER = [
+  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Prow',
+  'Auth & Security', 'Web Push',
+]
+
+// Categories with a test-connection endpoint (category -> integration id).
+const TEST_INTEGRATIONS: Record<string, string> = {
+  Jenkins: 'jenkins',
+  Jira: 'jira',
+  GitHub: 'github',
+  'Report Portal': 'reportportal',
+  Prow: 'prow',
+}
+
+// Jira auth methods, in backend resolution precedence order (oauth wins).
+type JiraMethod = 'oauth' | 'basic' | 'pat'
+const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
+  {
+    id: 'oauth',
+    label: 'Atlassian OAuth (token / cloud ID)',
+    fields: ['jira_oauth_access_token', 'atlassian_oauth_cloud_id', 'atlassian_oauth_client_id'],
+  },
+  {
+    id: 'basic',
+    label: 'Email + API token',
+    fields: ['jira_email', 'jira_api_token'],
+  },
+  {
+    id: 'pat',
+    label: 'PAT (Bearer)',
+    fields: ['jira_pat'],
+  },
+]
+
+const jiraMethodLabel = (id: JiraMethod) => JIRA_METHODS.find(m => m.id === id)!.label
 
 // ---------------------------------------------------------------------------
 // State reducer
@@ -291,6 +331,12 @@ function serializeAdditionalRepos(repos: RepoWithId[]): string {
     .join(',')
 }
 
+// Empty value means ALL server providers are active (backward compatible).
+function parseActiveServerProviders(raw: string, options: string[]): string[] {
+  if (!raw.trim()) return [...options]
+  return raw.split(',').map(s => s.trim()).filter(Boolean)
+}
+
 // ---------------------------------------------------------------------------
 // Source badge
 // ---------------------------------------------------------------------------
@@ -360,6 +406,26 @@ export function ServerSettingsPage() {
   const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
   const [reposEditing, setReposEditing] = useState(false)
 
+  // Active server providers editor state
+  const [serverProvidersEditing, setServerProvidersEditing] = useState(false)
+  const [serverProvidersChecked, setServerProvidersChecked] = useState<string[]>([])
+
+  // Active settings tab (persisted across reloads)
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    try {
+      return localStorage.getItem('rootcoz_settings_tab') || ''
+    } catch {
+      return ''
+    }
+  })
+
+  // Jira auth method selection (presentational grouping only)
+  const [jiraMethod, setJiraMethod] = useState<JiraMethod | null>(null)
+
+  // Test connection state
+  const [testingCategory, setTestingCategory] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<{ category: string; result: TestIntegrationResult } | null>(null)
+
   // Debounced search
   const [searchInput, setSearchInput] = useState('')
   useEffect(() => {
@@ -368,8 +434,10 @@ export function ServerSettingsPage() {
   }, [searchInput])
 
   // ---- Fetch settings ----
-  const fetchSettings = useCallback(async () => {
-    dispatch({ type: 'FETCH_START' })
+  // silent=true skips the loading skeleton (used after save/reset: keep the
+  // already-rendered content mounted so the scroll position is preserved).
+  const fetchSettings = useCallback(async (silent = false) => {
+    if (!silent) dispatch({ type: 'FETCH_START' })
     try {
       const data = await api.get<ServerSetting[]>('/api/admin/settings')
       dispatch({ type: 'FETCH_SUCCESS', settings: data })
@@ -390,7 +458,9 @@ export function ServerSettingsPage() {
   // ---- Multiplexed SSE ----
   const settingsEvents = useMemo(() => ({
     'settings-changed': () => {
-      fetchSettingsRef.current()
+      // Settings are already rendered for any listener of this stream —
+      // refetch silently to avoid the loading skeleton collapsing the page.
+      fetchSettingsRef.current(true)
     },
   }), [fetchSettingsRef])
 
@@ -402,7 +472,7 @@ export function ServerSettingsPage() {
     try {
       await api.put('/api/admin/settings', { settings: updates })
       dispatch({ type: 'SAVE_SUCCESS' })
-      fetchSettings()
+      fetchSettings(true)
       return true
     } catch (err) {
       let msg = 'Failed to save'
@@ -429,7 +499,7 @@ export function ServerSettingsPage() {
     dispatch({ type: 'RESET_START', key })
     try {
       await api.delete(`/api/admin/settings/${encodeURIComponent(key)}`)
-      fetchSettings()
+      fetchSettings(true)
     } catch {
       // silently fail – data will refetch anyway
     } finally {
@@ -523,6 +593,20 @@ export function ServerSettingsPage() {
     if (ok) setReposEditing(false)
   }
 
+  // ---- Active server providers editor ----
+  const serverProviderOptions = state.settings.find(s => s.key === 'active_server_providers')?.options ?? []
+
+  async function handleSaveServerProviders() {
+    // '' means all providers active: save it when nothing is checked (footgun warned
+    // inline) or when every available option is checked (restore default semantics).
+    const isAll = serverProviderOptions.length > 0 &&
+      serverProvidersChecked.length === serverProviderOptions.length &&
+      serverProviderOptions.every(o => serverProvidersChecked.includes(o))
+    const value = serverProvidersChecked.length === 0 || isAll ? '' : serverProvidersChecked.join(',')
+    const ok = await saveSettingValue('active_server_providers', value)
+    if (ok) setServerProvidersEditing(false)
+  }
+
   // ---- Toggle reveal (fetch real value from server) ----
   async function handleToggleReveal(key: string) {
     if (state.revealedKeys.has(key)) {
@@ -569,28 +653,545 @@ export function ServerSettingsPage() {
   }
 
   // ---- Group & filter ----
-  const groups: CategoryGroup[] = useMemo(() => {
-    const query = state.search.toLowerCase()
-    const filtered = state.settings.filter((s) => {
-      if (!query) return true
-      return (
-        s.key.toLowerCase().includes(query) ||
-        s.env_var.toLowerCase().includes(query) ||
-        s.description.toLowerCase().includes(query)
-      )
-    })
-
+  const allGroups: CategoryGroup[] = useMemo(() => {
     const categoryMap = new Map<string, ServerSetting[]>()
-    for (const s of filtered) {
+    for (const s of state.settings) {
       const cat = s.category || 'General'
       if (!categoryMap.has(cat)) categoryMap.set(cat, [])
       categoryMap.get(cat)!.push(s)
     }
 
+    const order = (cat: string) => {
+      const idx = CATEGORY_ORDER.indexOf(cat)
+      return idx === -1 ? CATEGORY_ORDER.length : idx
+    }
     return Array.from(categoryMap.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => order(a) - order(b) || a.localeCompare(b))
       .map(([category, settings]) => ({ category, settings }))
-  }, [state.settings, state.search])
+  }, [state.settings])
+
+  const groups: CategoryGroup[] = useMemo(() => {
+    const query = state.search.toLowerCase()
+    if (!query) return allGroups
+    const matches = (s: ServerSetting) =>
+      s.key.toLowerCase().includes(query) ||
+      s.env_var.toLowerCase().includes(query) ||
+      s.description.toLowerCase().includes(query)
+    return allGroups
+      .map(({ category, settings }) => ({ category, settings: settings.filter(matches) }))
+      .filter(g => g.settings.length > 0)
+  }, [allGroups, state.search])
+
+  // ---- Jira auth method (presentational grouping, same precedence as backend) ----
+  const jiraValue = (key: string) => state.settings.find(s => s.key === key)?.value?.trim() ?? ''
+  const activeJiraMethod: JiraMethod | null = jiraValue('jira_oauth_access_token')
+    ? 'oauth'
+    : jiraValue('jira_email') && jiraValue('jira_api_token')
+      ? 'basic'
+      : jiraValue('jira_pat')
+        ? 'pat'
+        : null
+  const effectiveJiraMethod = jiraMethod ?? activeJiraMethod ?? 'basic'
+  const jiraHiddenFields = new Set(
+    JIRA_METHODS.filter(m => m.id !== effectiveJiraMethod).flatMap(m => m.fields)
+  )
+  // Editing a lower-precedence method while higher-precedence credentials are stored
+  const jiraPrecedenceWarning =
+    activeJiraMethod &&
+    effectiveJiraMethod !== activeJiraMethod &&
+    JIRA_METHODS.findIndex(m => m.id === effectiveJiraMethod) >
+      JIRA_METHODS.findIndex(m => m.id === activeJiraMethod)
+      ? activeJiraMethod
+      : null
+
+  // ---- Test connection helpers ----
+  const editedCategory = state.editingKey
+    ? state.settings.find(s => s.key === state.editingKey)?.category ?? null
+    : null
+
+  async function handleTestConnection(category: string) {
+    const integration = TEST_INTEGRATIONS[category]
+    if (!integration) return
+    setTestResult(null)
+    setTestingCategory(category)
+    try {
+      const result = await api.testIntegration(integration)
+      setTestResult({ category, result })
+    } catch (err) {
+      setTestResult({
+        category,
+        result: { ok: false, message: err instanceof Error ? err.message : 'Test failed' },
+      })
+    } finally {
+      setTestingCategory(null)
+    }
+  }
+
+  function handleTabChange(tab: string) {
+    setActiveTab(tab)
+    setTestResult(null) // dismiss test banners on tab change
+    try {
+      localStorage.setItem('rootcoz_settings_tab', tab)
+    } catch {
+      // ignore persistence failures
+    }
+  }
+
+  const effectiveTab = allGroups.some(g => g.category === activeTab)
+    ? activeTab
+    : allGroups[0]?.category ?? ''
+
+  // ---- Per-category card (shared by the tab view and search results) ----
+  function renderCategory(category: string, settings: ServerSetting[]) {
+    const isCollapsed = state.collapsedCategories.has(category)
+    const rowSettings = category === 'Jira'
+      ? settings.filter(s => !jiraHiddenFields.has(s.key))
+      : settings
+    return (
+      <Card key={category}>
+        <div className="flex w-full items-center justify-between gap-2 px-4 py-3">
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'TOGGLE_CATEGORY', category })}
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 text-left transition-colors hover:bg-surface-hover"
+            aria-expanded={!isCollapsed}
+          >
+            {isCollapsed ? (
+              <ChevronRight className="h-4 w-4 shrink-0 text-text-tertiary" />
+            ) : (
+              <ChevronDown className="h-4 w-4 shrink-0 text-text-tertiary" />
+            )}
+            <span className="font-display text-sm font-semibold text-text-primary">
+              {category}
+            </span>
+            <span className="text-xs text-text-tertiary">
+              ({settings.length} {settings.length === 1 ? 'setting' : 'settings'})
+            </span>
+          </button>
+          {TEST_INTEGRATIONS[category] && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="inline-flex shrink-0">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={() => handleTestConnection(category)}
+                    disabled={testingCategory === category || editedCategory === category}
+                  >
+                    {testingCategory === category ? (
+                      <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Testing…</>
+                    ) : (
+                      <><Zap className="mr-1 h-3 w-3" />Test connection</>
+                    )}
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {editedCategory === category && <TooltipContent>Save changes before testing</TooltipContent>}
+            </Tooltip>
+          )}
+        </div>
+        {testResult?.category === category && <TestResultBanner result={testResult.result} />}
+        {!isCollapsed && (
+          <CardContent className="px-4 pb-4 pt-0">
+            {category === 'Jira' && (
+              <JiraAuthMethodControl
+                selected={effectiveJiraMethod}
+                onSelect={setJiraMethod}
+                activeMethod={activeJiraMethod}
+                warningMethod={jiraPrecedenceWarning}
+              />
+            )}
+            {category === 'AI' && cursorAuthStatus && (
+              <div className="mb-3">
+                <CursorAuthBanner status={cursorAuthStatus} />
+              </div>
+            )}
+            <div className="divide-y divide-border-default">
+              {rowSettings.map((setting) => {
+                if (setting.key === 'ai_provider') {
+                  return (
+                    <AiSettingRow
+                      key={setting.key}
+                      setting={setting}
+                      editing={aiProviderEditing}
+                      onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
+                      onCancel={() => {
+                        setAiProviderEditing(false)
+                        setAiProviderValue(savedAiProvider)
+                        setAiModelValue(savedAiModel)
+                      }}
+                      onSave={() => handleSaveAiProvider(aiProviderValue)}
+                      onReset={() => handleReset(setting.key)}
+                      saving={state.saving}
+                      historyKey={state.historyKey}
+                      history={state.history}
+                      historyLoading={state.historyLoading}
+                      onShowHistory={() => handleShowHistory(setting.key)}
+                      configureLabel="Configure provider"
+                      notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
+                    >
+                      <ProviderSelect
+                        showCredentialSources
+                        value={aiProviderValue}
+                        onChange={(v) => {
+                          setAiProviderValue(v)
+                          setAiModelValue('')
+                        }}
+                      />
+                    </AiSettingRow>
+                  )
+                }
+
+                if (setting.key === 'ai_model') {
+                  return (
+                    <AiSettingRow
+                      key={setting.key}
+                      setting={setting}
+                      editing={aiModelEditing}
+                      onStartEdit={(v) => { setAiModelValue(v); setAiModelEditing(true) }}
+                      onCancel={() => setAiModelEditing(false)}
+                      onSave={() => handleSaveAiModel(aiModelValue)}
+                      onReset={() => handleReset(setting.key)}
+                      saving={state.saving}
+                      historyKey={state.historyKey}
+                      history={state.history}
+                      historyLoading={state.historyLoading}
+                      onShowHistory={() => handleShowHistory(setting.key)}
+                      configureLabel="Configure model"
+                      notConfiguredLabel="Not configured (uses AI_MODEL env var)"
+                    >
+                      <div className="flex items-center gap-2">
+                        <ModelCombobox
+                          value={aiModelValue}
+                          onChange={setAiModelValue}
+                          options={aiModels}
+                          placeholder="Select model..."
+                          className="max-w-md"
+                        />
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              onClick={refreshModels}
+                              disabled={refreshingModels || !effectiveAiProvider}
+                              className="h-8 w-8 shrink-0"
+                            >
+                              <RefreshCw className={`h-4 w-4 ${refreshingModels ? 'animate-spin' : ''}`} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Refresh models from sidecar</TooltipContent>
+                        </Tooltip>
+                      </div>
+                      {!effectiveAiProvider && (
+                        <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
+                      )}
+                    </AiSettingRow>
+                  )
+                }
+
+                // ---- ACTIVE_SERVER_PROVIDERS: provider allowlist editor ----
+                if (setting.key === 'active_server_providers') {
+                  const options = setting.options ?? []
+                  const savedActive = parseActiveServerProviders(setting.value, options)
+                  return (
+                    <div key={setting.key} className="py-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                        <SourceBadge source={setting.source} />
+                        <EnvVarWarning setting={setting} />
+                      </div>
+                      {serverProvidersEditing ? (
+                        <div className="space-y-3">
+                          {options.length === 0 ? (
+                            <p className="text-xs text-text-tertiary italic">No server providers available</p>
+                          ) : (
+                            <div className="space-y-1">
+                              {options.map((provider) => (
+                                <label key={provider} className="flex items-center gap-2 text-xs">
+                                  <input
+                                    type="checkbox"
+                                    checked={serverProvidersChecked.includes(provider)}
+                                    onChange={() =>
+                                      setServerProvidersChecked(prev =>
+                                        prev.includes(provider)
+                                          ? prev.filter(p => p !== provider)
+                                          : [...prev, provider],
+                                      )
+                                    }
+                                    className="h-3.5 w-3.5 accent-signal-blue"
+                                    aria-label={provider}
+                                  />
+                                  <span className={`font-mono ${serverProvidersChecked.includes(provider) ? 'text-text-primary' : 'text-text-tertiary line-through'}`}>
+                                    {provider}
+                                  </span>
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                          {options.length > 0 && serverProvidersChecked.length === 0 && (
+                            <p className="flex items-center gap-1.5 text-xs text-signal-amber">
+                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                              No providers selected — saving this activates ALL server providers (an empty value means all).
+                            </p>
+                          )}
+                          <div className="flex items-center gap-2 pt-1">
+                            <Button size="sm" onClick={handleSaveServerProviders} disabled={state.saving} className="h-7 text-xs">
+                              {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => setServerProvidersEditing(false)} className="h-7 text-xs">Cancel</Button>
+                            {options.length > 0 && (
+                              <Button size="sm" variant="ghost" onClick={() => setServerProvidersChecked([...options])} className="h-7 text-xs text-text-tertiary">
+                                Reset to all
+                              </Button>
+                            )}
+                            {setting.source === 'db' && (
+                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          {options.length === 0 ? (
+                            <span className="text-xs text-text-tertiary italic">No server providers available</span>
+                          ) : !setting.value.trim() ? (
+                            <span className="text-xs text-text-secondary">
+                              All server providers are active <span className="text-text-quaternary">(empty value = all)</span>
+                            </span>
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                              {options.map((provider) => {
+                                const active = savedActive.includes(provider)
+                                return (
+                                  <span
+                                    key={provider}
+                                    className={`inline-flex items-center rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default ${active ? 'text-text-primary' : 'text-text-tertiary line-through'}`}
+                                  >
+                                    {provider}
+                                  </span>
+                                )
+                              })}
+                            </div>
+                          )}
+                          {options.length > 0 && (
+                            <button type="button" onClick={() => { setServerProvidersChecked(savedActive); setServerProvidersEditing(true) }} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
+                              Configure providers
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      <p className="text-xs text-text-tertiary">{setting.description}</p>
+                      <p className="text-xs text-text-quaternary">Unchecked providers are hidden from users (no server-credential models). Users&rsquo; own API keys are unaffected.</p>
+                      {setting.source === 'db' && setting.updated_by && (
+                        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+                      )}
+                      {setting.source === 'db' && (
+                        <HistoryToggle
+                          settingKey={setting.key}
+                          sensitive={setting.sensitive}
+                          historyKey={state.historyKey}
+                          history={state.history}
+                          historyLoading={state.historyLoading}
+                          onShowHistory={() => handleShowHistory(setting.key)}
+                        />
+                      )}
+                    </div>
+                  )
+                }
+
+                // ---- PEER_AI_CONFIGS: structured editor ----
+                if (setting.key === 'peer_ai_configs') {
+                  return (
+                    <div key={setting.key} className="py-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                        <SourceBadge source={setting.source} />
+                        <EnvVarWarning setting={setting} />
+                      </div>
+                      {peerEditing ? (
+                        <div className="space-y-3">
+                          <PeerConfigList
+                            peerConfigs={peerConfigs}
+                            setPeerConfigs={setPeerConfigs}
+                            maxRounds={peerMaxRounds}
+                            setMaxRounds={setPeerMaxRounds}
+                          />
+                          <div className="flex items-center gap-2 pt-1">
+                            <Button size="sm" onClick={handleSavePeerConfig} disabled={state.saving} className="h-7 text-xs">
+                              {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => setPeerEditing(false)} className="h-7 text-xs">Cancel</Button>
+                            {setting.source === 'db' && (
+                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          {setting.value ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {splitOutsideBrackets(setting.value).map((entry, i) => {
+                                const trimmed = entry.trim()
+                                const colonIdx = trimmed.indexOf(':')
+                                const provider = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed
+                                const model = colonIdx > 0 ? trimmed.slice(colonIdx + 1) : ''
+                                return (
+                                  <span key={i} className="inline-flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default">
+                                    <span className="text-text-tertiary">{provider}</span>
+                                    <span className="text-text-tertiary">/</span>
+                                    <span className="text-text-primary">{model}</span>
+                                  </span>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-text-tertiary italic">Not configured</span>
+                          )}
+                          <button type="button" onClick={() => handleStartPeerEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
+                            Configure peers
+                          </button>
+                        </div>
+                      )}
+                      <p className="text-xs text-text-tertiary">{setting.description}</p>
+                      {setting.source === 'db' && setting.updated_by && (
+                        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+                      )}
+                      {setting.source === 'db' && (
+                        <HistoryToggle
+                          settingKey={setting.key}
+                          sensitive={setting.sensitive}
+                          historyKey={state.historyKey}
+                          history={state.history}
+                          historyLoading={state.historyLoading}
+                          onShowHistory={() => handleShowHistory(setting.key)}
+                        />
+                      )}
+                    </div>
+                  )
+                }
+
+                // ---- PEER_ANALYSIS_MAX_ROUNDS: managed by PeerConfigList ----
+                if (setting.key === 'peer_analysis_max_rounds') {
+                  return (
+                    <div key={setting.key} className="py-3 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                        <SourceBadge source={setting.source} />
+                        <EnvVarWarning setting={setting} />
+                      </div>
+                      <p className="text-xs text-text-tertiary">
+                        Managed via Peer AI Configs above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || '3'}</span>
+                      </p>
+                    </div>
+                  )
+                }
+
+                // ---- ADDITIONAL_REPOS: structured editor ----
+                if (setting.key === 'additional_repos') {
+                  return (
+                    <div key={setting.key} className="py-3 space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                        <SourceBadge source={setting.source} />
+                        <EnvVarWarning setting={setting} />
+                      </div>
+                      {reposEditing ? (
+                        <div className="space-y-3">
+                          <AdditionalReposList repos={additionalRepos} setRepos={setAdditionalRepos} />
+                          <div className="flex items-center gap-2 pt-1">
+                            <Button size="sm" onClick={handleSaveRepos} disabled={state.saving} className="h-7 text-xs">
+                              {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => setReposEditing(false)} className="h-7 text-xs">Cancel</Button>
+                            {setting.source === 'db' && (
+                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          {setting.value ? (
+                            <div className="space-y-1">
+                              {parseAdditionalReposString(setting.value).map((repo) => (
+                                <div key={repo.id} className="inline-flex items-center gap-2 rounded-md bg-surface-elevated px-2 py-1 text-xs font-mono border border-border-default mr-1.5">
+                                  <span className="font-semibold text-text-primary">{repo.name}</span>
+                                  <span className="text-text-tertiary truncate max-w-[300px]">{repo.url}</span>
+                                  {repo.ref && <span className="text-signal-blue">{repo.ref}</span>}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-text-tertiary italic">Not configured</span>
+                          )}
+                          <button type="button" onClick={() => handleStartReposEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
+                            Configure repositories
+                          </button>
+                        </div>
+                      )}
+                      <p className="text-xs text-text-tertiary">{setting.description}</p>
+                      {setting.source === 'db' && setting.updated_by && (
+                        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+                      )}
+                      {setting.source === 'db' && (
+                        <HistoryToggle
+                          settingKey={setting.key}
+                          sensitive={setting.sensitive}
+                          historyKey={state.historyKey}
+                          history={state.history}
+                          historyLoading={state.historyLoading}
+                          onShowHistory={() => handleShowHistory(setting.key)}
+                        />
+                      )}
+                    </div>
+                  )
+                }
+
+                // ---- Default: generic SettingRow ----
+                return (
+                  <SettingRow
+                    key={setting.key}
+                    setting={setting}
+                    isEditing={state.editingKey === setting.key}
+                    editValue={state.editValue}
+                    saving={state.saving}
+                    resetting={state.resettingKey === setting.key}
+                    revealed={state.revealedKeys.has(setting.key)}
+                    historyKey={state.historyKey}
+                    history={state.history}
+                    historyLoading={state.historyLoading}
+                    onShowHistory={() => handleShowHistory(setting.key)}
+                    revealedValue={state.revealedValues[setting.key]}
+                    onStartEdit={() =>
+                      dispatch({
+                        type: 'START_EDIT',
+                        key: setting.key,
+                        currentValue: state.revealedValues[setting.key] ?? setting.value,
+                      })
+                    }
+                    onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
+                    onSetEditValue={(v) => dispatch({ type: 'SET_EDIT_VALUE', value: v })}
+                    onSave={() => handleSave(setting.key, state.editValue)}
+                    onReset={() => handleReset(setting.key)}
+                    onToggleReveal={() => handleToggleReveal(setting.key)}
+                    onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
+                  />
+                )
+              })}
+            </div>
+            {category === 'AI' && <FreeModelsCard />}
+
+          </CardContent>
+        )}
+      </Card>
+    )
+  }
 
   // ---- Render ----
   if (!isAdmin) {
@@ -675,313 +1276,31 @@ export function ServerSettingsPage() {
               {state.search ? 'No settings match your search.' : 'No settings found.'}
             </p>
           </div>
-        ) : (
-          <div className="space-y-4">
-            {groups.map(({ category, settings }) => {
-              const isCollapsed = state.collapsedCategories.has(category)
-              return (
-                <Card key={category}>
-                  <button
-                    type="button"
-                    onClick={() => dispatch({ type: 'TOGGLE_CATEGORY', category })}
-                    className="flex w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-surface-hover rounded-t-lg"
-                    aria-expanded={!isCollapsed}
-                  >
-                    <span className="flex items-center gap-2">
-                      {isCollapsed ? (
-                        <ChevronRight className="h-4 w-4 text-text-tertiary" />
-                      ) : (
-                        <ChevronDown className="h-4 w-4 text-text-tertiary" />
-                      )}
-                      <span className="font-display text-sm font-semibold text-text-primary">
-                        {category}
-                      </span>
-                      <span className="text-xs text-text-tertiary">
-                        ({settings.length} {settings.length === 1 ? 'setting' : 'settings'})
-                      </span>
-                    </span>
-                  </button>
-                  {!isCollapsed && (
-                    <CardContent className="px-4 pb-4 pt-0">
-                      {category === 'AI' && cursorAuthStatus && (
-                        <div className="mb-3">
-                          <CursorAuthBanner status={cursorAuthStatus} />
-                        </div>
-                      )}
-                      <div className="divide-y divide-border-default">
-                        {settings.map((setting) => {
-                          if (setting.key === 'ai_provider') {
-                            return (
-                              <AiSettingRow
-                                key={setting.key}
-                                setting={setting}
-                                editing={aiProviderEditing}
-                                onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
-                                onCancel={() => {
-                                  setAiProviderEditing(false)
-                                  setAiProviderValue(savedAiProvider)
-                                  setAiModelValue(savedAiModel)
-                                }}
-                                onSave={() => handleSaveAiProvider(aiProviderValue)}
-                                onReset={() => handleReset(setting.key)}
-                                saving={state.saving}
-                                historyKey={state.historyKey}
-                                history={state.history}
-                                historyLoading={state.historyLoading}
-                                onShowHistory={() => handleShowHistory(setting.key)}
-                                configureLabel="Configure provider"
-                                notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
-                              >
-                                <ProviderSelect
-                                  showCredentialSources
-                                  value={aiProviderValue}
-                                  onChange={(v) => {
-                                    setAiProviderValue(v)
-                                    setAiModelValue('')
-                                  }}
-                                />
-                              </AiSettingRow>
-                            )
-                          }
-
-                          if (setting.key === 'ai_model') {
-                            return (
-                              <AiSettingRow
-                                key={setting.key}
-                                setting={setting}
-                                editing={aiModelEditing}
-                                onStartEdit={(v) => { setAiModelValue(v); setAiModelEditing(true) }}
-                                onCancel={() => setAiModelEditing(false)}
-                                onSave={() => handleSaveAiModel(aiModelValue)}
-                                onReset={() => handleReset(setting.key)}
-                                saving={state.saving}
-                                historyKey={state.historyKey}
-                                history={state.history}
-                                historyLoading={state.historyLoading}
-                                onShowHistory={() => handleShowHistory(setting.key)}
-                                configureLabel="Configure model"
-                                notConfiguredLabel="Not configured (uses AI_MODEL env var)"
-                              >
-                                <div className="flex items-center gap-2">
-                                  <ModelCombobox
-                                    value={aiModelValue}
-                                    onChange={setAiModelValue}
-                                    options={aiModels}
-                                    placeholder="Select model..."
-                                    className="max-w-md"
-                                  />
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        variant="ghost"
-                                        size="icon"
-                                        onClick={refreshModels}
-                                        disabled={refreshingModels || !effectiveAiProvider}
-                                        className="h-8 w-8 shrink-0"
-                                      >
-                                        <RefreshCw className={`h-4 w-4 ${refreshingModels ? 'animate-spin' : ''}`} />
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>Refresh models from sidecar</TooltipContent>
-                                  </Tooltip>
-                                </div>
-                                {!effectiveAiProvider && (
-                                  <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
-                                )}
-                              </AiSettingRow>
-                            )
-                          }
-
-                          // ---- PEER_AI_CONFIGS: structured editor ----
-                          if (setting.key === 'peer_ai_configs') {
-                            return (
-                              <div key={setting.key} className="py-3 space-y-2">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                                  <SourceBadge source={setting.source} />
-                                  <EnvVarWarning setting={setting} />
-                                </div>
-                                {peerEditing ? (
-                                  <div className="space-y-3">
-                                    <PeerConfigList
-                                      peerConfigs={peerConfigs}
-                                      setPeerConfigs={setPeerConfigs}
-                                      maxRounds={peerMaxRounds}
-                                      setMaxRounds={setPeerMaxRounds}
-                                    />
-                                    <div className="flex items-center gap-2 pt-1">
-                                      <Button size="sm" onClick={handleSavePeerConfig} disabled={state.saving} className="h-7 text-xs">
-                                        {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                                      </Button>
-                                      <Button size="sm" variant="outline" onClick={() => setPeerEditing(false)} className="h-7 text-xs">Cancel</Button>
-                                      {setting.source === 'db' && (
-                                        <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                          <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                                        </Button>
-                                      )}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div>
-                                    {setting.value ? (
-                                      <div className="flex flex-wrap gap-1.5">
-                                        {splitOutsideBrackets(setting.value).map((entry, i) => {
-                                          const trimmed = entry.trim()
-                                          const colonIdx = trimmed.indexOf(':')
-                                          const provider = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed
-                                          const model = colonIdx > 0 ? trimmed.slice(colonIdx + 1) : ''
-                                          return (
-                                            <span key={i} className="inline-flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default">
-                                              <span className="text-text-tertiary">{provider}</span>
-                                              <span className="text-text-tertiary">/</span>
-                                              <span className="text-text-primary">{model}</span>
-                                            </span>
-                                          )
-                                        })}
-                                      </div>
-                                    ) : (
-                                      <span className="text-xs text-text-tertiary italic">Not configured</span>
-                                    )}
-                                    <button type="button" onClick={() => handleStartPeerEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
-                                      Configure peers
-                                    </button>
-                                  </div>
-                                )}
-                                <p className="text-xs text-text-tertiary">{setting.description}</p>
-                                {setting.source === 'db' && setting.updated_by && (
-                                  <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
-                                )}
-                                {setting.source === 'db' && (
-                                  <HistoryToggle
-                                    settingKey={setting.key}
-                                    sensitive={setting.sensitive}
-                                    historyKey={state.historyKey}
-                                    history={state.history}
-                                    historyLoading={state.historyLoading}
-                                    onShowHistory={() => handleShowHistory(setting.key)}
-                                  />
-                                )}
-                              </div>
-                            )
-                          }
-
-                          // ---- PEER_ANALYSIS_MAX_ROUNDS: managed by PeerConfigList ----
-                          if (setting.key === 'peer_analysis_max_rounds') {
-                            return (
-                              <div key={setting.key} className="py-3 space-y-1">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                                  <SourceBadge source={setting.source} />
-                                  <EnvVarWarning setting={setting} />
-                                </div>
-                                <p className="text-xs text-text-tertiary">
-                                  Managed via Peer AI Configs above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || '3'}</span>
-                                </p>
-                              </div>
-                            )
-                          }
-
-                          // ---- ADDITIONAL_REPOS: structured editor ----
-                          if (setting.key === 'additional_repos') {
-                            return (
-                              <div key={setting.key} className="py-3 space-y-2">
-                                <div className="flex items-center gap-2">
-                                  <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                                  <SourceBadge source={setting.source} />
-                                  <EnvVarWarning setting={setting} />
-                                </div>
-                                {reposEditing ? (
-                                  <div className="space-y-3">
-                                    <AdditionalReposList repos={additionalRepos} setRepos={setAdditionalRepos} />
-                                    <div className="flex items-center gap-2 pt-1">
-                                      <Button size="sm" onClick={handleSaveRepos} disabled={state.saving} className="h-7 text-xs">
-                                        {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                                      </Button>
-                                      <Button size="sm" variant="outline" onClick={() => setReposEditing(false)} className="h-7 text-xs">Cancel</Button>
-                                      {setting.source === 'db' && (
-                                        <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                          <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                                        </Button>
-                                      )}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div>
-                                    {setting.value ? (
-                                      <div className="space-y-1">
-                                        {parseAdditionalReposString(setting.value).map((repo) => (
-                                          <div key={repo.id} className="inline-flex items-center gap-2 rounded-md bg-surface-elevated px-2 py-1 text-xs font-mono border border-border-default mr-1.5">
-                                            <span className="font-semibold text-text-primary">{repo.name}</span>
-                                            <span className="text-text-tertiary truncate max-w-[300px]">{repo.url}</span>
-                                            {repo.ref && <span className="text-signal-blue">{repo.ref}</span>}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <span className="text-xs text-text-tertiary italic">Not configured</span>
-                                    )}
-                                    <button type="button" onClick={() => handleStartReposEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
-                                      Configure repositories
-                                    </button>
-                                  </div>
-                                )}
-                                <p className="text-xs text-text-tertiary">{setting.description}</p>
-                                {setting.source === 'db' && setting.updated_by && (
-                                  <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
-                                )}
-                                {setting.source === 'db' && (
-                                  <HistoryToggle
-                                    settingKey={setting.key}
-                                    sensitive={setting.sensitive}
-                                    historyKey={state.historyKey}
-                                    history={state.history}
-                                    historyLoading={state.historyLoading}
-                                    onShowHistory={() => handleShowHistory(setting.key)}
-                                  />
-                                )}
-                              </div>
-                            )
-                          }
-
-                          // ---- Default: generic SettingRow ----
-                          return (
-                            <SettingRow
-                              key={setting.key}
-                              setting={setting}
-                              isEditing={state.editingKey === setting.key}
-                              editValue={state.editValue}
-                              saving={state.saving}
-                              resetting={state.resettingKey === setting.key}
-                              revealed={state.revealedKeys.has(setting.key)}
-                              historyKey={state.historyKey}
-                              history={state.history}
-                              historyLoading={state.historyLoading}
-                              onShowHistory={() => handleShowHistory(setting.key)}
-                              revealedValue={state.revealedValues[setting.key]}
-                              onStartEdit={() =>
-                                dispatch({
-                                  type: 'START_EDIT',
-                                  key: setting.key,
-                                  currentValue: state.revealedValues[setting.key] ?? setting.value,
-                                })
-                              }
-                              onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
-                              onSetEditValue={(v) => dispatch({ type: 'SET_EDIT_VALUE', value: v })}
-                              onSave={() => handleSave(setting.key, state.editValue)}
-                              onReset={() => handleReset(setting.key)}
-                              onToggleReveal={() => handleToggleReveal(setting.key)}
-                              onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
-                            />
-                          )
-                        })}
-                      </div>
-                      {category === 'AI' && <FreeModelsCard />}
-                    </CardContent>
-                  )}
-                </Card>
-              )
-            })}
+        ) : state.search ? (
+          <div>
+            <h2 className="font-display text-sm font-semibold text-text-primary">Search results</h2>
+            <p className="mb-3 mt-0.5 text-xs text-text-tertiary">
+              {groups.reduce((n, g) => n + g.settings.length, 0)} settings match &ldquo;{state.search}&rdquo;
+            </p>
+            <div className="space-y-4">
+              {groups.map(({ category, settings }) => renderCategory(category, settings))}
+            </div>
           </div>
+        ) : (
+          <Tabs value={effectiveTab} onValueChange={handleTabChange}>
+            <TabsList>
+              {allGroups.map(({ category }) => (
+                <TabsTrigger key={category} value={category}>
+                  {category}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {allGroups.map(({ category, settings }) => (
+              <TabsContent key={category} value={category}>
+                {renderCategory(category, settings)}
+              </TabsContent>
+            ))}
+          </Tabs>
         )}
       </div>
     </TooltipProvider>
@@ -1150,6 +1469,7 @@ function SettingRow({
         <Input
           ref={inputRef}
           type={setting.type === 'integer' ? 'number' : setting.sensitive ? 'password' : 'text'}
+          autoComplete={setting.sensitive ? 'new-password' : 'off'}
           value={editValue}
           onChange={(e) => onSetEditValue(e.target.value)}
           onKeyDown={(e) => {
@@ -1386,5 +1706,79 @@ function RestartBadge() {
       </TooltipTrigger>
       <TooltipContent>Requires restart to take effect</TooltipContent>
     </Tooltip>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Jira auth method control (presentational grouping only)
+// ---------------------------------------------------------------------------
+
+interface JiraAuthMethodControlProps {
+  selected: JiraMethod
+  onSelect: (method: JiraMethod) => void
+  activeMethod: JiraMethod | null
+  warningMethod: JiraMethod | null
+}
+
+function JiraAuthMethodControl({ selected, onSelect, activeMethod, warningMethod }: JiraAuthMethodControlProps) {
+  return (
+    <div className="mb-3 space-y-2 rounded-md border border-border-default bg-surface-elevated px-3 py-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold text-text-secondary">Auth method</span>
+        <div role="group" aria-label="Jira auth method" className="inline-flex overflow-hidden rounded-md border border-border-default">
+          {JIRA_METHODS.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => onSelect(m.id)}
+              aria-pressed={selected === m.id}
+              className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                selected === m.id
+                  ? 'bg-surface-hover text-text-primary'
+                  : 'text-text-tertiary hover:bg-surface-hover hover:text-text-secondary'
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+        {activeMethod && (
+          <span className="inline-flex items-center rounded-full bg-signal-green/10 px-2 py-0.5 text-xs font-medium text-signal-green">
+            Active: {jiraMethodLabel(activeMethod)}
+          </span>
+        )}
+      </div>
+      {warningMethod && (
+        <p className="flex items-center gap-1.5 text-xs text-signal-amber">
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          {jiraMethodLabel(warningMethod)} credentials are stored and take precedence — clear them to use this method.
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Test connection result banner
+// ---------------------------------------------------------------------------
+
+function TestResultBanner({ result }: { result: TestIntegrationResult }) {
+  return (
+    <div
+      role="status"
+      className={`mx-4 mb-3 rounded-md border px-3 py-2 text-sm ${
+        result.ok
+          ? 'border-signal-green/30 bg-signal-green/10 text-signal-green'
+          : 'border-signal-red/30 bg-signal-red/10 text-signal-red'
+      }`}
+    >
+      <p className="font-medium">{result.ok ? 'Connection successful' : 'Connection failed'}</p>
+      {result.message && <p className="mt-0.5">{result.message}</p>}
+      {result.details && Object.keys(result.details).length > 0 && (
+        <pre className="mt-1 overflow-x-auto rounded bg-surface-card p-2 text-xs text-text-secondary">
+          {JSON.stringify(result.details, null, 2)}
+        </pre>
+      )}
+    </div>
   )
 }

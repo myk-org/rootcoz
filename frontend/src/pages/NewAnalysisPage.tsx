@@ -397,6 +397,7 @@ export function NewAnalysisPage() {
                 <FieldLabel>Jenkins Password / Token</FieldLabel>
                 <Input
                   type="password"
+                  autoComplete="new-password"
                   placeholder="API token"
                   value={jenkinsPassword}
                   onChange={(e) => setJenkinsPassword(e.target.value)}
