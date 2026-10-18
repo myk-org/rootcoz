@@ -78,6 +78,10 @@ function initFormState(p: AnalysisResult['request_params'], result: AnalysisResu
       ? (p.get_job_artifacts as boolean)
       : undefined,
     maxArtifactsSize: p?.jenkins_artifacts_max_size_mb != null ? (p.jenkins_artifacts_max_size_mb as number) : undefined,
+    // Whether the job replays WITH an AI pair absent any override — clearing
+    // it in the form must send an explicit empty pair so the stored one is
+    // overridden instead of silently retained.
+    hadStoredAiPair: !!(p?.ai_provider || result.ai_provider) && !!(p?.ai_model || result.ai_model),
   }
 }
 
@@ -108,6 +112,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
 
   const [getArtifacts, setGetArtifacts] = useState<boolean | undefined>(init.getArtifacts)
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(init.maxArtifactsSize)
+  const [hadStoredAiPair, setHadStoredAiPair] = useState(init.hadStoredAiPair)
 
   const effectiveForceServer = forceServerCredentials && canUseServerProviders
   const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
@@ -135,6 +140,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setJiraProjectKey(s.jiraProjectKey)
     setGetArtifacts(s.getArtifacts)
     setMaxArtifactsSize(s.maxArtifactsSize)
+    setHadStoredAiPair(s.hadStoredAiPair)
     setSubmitting(false)
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
@@ -159,7 +165,16 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
     try {
       const body: Record<string, unknown> = {
-        ...completeAiPairOverride(aiProvider, aiModel),
+        // A filled pair is sent as an override; a pair the user CLEARED from a
+        // job that had one is sent as explicit empty strings so the backend
+        // (model_fields_set) overrides the stored pair instead of retaining
+        // it — the empty pair then resolves via the server-side chain. A job
+        // that never had a pair stays omitted (plain deferral).
+        ...(aiProvider && aiModel
+          ? completeAiPairOverride(aiProvider, aiModel)
+          : hadStoredAiPair
+            ? { ai_provider: '', ai_model: '' }
+            : {}),
         force_server_credentials: effectiveForceServer,
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(enableJira !== undefined && { enable_jira: enableJira }),
@@ -199,6 +214,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   }, [
     aiProvider,
     aiModel,
+    hadStoredAiPair,
     effectiveForceServer,
     aiUnavailable,
     aiCallTimeout,

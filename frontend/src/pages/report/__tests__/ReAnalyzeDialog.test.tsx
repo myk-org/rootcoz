@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
 import { ApiError } from '@/lib/api'
 import type { AnalysisResult } from '@/types'
@@ -28,11 +29,17 @@ vi.mock('@/lib/useProviderOptions', () => ({
 }))
 // Real availability logic so deferPrimary behavior is exercised.
 vi.mock('@/components/shared/AnalysisAiPicker', () => ({
-  AnalysisProviderSelect: ({ value, label }: { value: string; label?: string }) => (
-    <div data-testid={`provider-${label ?? 'primary'}`}>{value}</div>
+  AnalysisProviderSelect: ({ value, label, onChange }: { value: string; label?: string; onChange?: (v: string) => void }) => (
+    <div data-testid={`provider-${label ?? 'primary'}`}>
+      {value}
+      <input aria-label={`set-provider-${label ?? 'primary'}`} value={value} onChange={(e) => onChange?.(e.target.value)} />
+    </div>
   ),
-  AnalysisModelSelect: ({ value, label }: { value: string; label?: string }) => (
-    <div data-testid={`model-${label ?? 'primary'}`}>{value}</div>
+  AnalysisModelSelect: ({ value, label, onChange }: { value: string; label?: string; onChange?: (v: string) => void }) => (
+    <div data-testid={`model-${label ?? 'primary'}`}>
+      {value}
+      <input aria-label={`set-model-${label ?? 'primary'}`} value={value} onChange={(e) => onChange?.(e.target.value)} />
+    </div>
   ),
 }))
 
@@ -190,5 +197,27 @@ describe('ReAnalyzeDialog', () => {
       { ai_provider: 'openai', ai_model: 'gpt-5' },
       { ai_provider: 'gemini', ai_model: 'gemini-3' },
     ])
+  })
+
+  it('sends an explicit empty pair when the user clears a stored pair (overrides instead of retaining)', async () => {
+    mockPost.mockResolvedValue({ job_id: 'job-2' })
+    const withPairAndRepo = {
+      ...result,
+      request_params: {
+        ai_provider: 'claude',
+        ai_model: 'claude-sonnet-4',
+        tests_repo_url: 'https://github.com/org/repo',
+      },
+    } as unknown as AnalysisResult
+    render(<ReAnalyzeDialog open onOpenChange={() => {}} result={withPairAndRepo} jobId="job-1" />)
+    // User clears both fields
+    const user = userEvent.setup()
+    await user.clear(screen.getByLabelText('set-provider-primary'))
+    await user.clear(screen.getByLabelText('set-model-primary'))
+    fireEvent.click(screen.getByRole('button', { name: /re-analyze/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1))
+    const body = submittedBody()
+    expect(body.ai_provider).toBe('')
+    expect(body.ai_model).toBe('')
   })
 })

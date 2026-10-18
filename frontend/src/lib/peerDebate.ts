@@ -36,7 +36,13 @@ export function resolvedPeerConfigs(result: AnalysisResult): Array<{ ai_provider
       }
     }
   }
+  const walkChildren = (children: AnalysisResult['child_job_analyses']): void => {
+    for (const child of children) {
+      collect(child.failures ?? [])
+      walkChildren(child.failed_children ?? [])
+    }
+  }
   collect(result.failures ?? [])
-  for (const child of result.child_job_analyses ?? []) collect(child.failures ?? [])
+  walkChildren(result.child_job_analyses ?? [])
   return pairs
 }
