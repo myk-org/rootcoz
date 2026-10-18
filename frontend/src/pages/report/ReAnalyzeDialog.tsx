@@ -18,7 +18,7 @@ import { Toggle } from '@/components/shared/Toggle'
 import { FieldLabel } from '@/components/shared/FieldLabel'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
-import { isAnalysisFormAiUnavailable } from '@/lib/analysisAi'
+import { isAnalysisFormAiUnavailable, completeAiPairOverride } from '@/lib/analysisAi'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -37,17 +37,20 @@ interface ReAnalyzeDialogProps {
   inPlaceAnalyze?: boolean
 }
 
-function initFormState(p: AnalysisResult['request_params']) {
+function initFormState(p: AnalysisResult['request_params'], result: AnalysisResult) {
   return {
-    aiProvider: normalizeProvider(p?.ai_provider || 'claude'),
-    aiModel: p?.ai_model || '',
+    // No hardcoded fallback: explicit request params win, then the values the
+    // server actually resolved for the original analysis, else empty (deferred
+    // to the server-side resolution chain on submit).
+    aiProvider: normalizeProvider(p?.ai_provider || result.ai_provider || ''),
+    aiModel: p?.ai_model || result.ai_model || '',
     forceServerCredentials: p?.force_server_credentials === true,
     aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
     enablePeers: !!(p?.peer_ai_configs?.length),
     peerConfigs: (p?.peer_ai_configs || []).map(c => ({
       ...c,
-      ai_provider: normalizeProvider(c.ai_provider || 'claude'),
+      ai_provider: c.ai_provider ? normalizeProvider(c.ai_provider) : '',
       id: crypto.randomUUID(),
     })),
     maxRounds: p?.peer_analysis_max_rounds || 3,
@@ -75,7 +78,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const params = result.request_params
   const isProwJob = ciSourceLabel(result.request_params) === 'Prow'
 
-  const init = initFormState(params)
+  const init = initFormState(params, result)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)
   const [aiModel, setAiModel] = useState(init.aiModel)
   const [forceServerCredentials, setForceServerCredentials] = useState(init.forceServerCredentials)
@@ -106,7 +109,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   // Reset form state when dialog opens
   useEffect(() => {
     if (!open) return
-    const s = initFormState(result.request_params)
+    const s = initFormState(result.request_params, result)
     setAiProvider(s.aiProvider)
     setAiModel(s.aiModel)
     setForceServerCredentials(s.forceServerCredentials)
@@ -127,7 +130,14 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
   }, [open, result.request_params, inPlaceAnalyze])
 
-  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders)
+  // Defer exactly like the submit form: only a fully empty primary defers to
+  // the server-side resolution chain; a partial selection must still validate.
+  const deferPrimary = !aiProvider.trim() && !aiModel.trim()
+  // Empty peer rows carry no selection; they are dropped from the submitted
+  // configs, so they must not block validation either. Zero active peers while
+  // peer review is enabled still blocks, as on the submit form.
+  const activePeers = peerConfigs.filter((c) => c.ai_provider.trim())
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, activePeers, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders, deferPrimary)
 
   const handleSubmit = useCallback(async () => {
     if (aiUnavailable) {
@@ -138,8 +148,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     setError('')
     try {
       const body: Record<string, unknown> = {
-        ai_provider: aiProvider,
-        ai_model: aiModel,
+        ...completeAiPairOverride(aiProvider, aiModel),
         force_server_credentials: effectiveForceServer,
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(enableJira !== undefined && { enable_jira: enableJira }),
@@ -149,7 +158,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
         ...(maxArtifactsSize !== undefined && { jenkins_artifacts_max_size_mb: maxArtifactsSize }),
         ...(rawPrompt && { raw_prompt: rawPrompt }),
         ...(testsRepoUrl && { tests_repo_url: testsRepoRef ? `${testsRepoUrl}:${testsRepoRef}` : testsRepoUrl }),
-        peer_ai_configs: enablePeers ? peerConfigs.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })) : [],
+        peer_ai_configs: enablePeers ? activePeers.map(({ ai_provider, ai_model }) => ({ ai_provider, ai_model })) : [],
         peer_analysis_max_rounds: maxRounds,
         additional_repos: additionalRepos
           .filter((r) => r.name.trim() && r.url.trim())
@@ -276,6 +285,11 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
               <FieldLabel>AI Model</FieldLabel>
               <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
             </div>
+            {deferPrimary && (
+              <p className="text-[11px] text-text-tertiary">
+                Left empty, the provider and model are resolved by the server from the repository settings or the admin's server settings.
+              </p>
+            )}
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">Use server credentials</span>
               <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
