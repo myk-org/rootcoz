@@ -486,17 +486,26 @@ export function ServerSettingsPage() {
   // ---- Fetch settings ----
   // silent=true skips the loading skeleton (used after save/reset: keep the
   // already-rendered content mounted so the scroll position is preserved).
+  // Generation guard (same pattern as testGenerationRef): a stale response —
+  // e.g. the Jira-test refetch resolving after a method-switch refetch —
+  // must not overwrite newer settings (#346).
+  const settingsGenerationRef = useRef(0)
   const fetchSettings = useCallback(async (silent = false) => {
+    const generation = ++settingsGenerationRef.current
     if (!silent) dispatch({ type: 'FETCH_START' })
     try {
       const data = await api.get<ServerSetting[]>('/api/admin/settings')
-      dispatch({ type: 'FETCH_SUCCESS', settings: data })
+      if (generation === settingsGenerationRef.current) {
+        dispatch({ type: 'FETCH_SUCCESS', settings: data })
+      }
       return data
     } catch (err) {
-      dispatch({
-        type: 'FETCH_ERROR',
-        error: err instanceof Error ? err.message : 'Failed to load settings',
-      })
+      if (generation === settingsGenerationRef.current) {
+        dispatch({
+          type: 'FETCH_ERROR',
+          error: err instanceof Error ? err.message : 'Failed to load settings',
+        })
+      }
     }
   }, [])
 
@@ -786,7 +795,12 @@ export function ServerSettingsPage() {
     if (state.editingKey && (method === null || hiddenJiraFieldsFor(method).has(state.editingKey))) {
       dispatch({ type: 'CANCEL_EDIT' })
     }
-    setJiraModeError(await saveSettings({ jira_auth_mode: method ?? '' }))
+    const error = await saveSettings({ jira_auth_mode: method ?? '' })
+    setJiraModeError(error)
+    // The admin must land on a WORKING method: after a successful switch to a
+    // real method, auto-run the existing Jira test for it. Disabling Jira never
+    // tests; the result is surfaced, the switch itself never reverts (#346).
+    if (method && !error) void handleTestConnection('Jira')
   }
 
   // ---- Test connection helpers ----

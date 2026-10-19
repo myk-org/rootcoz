@@ -4640,6 +4640,83 @@ class TestBuildRequestParams:
         assert params.get("labels") == ["Nightly", "CNV"]
 
 
+class TestMergeSettingsJiraModePinning:
+    """Request-supplied Jira credentials pin jira_auth_mode (PR #348 fix 3)."""
+
+    @staticmethod
+    def _server_settings(**overrides: Any) -> Settings:
+        base: dict[str, Any] = {
+            "jira_url": "https://jira.example.com",
+            "jira_pat": "server-pat",
+            "jira_oauth_access_token": SecretStr("server-oauth"),
+        }
+        base.update(overrides)
+        return Settings(**base)
+
+    @pytest.mark.parametrize("server_mode", ["", "basic", "pat", "oauth"])
+    @pytest.mark.parametrize(
+        ("body_fields", "expected_mode"),
+        [
+            ({"jira_email": "req@example.com", "jira_api_token": "req-tok"}, "basic"),
+            ({"jira_api_token": "req-tok"}, "pat"),
+            ({"jira_pat": "req-pat"}, "pat"),
+            ({"jira_oauth_access_token": "req-oauth"}, "oauth"),
+        ],
+    )
+    def test_request_creds_pin_mode(
+        self, mock_settings, server_mode: str, body_fields: dict, expected_mode: str
+    ) -> None:
+        """Request credentials select their method over any server mode."""
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        settings = self._server_settings(jira_auth_mode=server_mode)
+        body = AnalyzeRequest(job_name="j", build_number=1, **body_fields)
+        merged = _merge_settings(body, settings)
+        assert merged.jira_auth_mode == expected_mode
+
+        # Values land on the request credential's fields; a request oauth
+        # token is not wiped by the server-mode clearing semantics.
+        if "jira_api_token" in body_fields:
+            assert merged.jira_api_token
+            assert merged.jira_api_token.get_secret_value() == "req-tok"
+            if expected_mode == "basic":
+                assert merged.jira_oauth_access_token is None
+        elif "jira_pat" in body_fields:
+            assert merged.jira_pat
+            assert merged.jira_pat.get_secret_value() == "req-pat"
+        else:
+            assert merged.jira_oauth_access_token
+            assert merged.jira_oauth_access_token.get_secret_value() == "req-oauth"
+
+    @pytest.mark.parametrize("server_mode", ["", "basic", "pat", "oauth"])
+    def test_no_request_creds_keep_server_mode(
+        self, mock_settings, server_mode
+    ) -> None:
+        """Without request credentials the server mode is untouched."""
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        settings = self._server_settings(jira_auth_mode=server_mode)
+        merged = _merge_settings(AnalyzeRequest(job_name="j", build_number=1), settings)
+        assert merged.jira_auth_mode == (server_mode or None)
+
+    def test_request_api_token_pairs_with_server_email(self, mock_settings) -> None:
+        """A request api token pairs with the server email into basic mode."""
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        settings = self._server_settings(
+            jira_auth_mode="pat", jira_email="server@example.com"
+        )
+        merged = _merge_settings(
+            AnalyzeRequest(job_name="j", build_number=1, jira_api_token="req-tok"),
+            settings,
+        )
+        assert merged.jira_auth_mode == "basic"
+        assert merged.jira_email == "server@example.com"
+
+
 class TestReconstructFromParams:
     """Tests for _reconstruct_from_params helper."""
 
@@ -9324,6 +9401,113 @@ class TestIntegrationConnectionEndpoints:
         assert data["ok"] is False
         assert "authentication failed" in data["message"]
         assert "super-secret-token" not in json.dumps(data)
+
+    def test_jira_malformed_200_fails_and_records_nothing(self, test_client) -> None:
+        """HTTP 200 with a non-object body fails the test, no verified write."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+        )
+        malformed = self._http_response(
+            200,
+            ["not", "an", "object"],
+            "https://jira.example.com/rest/api/3/myself",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(malformed)[0] as _,
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "unexpected" in data["message"]
+        item = _settings_item(test_client, "jira_url")
+        assert item["jira_verified_method"] == ""
+
+    def test_jira_marker_write_failure_fails_test(self, test_client) -> None:
+        """A failed verified-marker write reports ok:false, not a success."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+            patch.object(
+                storage,
+                "set_server_setting",
+                AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "could not be recorded" in data["message"]
+
+    async def test_jira_repeated_success_writes_marker_once(self, test_client) -> None:
+        """Repeated successful tests don't rewrite the unchanged marker."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+        ):
+            assert test_client.post("/api/admin/settings/test/jira").json()["ok"]
+            assert test_client.post("/api/admin/settings/test/jira").json()["ok"]
+        rows = await storage.get_server_settings_history(key="jira_verified_method")
+        assert len(rows) == 1
+
+    def test_jira_credential_update_clears_verified_method(self, test_client) -> None:
+        """Updating Jira credentials/mode invalidates the verified record."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+        ):
+            assert test_client.post("/api/admin/settings/test/jira").json()["ok"]
+        assert _settings_item(test_client, "jira_url")["jira_verified_method"] == (
+            "basic"
+        )
+
+        # Unrelated updates keep the record
+        test_client.put(
+            "/api/admin/settings", json={"settings": {"ai_call_timeout": "20"}}
+        )
+        assert _settings_item(test_client, "jira_url")["jira_verified_method"] == (
+            "basic"
+        )
+
+        # A Jira credential update invalidates it
+        test_client.put(
+            "/api/admin/settings", json={"settings": {"jira_pat": "new-pat"}}
+        )
+        assert _settings_item(test_client, "jira_url")["jira_verified_method"] == ""
+
+        # Re-verify, then an auth-mode update invalidates it too
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+        ):
+            assert test_client.post("/api/admin/settings/test/jira").json()["ok"]
+        test_client.put(
+            "/api/admin/settings", json={"settings": {"jira_auth_mode": "pat"}}
+        )
+        assert _settings_item(test_client, "jira_url")["jira_verified_method"] == ""
 
     def test_jira_selected_method_missing_fields(self, test_client) -> None:
         """A selected method with missing fields names the method and fields."""

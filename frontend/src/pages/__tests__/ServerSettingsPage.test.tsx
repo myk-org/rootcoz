@@ -278,6 +278,80 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
   })
 
+  // ---- Refinement 6: the switch auto-runs the Jira test for the new method ----
+
+  it('auto-runs the Jira test after switching to a configured method and shows the success state', async () => {
+    mockJiraModeSettings('basic')
+    testIntegration.mockResolvedValue({ ok: true, message: 'Jira connection verified' } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    // The test POST fires automatically for the newly selected method
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledWith('jira'))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection successful')
+    expect(banner).toHaveTextContent('Jira connection verified')
+    // The switch is never auto-reverted on the admin's behalf
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+  })
+
+  it('auto-runs the Jira test after switching to an unconfigured method and surfaces the missing-fields error', async () => {
+    mockJiraModeSettings('basic')
+    testIntegration.mockResolvedValue({
+      ok: false,
+      message: "Jira auth method 'pat' requires jira_pat",
+    } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledWith('jira'))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection failed')
+    expect(banner).toHaveTextContent("requires jira_pat")
+    // The failed auto-test surfaces the error but keeps the selection
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+  })
+
+  it('does not run any test when switching to none (disabling Jira)', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Disable' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+    )
+    expect(testIntegration).not.toHaveBeenCalled()
+  })
+
+  it('still auto-runs the test for the target method after confirming a switch away from a verified method', async () => {
+    // basic is verified, so switching to pat goes through the confirmation dialog
+    mockJiraModeSettings('basic')
+    testIntegration.mockResolvedValue({ ok: true, message: 'ok' } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledTimes(1))
+    expect(testIntegration).toHaveBeenCalledWith('jira')
+    await screen.findByRole('status') // success banner from the auto-test
+  })
+
   it('a successful Jira test refreshes the verified method so the next switch asks for confirmation', async () => {
     const jira = mockJiraModeSettings('basic', '')
     testIntegration.mockImplementation(async () => {
@@ -296,6 +370,55 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('Switch from Email + API token to PAT (Bearer)?')
     expect(put).not.toHaveBeenCalled()
+  })
+
+  it('a stale settings fetch resolving after a method switch does not overwrite the switch result', async () => {
+    // basic selected, unverified → the Jira test verifies it server-side.
+    const jira = mockJiraModeSettings('basic', '')
+    // The manual test verifies basic; the post-switch AUTO-test (#346) is made
+    // to fail here so it adds no success refetch that would muddy get counts.
+    testIntegration.mockImplementationOnce(async () => {
+      jira.setVerified('basic') // backend records the method whose test succeeded
+      return { ok: true, message: 'ok' } as never
+    })
+    testIntegration.mockImplementation(
+      async () => ({ ok: false, message: 'auto-test failed' } as never),
+    )
+    await openJiraTab()
+    expect(get).toHaveBeenCalledTimes(1)
+
+    // The test-triggered metadata refetch stays pending (captures OLD state)
+    let resolveStale!: (value: TestSetting[]) => void
+    get.mockImplementationOnce(
+      () => new Promise<TestSetting[]>((r) => { resolveStale = r }),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /test connection/i }))
+    await screen.findByRole('status') // success banner
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2)) // stale fetch in flight
+
+    // Switch basic → pat while the stale fetch is pending (unverified in UI
+    // state, so no confirmation dialog). The switch's own refetch resolves first.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+
+    // The stale response (old method basic, now verified) arrives LAST —
+    // it must be dropped: final state still reflects the pat switch.
+    const stale = baseSettings()
+    stale.find((s) => s.key === 'jira_auth_mode')!.value = 'basic'
+    stale.find((s) => s.key === 'jira_url')!.jira_verified_method = 'basic'
+    resolveStale(stale)
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(3))
+
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
   })
 
   it('unchecking a selected-but-unverified method disables Jira immediately (no method fields render while unset)', async () => {

@@ -346,6 +346,20 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
     }
 )
 
+# Updating any of these invalidates the recorded jira_verified_method —
+# the record reflects the last successful test of the *previous* setup.
+_JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
+    {
+        "jira_auth_mode",
+        "jira_url",
+        "jira_email",
+        "jira_api_token",
+        "jira_pat",
+        "jira_oauth_access_token",
+        "atlassian_oauth_client_id",
+    }
+)
+
 # Category grouping for UI display
 _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "Jenkins": [
@@ -2557,6 +2571,18 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         overrides["github_token"] = SecretStr(body.github_token)
     if body.tests_repo_token is not None:
         overrides["tests_repo_token"] = SecretStr(body.tests_repo_token)
+
+    # Request-supplied Jira credentials pin the auth mode to their method
+    # (same mapping as user-credential pinning) so the server-selected
+    # jira_auth_mode cannot silently override or discard them.
+    request_jira_mode = _jira_auth_mode_for_credentials(
+        oauth_token=body.jira_oauth_access_token,
+        api_token=body.jira_api_token,
+        pat=body.jira_pat,
+        email=body.jira_email or settings.jira_email,
+    )
+    if request_jira_mode:
+        overrides["jira_auth_mode"] = request_jira_mode
 
     # Jenkins connection + polling overrides (AnalyzeRequest and
     # UnifiedAnalyzeRequest both inherit _JenkinsParamsMixin).
@@ -7328,6 +7354,31 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _jira_auth_mode_for_credentials(
+    *,
+    oauth_token: str | None = None,
+    api_token: str | None = None,
+    pat: str | None = None,
+    email: str | None = None,
+) -> str | None:
+    """Auth mode pinned by present Jira credentials; None when none supplied.
+
+    Field-presence only — no value sniffing, no fallback chain. Shared by
+    ``_build_effective_jira_settings`` (user credentials) and
+    ``_merge_settings`` (per-request credentials) so a server-pinned
+    ``jira_auth_mode`` cannot silently override or discard them: an oauth
+    token pins ``oauth``, an api token with an email pins ``basic``, a bare
+    token (no email / the pat field) pins ``pat``.
+    """
+    if oauth_token and oauth_token.strip():
+        return "oauth"
+    if api_token and api_token.strip():
+        return "basic" if email and email.strip() else "pat"
+    if pat and pat.strip():
+        return "pat"
+    return None
+
+
 def _build_effective_jira_settings(
     settings: Settings,
     user_jira_token: str,
@@ -7370,7 +7421,9 @@ def _build_effective_jira_settings(
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
-        overrides["jira_auth_mode"] = "oauth"
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            oauth_token=user_jira_sa_token
+        )
     elif user_jira_token and user_jira_token.strip().startswith("ATST"):
         # An ATST token supplied in the regular field: route it to SA mode so
         # validation (which detects the prefix) and actual use agree.
@@ -7378,7 +7431,9 @@ def _build_effective_jira_settings(
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
-        overrides["jira_auth_mode"] = "oauth"
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            oauth_token=user_jira_token
+        )
     elif user_jira_token and user_jira_token.strip():
         email = (
             user_jira_email.strip()
@@ -7388,12 +7443,13 @@ def _build_effective_jira_settings(
         if email:
             overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
             overrides["jira_pat"] = None
-            overrides["jira_auth_mode"] = "basic"
         else:
             # No email: the user token is a bearer PAT, not a basic-auth pair.
             overrides["jira_pat"] = SecretStr(user_jira_token.strip())
             overrides["jira_api_token"] = None
-            overrides["jira_auth_mode"] = "pat"
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            api_token=user_jira_token, email=email
+        )
         overrides["jira_oauth_access_token"] = None
         overrides["jira_email"] = email
     if user_jira_project_key and user_jira_project_key.strip():
@@ -12074,6 +12130,17 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             db_value = str_value
         await storage.set_server_setting(key, db_value, updated_by=username)
 
+    # Changed Jira credentials or auth mode invalidate the verified-method
+    # record — it reflects the last successful test of the previous setup.
+    if settings_updates.keys() & _JIRA_VERIFIED_INVALIDATING_KEYS:
+        try:
+            await storage.delete_server_setting(
+                "jira_verified_method", deleted_by=username
+            )
+            remove_from_db_settings_cache(["jira_verified_method"])
+        except Exception:
+            logger.warning("Failed to clear jira_verified_method", exc_info=True)
+
     # Update in-memory cache so get_settings() picks up changes.
     # Empty/null values are removed (fall back to env/default).
     cache_updates: dict[str, str] = {}
@@ -12333,17 +12400,32 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     except _IntegrationTestError as exc:
         return _test_result(False, f"Jira connection failed: {exc}")
     auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat"}[connection.mode]
-    # A method counts as configured only once its test succeeded — record
-    # the tested (selected) method as an internal DB row. Not cleared on
-    # failure: the record reflects the last success, not the latest attempt.
-    try:
-        await storage.set_server_setting("jira_verified_method", auth_mode)
-        logger.info("Jira verified method recorded: %s", auth_mode)
-    except Exception:
-        logger.debug("Failed to record jira_verified_method", exc_info=True)
+    # Validate the payload before recording anything: HTTP 200 with a
+    # non-object body is a failed test, not a verified method.
+    if not isinstance(data, dict):
+        return _test_result(
+            False, "Jira connection failed: unexpected /myself response"
+        )
     user = str(
         data.get("displayName") or data.get("name") or data.get("accountId") or ""
     )
+    # A method counts as configured only once its test succeeded — record
+    # the tested (selected) method as an internal DB row. Not cleared on
+    # failure: the record reflects the last success, not the latest attempt.
+    # Written only on change so repeated tests don't flood settings history.
+    try:
+        existing = await storage.get_server_setting("jira_verified_method")
+        if existing is None or existing.get("value") != auth_mode:
+            await storage.set_server_setting("jira_verified_method", auth_mode)
+            logger.info("Jira verified method recorded: %s", auth_mode)
+    except Exception:
+        logger.warning("Failed to record jira_verified_method", exc_info=True)
+        # The confirmation gate must match the reported result — a marker
+        # that could not be persisted would leave the UI inconsistent.
+        return _test_result(
+            False,
+            "Jira connection succeeded but verification could not be recorded",
+        )
     return _test_result(
         True, "Jira connection successful", auth_mode=auth_mode, user=user
     )
