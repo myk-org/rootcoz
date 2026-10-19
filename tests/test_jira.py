@@ -859,6 +859,96 @@ class TestJiraConnectionResolver:
         assert conn.auth == ("user@example.com", "param-token")
         assert "env-secret-pat" not in str(conn.headers)
 
+    def test_legacy_unset_mode_sniffing_unchanged(self):
+        """Unset mode keeps the legacy chain: ATST prefix wins over email."""
+        settings = self._sa_settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_EMAIL="user@example.com",
+            JIRA_API_TOKEN="regular-token",
+        )
+        assert resolve_jira_connection(settings).mode == "sa"
+
+
+class TestExplicitJiraAuthMode:
+    """resolve_jira_connection honors an explicitly selected auth method."""
+
+    def _settings(self, **extra_env: str) -> Settings:
+        return next(_jira_settings_from_env(extra_env))
+
+    def test_oauth_mode_trusts_non_atst_token(self):
+        """Explicit oauth uses the token as-is — no ATST prefix sniffing.
+
+        This is the live case from issue #346: a valid ATATT Atlassian API
+        token in JIRA_OAUTH_ACCESS_TOKEN must not be silently ignored.
+        """
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="oauth",
+            JIRA_OAUTH_ACCESS_TOKEN="ATATT3xFfGF-not-a-service-account-token",
+            JIRA_SITE_URL="https://myorg.atlassian.net",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "sa"
+        assert (
+            conn.headers["Authorization"]
+            == "Bearer ATATT3xFfGF-not-a-service-account-token"
+        )
+
+    def test_oauth_mode_missing_token_is_none(self):
+        """Explicit oauth without a token resolves to no connection."""
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="oauth",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "none"
+
+    def test_basic_mode_uses_only_email_and_api_token(self):
+        """Explicit basic builds Cloud basic auth — no PAT fallback."""
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="basic",
+            JIRA_EMAIL="user@example.com",
+            JIRA_API_TOKEN="regular-token",
+            JIRA_PAT="a-pat-that-must-not-be-used",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "cloud"
+        assert conn.auth == ("user@example.com", "regular-token")
+
+    def test_basic_mode_missing_fields_is_none(self):
+        """Explicit basic with incomplete fields resolves to no connection."""
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="basic",
+            JIRA_API_TOKEN="regular-token",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "none"
+
+    def test_pat_mode_ignores_sa_token_and_host_sniffing(self):
+        """Explicit pat uses Bearer PAT — SA token does not hijack it."""
+        settings = self._settings(
+            JIRA_URL="https://jira-server.example.com",
+            JIRA_AUTH_MODE="pat",
+            JIRA_OAUTH_ACCESS_TOKEN="ATST-test-token",
+            JIRA_PAT="server-pat-token",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "server"
+        assert conn.headers["Authorization"] == "Bearer server-pat-token"
+        assert conn.api_path == "/rest/api/2"
+
+    def test_pat_mode_missing_token_is_none(self):
+        """Explicit pat without a token resolves to no connection."""
+        settings = self._settings(
+            JIRA_URL="https://jira-server.example.com",
+            JIRA_AUTH_MODE="pat",
+            JIRA_OAUTH_ACCESS_TOKEN="ATST-test-token",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "none"
+
 
 class TestJiraClientServiceAccount:
     """JiraClient behavior in service account mode."""

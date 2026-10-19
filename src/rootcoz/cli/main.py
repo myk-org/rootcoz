@@ -150,6 +150,14 @@ _JiraUrlOpt = Annotated[
         help="Jira instance URL.",
     ),
 ]
+_JiraAuthModeOpt = Annotated[
+    str,
+    typer.Option(
+        "--jira-auth-mode",
+        envvar="JIRA_AUTH_MODE",
+        help="Explicit Jira auth method: oauth, basic, or pat (unset = auto-detect).",
+    ),
+]
 _JiraEmailOpt = Annotated[
     str,
     typer.Option(
@@ -1268,6 +1276,7 @@ def _apply_common_config_defaults(
         "tests_repo_url": cfg.tests_repo_url,
         "tests_repo_token": cfg.tests_repo_token,
         "jira_url": cfg.jira_url,
+        "jira_auth_mode": cfg.jira_auth_mode,
         "jira_email": cfg.jira_email,
         "jira_api_token": cfg.jira_api_token,
         "jira_pat": cfg.jira_pat,
@@ -1518,6 +1527,7 @@ def analyze(
     tests_repo_url: _TestsRepoUrlOpt = "",
     tests_repo_token: _TestsRepoTokenOpt = "",
     jira_url: _JiraUrlOpt = "",
+    jira_auth_mode: _JiraAuthModeOpt = "",
     jira_email: _JiraEmailOpt = "",
     jira_api_token: _JiraApiTokenOpt = "",
     jira_pat: _JiraPatOpt = "",
@@ -1667,6 +1677,7 @@ def analyze(
             "tests_repo_url": tests_repo_url,
             "tests_repo_token": tests_repo_token,
             "jira_url": jira_url,
+            "jira_auth_mode": jira_auth_mode,
             "jira_email": jira_email,
             "jira_api_token": jira_api_token,
             "jira_pat": jira_pat,

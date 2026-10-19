@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 from simple_logger.logger import get_logger
 
-from rootcoz.config import Settings, resolve_jira_auth
+from rootcoz.config import Settings, normalize_jira_auth_mode, resolve_jira_auth
 from rootcoz.issue_matching import filter_issue_matches_with_ai
 from rootcoz.models import (
     AnalysisDetail,
@@ -85,16 +85,24 @@ def _is_atlassian_cloud_host(url: str) -> bool:
 def resolve_jira_connection(settings: Settings) -> JiraConnection:
     """Resolve the Jira connection from settings.
 
-    Detection order: ATST service account token first (basic auth with an
-    ATST token is rejected by Atlassian, so the prefix wins over email),
-    then Cloud basic auth (``jira_email``), then Server/DC Bearer.
+    When ``jira_auth_mode`` is explicitly set, only that method's fields
+    are used — no prefix sniffing, no precedence chain. Unset mode keeps
+    the legacy detection order: ATST service account token first (basic
+    auth with an ATST token is rejected by Atlassian, so the prefix wins
+    over email), then Cloud basic auth (``jira_email``), then Server/DC
+    Bearer.
     """
     url = (settings.jira_url or "").rstrip("/")
+    explicit_mode = normalize_jira_auth_mode(settings.jira_auth_mode)
 
     sa_token = ""
     if settings.jira_oauth_access_token:
         value = settings.jira_oauth_access_token.get_secret_value()
-        if value.startswith("ATST"):
+        if explicit_mode == "oauth":
+            # Explicit selection: trust the stored token as-is — Atlassian
+            # rejects a wrong token type with a clear 401.
+            sa_token = value
+        elif not explicit_mode and value.startswith("ATST"):
             sa_token = value
 
     if sa_token:
@@ -144,7 +152,7 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
             api_path="/rest/api/3",
             search_path="/rest/api/3/search/jql",
         )
-    if token_value:
+    if token_value and explicit_mode != "basic":
         # Bearer auth (Server/DC PAT, or a Cloud PAT): v3 only when the
         # hostname is positively Atlassian Cloud — a lookalike or
         # substring-containing Server/DC host must keep v2.

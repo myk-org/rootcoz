@@ -99,6 +99,7 @@ from rootcoz.comment_enrichment import (
 from rootcoz.config import (
     Settings,
     get_settings,
+    jira_method_missing_fields,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -370,6 +371,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     ],
     "Jira": [
         "jira_url",
+        "jira_auth_mode",
         "jira_email",
         "jira_api_token",
         "jira_pat",
@@ -2510,6 +2512,7 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     #   additional_repos - list vs str type mismatch; resolved by resolve_additional_repos()
     direct_fields = [
         "jira_url",
+        "jira_auth_mode",
         "jira_email",
         "jira_project_key",
         "jira_ssl_verify",
@@ -11880,18 +11883,22 @@ async def get_admin_settings(
 
             item["options"] = await server_capable_providers()
 
-    # Authoritative Jira auth mode (nonsecret) — the frontend must not infer
-    # it from possibly-masked credential values.
+    # Authoritative resolved Jira auth mode (nonsecret) — the frontend must
+    # not infer it from possibly-masked credential values. Distinct from the
+    # user-selected `jira_auth_mode` setting item.
+    # Get DB overrides first — also the source of the internal
+    # jira_verified_method row (last method whose test SUCCEEDED, "" when
+    # never verified; not a user-editable setting).
+    db_overrides = await storage.get_server_settings()
+    verified_method = db_overrides.get("jira_verified_method", {}).get("value", "")
     for item in metadata:
         if item["key"] == "jira_url":
-            item["jira_auth_mode"] = {
+            item["jira_resolved_mode"] = {
                 "sa": "oauth",
                 "cloud": "basic",
                 "server": "pat",
             }.get(resolve_jira_connection(get_settings()).mode, "")
-
-    # Get DB overrides
-    db_overrides = await storage.get_server_settings()
+            item["jira_verified_method"] = verified_method
 
     # Update source and value for DB-overridden settings
     for item in metadata:
@@ -11975,7 +11982,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     errors = []
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket"):
+    for key in ("prow_url", "gcs_bucket", "jira_auth_mode"):
         if key not in settings_updates:
             continue
         value = settings_updates[key]
@@ -12281,6 +12288,13 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     """Current-user ping against the effective Jira connection resolution."""
     if not settings.jira_url:
         return _test_result(False, "Jira URL is not configured")
+    missing = jira_method_missing_fields(settings)
+    if missing:
+        return _test_result(
+            False,
+            f"Jira auth method '{settings.jira_auth_mode}' is selected "
+            f"but missing: {', '.join(missing)}",
+        )
     connection = resolve_jira_connection(settings)
     if connection.mode == "none":
         return _test_result(
@@ -12305,6 +12319,15 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     except _IntegrationTestError as exc:
         return _test_result(False, f"Jira connection failed: {exc}")
     auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat"}[connection.mode]
+    # A method counts as configured only once its test succeeded — record
+    # the tested method (selected `jira_auth_mode`, legacy-resolved when
+    # unset) as an internal DB row. Not cleared on failure: the record
+    # reflects the last success, not the latest attempt.
+    try:
+        await storage.set_server_setting("jira_verified_method", auth_mode)
+        logger.info("Jira verified method recorded: %s", auth_mode)
+    except Exception:
+        logger.debug("Failed to record jira_verified_method", exc_info=True)
     user = str(
         data.get("displayName") or data.get("name") or data.get("accountId") or ""
     )

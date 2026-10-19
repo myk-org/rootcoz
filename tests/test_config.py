@@ -4,10 +4,12 @@ import os
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from rootcoz.config import (
     Settings,
     get_settings,
+    jira_method_missing_fields,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -221,6 +223,127 @@ class TestResolveJiraAuth:
             is_cloud, token = resolve_jira_auth(settings)
             assert is_cloud, "email present must activate Cloud mode"
             assert token == env["JIRA_PAT"]
+
+
+class TestJiraAuthMode:
+    """Tests for the explicit jira_auth_mode setting."""
+
+    def test_env_var_loads_and_normalizes(self) -> None:
+        """JIRA_AUTH_MODE loads from env; case and whitespace normalize."""
+        with patch.dict(os.environ, _build_env(JIRA_AUTH_MODE=" Basic "), clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.jira_auth_mode == "basic"
+
+    def test_invalid_value_rejected(self) -> None:
+        """Invalid methods fail validation with a clear error."""
+        with (
+            patch.dict(os.environ, _build_env(JIRA_AUTH_MODE="kerberos"), clear=True),
+            pytest.raises(ValueError, match="jira_auth_mode"),
+        ):
+            Settings(_env_file=None)
+
+    def test_unset_defaults_to_none(self) -> None:
+        """No env var means auto-detect (None)."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            assert Settings(_env_file=None).jira_auth_mode is None
+
+    def test_missing_fields_unset_mode(self) -> None:
+        """Unset mode never reports missing fields (legacy chain decides)."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(_env_file=None)
+            assert jira_method_missing_fields(settings) == []
+
+    def test_missing_fields_per_method(self) -> None:
+        """Each method names exactly its own missing fields."""
+        cases = [
+            ("oauth", {}, ["jira_oauth_access_token"]),
+            ("basic", {}, ["jira_email", "jira_api_token"]),
+            (
+                "basic",
+                {"jira_email": "user@example.com"},
+                ["jira_api_token"],
+            ),
+            ("pat", {}, ["jira_pat"]),
+        ]
+        for mode, extra, expected in cases:
+            settings = Settings(jira_auth_mode=mode, **extra)
+            assert jira_method_missing_fields(settings) == expected, mode
+
+    def test_missing_fields_complete(self) -> None:
+        """A fully configured method reports no missing fields."""
+        settings = Settings(
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("tok"),  # pragma: allowlist secret
+            jira_pat=SecretStr("other"),  # pragma: allowlist secret
+        )
+        assert jira_method_missing_fields(settings) == []
+
+    def test_explicit_oauth_uses_token_as_is(self) -> None:
+        """Explicit oauth trusts the field value — no ATST prefix sniffing."""
+        settings = Settings(
+            jira_url="https://myorg.atlassian.net",
+            jira_auth_mode="oauth",
+            jira_oauth_access_token=SecretStr(
+                "ATATT3xFfGF-not-a-service-account-token"
+            ),  # pragma: allowlist secret
+        )
+        is_cloud, token = resolve_jira_auth(settings)
+        assert is_cloud is True
+        assert token == "ATATT3xFfGF-not-a-service-account-token"
+
+    def test_explicit_basic_no_pat_fallback(self) -> None:
+        """Explicit basic uses only email + api token — no PAT fallback."""
+        settings = Settings(
+            jira_url="https://myorg.atlassian.net",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_pat=SecretStr("pat-token"),  # pragma: allowlist secret
+        )
+        is_cloud, token = resolve_jira_auth(settings)
+        assert (is_cloud, token) == (True, "")
+
+    def test_explicit_pat_ignores_sa_and_api_token(self) -> None:
+        """Explicit pat uses only jira_pat — SA and api tokens are ignored."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="pat",
+            jira_oauth_access_token=SecretStr("ATST-token"),  # pragma: allowlist secret
+            jira_api_token=SecretStr("api-token"),  # pragma: allowlist secret
+            jira_pat=SecretStr("my-pat"),  # pragma: allowlist secret
+        )
+        is_cloud, token = resolve_jira_auth(settings)
+        assert (is_cloud, token) == (False, "my-pat")
+
+    def test_jira_enabled_with_explicit_mode_missing_fields(self) -> None:
+        """jira_enabled is False when the selected method lacks fields."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira.example.com",
+                JIRA_AUTH_MODE="basic",
+                JIRA_API_TOKEN="token-123",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)  # missing jira_email
+            assert not settings.jira_enabled
+
+    def test_jira_enabled_with_explicit_mode_complete(self) -> None:
+        """jira_enabled is True when the selected method is complete."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira.example.com",
+                JIRA_AUTH_MODE="pat",
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert settings.jira_enabled
 
 
 class TestGitHubIssuesSettings:

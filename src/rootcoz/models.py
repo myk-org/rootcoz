@@ -229,6 +229,10 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="Atlassian site URL for browse links when JIRA_URL is scoped (overrides JIRA_SITE_URL env var)",
     )
+    jira_auth_mode: str | None = Field(
+        default=None,
+        description="Explicit Jira auth method: 'oauth', 'basic', or 'pat' (overrides JIRA_AUTH_MODE env var; unset = auto-detect)",
+    )
     jira_project_key: str | None = Field(
         default=None,
         description="Jira project key to scope searches (overrides JIRA_PROJECT_KEY env var)",

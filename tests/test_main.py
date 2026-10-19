@@ -213,6 +213,13 @@ def _gh_release(version: str, name: str = "", body: str = "body") -> dict[str, A
     }
 
 
+def _settings_item(test_client, key: str) -> dict[str, Any]:
+    """One item from GET /api/admin/settings metadata by key."""
+    response = test_client.get("/api/admin/settings")
+    assert response.status_code == 200
+    return next(s for s in response.json() if s["key"] == key)
+
+
 @pytest.fixture
 def test_client(mock_settings, temp_db_path: Path):
     """Create a test client with mocked dependencies.
@@ -8686,7 +8693,7 @@ class TestAdminSettingsEndpoints:
         )
         assert (item["value"], item["source"]) == ("3", "db")
 
-    def test_jira_url_metadata_carries_auth_mode(self, test_client) -> None:
+    def test_jira_url_metadata_carries_resolved_mode(self, test_client) -> None:
         """The jira_url item exposes the backend-resolved auth mode per branch."""
         cases = [
             (Settings(jira_url=""), ""),
@@ -8718,9 +8725,53 @@ class TestAdminSettingsEndpoints:
                 response = test_client.get("/api/admin/settings")
             assert response.status_code == 200
             item = next(s for s in response.json() if s["key"] == "jira_url")
-            assert item.get("jira_auth_mode") == expected, (
+            assert item.get("jira_resolved_mode") == expected, (
                 f"{settings.jira_url!r} should resolve to {expected!r}"
             )
+            # The selected-method setting must not collide with the derived key
+            assert "jira_auth_mode" not in item
+
+    def test_jira_auth_mode_settings_item_and_round_trip(self, test_client) -> None:
+        """jira_auth_mode is a standalone, non-sensitive, validated setting."""
+        item = next(
+            s
+            for s in test_client.get("/api/admin/settings").json()
+            if s["key"] == "jira_auth_mode"
+        )
+        assert (item["category"], item["type"], item["value"]) == (
+            "Jira",
+            "string",
+            "",
+        )
+        assert not item["sensitive"] and not item["restart_required"]
+
+        # Invalid values are rejected with a clear error
+        response = test_client.put(
+            "/api/admin/settings", json={"settings": {"jira_auth_mode": "nope"}}
+        )
+        assert response.status_code == 400
+        assert "jira_auth_mode" in response.json()["detail"]
+        assert "oauth" in response.json()["detail"]
+
+        # Valid value saves and round-trips; empty resets to auto-detect
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {"jira_auth_mode": "basic"}}
+            ).status_code
+            == 200
+        )
+        item = next(
+            s
+            for s in test_client.get("/api/admin/settings").json()
+            if s["key"] == "jira_auth_mode"
+        )
+        assert (item["value"], item["source"]) == ("basic", "db")
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {"jira_auth_mode": ""}}
+            ).status_code
+            == 200
+        )
 
     def test_settings_provider_options_survive_sidecar_outage(
         self, test_client, monkeypatch
@@ -9145,6 +9196,80 @@ class TestIntegrationConnectionEndpoints:
         assert data["ok"] is True
         assert data["details"] == {"auth_mode": "basic", "user": "Test User"}
 
+    def _jira_myself_response(self) -> httpx.Response:
+        """A successful /myself payload against a generic Jira URL."""
+        return self._http_response(
+            200,
+            {"displayName": "Test User"},
+            "https://jira.example.com/rest/api/3/myself",
+        )
+
+    def test_jira_success_persists_verified_method_selected(self, test_client) -> None:
+        """A successful test persists the selected method as verified."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+        )
+        # Never tested successfully → empty in metadata
+        item = _settings_item(test_client, "jira_url")
+        assert item["jira_verified_method"] == ""
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        item = _settings_item(test_client, "jira_url")
+        assert item["jira_verified_method"] == "basic"
+
+    def test_jira_success_persists_verified_method_legacy_resolved(
+        self, test_client
+    ) -> None:
+        """Unset mode persists the legacy-resolved method (pat → server)."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_pat="not-a-real-pat",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        item = _settings_item(test_client, "jira_url")
+        assert item["jira_verified_method"] == "pat"
+
+    def test_jira_failure_keeps_previous_verified_method(self, test_client) -> None:
+        """A failed re-test does not clear the last successful record."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+        ):
+            assert test_client.post("/api/admin/settings/test/jira").json()["ok"]
+        unauthorized = self._http_response(
+            401,
+            {"message": "Unauthorized"},
+            "https://jira.example.com/rest/api/3/myself",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(unauthorized)[0] as _,
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        assert response.json()["ok"] is False
+        item = _settings_item(test_client, "jira_url")
+        assert item["jira_verified_method"] == "basic"
+
     def test_jira_failure_no_secrets_in_response(self, test_client) -> None:
         """A 401 from Jira yields ok:false without leaking the token."""
         settings = Settings(
@@ -9167,6 +9292,51 @@ class TestIntegrationConnectionEndpoints:
         assert data["ok"] is False
         assert "authentication failed" in data["message"]
         assert "super-secret-token" not in json.dumps(data)
+
+    def test_jira_selected_method_missing_fields(self, test_client) -> None:
+        """A selected method with missing fields names the method and fields."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+        )
+        with patch("rootcoz.main.get_settings", return_value=settings):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["message"] == (
+            "Jira auth method 'basic' is selected but missing: "
+            "jira_email, jira_api_token"
+        )
+
+    def test_jira_selected_method_partial_fields(self, test_client) -> None:
+        """Only the actually-missing fields are named, not every field."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+        )
+        with patch("rootcoz.main.get_settings", return_value=settings):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["message"] == (
+            "Jira auth method 'basic' is selected but missing: jira_api_token"
+        )
+
+    def test_jira_unset_mode_keeps_generic_message(self, test_client) -> None:
+        """Unset mode with nothing configured keeps the legacy message."""
+        settings = Settings(jira_url="https://jira.example.com")
+        with patch("rootcoz.main.get_settings", return_value=settings):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert data["message"] == (
+            "No Jira credentials configured (set jira_api_token, jira_pat, "
+            "or jira_oauth_access_token)"
+        )
 
     def test_github_success(self, test_client) -> None:
         """GitHub test hits api.github.com/user with the effective token."""

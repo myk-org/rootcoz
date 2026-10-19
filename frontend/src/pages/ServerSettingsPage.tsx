@@ -9,6 +9,17 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { Checkbox } from '@/components/ui/checkbox'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import {
   Tooltip,
   TooltipContent,
@@ -61,7 +72,8 @@ interface ServerSetting {
   has_env_var?: boolean
   env_var_value?: string
   options?: string[]
-  jira_auth_mode?: string
+  jira_resolved_mode?: string
+  jira_verified_method?: string
 }
 
 interface CategoryGroup {
@@ -110,19 +122,9 @@ function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
   return new Set(JIRA_METHODS.filter(m => m.id !== method).flatMap(m => m.fields))
 }
 
-// Active Jira auth method. The backend exposes the authoritative mode on the
-// jira_url settings item (`jira_auth_mode`: sa→oauth, cloud→basic, server→pat);
-// the local inference below is only a fallback for older servers without it.
-// The badge, initial method selection and precedence warning all derive from
-// this function.
-function resolveActiveJiraMethod(settings: ServerSetting[]): JiraMethod | null {
-  const backendMode = settings.find(s => s.key === 'jira_url')?.jira_auth_mode
-  if (backendMode === 'oauth' || backendMode === 'basic' || backendMode === 'pat') return backendMode
-  const value = (key: string) => settings.find(s => s.key === key)?.value?.trim() ?? ''
-  if (value('jira_oauth_access_token')) return 'oauth'
-  if (value('jira_email') && value('jira_api_token')) return 'basic'
-  if (value('jira_pat')) return 'pat'
-  return null
+// Valid Jira auth method ids ('' / anything else = unset, legacy auto-detect).
+function parseJiraMethod(value?: string): JiraMethod | null {
+  return value === 'oauth' || value === 'basic' || value === 'pat' ? value : null
 }
 
 // ---------------------------------------------------------------------------
@@ -466,8 +468,9 @@ export function ServerSettingsPage() {
     }
   })
 
-  // Jira auth method selection (presentational grouping only)
-  const [jiraMethod, setJiraMethod] = useState<JiraMethod | null>(null)
+  // Jira auth method switch confirmation (target method) + section-local save error
+  const [pendingJiraSwitch, setPendingJiraSwitch] = useState<JiraMethod | null>(null)
+  const [jiraModeError, setJiraModeError] = useState<string | null>(null)
 
   // Test connection state
   const [testingCategory, setTestingCategory] = useState<string | null>(null)
@@ -514,8 +517,8 @@ export function ServerSettingsPage() {
 
   useSSE('settings', settingsEvents)
 
-  // ---- Shared save helper ----
-  async function saveSettings(updates: Record<string, string>): Promise<boolean> {
+  // ---- Shared save helper (returns null on success, the error message on failure) ----
+  async function saveSettings(updates: Record<string, string>): Promise<string | null> {
     dispatch({ type: 'SAVE_START' })
     try {
       await api.put('/api/admin/settings', { settings: updates })
@@ -525,7 +528,7 @@ export function ServerSettingsPage() {
       // A saved key's cached reveal is stale — clear it so the fresh masked value shows (#343).
       dispatch({ type: 'CLEAR_REVEALED', keys: Object.keys(updates) })
       dispatch({ type: 'SAVE_SUCCESS' })
-      return true
+      return null
     } catch (err) {
       let msg = 'Failed to save'
       if (err instanceof ApiError) {
@@ -533,11 +536,11 @@ export function ServerSettingsPage() {
         msg = body?.detail ?? `Save failed (${err.status})`
       }
       dispatch({ type: 'SAVE_ERROR', error: msg })
-      return false
+      return msg
     }
   }
 
-  async function saveSettingValue(key: string, value: string): Promise<boolean> {
+  async function saveSettingValue(key: string, value: string): Promise<string | null> {
     return saveSettings({ [key]: value })
   }
 
@@ -585,8 +588,8 @@ export function ServerSettingsPage() {
     const configStr = serializePeerConfigs(peerConfigs)
     const updates: Record<string, string> = { peer_ai_configs: configStr }
     updates.peer_analysis_max_rounds = String(peerMaxRounds)
-    const ok = await saveSettings(updates)
-    if (ok) setPeerEditing(false)  // Only close on success
+    const error = await saveSettings(updates)
+    if (!error) setPeerEditing(false)  // Only close on success
   }
 
   async function handleSaveAiProvider(value: string) {
@@ -603,19 +606,18 @@ export function ServerSettingsPage() {
         })
         return
       }
-      const ok = await saveSettings({ ai_provider: value, ai_model: model })
-      if (ok) {
+      const error = await saveSettings({ ai_provider: value, ai_model: model })
+      if (!error) {
         setAiProviderEditing(false)
         setAiModelEditing(false)
         setAiProviderValue(value)
       }
       return
     }
-    const ok = await saveSettingValue('ai_provider', value)
-    if (ok) {
-      setAiProviderEditing(false)
-      setAiProviderValue(value)
-    }
+    const error = await saveSettingValue('ai_provider', value)
+    if (error) return
+    setAiProviderEditing(false)
+    setAiProviderValue(value)
   }
 
   async function handleSaveAiModel(value: string) {
@@ -629,16 +631,17 @@ export function ServerSettingsPage() {
         })
         return
       }
-      const ok = await saveSettings({ ai_provider: providerDraft, ai_model: model })
-      if (ok) {
+      const error = await saveSettings({ ai_provider: providerDraft, ai_model: model })
+      if (!error) {
         setAiProviderEditing(false)
         setAiModelEditing(false)
         setAiProviderValue(providerDraft)
       }
       return
     }
-    const ok = await saveSettingValue('ai_model', value)
-    if (ok) setAiModelEditing(false)
+    const error = await saveSettingValue('ai_model', value)
+    if (error) return
+    setAiModelEditing(false)
   }
 
   // ---- Additional repos structured editor ----
@@ -649,8 +652,9 @@ export function ServerSettingsPage() {
 
   async function handleSaveRepos() {
     const reposStr = serializeAdditionalRepos(additionalRepos)
-    const ok = await saveSettingValue('additional_repos', reposStr)
-    if (ok) setReposEditing(false)
+    const error = await saveSettingValue('additional_repos', reposStr)
+    if (error) return
+    setReposEditing(false)
   }
 
   // ---- Active server providers editor ----
@@ -663,8 +667,9 @@ export function ServerSettingsPage() {
       serverProvidersChecked.length === serverProviderOptions.length &&
       serverProviderOptions.every(o => serverProvidersChecked.includes(o))
     const value = serverProvidersChecked.length === 0 || isAll ? '' : serverProvidersChecked.join(',')
-    const ok = await saveSettingValue('active_server_providers', value)
-    if (ok) setServerProvidersEditing(false)
+    const error = await saveSettingValue('active_server_providers', value)
+    if (error) return
+    setServerProvidersEditing(false)
   }
 
   // ---- Toggle reveal (fetch real value from server) ----
@@ -745,18 +750,38 @@ export function ServerSettingsPage() {
       .filter(g => g.settings.length > 0)
   }, [allGroups, state.search])
 
-  // ---- Jira auth method (presentational grouping, same precedence as backend) ----
-  const activeJiraMethod = resolveActiveJiraMethod(state.settings)
-  const effectiveJiraMethod = jiraMethod ?? activeJiraMethod ?? 'basic'
-  const jiraHiddenFields = hiddenJiraFieldsFor(effectiveJiraMethod)
-  // Editing a lower-precedence method while higher-precedence credentials are stored
-  const jiraPrecedenceWarning =
-    activeJiraMethod &&
-    effectiveJiraMethod !== activeJiraMethod &&
-    JIRA_METHODS.findIndex(m => m.id === effectiveJiraMethod) >
-      JIRA_METHODS.findIndex(m => m.id === activeJiraMethod)
-      ? activeJiraMethod
-      : null
+  // ---- Jira auth method (explicit selection, persisted as jira_auth_mode) ----
+  // The checkbox state comes ONLY from the persisted jira_auth_mode setting;
+  // the backend-derived mode on the jira_url item (jira_resolved_mode) is display-only.
+  const persistedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_auth_mode')?.value)
+  const resolvedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_url')?.jira_resolved_mode)
+  // A method counts as configured only after its Test connection succeeded (#346).
+  const verifiedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_url')?.jira_verified_method)
+  // Unset mode = legacy auto-detect: no field hiding.
+  const jiraHiddenFields = persistedJiraMethod ? hiddenJiraFieldsFor(persistedJiraMethod) : new Set<string>()
+
+  function handleJiraMethodCheck(method: JiraMethod, checked: boolean) {
+    setJiraModeError(null)
+    if (!checked) {
+      // Unchecking the active method clears the selection (back to auto-detect)
+      void applyJiraMode(null)
+    } else if (persistedJiraMethod && persistedJiraMethod === verifiedJiraMethod && persistedJiraMethod !== method) {
+      // Switching away from a VERIFIED active method is never silent; a
+      // selected-but-unverified method switches without a prompt (#346).
+      setPendingJiraSwitch(method)
+    } else {
+      void applyJiraMode(method)
+    }
+  }
+
+  async function applyJiraMode(method: JiraMethod | null) {
+    // Cancel any open edit on a field the new method hides — otherwise the
+    // Jira test button stays disabled with no visible editor to save or cancel.
+    if (state.editingKey && (method === null || hiddenJiraFieldsFor(method).has(state.editingKey))) {
+      dispatch({ type: 'CANCEL_EDIT' })
+    }
+    setJiraModeError(await saveSettings({ jira_auth_mode: method ?? '' }))
+  }
 
   // ---- Test connection helpers ----
   const editedCategory = state.editingKey
@@ -775,6 +800,9 @@ export function ServerSettingsPage() {
     try {
       const result = await api.testIntegration(integration)
       if (generation === testGenerationRef.current) setTestResult({ category, result })
+      // A successful Jira test updates jira_verified_method server-side —
+      // refetch so the switch-confirmation gate has current metadata (#346).
+      if (result.ok && category === 'Jira') void fetchSettings(true)
     } catch (err) {
       if (generation === testGenerationRef.current) {
         setTestResult({
@@ -859,18 +887,18 @@ export function ServerSettingsPage() {
           <CardContent className="px-4 pb-4 pt-0">
             {category === 'Jira' && (
               <JiraAuthMethodControl
-                selected={effectiveJiraMethod}
-                onSelect={(method) => {
-                  // Cancel any open edit on a field the new method hides —
-                  // otherwise the Jira test button stays disabled with no
-                  // visible editor to save or cancel.
-                  if (state.editingKey && hiddenJiraFieldsFor(method).has(state.editingKey)) {
-                    dispatch({ type: 'CANCEL_EDIT' })
-                  }
-                  setJiraMethod(method)
+                selected={persistedJiraMethod}
+                resolvedMode={resolvedJiraMethod}
+                saving={state.saving}
+                pendingSwitch={pendingJiraSwitch}
+                error={jiraModeError}
+                onCheck={handleJiraMethodCheck}
+                onCancelSwitch={() => setPendingJiraSwitch(null)}
+                onConfirmSwitch={() => {
+                  const target = pendingJiraSwitch
+                  setPendingJiraSwitch(null)
+                  if (target) void applyJiraMode(target)
                 }}
-                activeMethod={activeJiraMethod}
-                warningMethod={jiraPrecedenceWarning}
               />
             )}
             {category === 'AI' && cursorAuthStatus && (
@@ -1237,6 +1265,22 @@ export function ServerSettingsPage() {
                           onShowHistory={() => handleShowHistory(setting.key)}
                         />
                       )}
+                    </div>
+                  )
+                }
+
+                // ---- JIRA_AUTH_MODE: managed by the auth method selector ----
+                if (setting.key === 'jira_auth_mode') {
+                  return (
+                    <div key={setting.key} className="py-3 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
+                        <SourceBadge source={setting.source} />
+                        <EnvVarWarning setting={setting} />
+                      </div>
+                      <p className="text-xs text-text-tertiary">
+                        Managed via the auth method selector above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || 'auto-detect'}</span>
+                      </p>
                     </div>
                   )
                 }
@@ -1798,50 +1842,80 @@ function RestartBadge() {
 }
 
 // ---------------------------------------------------------------------------
-// Jira auth method control (presentational grouping only)
+// Jira auth method control (explicit selection, persisted as jira_auth_mode)
 // ---------------------------------------------------------------------------
 
 interface JiraAuthMethodControlProps {
-  selected: JiraMethod
-  onSelect: (method: JiraMethod) => void
-  activeMethod: JiraMethod | null
-  warningMethod: JiraMethod | null
+  selected: JiraMethod | null
+  resolvedMode: JiraMethod | null
+  saving: boolean
+  pendingSwitch: JiraMethod | null
+  error: string | null
+  onCheck: (method: JiraMethod, checked: boolean) => void
+  onCancelSwitch: () => void
+  onConfirmSwitch: () => void
 }
 
-function JiraAuthMethodControl({ selected, onSelect, activeMethod, warningMethod }: JiraAuthMethodControlProps) {
+function JiraAuthMethodControl({
+  selected,
+  resolvedMode,
+  saving,
+  pendingSwitch,
+  error,
+  onCheck,
+  onCancelSwitch,
+  onConfirmSwitch,
+}: JiraAuthMethodControlProps) {
   return (
     <div className="mb-3 space-y-2 rounded-md border border-border-default bg-surface-elevated px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold text-text-secondary">Auth method</span>
-        <div role="group" aria-label="Jira auth method" className="inline-flex overflow-hidden rounded-md border border-border-default">
-          {JIRA_METHODS.map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => onSelect(m.id)}
-              aria-pressed={selected === m.id}
-              className={`px-2.5 py-1 text-xs font-medium transition-colors ${
-                selected === m.id
-                  ? 'bg-surface-hover text-text-primary'
-                  : 'text-text-tertiary hover:bg-surface-hover hover:text-text-secondary'
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-        {activeMethod && (
-          <span className="inline-flex items-center rounded-full bg-signal-green/10 px-2 py-0.5 text-xs font-medium text-signal-green">
-            Active: {jiraMethodLabel(activeMethod)}
+        {selected === null && (
+          <span className="text-xs text-text-tertiary">
+            No method selected — auto-detect is used
+            {resolvedMode && <> (resolved: {jiraMethodLabel(resolvedMode)})</>}
           </span>
         )}
       </div>
-      {warningMethod && (
-        <p className="flex items-center gap-1.5 text-xs text-signal-amber">
+      <div role="group" aria-label="Jira auth method" className="space-y-1.5">
+        {JIRA_METHODS.map((m) => (
+          <label key={m.id} className="flex items-center gap-2 text-xs">
+            <Checkbox
+              checked={selected === m.id}
+              disabled={saving}
+              onCheckedChange={(checked) => onCheck(m.id, checked === true)}
+              aria-label={m.label}
+            />
+            <span className={selected === m.id ? 'font-medium text-text-primary' : 'text-text-secondary'}>
+              {m.label}
+            </span>
+          </label>
+        ))}
+      </div>
+      {error && (
+        <p role="alert" className="flex items-center gap-1.5 text-xs text-signal-red">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-          {jiraMethodLabel(warningMethod)} credentials are stored and take precedence — clear them to use this method.
+          {error}
         </p>
       )}
+      <p className="text-xs text-text-quaternary">
+        Exactly one method is active. Uncheck it to clear the selection (legacy auto-detect).
+      </p>
+      <AlertDialog open={pendingSwitch !== null} onOpenChange={(open) => { if (!open) onCancelSwitch() }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Switch Jira auth method?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Switch from {selected ? jiraMethodLabel(selected) : 'none'} to{' '}
+              {pendingSwitch ? jiraMethodLabel(pendingSwitch) : ''}?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={onCancelSwitch}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={onConfirmSwitch}>Switch</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
