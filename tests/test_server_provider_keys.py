@@ -1219,3 +1219,31 @@ async def test_create_session_safely_keeps_server_source_for_server_key(
     finally:
         ai_client.ai_username.reset(token)
         await client._client.aclose()
+
+
+async def test_add_exact_match_wins_over_case_insensitive_fallback(client, monkeypatch):
+    """Two registered providers differing only by case stay distinct (#347).
+
+    Exact membership wins: a request for ``foo`` must verify and store
+    against ``foo`` itself, never against the ``Foo`` that happens to be
+    the first case-insensitive match.
+    """
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "Foo", "id": "foo-model"},
+            {"provider": "foo", "id": "foo-model"},
+        ],
+    )
+    _mock_supported(monkeypatch, ["Foo", "foo"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    response = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={"provider": "foo", "api_key": SECRET, "verification_model": "foo-model"},
+    )
+    assert response.status_code == 200
+    # Verification ran against the exact registered spelling
+    assert verified[0][0] == "foo"
+    stored = await storage.list_server_ai_providers()
+    assert [row["provider"] for row in stored] == ["foo"]

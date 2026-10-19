@@ -1981,3 +1981,27 @@ async def test_user_credential_listing_folds_case_variants(tmp_path, monkeypatch
         response.body
         == b'{"providers":[{"provider":"EnMaaS","configured":true,"supports_user_keys":true}]}'
     )
+
+
+@pytest.mark.asyncio
+async def test_set_user_credential_exact_match_wins_over_case_fallback(
+    tmp_path, monkeypatch
+):
+    """Two registered providers differing only by case stay distinct (#347).
+
+    A user saving a key for ``foo`` must verify and store against ``foo``,
+    never against the ``Foo`` that sorts first in the catalog.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "exact.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["Foo", "foo"])
+    )
+    verify = AsyncMock(return_value="accepted")
+    monkeypatch.setattr(ai_client, "verify_ai_key", verify)
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    body = main.AiCredentialInput(api_key="private-value", model="m")
+    await main.set_user_ai_credential("foo", body, request)
+    assert verify.await_args.args[0] == "foo"
+    assert (await storage.get_user_ai_credentials("alice"))["foo"] == "private-value"

@@ -11076,6 +11076,10 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
     # the catalog entirely keep their stored spelling (configured, no
     # longer key-supported) so the UI can still render and clear them.
     def _fold(provider: str) -> str:
+        # Exact registered spelling wins — two case-differing registered
+        # providers must never fold into each other.
+        if provider in supported_set:
+            return provider
         return next(
             (s for s in supported_set if s.lower() == provider.lower()), provider
         )
@@ -11175,7 +11179,7 @@ def _validate_submitted_api_key(key: str) -> str | None:
 
 
 async def _canonical_key_provider_id(provider: str) -> str | None:
-    """The sidecar's exact-case id for a provider, matched ignoring case.
+    """The sidecar's exact-case id for a provider.
 
     The sidecar's catalog — and its ``/sessions`` endpoint — is
     case-sensitive: it reports mixed-case IDs like ``EnMaaS`` and rejects
@@ -11184,9 +11188,17 @@ async def _canonical_key_provider_id(provider: str) -> str | None:
     Verification and storage must therefore use the canonical id this
     returns. ``None`` means the catalog does not list the provider;
     callers gate on that.
+
+    Exact match wins: when the catalog registers two providers that
+    differ only by case (``Foo`` and ``foo``), a request for ``foo`` must
+    target ``foo`` — case-insensitive fallback only when the submitted
+    spelling is not itself registered.
     """
+    supported = await supported_key_providers()
+    if provider in supported:
+        return provider
     lowered = provider.lower()
-    for candidate in await supported_key_providers():
+    for candidate in supported:
         if candidate.lower() == lowered:
             return candidate
     return None
