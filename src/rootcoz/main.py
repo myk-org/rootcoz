@@ -310,12 +310,15 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
 )
 
 # Server-only settings that should not be exposed to API clients.
-# Everything else is admin-settable via Server Settings (#347); these two
-# are process/deployment bootstrap with no Settings field at all.
+# Everything else is admin-settable via Server Settings (#347); these are
+# process/deployment bootstrap with no Settings field at all, plus
+# ADMIN_KEY — a Settings field, but a server-only bootstrap secret that
+# must never become settable or persistable at runtime (AGENTS.md).
 _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
     {
         "db_path",
         "debug",
+        "admin_key",
     }
 )
 
@@ -1659,6 +1662,40 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _sidecar_host_supports_loopback_probe(host: str) -> bool:
+    """True when a sidecar bind host keeps the loopback health probe working.
+
+    The container entrypoint probes ``http://127.0.0.1:$SIDECAR_PORT`` and
+    aborts startup when it fails, and the probe result persists under
+    ``/data`` — a bind address that can never answer on loopback would
+    brick every subsequent restart before the UI could undo it. Allowed:
+    loopback, the wildcard addresses (``0.0.0.0`` / ``::`` — they answer on
+    127.0.0.1 too), and empty (deployment default).
+    """
+    if not host:
+        return True
+    if host in ("0.0.0.0", "::"):
+        return True
+    return _is_loopback_host(host)
+
+
+def _derive_sidecar_url_from_port() -> None:
+    """Point the sidecar client at SIDECAR_PORT when no URL is configured.
+
+    The Python client defaults to ``127.0.0.1:9100`` regardless of
+    SIDECAR_PORT, so a port override would change the listener but not
+    the client (#347). An explicitly configured SIDECAR_URL always wins;
+    the container entrypoint applies the same derivation at boot.
+    """
+    if os.environ.get("SIDECAR_URL"):
+        return
+    port = (os.environ.get("SIDECAR_PORT") or "").strip()
+    if not port or port == "9100":
+        return
+    os.environ["SIDECAR_URL"] = f"http://127.0.0.1:{port}"
+    logger.info("Derived SIDECAR_URL=http://127.0.0.1:%s from SIDECAR_PORT", port)
+
+
 def _write_sidecar_env_bridge() -> None:
     """Write the full sidecar env bridge from the current DB overrides.
 
@@ -1737,6 +1774,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _install_job_id_filter()
     _install_sse_log_handler()
     _setup_usage_recorder()
+    _derive_sidecar_url_from_port()
 
     await init_db()
     await storage.cleanup_expired_sessions()
@@ -11823,6 +11861,11 @@ async def set_free_ai_models_endpoint(
     since they were saved, and a stale survivor must not block unrelated
     edits — the CLI and Users page resubmit the existing list for every
     add/remove. Stale pairs are ignored gracefully at runtime.
+
+    ``free ⊆ included`` is normalized here: a free pair on a managed
+    provider (stored key or selection) is auto-included in that
+    provider's selection, mirroring the server-providers PUT — otherwise
+    scoped_models would filter it out of the restricted catalog.
     """
     _require_admin(request)
     existing = {
@@ -11871,6 +11914,21 @@ async def set_free_ai_models_endpoint(
         request.state.username,
         len(stored),
     )
+    # free ⊆ included (#347): a managed provider (stored key or selection)
+    # only exposes its selection, so a free pair outside it would vanish
+    # from the restricted catalog. Auto-include it — the same normalization
+    # the server-providers PUT applies.
+    auto_included = await storage.auto_include_free_pairs(
+        [(entry.provider, entry.model) for entry in body.models],
+        request.state.username or "admin",
+    )
+    if auto_included:
+        logger.info(
+            "[AUDIT] Admin '%s' auto-included %d free pair(s) into managed "
+            "provider selections",
+            request.state.username,
+            len(auto_included),
+        )
     return {
         "models": stored,
         "version": storage.free_models_version(stored),
@@ -11927,7 +11985,7 @@ async def _verify_and_store_server_provider_key(
     )
 
 
-@app.get("/api/admin/server-providers", operation_id="listServerProviders")
+@app.get("/api/admin/server-providers", operation_id="listServerProvidersEndpoint")
 async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     """List server provider key state and per-model selection (admin only).
 
@@ -12003,8 +12061,8 @@ async def add_server_provider(
     """Add a server provider key (admin only) — verified before storing."""
     _require_admin(request)
     provider = body.provider.strip()
-    if provider in {
-        row["provider"] for row in await storage.list_server_ai_providers()
+    if provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
     }:
         raise HTTPException(
             status_code=409,
@@ -12022,8 +12080,8 @@ async def rotate_server_provider_key(
 ) -> JSONResponse:
     """Replace a server provider key (admin only) — re-verified before storing."""
     _require_admin(request)
-    if provider not in {
-        row["provider"] for row in await storage.list_server_ai_providers()
+    if provider.lower() not in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
     }:
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
@@ -12034,7 +12092,7 @@ async def rotate_server_provider_key(
 
 @app.put(
     "/api/admin/server-providers/{provider:path}/models",
-    operation_id="setServerProviderModels",
+    operation_id="setServerProviderModelsEndpoint",
 )
 async def set_server_provider_models_endpoint(
     provider: str, request: Request, body: SetServerProviderModelsRequest
@@ -12110,7 +12168,8 @@ async def set_server_provider_models_endpoint(
 
 
 @app.delete(
-    "/api/admin/server-providers/{provider:path}", operation_id="deleteServerProvider"
+    "/api/admin/server-providers/{provider:path}",
+    operation_id="deleteServerProviderEndpoint",
 )
 async def delete_server_provider_endpoint(
     provider: str, request: Request
@@ -12122,8 +12181,8 @@ async def delete_server_provider_endpoint(
     and the response records what the deletion actually removed.
     """
     _require_admin(request)
-    has_key = provider in {
-        row["provider"] for row in await storage.list_server_ai_providers()
+    has_key = provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
     }
     current = await storage.list_server_provider_models()
     has_selection = any(row["provider"].lower() == provider.lower() for row in current)
@@ -12362,6 +12421,45 @@ async def get_admin_settings(
     return JSONResponse(content=metadata)
 
 
+# Valid log levels shared by the PUT allowlist and the env-persist path
+# (#347): Settings.log_level itself is unconstrained, so both write paths
+# must enforce the same set.
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _log_level_error(value: object) -> str | None:
+    """Validate a log level; return the error message, or None when valid."""
+    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
+        return "log_level: must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    return None
+
+
+def _settings_env_value(key: str) -> str | None:
+    """Resolve a setting's environment value the same way Settings does.
+
+    os.environ first, then the configured dotenv file — the sources
+    pydantic-settings merges for ``Settings``. DB overrides are
+    deliberately excluded: when the effective value only exists in the DB
+    store there is no env value to persist, and the caller must report
+    no-env-value rather than re-persisting the DB's own value.
+    """
+    env_var = key.upper()
+    if os.environ.get(env_var) is not None:
+        return os.environ[env_var]
+    from pydantic_settings import DotEnvSettingsSource
+
+    try:
+        dotenv = DotEnvSettingsSource(
+            Settings,
+            env_file=Settings.model_config.get("env_file"),
+            env_file_encoding=Settings.model_config.get("env_file_encoding"),
+        )()
+    except OSError:
+        logger.debug("Unable to read dotenv sources for %s", env_var, exc_info=True)
+        return None
+    return dotenv.get(key)
+
+
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
 async def update_admin_settings(request: Request) -> JSONResponse:
     """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
@@ -12412,18 +12510,29 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key == "log_level" and str(value).strip().upper() not in (
-            "DEBUG",
-            "INFO",
-            "WARNING",
-            "ERROR",
-            "CRITICAL",
-        ):
-            errors.append(
-                "log_level: must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
-            )
+        if key == "log_level" and (message := _log_level_error(value)):
+            errors.append(message)
         if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
+        # Sidecar listener overrides persist under /data and every restart
+        # re-probes them — reject values that would brick container boot
+        # (#347): a non-numeric/out-of-range port, or a bind address the
+        # loopback health probe can never reach.
+        if key == "sidecar_port":
+            try:
+                port = int(str(value).strip())
+            except ValueError, TypeError:
+                port = 0
+            if not 1 <= port <= 65535:
+                errors.append("sidecar_port: must be an integer between 1 and 65535")
+        if key == "sidecar_host":
+            host = str(value).strip()
+            if host and not _sidecar_host_supports_loopback_probe(host):
+                errors.append(
+                    f"sidecar_host: '{host}' would break the container loopback "
+                    "health probe (startup would fail on every restart) — use a "
+                    "loopback address, 0.0.0.0, ::, or leave it empty"
+                )
         # Check integer fields
         annotation = field_info.annotation
         is_int = annotation is int or (
@@ -12564,11 +12673,19 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400, detail=f"Server-only setting (env var only): {key}"
         )
     # Env var name per the Settings field mapping (see _get_settings_metadata)
-    env_value = os.environ.get(key.upper())
+    # — resolved through the same sources Settings reads (dotenv included);
+    # a DB-only value correctly reports no env value.
+    env_value = _settings_env_value(key)
     if not env_value:
         raise HTTPException(
             status_code=400,
             detail=f"Setting '{key}' has no env value set",
+        )
+    # log_level has no Settings constraint — apply the shared PUT allowlist
+    # so an invalid level cannot survive the persist path either.
+    if key == "log_level" and (message := _log_level_error(env_value)) is not None:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}': {message}"
         )
     # Same validation the PUT path applies to admin-typed values
     try:
@@ -12612,6 +12729,10 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     _require_admin(request)
     if key not in Settings.model_fields:
         raise HTTPException(status_code=404, detail=f"Unknown setting: {key}")
+    if key in _SERVER_ONLY_SETTINGS:
+        raise HTTPException(
+            status_code=400, detail=f"Server-only setting (env var only): {key}"
+        )
 
     deleted = await storage.delete_server_setting(
         key, deleted_by=request.state.username or "admin"

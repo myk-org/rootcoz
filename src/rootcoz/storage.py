@@ -5800,6 +5800,10 @@ async def set_free_ai_models(
 async def get_server_ai_credential(provider: str) -> str | None:
     """Read one admin-stored server provider key (decrypted), or None.
 
+    Provider identity is case-insensitive (#347): the admin endpoints match
+    catalog providers that way, so a key stored as ``Google`` must serve a
+    ``google`` request too.
+
     Raises :class:`UnreadableAiCredentialsError` when the stored value
     cannot be decrypted — a corrupt store must never silently fall back to
     a stale key.
@@ -5807,7 +5811,8 @@ async def get_server_ai_credential(provider: str) -> str | None:
     async with _connect_db() as db:
         row = await (
             await db.execute(
-                "SELECT api_key_enc FROM server_ai_providers WHERE provider = ?",
+                "SELECT api_key_enc FROM server_ai_providers"
+                " WHERE lower(provider) = lower(?)",
                 (provider,),
             )
         ).fetchone()
@@ -5836,15 +5841,28 @@ async def list_server_ai_providers() -> list[dict[str, Any]]:
 
 
 async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> None:
-    """Upsert one admin-stored server provider key (encrypted at rest)."""
+    """Upsert one admin-stored server provider key (encrypted at rest).
+
+    Provider identity is case-insensitive: a rotate hitting an existing row
+    whose spelling differs only in case replaces it (keeping the stored
+    spelling) instead of duplicating the provider.
+    """
     async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT provider FROM server_ai_providers"
+                " WHERE lower(provider) = lower(?)",
+                (provider,),
+            )
+        ).fetchone()
+        canonical = row[0] if row is not None else provider
         await db.execute(
             "INSERT INTO server_ai_providers (provider, api_key_enc, created_by, updated_by)"
             " VALUES (?, ?, ?, ?)"
             " ON CONFLICT(provider) DO UPDATE SET"
             " api_key_enc = excluded.api_key_enc, verified_at = datetime('now'),"
             " updated_by = excluded.updated_by, updated_at = datetime('now')",
-            (provider, encrypt_value(key), updated_by, updated_by),
+            (canonical, encrypt_value(key), updated_by, updated_by),
         )
         await db.commit()
 
@@ -5863,19 +5881,30 @@ async def set_server_provider_models(
 ) -> None:
     """Replace one provider's selected models and free pairs atomically.
 
-    ``models`` holds ``{"id", "free"}`` entries — the caller normalizes
-    ``free ⊆ included`` before this runs. Included models become rows in
-    ``server_provider_models``; free flags are written to the same
+    ``models`` holds ``{"id", "included", "free"}`` entries — only entries
+    that are included (or free; ``free ⊆ included`` after caller
+    normalization) become selection rows, so a submitted ``included:``
+    ``false`` entry deselects instead of persisting. Included models become
+    rows in ``server_provider_models``; free flags are written to the same
     ``free_ai_models`` table the standalone free-models management uses.
+    Provider identity is case-insensitive: every stored spelling of this
+    provider is replaced, so a drifted case never leaves rows behind.
     Only this provider's pairs are touched; other providers' free pairs and
     their creator/timestamp history survive untouched.
     """
-    included = sorted({entry["id"] for entry in models if entry.get("id")})
+    included = sorted(
+        {
+            entry["id"]
+            for entry in models
+            if entry.get("id") and (entry.get("included", True) or entry.get("free"))
+        }
+    )
     free = sorted({entry["id"] for entry in models if entry.get("free")})
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await db.execute(
-            "DELETE FROM server_provider_models WHERE provider = ?", (provider,)
+            "DELETE FROM server_provider_models WHERE lower(provider) = lower(?)",
+            (provider,),
         )
         if included:
             await db.executemany(
@@ -5921,7 +5950,8 @@ async def delete_server_ai_provider(provider: str) -> dict[str, list[str]]:
             row[0]
             for row in await (
                 await db.execute(
-                    "SELECT model FROM server_provider_models WHERE provider = ?",
+                    "SELECT model FROM server_provider_models"
+                    " WHERE lower(provider) = lower(?)",
                     (provider,),
                 )
             ).fetchall()
@@ -5936,16 +5966,74 @@ async def delete_server_ai_provider(provider: str) -> dict[str, list[str]]:
             ).fetchall()
         ]
         await db.execute(
-            "DELETE FROM server_ai_providers WHERE provider = ?", (provider,)
+            "DELETE FROM server_ai_providers WHERE lower(provider) = lower(?)",
+            (provider,),
         )
         await db.execute(
-            "DELETE FROM server_provider_models WHERE provider = ?", (provider,)
+            "DELETE FROM server_provider_models WHERE lower(provider) = lower(?)",
+            (provider,),
         )
         await db.execute(
             "DELETE FROM free_ai_models WHERE lower(provider) = lower(?)", (provider,)
         )
         await db.commit()
     return {"selected_models": selected, "free_models": free}
+
+
+async def auto_include_free_pairs(
+    pairs: list[tuple[str, str]], updated_by: str
+) -> list[tuple[str, str]]:
+    """Normalize ``free ⊆ included`` for managed providers (#347).
+
+    The standalone free-models save declares pairs free without touching
+    the per-provider selection, but :func:`scoped_models` restricts a
+    managed provider (stored server key or existing selection) to its
+    selection — a free pair outside it would vanish from the restricted
+    catalog. This adds the missing ``server_provider_models`` rows so the
+    free pair is also included, mirroring the normalization the
+    server-providers PUT applies. Never-managed providers keep their full
+    catalog and need no row. Returns the (provider, model) pairs added.
+    """
+    added: list[tuple[str, str]] = []
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        managed = {
+            row[0].lower()
+            for row in await (
+                await db.execute("SELECT provider FROM server_ai_providers")
+            ).fetchall()
+        } | {
+            row[0].lower()
+            for row in await (
+                await db.execute("SELECT DISTINCT provider FROM server_provider_models")
+            ).fetchall()
+        }
+        existing = {
+            (row[0].lower(), row[1])
+            for row in await (
+                await db.execute("SELECT provider, model FROM server_provider_models")
+            ).fetchall()
+        }
+        for provider, model in pairs:
+            if not provider or not model:
+                continue
+            pair = (provider.lower(), model)
+            if provider.lower() not in managed or pair in existing:
+                continue
+            added.append((provider, model))
+            existing.add(pair)
+        if added:
+            await db.executemany(
+                "INSERT INTO server_provider_models (provider, model) VALUES (?, ?)",
+                added,
+            )
+            await db.commit()
+    if added:
+        logger.info(
+            "Auto-included %d free pair(s) into managed provider selections",
+            len(added),
+        )
+    return added
 
 
 async def track_user(username: str) -> None:

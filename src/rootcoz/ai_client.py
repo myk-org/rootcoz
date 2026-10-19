@@ -702,9 +702,10 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     active = _active_server_provider_entries()
     if active is not None:
         logger.debug("active_server_providers filtering active: %s", sorted(active))
-    # Admin-selected server models (#347): a provider with a stored selection
-    # exposes only those models on server credentials; a provider without one
-    # keeps its full catalog (legacy behavior, e.g. ambient-auth providers).
+    # Admin-managed server models (#347): a managed provider (stored
+    # selection or stored server key) exposes only its selected models on
+    # server credentials; a never-managed provider keeps its full catalog
+    # (legacy behavior, e.g. ambient-auth providers).
     selected_pairs: set[tuple[str, str]] = set()
     selected_providers: set[str] = set()
     try:
@@ -715,6 +716,17 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             selected_pairs.add((row["provider"].lower(), row["model"]))
     except sqlite3.Error, OSError:
         logger.warning("Unable to load server provider model selection")
+    # A stored server key marks the provider managed (#347): even with an
+    # empty selection (every model deselected) the server pool stays
+    # scoped — "no rows" must mean "nothing exposed", not "never scoped",
+    # or deselecting every model would re-expose the whole catalog.
+    try:
+        from rootcoz.storage import list_server_ai_providers
+
+        for row in await list_server_ai_providers():
+            selected_providers.add(row["provider"].lower())
+    except sqlite3.Error, OSError:
+        logger.warning("Unable to load server provider credentials")
     for provider, entries in build_friendly_catalog(catalog).items():
         if active is not None and not is_server_provider_active(provider):
             # Server credential source withdrawn; user-key discovery below
@@ -1230,8 +1242,46 @@ async def _call_with_safe_error(
 
 
 async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
-    """Create keyed sessions without upstream logging untrusted HTTP errors."""
+    """Create keyed sessions without upstream logging untrusted HTTP errors.
+
+    ``api_key`` selects the user-credential path (source ``user``);
+    ``server_api_key`` passes an admin-stored server provider key (#347)
+    while keeping the session classified as server-owned — the chat flow
+    uses it so stored provider keys reach chat sessions exactly like they
+    reach one-shot AI calls.
+    """
+    server_key = kwargs.pop("server_api_key", None)
     key = kwargs.get("api_key")
+    if server_key is not None:
+        if key is not None:
+            raise ValueError("Session cannot carry both user and server API keys")
+        if error := _validate_api_key(server_key):
+            raise ValueError(error)
+        from rootcoz.storage import create_ai_session_with_source
+
+        body = {
+            "provider": kwargs["provider"],
+            "model": kwargs["model"],
+            "system_prompt": kwargs["system_prompt"],
+            "cwd": kwargs.get("cwd") or tempfile.gettempdir(),
+            "api_key": server_key,
+        }
+        for field in ("agent_dir", "custom_tools", "tools"):
+            if kwargs.get(field) is not None:
+                body[field] = kwargs[field]
+
+        async def create_server_keyed() -> str:
+            response = await client._client.post("/sessions", json=body)
+            response.raise_for_status()
+            return response.json()["session_id"]
+
+        return await create_ai_session_with_source(
+            create_server_keyed,
+            ai_username.get(),
+            kwargs["provider"],
+            "server",
+            client.delete_session,
+        )
     if key is None:
         from rootcoz.storage import create_ai_session_with_source
 

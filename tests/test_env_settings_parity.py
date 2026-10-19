@@ -1,6 +1,7 @@
 """Env ↔ Server Settings parity (#347): sidecar bridge, unblocked settings,
 notifications, and session TTL reading Settings instead of raw env."""
 
+import os
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
@@ -350,3 +351,196 @@ def test_persist_rejections(client, monkeypatch):
         "/api/admin/settings/db_path/persist", headers=_admin_headers()
     )
     assert server_only.status_code == 400
+
+
+# --- ADMIN_KEY stays a server-only bootstrap secret (#347 review) ---
+
+
+def test_admin_key_is_rejected_by_every_write_path(client):
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"admin_key": "runtime-set-key"}},  # pragma: allowlist secret
+    )
+    assert put.status_code == 400
+    assert "Server-only setting" in put.json()["detail"]
+    persist = client.post(
+        "/api/admin/settings/admin_key/persist", headers=_admin_headers()
+    )
+    assert persist.status_code == 400
+    assert "Server-only setting" in persist.json()["detail"]
+    reset = client.delete("/api/admin/settings/admin_key", headers=_admin_headers())
+    assert reset.status_code == 400
+    assert "Server-only setting" in reset.json()["detail"]
+    # Read-only env usage keeps working: the fixture authenticates every
+    # request above with the env-sourced ADMIN_KEY itself.
+    assert (
+        client.get("/api/admin/settings", headers=_admin_headers()).status_code == 200
+    )
+
+
+# --- Unvalidated sidecar host/port cannot brick startup (#347 review) ---
+
+
+def test_sidecar_port_and_host_validation_on_save(client):
+    for bad_port in ("not-a-port", "0", "-1", "65536", "99999"):
+        response = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"sidecar_port": bad_port}},
+        )
+        assert response.status_code == 400, bad_port
+        assert "sidecar_port" in response.json()["detail"]
+    # A specific non-loopback bind would break the entrypoint's loopback
+    # health probe on every restart — rejected outright.
+    for bad_host in ("10.0.0.5", "sidecar.example.com"):
+        response = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"sidecar_host": bad_host}},
+        )
+        assert response.status_code == 400, bad_host
+        assert "sidecar_host" in response.json()["detail"]
+    # Loopback, wildcard, and empty stay saveable.
+    for host in ("", "127.0.0.1", "::1", "localhost", "0.0.0.0"):
+        response = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"sidecar_host": host}},
+        )
+        assert response.status_code == 200, host
+    good_port = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"sidecar_port": "9200"}},
+    )
+    assert good_port.status_code == 200
+
+
+# --- Shared log-level validation reaches the persist path (#347 review) ---
+
+
+def test_persist_rejects_invalid_log_level(client, monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "LOUD")
+    response = client.post(
+        "/api/admin/settings/log_level/persist", headers=_admin_headers()
+    )
+    assert response.status_code == 400
+    assert "log_level" in response.json()["detail"]
+    assert "DEBUG" in response.json()["detail"]
+    monkeypatch.setenv("LOG_LEVEL", "debug")
+    ok = client.post("/api/admin/settings/log_level/persist", headers=_admin_headers())
+    assert ok.status_code == 200
+
+
+# --- Persist resolves env values from dotenv too (#347 review) ---
+
+
+def test_persist_reads_dotenv_value(client, monkeypatch, tmp_path):
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    (tmp_path / ".env").write_text("SMTP_HOST=smtp.dotenv.example.com\n")
+    monkeypatch.chdir(tmp_path)
+    response = client.post(
+        "/api/admin/settings/smtp_host/persist", headers=_admin_headers()
+    )
+    assert response.status_code == 200
+    assert get_settings().smtp_host == "smtp.dotenv.example.com"
+
+
+def test_persist_reports_no_env_value_when_only_db_override_exists(client):
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"smtp_host": "smtp.db.example.com"}},
+    )
+    assert saved.status_code == 200
+    # The effective value comes from the DB override — there is no env value
+    # to persist, and the DB's own value must not be re-persisted as "env".
+    response = client.post(
+        "/api/admin/settings/smtp_host/persist", headers=_admin_headers()
+    )
+    assert response.status_code == 400
+    assert "no env value" in response.json()["detail"]
+
+
+# --- session_ttl_hours bounds (#347 review) ---
+
+
+def test_session_ttl_bounds_on_save(client):
+    for bad in ("0", "-1", "87601", "999999999"):
+        response = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"session_ttl_hours": bad}},
+        )
+        assert response.status_code == 400, bad
+        assert "session_ttl_hours" in response.json()["detail"]
+    for good in ("1", "720", "87600"):
+        response = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"session_ttl_hours": good}},
+        )
+        assert response.status_code == 200, good
+
+
+def test_session_ttl_out_of_range_env_is_clamped(monkeypatch):
+    monkeypatch.setenv("SESSION_TTL_HOURS", "999999999")
+    get_settings.cache_clear()
+    try:
+        # Settings() never fails app-wide; the env value is clamped into
+        # the field's 1-87600 range instead of overflowing datetime math.
+        assert get_settings().session_ttl_hours == 87600
+    finally:
+        monkeypatch.delenv("SESSION_TTL_HOURS")
+        get_settings.cache_clear()
+
+
+# --- Malformed SMTP_PORT no longer bricks Settings() (#347 review) ---
+
+
+def test_smtp_port_invalid_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("SMTP_PORT", "not-a-port")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().smtp_port == 587
+    finally:
+        monkeypatch.delenv("SMTP_PORT")
+        get_settings.cache_clear()
+
+
+def test_smtp_port_zero_env_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("SMTP_PORT", "0")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().smtp_port == 587
+    finally:
+        monkeypatch.delenv("SMTP_PORT")
+        get_settings.cache_clear()
+
+
+def test_send_email_alert_never_raises_when_settings_fail(monkeypatch):
+    def boom():
+        raise RuntimeError("settings store unavailable")
+
+    monkeypatch.setattr("rootcoz.config.get_settings", boom)
+    assert monitoring.send_email_alert("subject", "body") is False
+
+
+# --- SIDECAR_PORT override reaches the Python client (#347 review) ---
+
+
+def test_derive_sidecar_url_from_port(monkeypatch):
+    monkeypatch.delenv("SIDECAR_URL", raising=False)
+    monkeypatch.delenv("SIDECAR_PORT", raising=False)
+    main._derive_sidecar_url_from_port()
+    assert "SIDECAR_URL" not in os.environ  # default port: no-op
+
+    monkeypatch.setenv("SIDECAR_PORT", "9200")
+    main._derive_sidecar_url_from_port()
+    assert os.environ["SIDECAR_URL"] == "http://127.0.0.1:9200"
+
+    # An explicitly configured URL always wins.
+    monkeypatch.setenv("SIDECAR_URL", "http://sidecar.example.com:9300")
+    main._derive_sidecar_url_from_port()
+    assert os.environ["SIDECAR_URL"] == "http://sidecar.example.com:9300"

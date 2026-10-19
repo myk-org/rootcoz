@@ -6,6 +6,7 @@ delete warnings), the scoped-models server pool, and per-session apiKey
 injection with unchanged credential-source semantics.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -475,3 +476,264 @@ async def test_user_key_still_wins_over_server_key(tmp_path, monkeypatch):
         assert used_key == "user-key-value-9"  # pragma: allowlist secret
     finally:
         ai_client.ai_username.reset(token)
+
+
+# --- Deselected models are never stored (#347 review) ---
+
+
+async def test_deselected_model_is_not_stored_or_exposed(client, monkeypatch):
+    _fake_catalog(monkeypatch, CATALOG)
+    saved = client.put(
+        "/api/admin/server-providers/google/models",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                {"id": "gemini-2.5-pro", "included": True},
+                {"id": "gemini-2.5-flash", "included": False},
+            ]
+        },
+    )
+    assert saved.status_code == 200
+    # Not stored...
+    selection = await storage.list_server_provider_models()
+    assert [(row["provider"], row["model"]) for row in selection] == [
+        ("google", "gemini-2.5-pro")
+    ]
+    # ...not in the scoped server pool...
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
+    finally:
+        ai_client.force_server_credentials.reset(token)
+    # ...and GET reports it excluded.
+    providers = {
+        p["provider"]: p
+        for p in client.get(
+            "/api/admin/server-providers", headers=_admin_headers()
+        ).json()["providers"]
+    }
+    models = {m["id"]: m for m in providers["google"]["models"]}
+    assert models["gemini-2.5-flash"]["included"] is False
+
+
+async def test_empty_selection_on_managed_provider_exposes_no_server_models(
+    client, monkeypatch
+):
+    """No rows must mean 'nothing exposed', not 'never scoped' (#347 review)."""
+    _fake_catalog(monkeypatch, CATALOG)
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    # Deselect every model — the selection becomes explicitly empty while
+    # the provider stays managed by its stored key.
+    cleared = client.put(
+        "/api/admin/server-providers/google/models",
+        headers=_admin_headers(),
+        json={"models": []},
+    )
+    assert cleared.status_code == 200
+    assert await storage.list_server_provider_models() == []
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert scoped.get("google", []) == []
+        # Never-managed providers keep their full catalog.
+        assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
+    finally:
+        ai_client.force_server_credentials.reset(token)
+
+
+# --- free ⊆ included normalization on the standalone endpoint (#347 review) ---
+
+
+async def test_standalone_free_models_auto_include_into_managed_selection(
+    client, monkeypatch
+):
+    _fake_catalog(monkeypatch, CATALOG)
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+    saved = client.put(
+        "/api/admin/free-models",
+        headers=_admin_headers(),
+        json={"models": [{"provider": "google", "model": "gemini-2.5-flash"}]},
+    )
+    assert saved.status_code == 200
+    # The free pair was auto-included in the managed provider's selection.
+    selection = await storage.list_server_provider_models()
+    assert {(row["provider"], row["model"]) for row in selection} == {
+        ("google", "gemini-2.5-pro"),
+        ("google", "gemini-2.5-flash"),
+    }
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        by_id = {m["id"]: m for m in scoped["google"]}
+        assert by_id["gemini-2.5-flash"]["free"] is True
+    finally:
+        ai_client.force_server_credentials.reset(token)
+    # A never-managed provider needs no selection row — its catalog is full.
+    unmanaged = client.put(
+        "/api/admin/free-models",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                {"provider": "google", "model": "gemini-2.5-flash"},
+                {"provider": "openai", "model": "gpt-5.6-luna"},
+            ]
+        },
+    )
+    assert unmanaged.status_code == 200
+    assert not any(
+        row["provider"] == "openai"
+        for row in await storage.list_server_provider_models()
+    )
+
+
+# --- Provider casing must not leave rows behind (#347 review) ---
+
+
+async def test_selection_replacement_is_case_insensitive(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "case.db")
+    await storage.init_db()
+    await storage.set_server_provider_models(
+        "Google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+    # A differently-cased PUT replaces every stored spelling, not just the
+    # exact match — no "Google" rows may survive beside the new "google" ones.
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-flash"}], "admin"
+    )
+    selection = await storage.list_server_provider_models()
+    assert [(row["provider"], row["model"]) for row in selection] == [
+        ("google", "gemini-2.5-flash")
+    ]
+
+
+async def test_credential_read_and_delete_are_case_insensitive(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "case-key.db")
+    await storage.init_db()
+    await storage.set_server_ai_credential("Google", SECRET, "admin")
+    assert await storage.get_server_ai_credential("google") == SECRET
+    # A rotate with drifted spelling replaces the stored row instead of
+    # duplicating the provider.
+    await storage.set_server_ai_credential("google", "rotated-key-1", "admin")
+    providers = await storage.list_server_ai_providers()
+    assert [row["provider"] for row in providers] == ["Google"]
+    assert await storage.get_server_ai_credential("google") == "rotated-key-1"
+
+    await storage.set_server_provider_models(
+        "Google", [{"id": "gemini-2.5-pro", "free": True}], "admin"
+    )
+    affected = await storage.delete_server_ai_provider("google")
+    assert affected == {
+        "selected_models": ["gemini-2.5-pro"],
+        "free_models": ["gemini-2.5-pro"],
+    }
+    assert await storage.list_server_ai_providers() == []
+    assert await storage.list_server_provider_models() == []
+    assert await storage.list_free_ai_models() == []
+
+
+async def test_endpoint_key_checks_are_case_insensitive(client, monkeypatch):
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    await storage.set_server_ai_credential("Google", SECRET, "admin")
+    # Adding a differently-cased spelling is a conflict, not a second row.
+    conflict = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert conflict.status_code == 409
+    # Delete with drifted casing removes the stored key.
+    deleted = client.delete(
+        "/api/admin/server-providers/google", headers=_admin_headers()
+    )
+    assert deleted.status_code == 200
+    assert await storage.list_server_ai_providers() == []
+
+
+# --- Chat sessions use the stored server key (#347 review) ---
+
+
+@pytest.mark.asyncio
+async def test_chat_session_passes_stored_server_key(monkeypatch, tmp_path):
+    from rootcoz.engine import chat
+
+    create = AsyncMock(return_value="chat-sid")
+    monkeypatch.setattr(
+        chat, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(
+        ai_client, "server_provider_key", AsyncMock(return_value=SECRET)
+    )
+    monkeypatch.setattr(chat, "create_session_safely", create)
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    monkeypatch.setattr(chat, "get_sidecar_client", lambda: object())
+    choice = ai_client._selected_credential_source.set("server")
+    try:
+        assert (
+            await chat._create_chat_session(
+                system_prompt="hi",
+                ai_provider="openai",
+                ai_model="m",
+                repo_path=tmp_path,
+            )
+            == "chat-sid"
+        )
+        kwargs = create.call_args.kwargs
+        assert kwargs["server_api_key"] == SECRET
+        assert "api_key" not in kwargs  # never classified as a user key
+    finally:
+        ai_client._selected_credential_source.reset(choice)
+
+
+@pytest.mark.asyncio
+async def test_create_session_safely_keeps_server_source_for_server_key(
+    tmp_path, monkeypatch
+):
+    import httpx
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat-server-key.db")
+    await storage.init_db()
+    seen = {}
+
+    async def sidecar(request):
+        if request.url.path == "/sessions":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"session_id": "server-keyed-sid"})
+        return httpx.Response(200, json={"text": "reply"})
+
+    client = ai_client.SidecarClient.__new__(ai_client.SidecarClient)
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(sidecar), base_url="http://sidecar"
+    )
+    token = ai_client.ai_username.set("admin")
+    try:
+        assert (
+            await ai_client.create_session_safely(
+                client,
+                provider="openai",
+                model="m",
+                system_prompt="test",
+                server_api_key=SECRET,
+            )
+            == "server-keyed-sid"
+        )
+        assert seen["body"]["api_key"] == SECRET
+        # The server-keyed session is classified server-owned, exactly like
+        # an ambient session — not as a user-credential session.
+        assert (
+            await storage.get_ai_session_source("server-keyed-sid", "admin", "openai")
+            == "server"
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client._client.aclose()

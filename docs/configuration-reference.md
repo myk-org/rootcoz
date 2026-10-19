@@ -57,7 +57,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | Restart | Server restart required for a change to take effect |
    | After login | Whether an admin can change it in Server Settings without a restart |
 
-   Fields marked `after login: yes (restart)` are settable in Server Settings but only take effect after a server restart. `DB_PATH` and `DEBUG` remain env-only (`PUT /api/admin/settings` rejects them — they are process bootstrap with no Settings field).
+   Fields marked `after login: yes (restart)` are settable in Server Settings but only take effect after a server restart. `DB_PATH` and `DEBUG` remain env-only (`PUT /api/admin/settings` rejects them — they are process bootstrap with no Settings field). `ADMIN_KEY` is env-only too: it has a Settings field for read-only display, but every write path (`PUT`, persist, reset) rejects it — it is a server-only bootstrap secret, never settable at runtime.
 
 3. **Jenkins category.**
 
@@ -144,16 +144,15 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
-   | `ADMIN_KEY` | empty | string | yes | no | yes |
    | `SECURE_COOKIES` | `true` | boolean | no | **yes** | yes (restart) |
    | `TRUST_PROXY_HEADERS` | `false` | boolean | no | **yes** | yes (restart) |
    | `REQUIRE_APPROVAL` | `true` | boolean | no | no | yes |
    | `ADMIN_WAIT_APPROVE_MSG` | empty | string | no | no | yes |
    | `ALLOWED_USERS` | empty | string | no | no | yes |
    | `DEFAULT_USER_ROLE` | `reviewer` | string | no | **yes** | yes (restart) |
-   | `SESSION_TTL_HOURS` | `720` | integer ≥ 1 | no | no | yes |
+   | `SESSION_TTL_HOURS` | `720` | integer 1–87600 | no | no | yes |
 
-   `ADMIN_KEY` bootstraps the `admin` superuser that lives outside the database; log in as `admin` with that key. `DEFAULT_USER_ROLE` accepts only `viewer`, `reviewer`, or `operator` — any other value fails validation at startup. `ALLOWED_USERS` is a comma-separated list of usernames and is empty (open) by default. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with `403 Registration is restricted. Contact an admin.` before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets `403 User not allowed. Contact an administrator to be added to the allow list.` A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes.
+   `ADMIN_KEY` bootstraps the `admin` superuser that lives outside the database; log in as `admin` with that key. It is environment-only: Server Settings shows it masked (read-only) but rejects any attempt to set, persist, or reset it — keep the env var authoritative. `DEFAULT_USER_ROLE` accepts only `viewer`, `reviewer`, or `operator` — any other value fails validation at startup. `ALLOWED_USERS` is a comma-separated list of usernames and is empty (open) by default. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with `403 Registration is restricted. Contact an admin.` before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets `403 User not allowed. Contact an administrator to be added to the allow list.` A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes.
 
    > **Warning:** Set `SECURE_COOKIES=false` only for local HTTP development. Behind a TLS-terminating proxy, leave it `true` or sessions will not be stored by the browser.
 
@@ -232,7 +231,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `NODE_BINARY` | empty | string | no | **yes** | yes (restart) |
     | `PI_SIDECAR_TRANSCRIPTS_DIR` | empty | string | no | **yes** | yes (restart) |
 
-    A non-loopback `SIDECAR_HOST` gets a trust warning on save — the sidecar will listen on an external interface. That is the same trust class as `TRUST_PROXY_HEADERS`: only do it on a network you control.
+    `SIDECAR_HOST` accepts only values the container's loopback health probe can still reach: loopback addresses, `0.0.0.0`/`::` (wildcard binds that also answer on `127.0.0.1`), or empty. A specific non-loopback address is rejected with a `400` on save — the entrypoint probes `http://127.0.0.1:$SIDECAR_PORT` before every boot and aborts when it fails, so such a value would brick every restart. `0.0.0.0` is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as `TRUST_PROXY_HEADERS` — only do it on a network you control. `SIDECAR_PORT` must be an integer between 1 and 65535. When `SIDECAR_PORT` is overridden and `SIDECAR_URL` is not set, rootcoz derives `SIDECAR_URL=http://127.0.0.1:<port>` so the Python client follows the listener; an explicit `SIDECAR_URL` always wins.
 
 ### Environment variable audit (#347)
 
@@ -283,7 +282,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `RP_PUSH_CLASSIFICATIONS` | `rp_push_classifications` | Report Portal | runtime |
 | `RP_PUSH_ROOTCOZ_URL` | `rp_push_rootcoz_url` | Report Portal | runtime |
 | `RP_PUSH_TRACKER_LINKS` | `rp_push_tracker_links` | Report Portal | runtime |
-| `ADMIN_KEY` | `admin_key` | Auth & Security | runtime (sensitive) |
+| `ADMIN_KEY` | `admin_key` | Auth & Security | env-only (read-only display) |
 | `SECURE_COOKIES` | `secure_cookies` | Auth & Security | restart |
 | `TRUST_PROXY_HEADERS` | `trust_proxy_headers` | Auth & Security | restart |
 | `REQUIRE_APPROVAL` | `require_approval` | Auth & Security | runtime |

@@ -1266,9 +1266,19 @@ async def _create_chat_session(
         if key is not None:
             create_kwargs["api_key"] = key
         else:
-            from rootcoz.ai_client import require_server_provider_grant
+            from rootcoz.ai_client import (
+                require_server_provider_grant,
+                server_provider_key,
+            )
 
             await require_server_provider_grant(sidecar_provider, sidecar_model)
+            # A stored server provider key (#347) reaches chat sessions too:
+            # pass it as the session apiKey while keeping the server
+            # credential-source classification (create_session_safely records
+            # server_api_key sessions as server-owned).
+            server_key = await server_provider_key(sidecar_provider)
+            if server_key is not None:
+                create_kwargs["server_api_key"] = server_key
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id

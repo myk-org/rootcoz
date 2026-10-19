@@ -685,16 +685,16 @@ def send_email_alert(
     Returns:
         True if sent successfully, False otherwise.
     """
-    from rootcoz.config import get_settings
-
-    settings = get_settings()
-    host = smtp_host or settings.smtp_host
-    if not host:
-        return False
-    to_addr = alert_email_to or settings.alert_email_to
-    if not to_addr:
-        return False
     try:
+        from rootcoz.config import get_settings
+
+        settings = get_settings()
+        host = smtp_host or settings.smtp_host
+        if not host:
+            return False
+        to_addr = alert_email_to or settings.alert_email_to
+        if not to_addr:
+            return False
         port = smtp_port or settings.smtp_port
         user = smtp_user or settings.smtp_user
         password = smtp_password or (

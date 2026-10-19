@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { api } from '@/lib/api'
+import { api, ApiError } from '@/lib/api'
 import { ServerProvidersCard } from './ServerProvidersCard'
 
 Element.prototype.scrollIntoView = vi.fn()
@@ -9,6 +9,18 @@ Element.prototype.scrollIntoView = vi.fn()
 vi.mock('@/lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
   extractApiDetail: () => null,
+  ApiError: class ApiError extends Error {
+    status: number
+    statusText: string
+    body: unknown
+    constructor(status: number, statusText: string, body: unknown) {
+      super(`API error ${status}: ${statusText}`)
+      this.name = 'ApiError'
+      this.status = status
+      this.statusText = statusText
+      this.body = body
+    }
+  },
 }))
 vi.mock('@/lib/useProviderOptions', () => ({
   resetProviderCatalogCache: vi.fn(),
@@ -30,12 +42,13 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; verified: boolean; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; models: Model[] }
 
 function providersState(): Provider[] {
   return [
     {
       provider: 'gemini',
+      has_key: true,
       verified: true,
       models: [
         { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', included: true, free: false },
@@ -46,18 +59,31 @@ function providersState(): Provider[] {
   ]
 }
 
+/** GET response shape: {providers: [...]} — the real backend envelope. */
+function listResult(providers: Provider[]) {
+  return { providers } as never
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
-  get.mockResolvedValue(providersState() as never)
-  post.mockResolvedValue({} as never)
+  get.mockResolvedValue(listResult(providersState()))
+  // Real add/rotate response: HTTP 200 with ok true/false, not a throw.
+  post.mockResolvedValue({ ok: true, outcome: 'accepted' } as never)
   put.mockResolvedValue({} as never)
-  del.mockResolvedValue({} as never)
+  del.mockResolvedValue({ ok: true } as never)
 })
+
+async function openModels(user: ReturnType<typeof userEvent.setup>) {
+  render(<ServerProvidersCard />)
+  await screen.findByRole('list', { name: 'Configured server providers' })
+  await user.click(screen.getByRole('button', { name: 'gemini models' }))
+  await screen.findByRole('checkbox', { name: 'Select all' })
+}
 
 describe('ServerProvidersCard add flow gate', () => {
   it('keeps Add disabled until the provider test passes, then finishes the add', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue([] as never)
+    get.mockResolvedValue(listResult([]))
     render(<ServerProvidersCard />)
 
     await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
@@ -89,7 +115,7 @@ describe('ServerProvidersCard add flow gate', () => {
 
   it('keeps Add disabled and clears the key when the test fails', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue([] as never)
+    get.mockResolvedValue(listResult([]))
     post.mockRejectedValueOnce(new Error('verification failed') as never)
     render(<ServerProvidersCard />)
 
@@ -104,9 +130,46 @@ describe('ServerProvidersCard add flow gate', () => {
     expect(screen.getByLabelText('API key')).toHaveValue('')
   })
 
+  it('reports a rejected key from an ok:false response without verifying', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([]))
+    post.mockResolvedValueOnce({
+      ok: false,
+      outcome: 'rejected',
+      message: 'Check the key and selected model; existing credential unchanged.',
+    } as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(await screen.findByRole('option', { name: 'openai' }))
+    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
+    await user.type(screen.getByLabelText('API key'), 'sk-bad')
+
+    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the key and selected model')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '+ Add provider' })).toBeDisabled()
+  })
+
+  it('falls back to the outcome when the ok:false response has no message', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([]))
+    post.mockResolvedValueOnce({ ok: false, outcome: 'inconclusive' } as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(await screen.findByRole('option', { name: 'openai' }))
+    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
+    await user.type(screen.getByLabelText('API key'), 'sk-flaky')
+
+    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Key inconclusive')
+    expect(screen.getByRole('button', { name: '+ Add provider' })).toBeDisabled()
+  })
+
   it('invalidates a passed test when the key changes', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue([] as never)
+    get.mockResolvedValue(listResult([]))
     render(<ServerProvidersCard />)
 
     await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
@@ -121,14 +184,36 @@ describe('ServerProvidersCard add flow gate', () => {
   })
 })
 
-describe('ServerProvidersCard model multi-select', () => {
-  async function openModels(user: ReturnType<typeof userEvent.setup>) {
+describe('ServerProvidersCard provider list', () => {
+  it('lists only stored-key providers; unkeyed catalog entries are addable', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      { provider: 'gemini', has_key: false, verified: false, models: [] },
+      { provider: 'openai', has_key: true, verified: true, models: [] },
+    ]))
     render(<ServerProvidersCard />)
-    await screen.findByRole('list', { name: 'Configured server providers' })
-    await user.click(screen.getByRole('button', { name: 'gemini models' }))
-    expect(await screen.findByRole('checkbox', { name: 'Select all' })).toBeInTheDocument()
-  }
 
+    // gemini has no stored key: not in the configured list, but addable
+    expect(screen.queryByRole('button', { name: 'Remove gemini' })).not.toBeInTheDocument()
+    expect(await screen.findByRole('list', { name: 'Configured server providers' }))
+    expect(screen.getByRole('button', { name: 'Rotate openai key' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'gemini' })).toBeInTheDocument()
+  })
+
+  it('shows the empty state when no stored-key providers exist', async () => {
+    get.mockResolvedValue(listResult([
+      { provider: 'gemini', has_key: false, verified: false, models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByText('No server providers configured.')).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Configured server providers' })).not.toBeInTheDocument()
+  })
+})
+
+describe('ServerProvidersCard model multi-select', () => {
   it('shows per-model checkmarks, Select all with an indeterminate partial state, and saves', async () => {
     const user = userEvent.setup()
     await openModels(user)
@@ -171,13 +256,6 @@ describe('ServerProvidersCard model multi-select', () => {
 })
 
 describe('ServerProvidersCard free pill', () => {
-  async function openModels(user: ReturnType<typeof userEvent.setup>) {
-    render(<ServerProvidersCard />)
-    await screen.findByRole('list', { name: 'Configured server providers' })
-    await user.click(screen.getByRole('button', { name: 'gemini models' }))
-    await screen.findByRole('checkbox', { name: 'Select all' })
-  }
-
   it('marks a model free and auto-includes it', async () => {
     const user = userEvent.setup()
     await openModels(user)
@@ -204,7 +282,7 @@ describe('ServerProvidersCard free pill', () => {
     const user = userEvent.setup()
     const state = providersState()
     state[0].models[1] = { id: 'gemini-2.5-flash', name: 'Flash', included: true, free: true }
-    get.mockResolvedValue(state as never)
+    get.mockResolvedValue(listResult(state))
     await openModels(user)
 
     expect(screen.getByRole('button', { name: 'Toggle gemini-2.5-flash free' })).toHaveAttribute('aria-pressed', 'true')
@@ -224,56 +302,90 @@ describe('ServerProvidersCard free pill', () => {
 })
 
 describe('ServerProvidersCard remove and rotate', () => {
-  it('confirms removal with the affected models from the delete response warning', async () => {
+  it('confirms removal from loaded state before sending a single DELETE', async () => {
     const user = userEvent.setup()
     let removed = false
-    get.mockImplementation(async () => (removed ? [] : providersState()) as never)
-    del.mockImplementation(async (_url: string, body?: unknown) => {
-      const confirmed = (body as { confirm?: boolean } | undefined)?.confirm === true
-      if (confirmed) removed = true
-      return confirmed
-        ? {}
-        : { warning: { models: ['gemini-2.5-pro'], free: ['gemini-2.5-flash'] } }
+    const state = providersState()
+    state[0].models[1] = { id: 'gemini-2.5-flash', name: 'Flash', included: true, free: true }
+    get.mockImplementation(async () => listResult(removed ? [] : state))
+    del.mockImplementation(async () => {
+      removed = true
+      return { ok: true } as never
     })
-
     render(<ServerProvidersCard />)
+
     await user.click(await screen.findByRole('button', { name: 'Remove gemini' }))
 
-    // The confirm dialog shows the affected selected and free models
+    // The dialog opens before any DELETE, listing the affected selected and
+    // free models from the loaded provider entry
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText(/gemini-2\.5-pro/)).toBeInTheDocument()
     expect(within(dialog).getByText(/gemini-2\.5-flash/)).toBeInTheDocument()
+    expect(del).not.toHaveBeenCalled()
 
     await user.click(within(dialog).getByRole('button', { name: 'Remove provider' }))
     await waitFor(() =>
-      expect(del).toHaveBeenLastCalledWith('/api/admin/server-providers/gemini', { confirm: true }),
+      expect(del).toHaveBeenLastCalledWith('/api/admin/server-providers/gemini'),
     )
+    expect(del).toHaveBeenCalledTimes(1)
     await waitFor(() =>
       expect(screen.queryByRole('list', { name: 'Configured server providers' })).not.toBeInTheDocument(),
     )
     expect(await screen.findByRole('status')).toHaveTextContent('gemini removed.')
   })
 
-  it('removes without a confirm when no models are affected', async () => {
+  it('confirms removal even when no models are affected', async () => {
     const user = userEvent.setup()
     let removed = false
-    get.mockImplementation(async () => (removed ? [] : providersState()) as never)
+    get.mockImplementation(async () => listResult(removed ? [] : providersState()))
     del.mockImplementation(async () => {
       removed = true
-      return {}
+      return { ok: true } as never
     })
-
     render(<ServerProvidersCard />)
+
     await user.click(await screen.findByRole('button', { name: 'Remove gemini' }))
 
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/none/)).toBeInTheDocument()
+    expect(del).not.toHaveBeenCalled()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Remove provider' }))
     await waitFor(() =>
       expect(screen.queryByRole('list', { name: 'Configured server providers' })).not.toBeInTheDocument(),
     )
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(del).toHaveBeenCalledTimes(1)
   })
 
-  it('rotates a key via the rotate endpoint', async () => {
+  it('treats a 404 on confirm as already removed', async () => {
+    const user = userEvent.setup()
+    del.mockRejectedValueOnce(new ApiError(404, 'Not Found', { detail: 'not configured' }) as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Remove gemini' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Remove provider' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('gemini removed.')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows an error when removal fails for another reason', async () => {
+    const user = userEvent.setup()
+    del.mockRejectedValueOnce(new ApiError(500, 'Server Error', null) as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Remove gemini' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Remove provider' }))
+
+    expect(await screen.findByText('Could not remove provider')).toBeInTheDocument()
+    // The dialog stays open so the admin can retry
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('rotates a key via the rotate-key endpoint with the provider in the body', async () => {
     const user = userEvent.setup()
     render(<ServerProvidersCard />)
     await user.click(await screen.findByRole('button', { name: 'Rotate gemini key' }))
@@ -283,11 +395,28 @@ describe('ServerProvidersCard remove and rotate', () => {
     await user.click(screen.getByRole('button', { name: 'Test provider' }))
 
     await waitFor(() =>
-      expect(post).toHaveBeenCalledWith('/api/admin/server-providers/gemini/rotate', {
+      expect(post).toHaveBeenCalledWith('/api/admin/server-providers/gemini/rotate-key', {
+        provider: 'gemini',
         api_key: 'new-secret', // pragma: allowlist secret
         verification_model: 'manual-model',
       }),
     )
     expect(await screen.findByRole('status')).toHaveTextContent('API key verified and rotated.')
+  })
+
+  it('reports an ok:false rotation without clearing the editing form', async () => {
+    const user = userEvent.setup()
+    post.mockResolvedValueOnce({ ok: false, outcome: 'rejected' } as never)
+    render(<ServerProvidersCard />)
+    await user.click(await screen.findByRole('button', { name: 'Rotate gemini key' }))
+
+    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
+    await user.type(screen.getByLabelText('API key'), 'bad-secret')
+    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Key rejected')
+    // Still editing: the rotate form is not closed on a rejected key
+    expect(screen.getByText('Rotate gemini key')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 })

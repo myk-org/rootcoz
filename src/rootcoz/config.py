@@ -566,6 +566,32 @@ class Settings(BaseSettings):
     smtp_from: str = Field(
         default="", description="From address for email alerts. Defaults to smtp_user."
     )
+
+    @field_validator("smtp_port", mode="before")
+    @classmethod
+    def _coerce_smtp_port(cls, v: object) -> int:
+        """Tolerate a malformed SMTP_PORT env instead of failing Settings().
+
+        Mirrors ``_coerce_session_ttl``: a typo in the deployment env must
+        not brick app-wide settings; fall back to 587 with a warning and
+        let the (strict) field constraint reject bad admin-typed values.
+        """
+        if isinstance(v, bool):
+            port: int | None = None
+        elif isinstance(v, int):
+            port = v
+        elif isinstance(v, str):
+            try:
+                port = int(v)
+            except ValueError:
+                port = None
+        else:
+            port = None
+        if port is None or port <= 0:
+            logger.warning("Ignoring invalid SMTP_PORT value %r; using default 587", v)
+            return 587
+        return port
+
     slack_webhook_url: SecretStr | None = Field(
         default=None, description="Slack webhook URL for alerts.", repr=False
     )
@@ -574,22 +600,32 @@ class Settings(BaseSettings):
     )
 
     # --- Auth (#347) ---
+    # Upper bound keeps datetime arithmetic in create_session/renew_session
+    # well inside datetime.max even for the longest-lived deployment
+    # (10 years); without it an out-of-range value could brick every login.
     session_ttl_hours: int = Field(
         default=720,
+        ge=1,
+        le=87600,
         description="Login session lifetime in hours (SESSION_TTL_HOURS).",
     )
 
     @field_validator("session_ttl_hours", mode="before")
     @classmethod
     def _coerce_session_ttl(cls, v: object) -> int:
-        """Tolerate bad values like the env parser always did (boot default)."""
+        """Tolerate bad values like the env parser always did (boot default).
+
+        Env/DB values are clamped into the 1–87600 range so ``Settings()``
+        never fails app-wide; the PUT path enforces the same bound with a
+        400 via the field constraints.
+        """
         if isinstance(v, bool):
             return 720
         if isinstance(v, int):
-            return max(1, v)
+            return min(max(v, 1), 87600)
         if isinstance(v, str):
             try:
-                return max(1, int(v))
+                return min(max(int(v), 1), 87600)
             except ValueError:
                 return 720
         return 720

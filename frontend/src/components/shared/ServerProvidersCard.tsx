@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, extractApiDetail } from '@/lib/api'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { resetProviderCatalogCache, useProviderCatalog } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { Button } from '@/components/ui/button'
@@ -11,7 +11,13 @@ import { ModelCombobox } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; verified: boolean; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; models: ServerProviderModel[] }
+
+/** GET /api/admin/server-providers — one entry per catalog + stored provider. */
+type ServerProviderListResult = { providers: ServerProvider[] }
+
+/** POST add/rotate-key — HTTP 200 with ok:false when the key is rejected. */
+type VerifyKeyResult = { ok: boolean; outcome?: string; message?: string }
 
 type RemoveWarning = { models: string[]; free: string[] }
 
@@ -41,15 +47,15 @@ export function ServerProvidersCard() {
   const { providers: catalog } = useProviderCatalog()
 
   function refreshProviders() {
-    return api.get<ServerProvider[]>('/api/admin/server-providers')
-      .then((result) => { setProviders(result) })
+    return api.get<ServerProviderListResult>('/api/admin/server-providers')
+      .then((result) => { setProviders(result.providers) })
       .catch(() => { setError('Could not load server providers') })
   }
 
   useEffect(() => {
     let active = true
-    api.get<ServerProvider[]>('/api/admin/server-providers')
-      .then((result) => { if (active) setProviders(result) })
+    api.get<ServerProviderListResult>('/api/admin/server-providers')
+      .then((result) => { if (active) setProviders(result.providers) })
       .catch(() => { if (active) setError('Could not load server providers') })
     return () => { active = false; keyRef.current = '' }
   }, [])
@@ -64,7 +70,8 @@ export function ServerProvidersCard() {
     setError('')
   }
 
-  const listed = providers ?? []
+  // GET lists every catalog provider; only stored-key entries are configured.
+  const listed = (providers ?? []).filter((item) => item.has_key)
   const added = new Set(listed.map((item) => normalizeProvider(item.provider)))
   const addable = Object.keys(catalog).filter((id) => !added.has(normalizeProvider(id)))
   const provider = editing ?? selected
@@ -77,21 +84,27 @@ export function ServerProvidersCard() {
     setError('')
     setNotice('')
     try {
+      const res = editing
+        ? await api.post<VerifyKeyResult>(
+            `/api/admin/server-providers/${encodeURIComponent(editing)}/rotate-key`,
+            { provider: editing, api_key: value, verification_model: model.trim() })
+        : await api.post<VerifyKeyResult>('/api/admin/server-providers',
+            { provider: selected, api_key: value, verification_model: model.trim() })
+      // The backend reports rejected/inconclusive keys as HTTP 200 ok:false.
+      if (!res.ok) {
+        setTested(false)
+        setError(res.message ?? `Key ${res.outcome}`)
+        return
+      }
+      resetProviderCatalogCache()
+      await refreshProviders()
       if (editing) {
-        await api.post(`/api/admin/server-providers/${encodeURIComponent(editing)}/rotate`,
-          { api_key: value, verification_model: model.trim() })
-        resetProviderCatalogCache()
-        await refreshProviders()
         setEditing(null)
         setSelected('')
         setModel('')
         setNotice('API key verified and rotated.')
       } else {
-        await api.post('/api/admin/server-providers',
-          { provider: selected, api_key: value, verification_model: model.trim() })
         setTested(true)
-        resetProviderCatalogCache()
-        await refreshProviders()
         setNotice('Provider verified — add it to finish.')
       }
     } catch (err) {
@@ -112,38 +125,38 @@ export function ServerProvidersCard() {
     setNotice('Server provider added.')
   }
 
-  async function requestRemove(providerId: string) {
+  // Confirm-first: build the warning from the loaded list (the backend DELETE
+  // removes immediately and only reports what it removed).
+  function requestRemove(providerId: string) {
     if (busy) return
-    setBusy(providerId)
-    setError('')
-    setNotice('')
-    try {
-      const result = await api.delete<{ warning?: RemoveWarning }>(
-        `/api/admin/server-providers/${encodeURIComponent(providerId)}`)
-      const warning = result?.warning
-      if (warning && (warning.models?.length || warning.free?.length)) {
-        // Server withholds removal while models are affected — confirm first.
-        setRemoveTarget({ provider: providerId, warning })
-      } else {
-        await afterRemoved(providerId)
-      }
-    } catch {
-      setError('Could not remove provider')
-    } finally {
-      setBusy(null)
-    }
+    const entry = listed.find((item) => item.provider === providerId)
+    setRemoveTarget({
+      provider: providerId,
+      warning: {
+        models: (entry?.models ?? []).filter((m) => m.included).map((m) => m.id),
+        free: (entry?.models ?? []).filter((m) => m.free).map((m) => m.id),
+      },
+    })
   }
 
   async function confirmRemove() {
     if (!removeTarget || busy) return
     const providerId = removeTarget.provider
     setBusy(providerId)
+    setError('')
+    setNotice('')
     try {
-      await api.delete(`/api/admin/server-providers/${encodeURIComponent(providerId)}`, { confirm: true })
+      await api.delete(`/api/admin/server-providers/${encodeURIComponent(providerId)}`)
       await afterRemoved(providerId)
       setRemoveTarget(null)
-    } catch {
-      setError('Could not remove provider')
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        // Already deleted elsewhere — treat as removed.
+        await afterRemoved(providerId)
+        setRemoveTarget(null)
+      } else {
+        setError('Could not remove provider')
+      }
     } finally {
       setBusy(null)
     }
@@ -169,8 +182,8 @@ export function ServerProvidersCard() {
         </div>
         {error && <p role="alert" className="text-xs text-signal-red">{error}</p>}
         {notice && <p role="status" className="text-xs text-signal-green">{notice}</p>}
-        {providers?.length === 0 && <p className="text-sm text-text-tertiary">No server providers configured.</p>}
-        {providers && listed.length > 0 && (
+        {providers !== null && listed.length === 0 && <p className="text-sm text-text-tertiary">No server providers configured.</p>}
+        {listed.length > 0 && (
           <ul aria-label="Configured server providers" className="divide-y divide-border-muted border-t border-border-muted">
             {listed.map((item) => (
               <li key={item.provider} className="space-y-2 py-3">
