@@ -7282,12 +7282,15 @@ async def preview_jira_bug(
 
 
 def _has_jira_credentials(settings: Settings) -> bool:
-    """Return True if the given settings contain usable Jira credentials."""
-    sa_token = settings.jira_oauth_access_token
+    """True when an explicitly selected Jira auth method is fully configured.
+
+    Mirrors the resolver: with ``jira_auth_mode`` set, any non-empty token
+    for the selected method is usable (no value sniffing), and an unset
+    mode disables Jira entirely regardless of stored credentials.
+    """
     return bool(
-        (settings.jira_api_token and settings.jira_api_token.get_secret_value())
-        or (settings.jira_pat and settings.jira_pat.get_secret_value())
-        or (sa_token and sa_token.get_secret_value().startswith("ATST"))
+        normalize_jira_auth_mode(settings.jira_auth_mode)
+        and not jira_method_missing_fields(settings)
     )
 
 
@@ -11954,21 +11957,13 @@ async def get_admin_settings(
 
             item["options"] = await server_capable_providers()
 
-    # Authoritative selected Jira auth mode (nonsecret) — the frontend must
-    # not infer it from possibly-masked credential values. With no
-    # auto-detection the resolved mode IS the selected mode, so this now
-    # mirrors the normalized `jira_auth_mode` (empty when unset = Jira
-    # disabled). Distinct from the user-selected `jira_auth_mode` setting
-    # item. Also the source of the internal jira_verified_method row (last
-    # method whose test SUCCEEDED, "" when never verified; recorded only
-    # for successful tests of a SELECTED method; not user-editable).
+    # Internal jira_verified_method row on the jira_url item (last method
+    # whose test SUCCEEDED, "" when never verified; recorded only for
+    # successful tests of a SELECTED method; not user-editable).
     db_overrides = await storage.get_server_settings()
     verified_method = db_overrides.get("jira_verified_method", {}).get("value", "")
     for item in metadata:
         if item["key"] == "jira_url":
-            item["jira_resolved_mode"] = normalize_jira_auth_mode(
-                get_settings().jira_auth_mode
-            )
             item["jira_verified_method"] = verified_method
 
     # Update source and value for DB-overridden settings

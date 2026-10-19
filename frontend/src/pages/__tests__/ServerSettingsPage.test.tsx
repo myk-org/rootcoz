@@ -39,7 +39,6 @@ interface TestSetting {
   updated_by: string
   updated_at: string
   options?: string[]
-  jira_resolved_mode?: string
   jira_verified_method?: string
 }
 

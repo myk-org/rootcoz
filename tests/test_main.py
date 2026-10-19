@@ -8177,31 +8177,50 @@ class TestReAnalyzeFailure:
 
 
 class TestHasJiraCredentials:
-    """Tests for _has_jira_credentials SA awareness."""
+    """_has_jira_credentials is driven by the selected auth mode."""
 
-    def test_sa_token_counts_as_credentials(self):
+    def test_oauth_mode_non_atst_token_counts(self):
+        """Oauth mode with any non-empty token (not just ATST) has credentials."""
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="oauth",
+            jira_oauth_access_token=SecretStr("not-atst"),
+        )
+        assert _has_jira_credentials(settings) is True
+
+    def test_unset_mode_false_even_with_credentials(self):
+        """No selected mode → Jira disabled → no credentials, ATST or not."""
         from rootcoz.main import _has_jira_credentials
 
         settings = Settings(
             jira_url="https://jira.example.com",
             jira_oauth_access_token=SecretStr("ATST-token"),
-        )
-        assert _has_jira_credentials(settings) is True
-
-    def test_non_atst_sa_token_does_not_count(self):
-        from rootcoz.main import _has_jira_credentials
-
-        settings = Settings(
-            jira_url="https://jira.example.com",
-            jira_oauth_access_token=SecretStr("not-atst"),
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("token"),
+            jira_pat=SecretStr("pat"),
         )
         assert _has_jira_credentials(settings) is False
 
-    def test_api_token_still_counts(self):
+    def test_selected_mode_with_missing_field_false(self):
+        """A selected mode with an unconfigured required field → False."""
         from rootcoz.main import _has_jira_credentials
 
         settings = Settings(
             jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+        )
+        assert _has_jira_credentials(settings) is False
+
+    def test_api_token_with_selected_mode_counts(self):
+        from rootcoz.main import _has_jira_credentials
+
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
             jira_api_token=SecretStr("token"),
         )
         assert _has_jira_credentials(settings) is True
@@ -8773,56 +8792,6 @@ class TestAdminSettingsEndpoints:
             s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
         )
         assert (item["value"], item["source"]) == ("3", "db")
-
-    def test_jira_url_metadata_carries_resolved_mode(self, test_client) -> None:
-        """The jira_url item mirrors the selected auth mode (empty when unset)."""
-        cases = [
-            (Settings(jira_url=""), ""),
-            (
-                Settings(
-                    jira_url="https://x.atlassian.net",
-                    jira_auth_mode="basic",
-                    jira_email="user@example.com",
-                    jira_api_token=SecretStr("not-a-real-token"),
-                ),
-                "basic",
-            ),
-            (
-                Settings(
-                    jira_url="https://jira.example.com",
-                    jira_auth_mode="pat",
-                    jira_pat=SecretStr("not-a-real-token"),
-                ),
-                "pat",
-            ),
-            (
-                Settings(
-                    jira_url="https://jira.example.com",
-                    jira_auth_mode="oauth",
-                    jira_oauth_access_token=SecretStr("ATST-not-a-real-token"),
-                ),
-                "oauth",
-            ),
-            # No auto-detection: full credentials without a selected mode → empty
-            (
-                Settings(
-                    jira_url="https://x.atlassian.net",
-                    jira_email="user@example.com",
-                    jira_api_token=SecretStr("not-a-real-token"),
-                ),
-                "",
-            ),
-        ]
-        for settings, expected in cases:
-            with patch("rootcoz.main.get_settings", return_value=settings):
-                response = test_client.get("/api/admin/settings")
-            assert response.status_code == 200
-            item = next(s for s in response.json() if s["key"] == "jira_url")
-            assert item.get("jira_resolved_mode") == expected, (
-                f"{settings.jira_url!r} should resolve to {expected!r}"
-            )
-            # The selected-method setting must not collide with the derived key
-            assert "jira_auth_mode" not in item
 
     def test_jira_auth_mode_env_var_ignored(self, test_client, monkeypatch) -> None:
         """A JIRA_AUTH_MODE env var has no effect — Server Settings only."""

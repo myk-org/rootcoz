@@ -72,7 +72,6 @@ interface ServerSetting {
   has_env_var?: boolean
   env_var_value?: string
   options?: string[]
-  jira_resolved_mode?: string
   jira_verified_method?: string
 }
 
