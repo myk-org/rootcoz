@@ -2574,15 +2574,40 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
 
     # Request-supplied Jira credentials pin the auth mode to their method
     # (same mapping as user-credential pinning) so the server-selected
-    # jira_auth_mode cannot silently override or discard them.
+    # jira_auth_mode cannot silently override or discard them. The mode is
+    # derived from REQUEST-supplied fields only — a request token without
+    # a request email is a bearer/PAT credential and must never silently
+    # pair with the inherited server email into basic auth.
     request_jira_mode = _jira_auth_mode_for_credentials(
         oauth_token=body.jira_oauth_access_token,
         api_token=body.jira_api_token,
         pat=body.jira_pat,
-        email=body.jira_email or settings.jira_email,
+        email=body.jira_email,
     )
     if request_jira_mode:
         overrides["jira_auth_mode"] = request_jira_mode
+        if request_jira_mode == "pat":
+            if (
+                body.jira_api_token
+                and body.jira_api_token.strip()
+                and not (body.jira_pat and body.jira_pat.strip())
+            ):
+                # A bare request API token (no email) is a bearer PAT, and
+                # PAT resolution reads only jira_pat — route the token there
+                # or it would never be sent (an inherited server PAT would
+                # win instead). Mirrors the routing in
+                # _build_effective_jira_settings.
+                overrides["jira_pat"] = SecretStr(body.jira_api_token.strip())
+                overrides["jira_api_token"] = None
+            if not (body.jira_email and body.jira_email.strip()):
+                # Never pair a request bearer credential with the inherited
+                # server email (same clearing semantics as
+                # _build_effective_jira_settings).
+                overrides["jira_email"] = None
+        elif request_jira_mode == "basic":
+            # The request email+token pair is unambiguous — drop an inherited
+            # server PAT so only the request credentials can be used.
+            overrides["jira_pat"] = None
 
     # Jenkins connection + polling overrides (AnalyzeRequest and
     # UnifiedAnalyzeRequest both inherit _JenkinsParamsMixin).
@@ -12361,6 +12386,30 @@ async def _test_jenkins_connection(settings: Settings) -> dict[str, Any]:
     return _test_result(True, message, authenticated_user=user)
 
 
+def _jira_settings_fingerprint(settings: Settings) -> str:
+    """Cheap fingerprint of the Jira settings a connection test exercises.
+
+    Covers the selected auth mode, the Jira URL, and that method's
+    credential fields (the same fields ``jira_method_missing_fields``
+    checks). Values are SHA-256 hashed so the fingerprint can be compared
+    but never decoded or logged — no secrets in comparisons or logs.
+    """
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+
+    def _secret(value: SecretStr | None) -> str:
+        return value.get_secret_value() if value else ""
+
+    parts = [mode, (settings.jira_url or "").strip()]
+    if mode == "oauth":
+        parts.append(_secret(settings.jira_oauth_access_token))
+    elif mode == "basic":
+        parts.append((settings.jira_email or "").strip())
+        parts.append(_secret(settings.jira_api_token))
+    elif mode == "pat":
+        parts.append(_secret(settings.jira_pat))
+    return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
+
+
 async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     """Current-user ping against the effective Jira connection resolution."""
     if not settings.jira_url:
@@ -12378,6 +12427,10 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
             f"but missing: {', '.join(missing)}",
         )
     connection = resolve_jira_connection(settings)
+    # Snapshot of the Jira settings this test exercises — compared after
+    # the network call so a mid-flight admin update cannot leave a
+    # verification record for the untested configuration.
+    tested_fingerprint = _jira_settings_fingerprint(settings)
     connection = await complete_jira_connection(connection, settings.jira_ssl_verify)
     if not connection.api_base:
         return _test_result(
@@ -12408,6 +12461,25 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     # the tested (selected) method as an internal DB row. Not cleared on
     # failure: the record reflects the last success, not the latest attempt.
     # Written only on change so repeated tests don't flood settings history.
+    # But not when the Jira settings changed while the test was in flight:
+    # update_admin_settings already deleted the record for the previous
+    # setup, and this test proved the OLD credentials — re-writing the
+    # marker would verify the untested new configuration.
+    if _jira_settings_fingerprint(get_settings()) != tested_fingerprint:
+        logger.info(
+            "Jira settings changed during the connection test — "
+            "verified method not recorded"
+        )
+        return _test_result(
+            True,
+            "Jira connection successful",
+            auth_mode=auth_mode,
+            user=user,
+            note=(
+                "Jira settings changed during the test — verification not "
+                "recorded; re-run the test for the current settings"
+            ),
+        )
     try:
         existing = await storage.get_server_setting("jira_verified_method")
         if existing is None or existing.get("value") != auth_mode:

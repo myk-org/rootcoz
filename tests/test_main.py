@@ -4678,10 +4678,20 @@ class TestMergeSettingsJiraModePinning:
         # Values land on the request credential's fields; a request oauth
         # token is not wiped by the server-mode clearing semantics.
         if "jira_api_token" in body_fields:
-            assert merged.jira_api_token
-            assert merged.jira_api_token.get_secret_value() == "req-tok"
             if expected_mode == "basic":
+                assert merged.jira_api_token
+                assert merged.jira_api_token.get_secret_value() == "req-tok"
                 assert merged.jira_oauth_access_token is None
+                # The request basic-auth pair is unambiguous — an inherited
+                # server PAT must not survive alongside it.
+                assert merged.jira_pat is None
+            else:
+                # No request email: the token is a bearer PAT — routed to
+                # jira_pat (the only field PAT resolution reads) so it is
+                # actually sent, not silently dropped for the server PAT.
+                assert merged.jira_api_token is None
+                assert merged.jira_pat
+                assert merged.jira_pat.get_secret_value() == "req-tok"
         elif "jira_pat" in body_fields:
             assert merged.jira_pat
             assert merged.jira_pat.get_secret_value() == "req-pat"
@@ -4701,8 +4711,44 @@ class TestMergeSettingsJiraModePinning:
         merged = _merge_settings(AnalyzeRequest(job_name="j", build_number=1), settings)
         assert merged.jira_auth_mode == (server_mode or None)
 
-    def test_request_api_token_pairs_with_server_email(self, mock_settings) -> None:
-        """A request api token pairs with the server email into basic mode."""
+    @pytest.mark.parametrize("server_pat", [None, "server-pat"])
+    def test_request_api_token_without_email_routed_to_pat(
+        self, mock_settings, server_pat: str | None
+    ) -> None:
+        """A request API token without an email is a bearer PAT and is sent.
+
+        PAT resolution reads only jira_pat — without routing, the request
+        token was never sent and an inherited server PAT (or nothing) was
+        used instead. With and without a configured server PAT.
+        """
+        from rootcoz.jira import resolve_jira_connection
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        settings = self._server_settings(jira_auth_mode="basic", jira_pat=server_pat)
+        merged = _merge_settings(
+            AnalyzeRequest(job_name="j", build_number=1, jira_api_token="req-tok"),
+            settings,
+        )
+        assert merged.jira_auth_mode == "pat"
+        assert merged.jira_api_token is None
+        assert merged.jira_pat
+        assert merged.jira_pat.get_secret_value() == "req-tok"
+
+        connection = resolve_jira_connection(merged)
+        assert connection.mode == "server"
+        assert connection.headers["Authorization"] == "Bearer req-tok"
+
+    def test_request_api_token_without_email_never_pairs_server_email(
+        self, mock_settings
+    ) -> None:
+        """A request token without a request email is never basic-with-server-email.
+
+        The request credential mode is derived from REQUEST-supplied fields
+        only — the inherited server email must not silently turn the token
+        into a basic-auth pair under the server's identity.
+        """
+        from rootcoz.jira import resolve_jira_connection
         from rootcoz.main import _merge_settings
         from rootcoz.models import AnalyzeRequest
 
@@ -4713,8 +4759,47 @@ class TestMergeSettingsJiraModePinning:
             AnalyzeRequest(job_name="j", build_number=1, jira_api_token="req-tok"),
             settings,
         )
+        assert merged.jira_auth_mode == "pat"
+        assert merged.jira_pat
+        assert merged.jira_pat.get_secret_value() == "req-tok"
+        # The server email is NOT paired with the request token.
+        assert not merged.jira_email
+
+        connection = resolve_jira_connection(merged)
+        assert connection.mode == "server"
+        assert connection.auth is None
+        assert connection.headers["Authorization"] == "Bearer req-tok"
+
+    def test_request_api_token_with_request_email_is_basic(self, mock_settings) -> None:
+        """A request token + request email is basic under the REQUEST email."""
+        from rootcoz.jira import resolve_jira_connection
+        from rootcoz.main import _merge_settings
+        from rootcoz.models import AnalyzeRequest
+
+        settings = self._server_settings(
+            jira_auth_mode="pat",
+            jira_email="server@example.com",
+            jira_pat="server-pat",
+        )
+        merged = _merge_settings(
+            AnalyzeRequest(
+                job_name="j",
+                build_number=1,
+                jira_email="req@example.com",
+                jira_api_token="req-tok",
+            ),
+            settings,
+        )
         assert merged.jira_auth_mode == "basic"
-        assert merged.jira_email == "server@example.com"
+        assert merged.jira_email == "req@example.com"
+        assert merged.jira_api_token
+        assert merged.jira_api_token.get_secret_value() == "req-tok"
+        # The inherited server PAT is cleared so the pair is unambiguous.
+        assert merged.jira_pat is None
+
+        connection = resolve_jira_connection(merged)
+        assert connection.mode == "cloud"
+        assert connection.auth == ("req@example.com", "req-tok")
 
 
 class TestReconstructFromParams:
@@ -9435,6 +9520,72 @@ class TestIntegrationConnectionEndpoints:
             assert test_client.post("/api/admin/settings/test/jira").json()["ok"]
         rows = await storage.get_server_settings_history(key="jira_verified_method")
         assert len(rows) == 1
+
+    def test_jira_settings_changed_midflight_skips_verified_write(
+        self, test_client
+    ) -> None:
+        """A stale in-flight test must not re-write verification after a creds change.
+
+        The test snapshots the settings before the network call; if an
+        admin updates the Jira credentials while it is in flight (which
+        deletes the verification record), the completing old test must
+        skip the write instead of verifying the untested configuration.
+        """
+        snapshot = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("old-token"),
+        )
+        changed = Settings(
+            jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
+            jira_email="other@example.com",
+            jira_api_token=SecretStr("new-token"),
+        )
+        # The admin update lands exactly when the network response
+        # arrives: every get_settings() call before that returns the
+        # tested snapshot, every call after returns the updated settings.
+        state = {"updated": False}
+
+        def _get_response(*_args: Any, **_kwargs: Any) -> httpx.Response:
+            state["updated"] = True
+            return self._jira_myself_response()
+
+        def _settings() -> Settings:
+            return changed if state["updated"] else snapshot
+
+        # The canned-response helper only accepts lists; wire the callable
+        # side_effect (which flips the settings on delivery) manually.
+        patcher, mock_client_cls = self._mock_async_client(self._jira_myself_response())
+        mock_client_cls.return_value.__aenter__.return_value.get.side_effect = (
+            _get_response
+        )
+        with (
+            patcher,
+            patch("rootcoz.main.get_settings", side_effect=_settings),
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["auth_mode"] == "basic"
+        assert "changed during the test" in data["details"]["note"]
+        # No verification record for the untested new credentials.
+        item = _settings_item(test_client, "jira_url")
+        assert item["jira_verified_method"] == ""
+
+        # The same test with UNCHANGED settings still records the marker
+        # (the fingerprint re-check must not break the normal path).
+        with (
+            patch("rootcoz.main.get_settings", return_value=snapshot),
+            self._mock_async_client(self._jira_myself_response())[0] as _,
+        ):
+            response = test_client.post("/api/admin/settings/test/jira")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+        item = _settings_item(test_client, "jira_url")
+        assert item["jira_verified_method"] == "basic"
 
     def test_jira_credential_update_clears_verified_method(self, test_client) -> None:
         """Updating Jira credentials/mode invalidates the verified record."""

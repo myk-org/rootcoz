@@ -171,7 +171,7 @@ type PageAction =
   | { type: 'CANCEL_EDIT' }
   | { type: 'SET_EDIT_VALUE'; value: string }
   | { type: 'SAVE_START' }
-  | { type: 'SAVE_SUCCESS' }
+  | { type: 'SAVE_SUCCESS'; keepEditor?: boolean }
   | { type: 'SAVE_ERROR'; error: string }
   | { type: 'RESET_START'; key: string }
   | { type: 'RESET_DONE' }
@@ -210,6 +210,10 @@ function reducer(state: PageState, action: PageAction): PageState {
     case 'SAVE_START':
       return { ...state, saving: true, saveError: null }
     case 'SAVE_SUCCESS':
+      // keepEditor: a Jira method switch saves auth mode without touching the
+      // field being edited — an editor on a field still visible under the new
+      // method keeps its draft across the switch (#346).
+      if (action.keepEditor) return { ...state, saving: false }
       return { ...state, saving: false, editingKey: null, editValue: '' }
     case 'SAVE_ERROR':
       return { ...state, saving: false, saveError: action.error }
@@ -487,16 +491,17 @@ export function ServerSettingsPage() {
   // already-rendered content mounted so the scroll position is preserved).
   // Generation guard (same pattern as testGenerationRef): a stale response —
   // e.g. the Jira-test refetch resolving after a method-switch refetch —
-  // must not overwrite newer settings (#346).
+  // must not overwrite newer settings (#346). A superseded response also
+  // returns null so no caller state is fed from it — only the dispatch is
+  // dropped, the stale payload never reaches a caller.
   const settingsGenerationRef = useRef(0)
-  const fetchSettings = useCallback(async (silent = false) => {
+  const fetchSettings = useCallback(async (silent = false): Promise<ServerSetting[] | null> => {
     const generation = ++settingsGenerationRef.current
     if (!silent) dispatch({ type: 'FETCH_START' })
     try {
       const data = await api.get<ServerSetting[]>('/api/admin/settings')
-      if (generation === settingsGenerationRef.current) {
-        dispatch({ type: 'FETCH_SUCCESS', settings: data })
-      }
+      if (generation !== settingsGenerationRef.current) return null // superseded
+      dispatch({ type: 'FETCH_SUCCESS', settings: data })
       return data
     } catch (err) {
       if (generation === settingsGenerationRef.current) {
@@ -505,10 +510,14 @@ export function ServerSettingsPage() {
           error: err instanceof Error ? err.message : 'Failed to load settings',
         })
       }
+      return null
     }
   }, [])
 
   const fetchSettingsRef = useLatestRef(fetchSettings)
+  // Latest editing key for async flows (Jira method switch): the closure state
+  // captured at call time can be stale once the awaited save resolves (#346).
+  const editingKeyRef = useLatestRef(state.editingKey)
 
   useEffect(() => {
     fetchSettings()
@@ -526,7 +535,13 @@ export function ServerSettingsPage() {
   useSSE('settings', settingsEvents)
 
   // ---- Shared save helper (returns null on success, the error message on failure) ----
-  async function saveSettings(updates: Record<string, string>): Promise<string | null> {
+  // opts.keepEditor: the Jira method switch uses this so the SAVE_SUCCESS it
+  // triggers does not close an editor on a field still visible under the new
+  // method (#346).
+  async function saveSettings(
+    updates: Record<string, string>,
+    opts?: { keepEditor?: boolean },
+  ): Promise<string | null> {
     dispatch({ type: 'SAVE_START' })
     try {
       await api.put('/api/admin/settings', { settings: updates })
@@ -535,7 +550,7 @@ export function ServerSettingsPage() {
       await fetchSettings(true)
       // A saved key's cached reveal is stale — clear it so the fresh masked value shows (#343).
       dispatch({ type: 'CLEAR_REVEALED', keys: Object.keys(updates) })
-      dispatch({ type: 'SAVE_SUCCESS' })
+      dispatch({ type: 'SAVE_SUCCESS', keepEditor: opts?.keepEditor })
       return null
     } catch (err) {
       let msg = 'Failed to save'
@@ -565,10 +580,14 @@ export function ServerSettingsPage() {
       const fresh = await fetchSettings(true)
       dispatch({ type: 'CLEAR_REVEALED', keys: [key] })
       // A reset while the provider editor is open must not leave the pre-reset
-      // checkbox selection saveable over the fresh value (#339/#340).
+      // checkbox selection saveable over the fresh value (#339/#340). A
+      // superseded refetch returns null — repopulating from it would restore
+      // older selections, so skip it; the editor still closes (#346).
       if (key === 'active_server_providers') {
-        const setting = fresh?.find(s => s.key === key)
-        setServerProvidersChecked(parseActiveServerProviders(setting?.value ?? '', setting?.options ?? []))
+        if (fresh) {
+          const setting = fresh.find(s => s.key === key)
+          setServerProvidersChecked(parseActiveServerProviders(setting?.value ?? '', setting?.options ?? []))
+        }
         setServerProvidersEditing(false)
       }
     } catch {
@@ -791,11 +810,22 @@ export function ServerSettingsPage() {
   async function applyJiraMode(method: JiraMethod | null) {
     // Cancel any open edit on a field the new method hides — otherwise the
     // Jira test button stays disabled with no visible editor to save or cancel.
-    if (state.editingKey && (method === null || hiddenJiraFieldsFor(method).has(state.editingKey))) {
-      dispatch({ type: 'CANCEL_EDIT' })
+    // Re-checked after the save: keepEditor preserves the draft of a
+    // still-visible field across the switch, but an editor opened mid-save on
+    // a field the new method hides must still be cancelled (#346).
+    const cancelHiddenJiraEdit = () => {
+      const key = editingKeyRef.current
+      if (key && (method === null || hiddenJiraFieldsFor(method).has(key))) {
+        dispatch({ type: 'CANCEL_EDIT' })
+      }
     }
-    const error = await saveSettings({ jira_auth_mode: method ?? '' })
+    cancelHiddenJiraEdit()
+    // keepEditor: a switch must not discard the draft of a field that stays
+    // visible under the new method (e.g. jira_url) — only fields the new
+    // method hides are cancelled above (#346).
+    const error = await saveSettings({ jira_auth_mode: method ?? '' }, { keepEditor: true })
     setJiraModeError(error)
+    if (!error) cancelHiddenJiraEdit()
     // The admin must land on a WORKING method: after a successful switch to a
     // real method, auto-run the existing Jira test for it. Disabling Jira never
     // tests; the result is surfaced, the switch itself never reverts (#346).

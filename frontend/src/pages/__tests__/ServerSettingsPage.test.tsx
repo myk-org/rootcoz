@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '@/lib/api'
+import { useSSE } from '@/lib/useSSE'
 import { ServerSettingsPage } from '../ServerSettingsPage'
 
 vi.mock('@/lib/api', () => ({
@@ -807,6 +808,53 @@ describe('ServerSettingsPage active server providers', () => {
       }),
     )
   })
+
+  it('does not repopulate provider checkboxes from a superseded reset refetch', async () => {
+    const settings = baseSettings()
+    const providers = settings.find((s) => s.key === 'active_server_providers')!
+    providers.value = 'gemini'
+    providers.source = 'db'
+    get.mockResolvedValueOnce(settings as never) // initial load: restricted to gemini
+    const del = vi.mocked(api.delete)
+    del.mockResolvedValue({} as never)
+
+    await openAiTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
+
+    // The reset's silent refetch stays pending; when it resolves it carries an
+    // OLDER restriction than either the pre-reset or the post-reset state.
+    let resolveStale!: (value: TestSetting[]) => void
+    get.mockImplementationOnce(() => new Promise<TestSetting[]>((r) => { resolveStale = r }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+
+    // A newer fetch (settings-changed SSE) supersedes it and resolves with the
+    // post-reset state: no restriction, all providers active.
+    get.mockResolvedValueOnce(baseSettings() as never)
+    const events = vi.mocked(useSSE).mock.calls.find(([stream]) => stream === 'settings')![1] as Record<string, () => void>
+    events['settings-changed']()
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(3))
+
+    // The stale response arrives LAST — handleReset must not repopulate the
+    // provider checkboxes from it; the editor still closes (#346).
+    const stale = baseSettings()
+    stale.find((s) => s.key === 'active_server_providers')!.value = 'openai'
+    resolveStale(stale)
+
+    // Reset finished: editor closed, row shows the fresh (post-reset) state
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument(),
+    )
+    expect(screen.getByText('All server providers are active')).toBeInTheDocument()
+
+    // Reopening seeds from the rendered fresh value — never the stale
+    // 'openai'-only restriction the superseded response carried.
+    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    for (const provider of ['gemini', 'openai', 'vertex-claude']) {
+      expect(screen.getByRole('checkbox', { name: provider })).toBeChecked()
+    }
+  })
 })
 
 describe('ServerSettingsPage save refetch gating', () => {
@@ -1034,5 +1082,31 @@ describe('ServerSettingsPage Jira field visibility', () => {
     expect(screen.queryByLabelText('Edit JIRA_EMAIL')).not.toBeInTheDocument()
     expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
     expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+  })
+
+  it('keeps an open editor and its draft when switching to a method that still shows the field', async () => {
+    mockJiraModeSettings('basic')
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+    await screen.findByText('JIRA_EMAIL')
+
+    // Draft an edit on a method-independent field (visible under every method)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_URL' }))
+    fireEvent.change(screen.getByLabelText('Edit JIRA_URL'), {
+      target: { value: 'https://draft.example.com' },
+    })
+
+    // Switch basic → PAT (verified method: confirmation dialog, then save)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+
+    // jira_url stays visible under PAT: the editor survives the switch with its draft
+    expect(screen.getByLabelText('Edit JIRA_URL')).toHaveValue('https://draft.example.com')
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
   })
 })
