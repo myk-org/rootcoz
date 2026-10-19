@@ -150,38 +150,9 @@ _JiraUrlOpt = Annotated[
         help="Jira instance URL.",
     ),
 ]
-_JiraEmailOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-email",
-        envvar="JIRA_EMAIL",
-        help="Jira Cloud email.",
-    ),
-]
-_JiraApiTokenOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-api-token",
-        envvar="JIRA_API_TOKEN",
-        help="Jira Cloud API token.",
-    ),
-]
-_JiraPatOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-pat",
-        envvar="JIRA_PAT",
-        help="Jira Server/DC personal access token.",
-    ),
-]
-_JiraSaTokenOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-sa-token",
-        envvar="JIRA_OAUTH_ACCESS_TOKEN",
-        help="Atlassian service account (ATST) token — takes precedence over the other Jira credentials.",
-    ),
-]
+# NOTE: no per-request Jira credential options here — Jira credentials are
+# Server Settings only. Per-user tokens for bug creation/listing commands
+# use their own --jira-token/--jira-email/--jira-sa-token options.
 _AtlassianCloudIdOpt = Annotated[
     str,
     typer.Option(
@@ -1268,10 +1239,6 @@ def _apply_common_config_defaults(
         "tests_repo_url": cfg.tests_repo_url,
         "tests_repo_token": cfg.tests_repo_token,
         "jira_url": cfg.jira_url,
-        "jira_email": cfg.jira_email,
-        "jira_api_token": cfg.jira_api_token,
-        "jira_pat": cfg.jira_pat,
-        "jira_oauth_access_token": cfg.jira_oauth_access_token,
         "atlassian_oauth_cloud_id": cfg.atlassian_oauth_cloud_id,
         "jira_site_url": cfg.jira_site_url,
         "jira_project_key": cfg.jira_project_key,
@@ -1518,10 +1485,6 @@ def analyze(
     tests_repo_url: _TestsRepoUrlOpt = "",
     tests_repo_token: _TestsRepoTokenOpt = "",
     jira_url: _JiraUrlOpt = "",
-    jira_email: _JiraEmailOpt = "",
-    jira_api_token: _JiraApiTokenOpt = "",
-    jira_pat: _JiraPatOpt = "",
-    jira_sa_token: _JiraSaTokenOpt = "",
     atlassian_oauth_cloud_id: _AtlassianCloudIdOpt = "",
     jira_site_url: _JiraSiteUrlOpt = "",
     jira_project_key: _JiraProjectKeyOpt = "",
@@ -1667,10 +1630,6 @@ def analyze(
             "tests_repo_url": tests_repo_url,
             "tests_repo_token": tests_repo_token,
             "jira_url": jira_url,
-            "jira_email": jira_email,
-            "jira_api_token": jira_api_token,
-            "jira_pat": jira_pat,
-            "jira_oauth_access_token": jira_sa_token,
             "atlassian_oauth_cloud_id": atlassian_oauth_cloud_id,
             "jira_site_url": jira_site_url,
             "jira_project_key": jira_project_key,

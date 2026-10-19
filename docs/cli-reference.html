@@ -454,12 +454,8 @@
 <td>Tests repository and its token. <code>TESTS_REPO_URL</code>, <code>TESTS_REPO_TOKEN</code>.</td>
 </tr>
 <tr>
-<td><code>--jira-url</code>, <code>--jira-email</code>, <code>--jira-api-token</code>, <code>--jira-pat</code>, <code>--jira-project-key</code></td>
-<td>Jira connection. Each has a matching <code>JIRA_*</code> env var.</td>
-</tr>
-<tr>
-<td><code>--jira-sa-token</code></td>
-<td>Atlassian service account (ATST) token, a third connection method that takes precedence over the regular Jira credentials. <code>JIRA_SA_TOKEN</code> in config files; server-side SA setup uses <code>JIRA_OAUTH_ACCESS_TOKEN</code> (see <a href="configuration-reference.html">Configuration Reference</a>).</td>
+<td><code>--jira-url</code>, <code>--jira-project-key</code></td>
+<td>Jira connection. Each has a matching <code>JIRA_*</code> env var. Jira credentials are <strong>Server Settings only</strong> — the analyze command has no <code>--jira-email</code>, <code>--jira-api-token</code>, <code>--jira-pat</code>, or <code>--jira-sa-token</code> options; configure them server-side (see <a href="configuration-reference.html">Configuration Reference</a>).</td>
 </tr>
 <tr>
 <td><code>--jira-ssl-verify</code> / <code>--no-jira-ssl-verify</code>, <code>--jira-max-results</code></td>

@@ -202,25 +202,6 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="Jira instance URL (overrides JIRA_URL env var)",
     )
-    jira_email: str | None = Field(
-        default=None,
-        description="Jira Cloud email (overrides JIRA_EMAIL env var)",
-    )
-    jira_api_token: str | None = Field(
-        default=None,
-        description="Jira Cloud API token (overrides JIRA_API_TOKEN env var)",
-        json_schema_extra={"format": "password"},
-    )
-    jira_pat: str | None = Field(
-        default=None,
-        description="Jira Server/DC personal access token (overrides JIRA_PAT env var)",
-        json_schema_extra={"format": "password"},
-    )
-    jira_oauth_access_token: str | None = Field(
-        default=None,
-        description="Atlassian service account (ATST) token (overrides JIRA_OAUTH_ACCESS_TOKEN env var)",
-        json_schema_extra={"format": "password"},
-    )
     atlassian_oauth_cloud_id: str | None = Field(
         default=None,
         description="Atlassian cloud ID for the service account connection (overrides ATLASSIAN_OAUTH_CLOUD_ID env var)",

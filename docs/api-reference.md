@@ -114,7 +114,7 @@ The shared body accepts the server defaults as per-request overrides:
 | `peer_ai_configs`, `peer_analysis_max_rounds` | Multi-AI debate settings |
 | `additional_repos` | Extra repositories to clone for context |
 | `tests_repo_url`, `tests_repo_token` | Tests repository used for history and context |
-| `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`, `atlassian_oauth_cloud_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira` | Jira search during analysis |
+| `jira_url`, `atlassian_oauth_cloud_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira` | Jira search during analysis. Jira credentials (`jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`) are **Server Settings only** — analysis requests cannot carry them; the server-selected `jira_auth_mode` and its credentials always apply |
 | `github_token` | GitHub access for comment enrichment |
 | `raw_prompt`, `issue_prompt` | Additive prompt instructions |
 | `labels`, plus name and tag fields | Metadata for the job |

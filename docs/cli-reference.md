@@ -87,8 +87,7 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--jenkins-ssl-verify` / `--no-jenkins-ssl-verify`, `--jenkins-timeout`, `--jenkins-artifacts-max-size-mb` | Jenkins transport tuning. |
 | `--get-job-artifacts` / `--no-get-job-artifacts` | Download build artifacts for AI context. |
 | `--tests-repo-url`, `--tests-repo-token` | Tests repository and its token. `TESTS_REPO_URL`, `TESTS_REPO_TOKEN`. |
-| `--jira-url`, `--jira-email`, `--jira-api-token`, `--jira-pat`, `--jira-project-key` | Jira connection. Each has a matching `JIRA_*` env var. |
-| `--jira-sa-token` | Atlassian service account (ATST) token, a third connection method that takes precedence over the regular Jira credentials. `JIRA_SA_TOKEN` in config files; server-side SA setup uses `JIRA_OAUTH_ACCESS_TOKEN` (see [Configuration Reference](configuration-reference.html)). |
+| `--jira-url`, `--jira-project-key` | Jira connection. Each has a matching `JIRA_*` env var. Jira credentials are **Server Settings only** — the analyze command has no `--jira-email`, `--jira-api-token`, `--jira-pat`, or `--jira-sa-token` options; configure them server-side (see [Configuration Reference](configuration-reference.html)). |
 | `--jira-ssl-verify` / `--no-jira-ssl-verify`, `--jira-max-results` | Jira search tuning. |
 | `--github-token` | GitHub API token. `GITHUB_TOKEN`. |
 | `--ai-call-timeout` | AI timeout in minutes. |

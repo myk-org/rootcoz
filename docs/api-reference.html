@@ -545,8 +545,8 @@
 <td>Tests repository used for history and context</td>
 </tr>
 <tr>
-<td><code>jira_url</code>, <code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_access_token</code>, <code>atlassian_oauth_cloud_id</code>, <code>jira_site_url</code>, <code>jira_project_key</code>, <code>jira_ssl_verify</code>, <code>jira_max_results</code>, <code>enable_jira</code></td>
-<td>Jira search during analysis</td>
+<td><code>jira_url</code>, <code>atlassian_oauth_cloud_id</code>, <code>jira_site_url</code>, <code>jira_project_key</code>, <code>jira_ssl_verify</code>, <code>jira_max_results</code>, <code>enable_jira</code></td>
+<td>Jira search during analysis. Jira credentials (<code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_access_token</code>) are <strong>Server Settings only</strong> — analysis requests cannot carry them; the server-selected <code>jira_auth_mode</code> and its credentials always apply</td>
 </tr>
 <tr>
 <td><code>github_token</code></td>

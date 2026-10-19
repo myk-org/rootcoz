@@ -31,8 +31,6 @@ _TEST_SERVER = "http://test-server:8000"
 
 # Fake credential constants used throughout tests.
 _FAKE_JENKINS_PASSWORD = "cfg-jenkins-pw"  # pragma: allowlist secret
-_FAKE_JIRA_API_TOKEN = "cfg-jira-tok"
-_FAKE_JIRA_PAT = "cfg-jira-pat"
 _FAKE_GITHUB_TOKEN = "ghp_cfg_token"
 _FAKE_GITHUB_CLI_TOKEN = "ghp_tok"
 _FAKE_GITHUB_CLI_OVERRIDE = "ghp_cli_override"  # pragma: allowlist secret
@@ -1466,14 +1464,6 @@ class TestAnalyzeAllOptions:
                 "jira_url",
                 "https://jira.example.com",
             ),
-            ("--jira-email", "user@example.com", "jira_email", "user@example.com"),
-            (
-                "--jira-api-token",
-                _FAKE_JIRA_API_TOKEN,
-                "jira_api_token",
-                _FAKE_JIRA_API_TOKEN,
-            ),
-            ("--jira-pat", _FAKE_JIRA_PAT, "jira_pat", _FAKE_JIRA_PAT),
             ("--jira-project-key", "PROJ", "jira_project_key", "PROJ"),
             (
                 "--github-token",
@@ -1510,6 +1500,27 @@ class TestAnalyzeAllOptions:
         assert result.exit_code == 0
         kwargs = mock_client.analyze.call_args[1]
         assert kwargs[body_key] == expected_value
+
+    @pytest.mark.parametrize(
+        "removed_flag",
+        ["--jira-email", "--jira-api-token", "--jira-pat", "--jira-sa-token"],
+    )
+    def test_jira_credential_options_removed(self, mock_client, removed_flag):
+        """Jira credentials are Server Settings only — no analyze flags exist."""
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                removed_flag,
+                "some-value",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
     @pytest.mark.parametrize(
         "cli_flag,cli_value,body_key,expected_value",
@@ -2568,9 +2579,9 @@ class TestAnalyzeConfigDefaults:
         ai_call_timeout=20,
         max_concurrent_ai_calls=5,
         jira_url="https://jira.cfg.local",
+        # jira_email stays a valid config field (per-user fallback for bug
+        # creation) but must NOT be forwarded to the analyze payload.
         jira_email="cfg@example.com",
-        jira_api_token=_FAKE_JIRA_API_TOKEN,
-        jira_pat=_FAKE_JIRA_PAT,
         jira_project_key="CFG",
         jira_ssl_verify=False,
         jira_max_results=40,
@@ -2630,11 +2641,16 @@ class TestAnalyzeConfigDefaults:
         assert kwargs["ai_provider"] == "gemini"
         assert kwargs["ai_model"] == "2.5-pro"
         assert kwargs["jira_url"] == "https://jira.cfg.local"
-        assert kwargs["jira_email"] == "cfg@example.com"
-        assert kwargs["jira_api_token"] == _FAKE_JIRA_API_TOKEN
-        assert kwargs["jira_pat"] == _FAKE_JIRA_PAT
         assert kwargs["jira_project_key"] == "CFG"
         assert kwargs["github_token"] == _FAKE_GITHUB_TOKEN
+        # Jira credentials are Server Settings only — never request fields.
+        for absent in (
+            "jira_email",
+            "jira_api_token",
+            "jira_pat",
+            "jira_oauth_access_token",
+        ):
+            assert absent not in kwargs
 
     def test_config_integer_fields_used_as_defaults(self):
         """Integer config fields are sent when CLI flags are absent."""

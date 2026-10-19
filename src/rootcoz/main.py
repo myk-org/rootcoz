@@ -1127,9 +1127,6 @@ _ANALYSIS_SETTINGS_FIELDS = (
     "peer_analysis_max_rounds",
     "enable_jira",
     "jira_url",
-    "jira_email",
-    "jira_api_token",
-    "jira_pat",
     "jira_project_key",
     "jira_ssl_verify",
     "jira_max_results",
@@ -2526,9 +2523,11 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     #   ai_provider      - resolved + validated by _resolve_ai_config()
     #   ai_model         - resolved + validated by _resolve_ai_config()
     #   additional_repos - list vs str type mismatch; resolved by resolve_additional_repos()
+    # Jira credentials (jira_email/jira_api_token/jira_pat/
+    # jira_oauth_access_token) are intentionally absent: they are Server
+    # Settings only and can never be supplied per request.
     direct_fields = [
         "jira_url",
-        "jira_email",
         "jira_project_key",
         "jira_ssl_verify",
         "jira_max_results",
@@ -2552,62 +2551,10 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         overrides["peer_analysis_max_rounds"] = body.peer_analysis_max_rounds
 
     # SecretStr fields need wrapping
-    if body.jira_api_token is not None:
-        overrides["jira_api_token"] = SecretStr(body.jira_api_token)
-    if body.jira_pat is not None:
-        overrides["jira_pat"] = SecretStr(body.jira_pat)
-    if body.jira_oauth_access_token is not None:
-        overrides["jira_oauth_access_token"] = SecretStr(body.jira_oauth_access_token)
-    elif (body.jira_api_token and body.jira_api_token.strip()) or (
-        body.jira_pat and body.jira_pat.strip()
-    ):
-        # Request-level Jira credentials must not be silently bypassed by a
-        # server-configured ATST token (which would otherwise win). The auth
-        # method itself is a server-level selection (Server Settings DB row)
-        # — request credentials only apply under the selected method.
-        # Mirrors the clearing semantics of _build_effective_jira_settings.
-        overrides["jira_oauth_access_token"] = None
     if body.github_token is not None:
         overrides["github_token"] = SecretStr(body.github_token)
     if body.tests_repo_token is not None:
         overrides["tests_repo_token"] = SecretStr(body.tests_repo_token)
-
-    # Request-supplied Jira credentials pin the auth mode to their method
-    # (same mapping as user-credential pinning) so the server-selected
-    # jira_auth_mode cannot silently override or discard them. The mode is
-    # derived from REQUEST-supplied fields only — a request token without
-    # a request email is a bearer/PAT credential and must never silently
-    # pair with the inherited server email into basic auth.
-    request_jira_mode = _jira_auth_mode_for_credentials(
-        oauth_token=body.jira_oauth_access_token,
-        api_token=body.jira_api_token,
-        pat=body.jira_pat,
-        email=body.jira_email,
-    )
-    if request_jira_mode:
-        overrides["jira_auth_mode"] = request_jira_mode
-        if request_jira_mode == "pat":
-            if (
-                body.jira_api_token
-                and body.jira_api_token.strip()
-                and not (body.jira_pat and body.jira_pat.strip())
-            ):
-                # A bare request API token (no email) is a bearer PAT, and
-                # PAT resolution reads only jira_pat — route the token there
-                # or it would never be sent (an inherited server PAT would
-                # win instead). Mirrors the routing in
-                # _build_effective_jira_settings.
-                overrides["jira_pat"] = SecretStr(body.jira_api_token.strip())
-                overrides["jira_api_token"] = None
-            if not (body.jira_email and body.jira_email.strip()):
-                # Never pair a request bearer credential with the inherited
-                # server email (same clearing semantics as
-                # _build_effective_jira_settings).
-                overrides["jira_email"] = None
-        elif request_jira_mode == "basic":
-            # The request email+token pair is unambiguous — drop an inherited
-            # server PAT so only the request credentials can be used.
-            overrides["jira_pat"] = None
 
     # Jenkins connection + polling overrides (AnalyzeRequest and
     # UnifiedAnalyzeRequest both inherit _JenkinsParamsMixin).
@@ -3390,27 +3337,18 @@ def _apply_base_analysis_overrides(
     params["jira_url"] = (
         body.jira_url if body.jira_url is not None else (merged.jira_url or "")
     )
-    params["jira_email"] = (
-        body.jira_email if body.jira_email is not None else (merged.jira_email or "")
-    )
+    # Jira credentials are Server Settings only — persist the effective
+    # (server) values so stored request_params replay exactly what the
+    # analysis ran with; requests cannot supply or override them.
+    params["jira_email"] = merged.jira_email or ""
     params["jira_api_token"] = (
-        body.jira_api_token
-        if body.jira_api_token is not None
-        else (merged.jira_api_token.get_secret_value() if merged.jira_api_token else "")
+        merged.jira_api_token.get_secret_value() if merged.jira_api_token else ""
     )
-    params["jira_pat"] = (
-        body.jira_pat
-        if body.jira_pat is not None
-        else (merged.jira_pat.get_secret_value() if merged.jira_pat else "")
-    )
+    params["jira_pat"] = merged.jira_pat.get_secret_value() if merged.jira_pat else ""
     params["jira_oauth_access_token"] = (
-        body.jira_oauth_access_token
-        if body.jira_oauth_access_token is not None
-        else (
-            merged.jira_oauth_access_token.get_secret_value()
-            if merged.jira_oauth_access_token
-            else ""
-        )
+        merged.jira_oauth_access_token.get_secret_value()
+        if merged.jira_oauth_access_token
+        else ""
     )
     params["atlassian_oauth_cloud_id"] = (
         body.atlassian_oauth_cloud_id

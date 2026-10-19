@@ -4640,8 +4640,13 @@ class TestBuildRequestParams:
         assert params.get("labels") == ["Nightly", "CNV"]
 
 
-class TestMergeSettingsJiraModePinning:
-    """Request-supplied Jira credentials pin jira_auth_mode (PR #348 fix 3)."""
+class TestMergeSettingsJiraServerMode:
+    """Jira credentials are Server Settings only — requests cannot touch them.
+
+    Covers the removal of per-request Jira credentials: the request body has
+    no Jira credential fields, and the server-selected ``jira_auth_mode`` and
+    credentials always win.
+    """
 
     @staticmethod
     def _server_settings(**overrides: Any) -> Settings:
@@ -4652,52 +4657,6 @@ class TestMergeSettingsJiraModePinning:
         }
         base.update(overrides)
         return Settings(**base)
-
-    @pytest.mark.parametrize("server_mode", ["", "basic", "pat", "oauth"])
-    @pytest.mark.parametrize(
-        ("body_fields", "expected_mode"),
-        [
-            ({"jira_email": "req@example.com", "jira_api_token": "req-tok"}, "basic"),
-            ({"jira_api_token": "req-tok"}, "pat"),
-            ({"jira_pat": "req-pat"}, "pat"),
-            ({"jira_oauth_access_token": "req-oauth"}, "oauth"),
-        ],
-    )
-    def test_request_creds_pin_mode(
-        self, mock_settings, server_mode: str, body_fields: dict, expected_mode: str
-    ) -> None:
-        """Request credentials select their method over any server mode."""
-        from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
-
-        settings = self._server_settings(jira_auth_mode=server_mode)
-        body = AnalyzeRequest(job_name="j", build_number=1, **body_fields)
-        merged = _merge_settings(body, settings)
-        assert merged.jira_auth_mode == expected_mode
-
-        # Values land on the request credential's fields; a request oauth
-        # token is not wiped by the server-mode clearing semantics.
-        if "jira_api_token" in body_fields:
-            if expected_mode == "basic":
-                assert merged.jira_api_token
-                assert merged.jira_api_token.get_secret_value() == "req-tok"
-                assert merged.jira_oauth_access_token is None
-                # The request basic-auth pair is unambiguous — an inherited
-                # server PAT must not survive alongside it.
-                assert merged.jira_pat is None
-            else:
-                # No request email: the token is a bearer PAT — routed to
-                # jira_pat (the only field PAT resolution reads) so it is
-                # actually sent, not silently dropped for the server PAT.
-                assert merged.jira_api_token is None
-                assert merged.jira_pat
-                assert merged.jira_pat.get_secret_value() == "req-tok"
-        elif "jira_pat" in body_fields:
-            assert merged.jira_pat
-            assert merged.jira_pat.get_secret_value() == "req-pat"
-        else:
-            assert merged.jira_oauth_access_token
-            assert merged.jira_oauth_access_token.get_secret_value() == "req-oauth"
 
     @pytest.mark.parametrize("server_mode", ["", "basic", "pat", "oauth"])
     def test_no_request_creds_keep_server_mode(
@@ -4711,95 +4670,44 @@ class TestMergeSettingsJiraModePinning:
         merged = _merge_settings(AnalyzeRequest(job_name="j", build_number=1), settings)
         assert merged.jira_auth_mode == (server_mode or None)
 
-    @pytest.mark.parametrize("server_pat", [None, "server-pat"])
-    def test_request_api_token_without_email_routed_to_pat(
-        self, mock_settings, server_pat: str | None
+    @pytest.mark.parametrize(
+        "cred_field",
+        ["jira_email", "jira_api_token", "jira_pat", "jira_oauth_access_token"],
+    )
+    def test_request_models_have_no_jira_credential_fields(
+        self, cred_field: str
     ) -> None:
-        """A request API token without an email is a bearer PAT and is sent.
+        """The request models no longer define Jira credential fields."""
+        from rootcoz.models import AnalyzeRequest, UnifiedAnalyzeRequest
 
-        PAT resolution reads only jira_pat — without routing, the request
-        token was never sent and an inherited server PAT (or nothing) was
-        used instead. With and without a configured server PAT.
-        """
-        from rootcoz.jira import resolve_jira_connection
-        from rootcoz.main import _merge_settings
+        for model in (AnalyzeRequest, UnifiedAnalyzeRequest):
+            assert cred_field not in model.model_fields
+
+    def test_request_payload_jira_creds_are_ignored(self, mock_settings) -> None:
+        """Extra Jira credential keys in a payload cannot influence settings."""
         from rootcoz.models import AnalyzeRequest
 
-        settings = self._server_settings(jira_auth_mode="basic", jira_pat=server_pat)
-        merged = _merge_settings(
-            AnalyzeRequest(job_name="j", build_number=1, jira_api_token="req-tok"),
-            settings,
+        # Pydantic ignores unknown fields, so a legacy client still sending
+        # Jira credentials gets them silently dropped — never applied.
+        body = AnalyzeRequest.model_validate(
+            {
+                "job_name": "j",
+                "build_number": 1,
+                "jira_email": "req@example.com",
+                "jira_api_token": "req-tok",
+                "jira_pat": "req-pat",
+                "jira_oauth_access_token": "req-oauth",
+            }
         )
-        assert merged.jira_auth_mode == "pat"
-        assert merged.jira_api_token is None
-        assert merged.jira_pat
-        assert merged.jira_pat.get_secret_value() == "req-tok"
-
-        connection = resolve_jira_connection(merged)
-        assert connection.mode == "server"
-        assert connection.headers["Authorization"] == "Bearer req-tok"
-
-    def test_request_api_token_without_email_never_pairs_server_email(
-        self, mock_settings
-    ) -> None:
-        """A request token without a request email is never basic-with-server-email.
-
-        The request credential mode is derived from REQUEST-supplied fields
-        only — the inherited server email must not silently turn the token
-        into a basic-auth pair under the server's identity.
-        """
-        from rootcoz.jira import resolve_jira_connection
+        settings = self._server_settings(jira_auth_mode="basic")
         from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
 
-        settings = self._server_settings(
-            jira_auth_mode="pat", jira_email="server@example.com"
-        )
-        merged = _merge_settings(
-            AnalyzeRequest(job_name="j", build_number=1, jira_api_token="req-tok"),
-            settings,
-        )
-        assert merged.jira_auth_mode == "pat"
-        assert merged.jira_pat
-        assert merged.jira_pat.get_secret_value() == "req-tok"
-        # The server email is NOT paired with the request token.
-        assert not merged.jira_email
-
-        connection = resolve_jira_connection(merged)
-        assert connection.mode == "server"
-        assert connection.auth is None
-        assert connection.headers["Authorization"] == "Bearer req-tok"
-
-    def test_request_api_token_with_request_email_is_basic(self, mock_settings) -> None:
-        """A request token + request email is basic under the REQUEST email."""
-        from rootcoz.jira import resolve_jira_connection
-        from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
-
-        settings = self._server_settings(
-            jira_auth_mode="pat",
-            jira_email="server@example.com",
-            jira_pat="server-pat",
-        )
-        merged = _merge_settings(
-            AnalyzeRequest(
-                job_name="j",
-                build_number=1,
-                jira_email="req@example.com",
-                jira_api_token="req-tok",
-            ),
-            settings,
-        )
+        merged = _merge_settings(body, settings)
         assert merged.jira_auth_mode == "basic"
-        assert merged.jira_email == "req@example.com"
-        assert merged.jira_api_token
-        assert merged.jira_api_token.get_secret_value() == "req-tok"
-        # The inherited server PAT is cleared so the pair is unambiguous.
-        assert merged.jira_pat is None
-
-        connection = resolve_jira_connection(merged)
-        assert connection.mode == "cloud"
-        assert connection.auth == ("req@example.com", "req-tok")
+        assert not merged.jira_email
+        assert merged.jira_api_token is None
+        assert merged.jira_pat.get_secret_value() == "server-pat"
+        assert merged.jira_oauth_access_token.get_secret_value() == "server-oauth"
 
 
 class TestReconstructFromParams:
@@ -5367,39 +5275,6 @@ class TestPeerAnalysisParams:
         settings = Settings()
         merged = _merge_settings(body, settings)
         assert merged.max_concurrent_ai_calls == 7
-
-    def test_merge_settings_request_jira_creds_clear_server_sa_token(self) -> None:
-        """Request-level Jira credentials must not lose to a server ATST token.
-
-        The auth method is a server-level selection; request credentials
-        apply under it. The merged connection resolves to the request's
-        credentials, not the SA token.
-        """
-        from rootcoz.main import _merge_settings
-        from rootcoz.models import AnalyzeRequest
-
-        body = AnalyzeRequest(
-            job_name="test",
-            build_number=1,
-            ai_provider="claude",
-            ai_model="test-model",
-            jira_email="user@example.com",
-            jira_api_token="request-token",
-        )
-        settings = Settings(
-            jira_url="https://myorg.atlassian.net",
-            jira_auth_mode="basic",
-            jira_oauth_access_token=SecretStr("ATST-server-token"),
-        )
-        merged = _merge_settings(body, settings)
-        assert merged.jira_oauth_access_token is None
-        assert merged.jira_api_token.get_secret_value() == "request-token"
-        # And the resolved connection is basic-auth cloud, not the SA.
-        from rootcoz.jira import resolve_jira_connection
-
-        connection = resolve_jira_connection(merged)
-        assert connection.mode == "cloud"
-        assert connection.auth == ("user@example.com", "request-token")
 
     def test_merge_settings_preserves_server_sa_token_when_request_has_no_jira_creds(
         self,
