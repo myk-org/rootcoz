@@ -781,6 +781,7 @@ class TestAiFooterNotDoubled:
             "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
         )
         mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_auth_mode = "oauth"
         mock_settings.jira_email = "user@example.com"
         mock_settings.jira_api_token = MagicMock()
         mock_settings.jira_api_token.get_secret_value.return_value = "token123"
@@ -827,6 +828,7 @@ class TestAiFooterNotDoubled:
         mock_settings = MagicMock()
         mock_settings.jira_url = "https://myorg.atlassian.net"
         mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_auth_mode = "oauth"
         mock_settings.jira_email = None
         mock_settings.jira_api_token = None
         mock_settings.jira_pat = None
@@ -868,6 +870,7 @@ class TestAiFooterNotDoubled:
             "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
         )
         mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_auth_mode = "oauth"
         mock_settings.jira_email = None
         mock_settings.jira_api_token = None
         mock_settings.jira_pat = None
@@ -909,6 +912,7 @@ class TestAiFooterNotDoubled:
             "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
         )
         mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_auth_mode = "oauth"
         mock_settings.jira_email = None
         mock_settings.jira_api_token = None
         mock_settings.jira_pat = None

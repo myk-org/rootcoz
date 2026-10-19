@@ -242,6 +242,14 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     await openJiraTab()
     expect(screen.queryByRole('alertdialog')).toBeNull()
 
+    // No method selected: no method credential fields render, but
+    // method-independent rows do
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_ACCESS_TOKEN')).not.toBeInTheDocument()
+    expect(screen.getByText('JIRA_URL')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+
     fireEvent.click(screen.getByRole('checkbox', { name: 'Atlassian OAuth (token / cloud ID)' }))
     expect(screen.queryByRole('alertdialog')).toBeNull()
 
@@ -290,20 +298,55 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     expect(put).not.toHaveBeenCalled()
   })
 
-  it('unchecking the active method clears the selection (legacy auto-detect shows all fields)', async () => {
-    mockJiraModeSettings('basic')
+  it('unchecking a selected-but-unverified method disables Jira immediately (no method fields render while unset)', async () => {
+    mockJiraModeSettings('basic', '')
     await openJiraTab()
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
     )
     await waitFor(() =>
       expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
     )
-    expect(screen.getByText(/No method selected — auto-detect is used/)).toBeInTheDocument()
-    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_EMAIL')).toBeInTheDocument()
+    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_ACCESS_TOKEN')).not.toBeInTheDocument()
+    // Method-independent rows stay visible
+    expect(screen.getByText('JIRA_URL')).toBeInTheDocument()
+  })
+
+  it('unchecking a verified method asks for confirmation and disables Jira on confirm', async () => {
+    mockJiraModeSettings('basic') // basic selected and test-verified
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(/disables Jira until another method is selected/)
+    expect(put).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Disable' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+    )
+    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+  })
+
+  it('cancelling the disable confirmation keeps the method selected', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(put).not.toHaveBeenCalled()
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
   })
 
   it('surfaces a backend save-validation error in the Jira section and keeps the selection', async () => {
@@ -324,22 +367,33 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
   })
 
-  it('shows the backend-resolved mode as a hint when no method is selected', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'jira_url')!.jira_resolved_mode = 'basic'
-    get.mockResolvedValue(settings as never)
-
+  it('shows the disabled hint when no method is selected', async () => {
+    mockJiraModeSettings('')
     await openJiraTab()
-    expect(screen.getByText(/resolved: Email \+ API token/)).toBeInTheDocument()
-    // The resolved hint never checks a box — only the persisted setting does
+    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+    // The hint never checks a box — only the persisted setting does
     expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
   })
 
-  it('hides the resolved hint when a method is explicitly selected', async () => {
+  it('hides the disabled hint when a method is explicitly selected', async () => {
     mockJiraModeSettings('pat')
     await openJiraTab()
-    expect(screen.queryByText(/resolved:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/No method selected/)).not.toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+  })
+
+  it('surfaces the backend error when testing with no method selected', async () => {
+    mockJiraModeSettings('')
+    testIntegration.mockResolvedValue({
+      ok: false,
+      message: 'No Jira auth method selected — choose one in Server Settings',
+    } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('button', { name: /test connection/i }))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection failed')
+    expect(banner).toHaveTextContent('No Jira auth method selected — choose one in Server Settings')
   })
 })
 

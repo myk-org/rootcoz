@@ -96,7 +96,7 @@ const TEST_INTEGRATIONS: Record<string, string> = {
   Prow: 'prow',
 }
 
-// Jira auth methods, in backend resolution precedence order (oauth wins).
+// Jira auth methods (exactly one is selected in Server Settings; none = Jira disabled)
 type JiraMethod = 'oauth' | 'basic' | 'pat'
 const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
   {
@@ -122,7 +122,7 @@ function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
   return new Set(JIRA_METHODS.filter(m => m.id !== method).flatMap(m => m.fields))
 }
 
-// Valid Jira auth method ids ('' / anything else = unset, legacy auto-detect).
+// Valid Jira auth method ids ('' / anything else = unset: Jira disabled).
 function parseJiraMethod(value?: string): JiraMethod | null {
   return value === 'oauth' || value === 'basic' || value === 'pat' ? value : null
 }
@@ -468,8 +468,8 @@ export function ServerSettingsPage() {
     }
   })
 
-  // Jira auth method switch confirmation (target method) + section-local save error
-  const [pendingJiraSwitch, setPendingJiraSwitch] = useState<JiraMethod | null>(null)
+  // Jira auth method switch confirmation (target method, or 'none' = disable) + section-local save error
+  const [pendingJiraSwitch, setPendingJiraSwitch] = useState<JiraMethod | 'none' | null>(null)
   const [jiraModeError, setJiraModeError] = useState<string | null>(null)
 
   // Test connection state
@@ -751,20 +751,26 @@ export function ServerSettingsPage() {
   }, [allGroups, state.search])
 
   // ---- Jira auth method (explicit selection, persisted as jira_auth_mode) ----
-  // The checkbox state comes ONLY from the persisted jira_auth_mode setting;
-  // the backend-derived mode on the jira_url item (jira_resolved_mode) is display-only.
+  // The checkbox state comes ONLY from the persisted jira_auth_mode setting.
   const persistedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_auth_mode')?.value)
-  const resolvedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_url')?.jira_resolved_mode)
   // A method counts as configured only after its Test connection succeeded (#346).
   const verifiedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_url')?.jira_verified_method)
-  // Unset mode = legacy auto-detect: no field hiding.
-  const jiraHiddenFields = persistedJiraMethod ? hiddenJiraFieldsFor(persistedJiraMethod) : new Set<string>()
+  // Unset = no method chosen yet: hide every method credential field until
+  // the admin picks one; only method-independent rows stay visible (#346).
+  const jiraHiddenFields = persistedJiraMethod
+    ? hiddenJiraFieldsFor(persistedJiraMethod)
+    : new Set(JIRA_METHODS.flatMap(m => m.fields))
 
   function handleJiraMethodCheck(method: JiraMethod, checked: boolean) {
     setJiraModeError(null)
     if (!checked) {
-      // Unchecking the active method clears the selection (back to auto-detect)
-      void applyJiraMode(null)
+      // Unchecking the active method disables Jira — a verified method gets
+      // the same confirmation as a switch; unverified applies immediately.
+      if (persistedJiraMethod === verifiedJiraMethod) {
+        setPendingJiraSwitch('none')
+      } else {
+        void applyJiraMode(null)
+      }
     } else if (persistedJiraMethod && persistedJiraMethod === verifiedJiraMethod && persistedJiraMethod !== method) {
       // Switching away from a VERIFIED active method is never silent; a
       // selected-but-unverified method switches without a prompt (#346).
@@ -888,7 +894,6 @@ export function ServerSettingsPage() {
             {category === 'Jira' && (
               <JiraAuthMethodControl
                 selected={persistedJiraMethod}
-                resolvedMode={resolvedJiraMethod}
                 saving={state.saving}
                 pendingSwitch={pendingJiraSwitch}
                 error={jiraModeError}
@@ -897,7 +902,7 @@ export function ServerSettingsPage() {
                 onConfirmSwitch={() => {
                   const target = pendingJiraSwitch
                   setPendingJiraSwitch(null)
-                  if (target) void applyJiraMode(target)
+                  if (target) void applyJiraMode(target === 'none' ? null : target)
                 }}
               />
             )}
@@ -1279,7 +1284,7 @@ export function ServerSettingsPage() {
                         <EnvVarWarning setting={setting} />
                       </div>
                       <p className="text-xs text-text-tertiary">
-                        Managed via the auth method selector above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || 'auto-detect'}</span>
+                        Managed via the auth method selector above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || 'unset — Jira disabled'}</span>
                       </p>
                     </div>
                   )
@@ -1847,9 +1852,8 @@ function RestartBadge() {
 
 interface JiraAuthMethodControlProps {
   selected: JiraMethod | null
-  resolvedMode: JiraMethod | null
   saving: boolean
-  pendingSwitch: JiraMethod | null
+  pendingSwitch: JiraMethod | 'none' | null
   error: string | null
   onCheck: (method: JiraMethod, checked: boolean) => void
   onCancelSwitch: () => void
@@ -1858,7 +1862,6 @@ interface JiraAuthMethodControlProps {
 
 function JiraAuthMethodControl({
   selected,
-  resolvedMode,
   saving,
   pendingSwitch,
   error,
@@ -1872,8 +1875,7 @@ function JiraAuthMethodControl({
         <span className="text-xs font-semibold text-text-secondary">Auth method</span>
         {selected === null && (
           <span className="text-xs text-text-tertiary">
-            No method selected — auto-detect is used
-            {resolvedMode && <> (resolved: {jiraMethodLabel(resolvedMode)})</>}
+            No method selected — Jira is disabled
           </span>
         )}
       </div>
@@ -1899,20 +1901,22 @@ function JiraAuthMethodControl({
         </p>
       )}
       <p className="text-xs text-text-quaternary">
-        Exactly one method is active. Uncheck it to clear the selection (legacy auto-detect).
+        Exactly one method is active. Uncheck it to disable Jira.
       </p>
       <AlertDialog open={pendingSwitch !== null} onOpenChange={(open) => { if (!open) onCancelSwitch() }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Switch Jira auth method?</AlertDialogTitle>
+            <AlertDialogTitle>{pendingSwitch === 'none' ? 'Disable Jira?' : 'Switch Jira auth method?'}</AlertDialogTitle>
             <AlertDialogDescription>
-              Switch from {selected ? jiraMethodLabel(selected) : 'none'} to{' '}
-              {pendingSwitch ? jiraMethodLabel(pendingSwitch) : ''}?
+              {pendingSwitch === 'none'
+                ? <>Unchecking {selected ? jiraMethodLabel(selected) : 'this method'} disables Jira until another method is selected.</>
+                : <>Switch from {selected ? jiraMethodLabel(selected) : 'none'} to{' '}{pendingSwitch ? jiraMethodLabel(pendingSwitch) : ''}?</>
+              }
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={onCancelSwitch}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={onConfirmSwitch}>Switch</AlertDialogAction>
+            <AlertDialogAction onClick={onConfirmSwitch}>{pendingSwitch === 'none' ? 'Disable' : 'Switch'}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

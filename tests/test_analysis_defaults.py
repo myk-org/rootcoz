@@ -39,7 +39,7 @@ def client_with_ai(temp_db_path, _init_db):
 @pytest.fixture
 def client_with_full_config(temp_db_path, _init_db):
     """Create a test client with many settings configured."""
-    yield from make_app_client(
+    gen = make_app_client(
         temp_db_path,
         {
             "AI_PROVIDER": "claude",
@@ -60,6 +60,21 @@ def client_with_full_config(temp_db_path, _init_db):
             "MAX_WAIT_MINUTES": "60",
         },
     )
+    client = next(gen)
+    # The Jira auth method is a Server Settings (DB) selection — set it
+    # through the admin API like the UI does; there is no env var for it.
+    cookies = admin_login(client)
+    resp = client.put(
+        "/api/admin/settings",
+        json={"settings": {"jira_auth_mode": "basic"}},
+        cookies=cookies,
+    )
+    assert resp.status_code == 200
+    yield client
+    try:
+        next(gen)
+    except StopIteration:
+        pass
 
 
 @pytest.fixture

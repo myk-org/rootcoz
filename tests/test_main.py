@@ -5209,9 +5209,9 @@ class TestPeerAnalysisParams:
     def test_merge_settings_request_jira_creds_clear_server_sa_token(self) -> None:
         """Request-level Jira credentials must not lose to a server ATST token.
 
-        The resolver prefers SA mode, so a request carrying its own
-        jira_api_token/jira_pat clears the server's jira_oauth_access_token
-        (mirroring _build_effective_jira_settings).
+        The auth method is a server-level selection; request credentials
+        apply under it. The merged connection resolves to the request's
+        credentials, not the SA token.
         """
         from rootcoz.main import _merge_settings
         from rootcoz.models import AnalyzeRequest
@@ -5226,6 +5226,7 @@ class TestPeerAnalysisParams:
         )
         settings = Settings(
             jira_url="https://myorg.atlassian.net",
+            jira_auth_mode="basic",
             jira_oauth_access_token=SecretStr("ATST-server-token"),
         )
         merged = _merge_settings(body, settings)
@@ -7969,7 +7970,7 @@ class TestReAnalyzeFailure:
         assert result is settings
 
     def test_user_token_clears_server_pat(self):
-        """User token clears server PAT so it takes precedence."""
+        """User token without email pins pat mode and clears the server PAT."""
         from rootcoz.main import _build_effective_jira_settings
 
         settings = Settings(
@@ -7979,8 +7980,10 @@ class TestReAnalyzeFailure:
             jira_project_key="TEST",
         )
         result = _build_effective_jira_settings(settings, "user-token", "")
-        assert result.jira_pat is None
-        assert result.jira_api_token.get_secret_value() == "user-token"
+        assert result.jira_auth_mode == "pat"
+        assert result.jira_pat is not None
+        assert result.jira_pat.get_secret_value() == "user-token"
+        assert result.jira_api_token is None
 
     def test_user_token_without_email_clears_server_email(self):
         """User token without email clears server email to avoid mismatched Cloud auth."""
@@ -7993,8 +7996,9 @@ class TestReAnalyzeFailure:
             jira_project_key="TEST",
         )
         result = _build_effective_jira_settings(settings, "user-token", "")
+        assert result.jira_auth_mode == "pat"
         assert result.jira_email is None
-        assert result.jira_api_token.get_secret_value() == "user-token"
+        assert result.jira_pat.get_secret_value() == "user-token"
 
     def test_user_token_with_email_sets_both(self):
         """User token with email sets both for Cloud auth."""
@@ -8694,12 +8698,13 @@ class TestAdminSettingsEndpoints:
         assert (item["value"], item["source"]) == ("3", "db")
 
     def test_jira_url_metadata_carries_resolved_mode(self, test_client) -> None:
-        """The jira_url item exposes the backend-resolved auth mode per branch."""
+        """The jira_url item mirrors the selected auth mode (empty when unset)."""
         cases = [
             (Settings(jira_url=""), ""),
             (
                 Settings(
                     jira_url="https://x.atlassian.net",
+                    jira_auth_mode="basic",
                     jira_email="user@example.com",
                     jira_api_token=SecretStr("not-a-real-token"),
                 ),
@@ -8708,6 +8713,7 @@ class TestAdminSettingsEndpoints:
             (
                 Settings(
                     jira_url="https://jira.example.com",
+                    jira_auth_mode="pat",
                     jira_pat=SecretStr("not-a-real-token"),
                 ),
                 "pat",
@@ -8715,9 +8721,19 @@ class TestAdminSettingsEndpoints:
             (
                 Settings(
                     jira_url="https://jira.example.com",
+                    jira_auth_mode="oauth",
                     jira_oauth_access_token=SecretStr("ATST-not-a-real-token"),
                 ),
                 "oauth",
+            ),
+            # No auto-detection: full credentials without a selected mode → empty
+            (
+                Settings(
+                    jira_url="https://x.atlassian.net",
+                    jira_email="user@example.com",
+                    jira_api_token=SecretStr("not-a-real-token"),
+                ),
+                "",
             ),
         ]
         for settings, expected in cases:
@@ -8730,6 +8746,22 @@ class TestAdminSettingsEndpoints:
             )
             # The selected-method setting must not collide with the derived key
             assert "jira_auth_mode" not in item
+
+    def test_jira_auth_mode_env_var_ignored(self, test_client, monkeypatch) -> None:
+        """A JIRA_AUTH_MODE env var has no effect — Server Settings only."""
+        from rootcoz.config import get_settings
+
+        monkeypatch.setenv("JIRA_AUTH_MODE", "basic")
+        get_settings.cache_clear()
+        item = _settings_item(test_client, "jira_auth_mode")
+        assert (item["value"], item["source"], item["env_var"]) == (
+            "",
+            "default",
+            "",
+        )
+        from rootcoz.jira import resolve_jira_connection
+
+        assert resolve_jira_connection(get_settings()).mode == "none"
 
     def test_jira_auth_mode_settings_item_and_round_trip(self, test_client) -> None:
         """jira_auth_mode is a standalone, non-sensitive, validated setting."""
@@ -9178,6 +9210,7 @@ class TestIntegrationConnectionEndpoints:
         """Jira test fetches /myself and reports the exercised auth mode."""
         settings = Settings(
             jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
             jira_email="user@example.com",
             jira_api_token=SecretStr("not-a-real-token"),
         )
@@ -9228,25 +9261,23 @@ class TestIntegrationConnectionEndpoints:
     def test_jira_success_persists_verified_method_legacy_resolved(
         self, test_client
     ) -> None:
-        """Unset mode persists the legacy-resolved method (pat → server)."""
+        """Unset mode never reaches Jira and never records a verified method."""
         settings = Settings(
             jira_url="https://jira.example.com",
             jira_pat="not-a-real-pat",
         )
-        with (
-            patch("rootcoz.main.get_settings", return_value=settings),
-            self._mock_async_client(self._jira_myself_response())[0] as _,
-        ):
+        with patch("rootcoz.main.get_settings", return_value=settings):
             response = test_client.post("/api/admin/settings/test/jira")
         assert response.status_code == 200
-        assert response.json()["ok"] is True
+        assert response.json()["ok"] is False
         item = _settings_item(test_client, "jira_url")
-        assert item["jira_verified_method"] == "pat"
+        assert item["jira_verified_method"] == ""
 
     def test_jira_failure_keeps_previous_verified_method(self, test_client) -> None:
         """A failed re-test does not clear the last successful record."""
         settings = Settings(
             jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
             jira_email="user@example.com",
             jira_api_token=SecretStr("not-a-real-token"),
         )
@@ -9274,6 +9305,7 @@ class TestIntegrationConnectionEndpoints:
         """A 401 from Jira yields ok:false without leaking the token."""
         settings = Settings(
             jira_url="https://jira.example.com",
+            jira_auth_mode="basic",
             jira_email="user@example.com",
             jira_api_token=SecretStr("super-secret-token"),
         )
@@ -9325,17 +9357,24 @@ class TestIntegrationConnectionEndpoints:
             "Jira auth method 'basic' is selected but missing: jira_api_token"
         )
 
-    def test_jira_unset_mode_keeps_generic_message(self, test_client) -> None:
-        """Unset mode with nothing configured keeps the legacy message."""
-        settings = Settings(jira_url="https://jira.example.com")
+    def test_jira_unset_mode_reports_method_required(self, test_client) -> None:
+        """Unset mode (even with full credentials) reports the method-required error."""
+        settings = Settings(
+            jira_url="https://jira.example.com",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("not-a-real-token"),
+            jira_pat="not-a-real-pat",
+            jira_oauth_access_token=SecretStr("ATST-not-a-real-token"),
+        )
+        assert not settings.jira_enabled
         with patch("rootcoz.main.get_settings", return_value=settings):
             response = test_client.post("/api/admin/settings/test/jira")
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is False
-        assert data["message"] == (
-            "No Jira credentials configured (set jira_api_token, jira_pat, "
-            "or jira_oauth_access_token)"
+        assert (
+            data["message"]
+            == "No Jira auth method selected — choose one in Server Settings"
         )
 
     def test_github_success(self, test_client) -> None:

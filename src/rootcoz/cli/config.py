@@ -40,7 +40,6 @@ class ServerConfig:
     max_concurrent_ai_calls: int = 0  # 0 means use server default
     # Jira
     jira_url: str = ""
-    jira_auth_mode: str = ""
     jira_email: str = ""
     jira_api_token: str = ""
     jira_pat: str = ""
@@ -246,7 +245,6 @@ def _server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         additional_repos=_validated_str(data, "additional_repos"),
         # Jira
         jira_url=data.get("jira_url", ""),
-        jira_auth_mode=data.get("jira_auth_mode", ""),
         jira_email=data.get("jira_email", ""),
         jira_api_token=data.get("jira_api_token", ""),
         jira_pat=data.get("jira_pat", ""),

@@ -13,8 +13,9 @@ from rootcoz.config import (
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
-    resolve_jira_auth,
+    update_db_settings_cache,
 )
+from rootcoz.jira import resolve_jira_connection
 from tests.conftest import build_test_env as _build_env
 
 
@@ -93,7 +94,7 @@ class TestJiraSettings:
             assert settings.jira_url is None
 
     def test_jira_enabled_with_cloud_auth(self) -> None:
-        """Jira is enabled with URL + email + API token + project key."""
+        """Jira is enabled with URL + selected basic method + project key."""
         with patch.dict(
             os.environ,
             _build_env(
@@ -104,11 +105,11 @@ class TestJiraSettings:
             ),
             clear=True,
         ):
-            settings = Settings(_env_file=None)
-            assert settings.jira_enabled
+            update_db_settings_cache({"jira_auth_mode": "basic"})
+            assert get_settings().jira_enabled
 
     def test_jira_enabled_with_server_pat(self) -> None:
-        """Jira is enabled with URL + PAT + project key."""
+        """Jira is enabled with URL + selected pat method + project key."""
         with patch.dict(
             os.environ,
             _build_env(
@@ -118,8 +119,8 @@ class TestJiraSettings:
             ),
             clear=True,
         ):
-            settings = Settings(_env_file=None)
-            assert settings.jira_enabled
+            update_db_settings_cache({"jira_auth_mode": "pat"})
+            assert get_settings().jira_enabled
 
     def test_jira_disabled_without_url(self) -> None:
         """Jira is disabled when URL is missing even with credentials."""
@@ -204,51 +205,63 @@ class TestJiraSettings:
             assert settings.jira_max_results == 10
 
 
-class TestResolveJiraAuth:
-    """Tests for resolve_jira_auth helper."""
-
-    def test_email_plus_pat_is_cloud(self) -> None:
-        """JIRA_EMAIL + JIRA_PAT resolves to Cloud mode.
-
-        Email present = Cloud.  PAT is used as the token via Basic auth.
-        """
-        env = _build_env(
-            JIRA_URL="https://myorg.atlassian.net",
-            JIRA_EMAIL="user@example.com",
-            JIRA_PAT="pat-token-456",
-            JIRA_PROJECT_KEY="TEST",
-        )
-        with patch.dict(os.environ, env, clear=True):
-            settings = Settings(_env_file=None)
-            is_cloud, token = resolve_jira_auth(settings)
-            assert is_cloud, "email present must activate Cloud mode"
-            assert token == env["JIRA_PAT"]
-
-
 class TestJiraAuthMode:
     """Tests for the explicit jira_auth_mode setting."""
 
-    def test_env_var_loads_and_normalizes(self) -> None:
-        """JIRA_AUTH_MODE loads from env; case and whitespace normalize."""
+    def test_env_var_is_ignored(self) -> None:
+        """JIRA_AUTH_MODE env has no effect — selection is Server Settings only."""
         with patch.dict(os.environ, _build_env(JIRA_AUTH_MODE=" Basic "), clear=True):
             settings = Settings(_env_file=None)
-            assert settings.jira_auth_mode == "basic"
+            assert settings.jira_auth_mode is None
+            assert not settings.jira_enabled
+
+    def test_db_setting_selects_mode(self) -> None:
+        """The resolver reads the selected method from the DB settings cache."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira-server.example.com",
+                JIRA_PAT="pat-token",
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            update_db_settings_cache({"jira_auth_mode": "pat"})
+            settings = get_settings()
+            assert settings.jira_auth_mode == "pat"
+            assert settings.jira_enabled
+            assert resolve_jira_connection(settings).mode == "server"
 
     def test_invalid_value_rejected(self) -> None:
         """Invalid methods fail validation with a clear error."""
-        with (
-            patch.dict(os.environ, _build_env(JIRA_AUTH_MODE="kerberos"), clear=True),
-            pytest.raises(ValueError, match="jira_auth_mode"),
-        ):
-            Settings(_env_file=None)
+        with pytest.raises(ValueError, match="jira_auth_mode"):
+            Settings(_env_file=None, jira_auth_mode="kerberos")
 
     def test_unset_defaults_to_none(self) -> None:
-        """No env var means auto-detect (None)."""
+        """No env var means no method selected (Jira disabled)."""
         with patch.dict(os.environ, _build_env(), clear=True):
             assert Settings(_env_file=None).jira_auth_mode is None
 
+    def test_unset_mode_disables_jira_even_with_credentials(self) -> None:
+        """Unset mode: no auto-detection — full credentials are ignored."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://myorg.atlassian.net",
+                JIRA_EMAIL="user@example.com",
+                JIRA_API_TOKEN="api-token",  # pragma: allowlist secret
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+                JIRA_OAUTH_ACCESS_TOKEN="ATST-token",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert not settings.jira_enabled
+            assert resolve_jira_connection(settings).mode == "none"
+
     def test_missing_fields_unset_mode(self) -> None:
-        """Unset mode never reports missing fields (legacy chain decides)."""
+        """Unset mode never reports missing fields (Jira is disabled instead)."""
         with patch.dict(os.environ, _build_env(), clear=True):
             settings = Settings(_env_file=None)
             assert jira_method_missing_fields(settings) == []
@@ -288,9 +301,12 @@ class TestJiraAuthMode:
                 "ATATT3xFfGF-not-a-service-account-token"
             ),  # pragma: allowlist secret
         )
-        is_cloud, token = resolve_jira_auth(settings)
-        assert is_cloud is True
-        assert token == "ATATT3xFfGF-not-a-service-account-token"
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "sa"
+        assert (
+            connection.headers["Authorization"]
+            == "Bearer ATATT3xFfGF-not-a-service-account-token"
+        )
 
     def test_explicit_basic_no_pat_fallback(self) -> None:
         """Explicit basic uses only email + api token — no PAT fallback."""
@@ -300,8 +316,8 @@ class TestJiraAuthMode:
             jira_email="user@example.com",
             jira_pat=SecretStr("pat-token"),  # pragma: allowlist secret
         )
-        is_cloud, token = resolve_jira_auth(settings)
-        assert (is_cloud, token) == (True, "")
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "none"
 
     def test_explicit_pat_ignores_sa_and_api_token(self) -> None:
         """Explicit pat uses only jira_pat — SA and api tokens are ignored."""
@@ -312,8 +328,9 @@ class TestJiraAuthMode:
             jira_api_token=SecretStr("api-token"),  # pragma: allowlist secret
             jira_pat=SecretStr("my-pat"),  # pragma: allowlist secret
         )
-        is_cloud, token = resolve_jira_auth(settings)
-        assert (is_cloud, token) == (False, "my-pat")
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "server"
+        assert connection.headers["Authorization"] == "Bearer my-pat"
 
     def test_jira_enabled_with_explicit_mode_missing_fields(self) -> None:
         """jira_enabled is False when the selected method lacks fields."""
@@ -321,13 +338,14 @@ class TestJiraAuthMode:
             os.environ,
             _build_env(
                 JIRA_URL="https://jira.example.com",
-                JIRA_AUTH_MODE="basic",
                 JIRA_API_TOKEN="token-123",  # pragma: allowlist secret
                 JIRA_PROJECT_KEY="TEST",
             ),
             clear=True,
         ):
-            settings = Settings(_env_file=None)  # missing jira_email
+            settings = Settings(
+                _env_file=None, jira_auth_mode="basic"
+            )  # missing jira_email
             assert not settings.jira_enabled
 
     def test_jira_enabled_with_explicit_mode_complete(self) -> None:
@@ -336,13 +354,12 @@ class TestJiraAuthMode:
             os.environ,
             _build_env(
                 JIRA_URL="https://jira.example.com",
-                JIRA_AUTH_MODE="pat",
                 JIRA_PAT="pat-token",  # pragma: allowlist secret
                 JIRA_PROJECT_KEY="TEST",
             ),
             clear=True,
         ):
-            settings = Settings(_env_file=None)
+            settings = Settings(_env_file=None, jira_auth_mode="pat")
             assert settings.jira_enabled
 
 

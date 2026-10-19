@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import httpx
 from simple_logger.logger import get_logger
 
-from rootcoz.config import Settings, normalize_jira_auth_mode, resolve_jira_auth
+from rootcoz.config import Settings, normalize_jira_auth_mode
 from rootcoz.issue_matching import filter_issue_matches_with_ai
 from rootcoz.models import (
     AnalysisDetail,
@@ -85,25 +85,26 @@ def _is_atlassian_cloud_host(url: str) -> bool:
 def resolve_jira_connection(settings: Settings) -> JiraConnection:
     """Resolve the Jira connection from settings.
 
-    When ``jira_auth_mode`` is explicitly set, only that method's fields
-    are used — no prefix sniffing, no precedence chain. Unset mode keeps
-    the legacy detection order: ATST service account token first (basic
-    auth with an ATST token is rejected by Atlassian, so the prefix wins
-    over email), then Cloud basic auth (``jira_email``), then Server/DC
-    Bearer.
+    ``jira_auth_mode`` is REQUIRED: only the selected method's fields are
+    used — no prefix sniffing, no precedence chain, no fallback. Unset
+    mode resolves to ``"none"`` regardless of which credentials are
+    configured (Jira is disabled — see ``Settings.jira_enabled``).
     """
     url = (settings.jira_url or "").rstrip("/")
-    explicit_mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
 
     sa_token = ""
-    if settings.jira_oauth_access_token:
-        value = settings.jira_oauth_access_token.get_secret_value()
-        if explicit_mode == "oauth":
-            # Explicit selection: trust the stored token as-is — Atlassian
-            # rejects a wrong token type with a clear 401.
-            sa_token = value
-        elif not explicit_mode and value.startswith("ATST"):
-            sa_token = value
+    token_value = ""
+    if mode == "oauth":
+        # Trust the stored token as-is — Atlassian rejects a wrong token
+        # type with a clear 401.
+        if settings.jira_oauth_access_token:
+            sa_token = settings.jira_oauth_access_token.get_secret_value()
+    elif mode == "basic":
+        if settings.jira_api_token:
+            token_value = settings.jira_api_token.get_secret_value()
+    elif mode == "pat" and settings.jira_pat:
+        token_value = settings.jira_pat.get_secret_value()
 
     if sa_token:
         # SA mode: REST calls go to the scoped gateway; browse links must
@@ -136,23 +137,23 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
             search_path="/rest/api/3/search/jql",
         )
 
-    is_cloud, token_value = resolve_jira_auth(settings)
-    if is_cloud and settings.jira_email and token_value:
+    if mode == "basic":
         # Basic auth keeps v3 regardless of host — Atlassian removed the v2
         # search endpoint, so a Cloud site behind a custom domain or proxy
         # would hard-fail on v2 paths. (A Server/DC instance configured with
         # email+token basic auth keeps its historical pre-connection behavior.)
-        return JiraConnection(
-            mode="cloud",
-            api_base=url,
-            browse_base=url,
-            site_url=url,
-            auth=(settings.jira_email, token_value),
-            headers={},
-            api_path="/rest/api/3",
-            search_path="/rest/api/3/search/jql",
-        )
-    if token_value and explicit_mode != "basic":
+        if settings.jira_email and token_value:
+            return JiraConnection(
+                mode="cloud",
+                api_base=url,
+                browse_base=url,
+                site_url=url,
+                auth=(settings.jira_email, token_value),
+                headers={},
+                api_path="/rest/api/3",
+                search_path="/rest/api/3/search/jql",
+            )
+    elif mode == "pat" and token_value:
         # Bearer auth (Server/DC PAT, or a Cloud PAT): v3 only when the
         # hostname is positively Atlassian Cloud — a lookalike or
         # substring-containing Server/DC host must keep v2.
@@ -171,7 +172,8 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
                 else "/rest/api/2/search"
             ),
         )
-    # No valid auth configured: anonymous, current behavior preserved
+    # No method selected, or the selected method's fields are missing:
+    # no credentials are used — no inference, no fallback.
     return JiraConnection(
         mode="none",
         api_base=url,
@@ -197,19 +199,43 @@ def resolve_jira_connection_from_params(
     user token validation) rather than a :class:`Settings` instance. Uses
     ``model_construct`` so the process environment is never consulted —
     server deployment secrets must not leak into user-scoped resolution.
+
+    These are per-user credentials whose fields the user chose explicitly:
+    the supplied field(s) pin the auth method (service-account token →
+    oauth, token+email → basic, bare token/PAT → pat) — the same choice
+    the user made in the credentials UI. No fallback across methods.
     """
     from pydantic import SecretStr
 
+    email = jira_email.strip()
+    token = jira_token.strip()
+    pat = jira_pat.strip()
+    sa_token = jira_oauth_access_token.strip()
+    if sa_token:
+        auth_mode = "oauth"
+    elif email and (token or pat):
+        # Email + token is the Cloud basic-auth pair the user entered.
+        auth_mode = "basic"
+        if not token:
+            token = pat
+            pat = ""
+    elif pat or token:
+        auth_mode = "pat"
+        if not pat:
+            pat = token
+            token = ""
+    else:
+        auth_mode = ""
+
     settings = Settings.model_construct(
         jira_url=jira_url.strip().rstrip("/") or None,
-        jira_email=jira_email.strip() or None,
-        jira_api_token=SecretStr(jira_token) if jira_token else None,
-        jira_pat=SecretStr(jira_pat) if jira_pat else None,
-        jira_oauth_access_token=SecretStr(jira_oauth_access_token)
-        if jira_oauth_access_token
-        else None,
+        jira_email=email or None,
+        jira_api_token=SecretStr(token) if token else None,
+        jira_pat=SecretStr(pat) if pat else None,
+        jira_oauth_access_token=SecretStr(sa_token) if sa_token else None,
         atlassian_oauth_cloud_id=atlassian_oauth_cloud_id.strip() or None,
         jira_site_url=jira_site_url.strip() or None,
+        jira_auth_mode=auth_mode,
     )
     return resolve_jira_connection(settings)
 
@@ -282,14 +308,14 @@ class JiraClient:
     """HTTP client for Jira REST API.
 
     Resolves its connection through :func:`resolve_jira_connection` — the
-    shared single source of truth for all Jira call sites. Three additive
-    connection methods, detected from the configured credentials:
+    shared single source of truth for all Jira call sites. Three
+    connection methods, selected by the required ``jira_auth_mode``:
 
-    - Atlassian service account (ATST token): Bearer against the scoped
+    - Atlassian service account (``oauth``): Bearer against the scoped
       ``api.atlassian.com`` gateway, REST v3. The cloud ID is resolved on
       entry (``__aenter__``) when not configured.
-    - Cloud (``jira_email`` present): basic auth, REST v3.
-    - Server/DC (no email): Bearer PAT, REST v2.
+    - Cloud (``basic``): basic auth with email + API token, REST v3.
+    - Server/DC (``pat``): Bearer PAT, REST v2 (v3 on Atlassian Cloud hosts).
     """
 
     def __init__(self, settings: Settings) -> None:

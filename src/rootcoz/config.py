@@ -6,7 +6,11 @@ from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 from simple_logger.logger import get_logger
 
 from rootcoz.ai_client import normalize_provider
@@ -246,14 +250,17 @@ class Settings(BaseSettings):
     # Site URL for browse links when JIRA_URL is the scoped API URL
     # (the site URL cannot be derived from the scoped URL).
     jira_site_url: str | None = None
-    # Explicit Jira auth method selection. When set, ONLY that method's
-    # fields are used (no prefix sniffing, no precedence chain). Empty or
-    # unset keeps the legacy auto-detection chain for backward compat.
+    # DB-only Jira auth method selection (Server Settings UI) — REQUIRED
+    # for the Jira integration. When set, ONLY that method's fields are
+    # used. Unset disables Jira entirely: no credentials are read, no
+    # inference. Never read from the environment (see
+    # settings_customise_sources); set via PUT /api/admin/settings.
     jira_auth_mode: str | None = Field(
         default=None,
         description=(
-            "Explicit Jira auth method: 'oauth', 'basic', or 'pat'. "
-            "Unset means auto-detect from the configured credentials."
+            "Explicit Jira auth method: 'oauth', 'basic', or 'pat' "
+            "(Server Settings only). Unset disables the Jira integration "
+            "(no auto-detection)."
         ),
     )
 
@@ -371,10 +378,44 @@ class Settings(BaseSettings):
         ),
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Drop ``jira_auth_mode`` from the env/dotenv sources.
+
+        The auth method is selected ONLY in Server Settings (DB); the
+        ``JIRA_AUTH_MODE`` environment variable is deliberately ignored.
+        Init kwargs (DB-override merge in ``get_settings()``, admin PUT
+        validation) and ``model_copy`` pinning are unaffected.
+        """
+
+        def _without_auth_mode(
+            source: PydanticBaseSettingsSource,
+        ) -> PydanticBaseSettingsSource:
+            def _load() -> dict[str, Any]:
+                data = source()
+                data.pop("jira_auth_mode", None)
+                return data
+
+            return _load
+
+        return (
+            init_settings,
+            _without_auth_mode(env_settings),
+            _without_auth_mode(dotenv_settings),
+            file_secret_settings,
+        )
+
     @field_validator("jira_auth_mode")
     @classmethod
     def _validate_jira_auth_mode(cls, value: str | None) -> str | None:
-        """Accept only the three known methods (or empty for auto-detect)."""
+        """Accept only the three known methods (or empty — Jira disabled)."""
         mode = (value or "").strip().lower()
         if mode and mode not in JIRA_AUTH_MODES:
             raise ValueError(
@@ -616,6 +657,14 @@ class Settings(BaseSettings):
         """Check if Jira integration is enabled and configured with valid credentials."""
         if self.enable_jira is False:
             return False
+        if not normalize_jira_auth_mode(self.jira_auth_mode):
+            # No method selected: Jira is disabled — no credential inference.
+            if self.enable_jira is True:
+                logger.warning(
+                    "enable_jira is True but no Jira auth method is selected "
+                    "(choose one in Server Settings)"
+                )
+            return False
         missing = jira_method_missing_fields(self)
         if missing:
             if self.enable_jira is True:
@@ -628,13 +677,6 @@ class Settings(BaseSettings):
         if not self.jira_url:
             if self.enable_jira is True:
                 logger.warning("enable_jira is True but JIRA_URL is not configured")
-            return False
-        _, token_value = resolve_jira_auth(self)
-        if not token_value:
-            if self.enable_jira is True:
-                logger.warning(
-                    "enable_jira is True but no Jira credentials are configured"
-                )
             return False
         if not self.jira_project_key:
             if self.enable_jira is True:
@@ -762,7 +804,7 @@ def normalize_jira_auth_mode(value: str | None) -> str:
 
     Lenient on purpose: ``Settings.model_copy`` (per-request overrides)
     bypasses field validators, so resolve paths normalize instead of
-    crashing. Invalid values log a warning and fall back to auto-detect.
+    crashing. Invalid values log a warning and disable Jira (empty mode).
     """
     mode = (value or "").strip().lower()
     if mode and mode not in JIRA_AUTH_MODES:
@@ -778,8 +820,9 @@ def normalize_jira_auth_mode(value: str | None) -> str:
 def jira_method_missing_fields(settings: Settings) -> list[str]:
     """Missing settings field names for the explicitly selected Jira auth method.
 
-    Returns [] when ``jira_auth_mode`` is unset (legacy auto-detect) or
-    when the selected method's fields are all configured.
+    Returns [] when ``jira_auth_mode`` is unset (Jira is disabled then —
+    ``jira_enabled`` short-circuits before field checks) or when the
+    selected method's fields are all configured.
     """
     mode = normalize_jira_auth_mode(settings.jira_auth_mode)
     if not mode:
@@ -795,80 +838,10 @@ def jira_method_missing_fields(settings: Settings) -> list[str]:
     return [name for name, value in required[mode] if not value]
 
 
-def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
-    """Resolve Jira authentication mode and token value.
-
-    When ``jira_auth_mode`` is explicitly set, ONLY that method's fields
-    are used — no prefix sniffing, no precedence chain (missing fields
-    leave the token empty; callers detect them via
-    ``jira_method_missing_fields``).
-
-    Unset mode keeps the legacy detection chain. Three additive modes,
-    never replacing each other:
-
-    Service account (``is_cloud=True``) is detected when
-    ``jira_oauth_access_token`` holds an ATST-prefixed token. It wins over
-    ``jira_email`` — basic auth with an ATST token is rejected by Atlassian
-    (and the failure is masked by anonymous browsing), so the prefix takes
-    precedence. A non-ATST value in that field is ignored with a warning.
-
-    Cloud mode (``is_cloud=True``) is detected when ``jira_email`` is
-    set.  The token is selected by preferring ``jira_api_token`` and
-    falling back to ``jira_pat``.
-
-    Server/DC mode (no ``jira_email``) prefers ``jira_pat`` and falls
-    back to ``jira_api_token`` only when PAT is absent.
-
-    Returns:
-        Tuple of (is_cloud, token_value).  ``token_value`` is empty when
-        no credentials are configured.
-    """
-    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
-    if mode:
-        # Explicit selection: use ONLY that method's fields — no prefix
-        # sniffing, no precedence chain. Missing fields surface through
-        # ``jira_method_missing_fields`` (token stays empty here).
-        if mode == "oauth":
-            token = settings.jira_oauth_access_token
-            return True, token.get_secret_value() if token else ""
-        if mode == "basic":
-            token = settings.jira_api_token
-            return True, token.get_secret_value() if token else ""
-        token = settings.jira_pat
-        return False, token.get_secret_value() if token else ""
-
-    if settings.jira_oauth_access_token:
-        sa_token = settings.jira_oauth_access_token.get_secret_value()
-        if sa_token.startswith("ATST"):
-            return True, sa_token
-        logger.warning(
-            "jira_oauth_access_token is set but not ATST-prefixed; "
-            "ignoring it for Jira auth resolution"
-        )
-
-    has_api_token = bool(
-        settings.jira_api_token and settings.jira_api_token.get_secret_value()
-    )
-    has_pat = bool(settings.jira_pat and settings.jira_pat.get_secret_value())
-    has_email = bool(settings.jira_email)
-
-    # email present = Cloud; use api_token first, fall back to pat
-    if has_email:
-        if has_api_token:
-            assert settings.jira_api_token is not None  # guarded by has_api_token
-            return True, settings.jira_api_token.get_secret_value()
-        if has_pat:
-            assert settings.jira_pat is not None  # guarded by has_pat
-            return True, settings.jira_pat.get_secret_value()
-        return True, ""
-
-    # No email = Server/DC; prefer PAT, fall back to API token
-    if has_pat and settings.jira_pat:
-        return False, settings.jira_pat.get_secret_value()
-    if has_api_token and settings.jira_api_token:
-        return False, settings.jira_api_token.get_secret_value()
-
-    return False, ""
+# Legacy auto-detection (ATST prefix sniffing, email-presence Cloud
+# detection, pat/api-token fallback chain) was removed in #346:
+# jira_auth_mode is required — unset disables Jira entirely. Each
+# selected method's token is read directly by the resolver in jira.py.
 
 
 # In-memory cache for DB settings overrides.

@@ -100,6 +100,7 @@ from rootcoz.config import (
     Settings,
     get_settings,
     jira_method_missing_fields,
+    normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -496,7 +497,8 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
         result.append(
             {
                 "key": field_name,
-                "env_var": field_name.upper(),
+                # jira_auth_mode is DB-only (Server Settings) — no env var
+                "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
                 "value": display_value,
                 "default": default_str,
                 "description": description,
@@ -2466,11 +2468,11 @@ async def _validate_peer_configs(
 
 
 def _resolve_enable_jira(body: BaseAnalysisRequest, settings: Settings) -> bool:
-    """Resolve enable_jira flag from request, env var, or auto-detection.
+    """Resolve enable_jira flag from request or settings.
 
     Priority order:
     1. Request body field (highest)
-    2. settings.jira_enabled property (env var + auto-detect fallback)
+    2. settings.jira_enabled property (requires a selected jira_auth_mode)
 
     Args:
         body: The analysis request.
@@ -2512,7 +2514,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     #   additional_repos - list vs str type mismatch; resolved by resolve_additional_repos()
     direct_fields = [
         "jira_url",
-        "jira_auth_mode",
         "jira_email",
         "jira_project_key",
         "jira_ssl_verify",
@@ -2547,7 +2548,9 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         body.jira_pat and body.jira_pat.strip()
     ):
         # Request-level Jira credentials must not be silently bypassed by a
-        # server-configured ATST token (the resolver prefers SA mode).
+        # server-configured ATST token (which would otherwise win). The auth
+        # method itself is a server-level selection (Server Settings DB row)
+        # — request credentials only apply under the selected method.
         # Mirrors the clearing semantics of _build_effective_jira_settings.
         overrides["jira_oauth_access_token"] = None
     if body.github_token is not None:
@@ -6713,10 +6716,10 @@ async def enrich_comments(
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
-    # Detect Cloud vs Server/DC auth once, matching JiraClient logic:
-    # - Cloud: jira_email is set -> Basic auth with email:token
-    # - Server/DC: no email -> Bearer PAT
-    # - Service account: ATST token -> Bearer against scoped gateway
+    # Jira connection resolution (single source of truth): the selected
+    # `jira_auth_mode` decides oauth (scoped gateway) / basic (Cloud) /
+    # pat (Server/DC Bearer). Unset mode → jira_enabled is False and the
+    # connection is skipped entirely.
     jira_url: str | None = settings.jira_url if settings.jira_enabled else None
     jira_active = bool(jira_url)
     jira_connection: JiraConnection | None = (
@@ -7336,22 +7339,24 @@ def _build_effective_jira_settings(
 
     Uses ``model_copy()`` to follow the same pattern as ``_merge_settings()``.
 
-    Service account mode: a user ATST token replaces the server's SA token
-    and clears the basic-auth pair (``jira_api_token``/``jira_pat``/
-    ``jira_email``) so the effective credentials are unambiguous — the
-    resolver would pick ATST first anyway.
+    The auth mode is pinned to the user's credential choice (which field
+    they filled in the credentials UI) — no inference from values:
 
-    Regular token mode: the user token is set as ``jira_api_token`` and both
-    ``jira_pat`` and ``jira_oauth_access_token`` are cleared so the user
-    token takes precedence in all auth resolution paths
-    (``resolve_jira_auth`` prefers PAT and ATST over the API token, so
-    leaving the server values intact would bypass the user override).
+    Service account mode: a user ATST token replaces the server's SA token
+    and clears the other credentials so the effective credentials are
+    unambiguous; ``jira_auth_mode`` is set to ``oauth``.
+
+    Regular token mode: with an email, ``jira_auth_mode`` is ``basic`` and
+    the token goes to ``jira_api_token``; without an email the token is a
+    bearer PAT — mode ``pat`` with the token in ``jira_pat``. The other
+    methods' fields are cleared so the user token takes precedence in all
+    auth resolution paths.
 
     When the user provides a token but no email, ``jira_email`` is also cleared
     to prevent pairing the server's email with the user's token (which would
     incorrectly trigger Cloud Basic auth). Cloud users must explicitly provide
-    their email; without it, the non-Cloud auth path is used, which may
-    fail against Cloud-only Jira hosts.
+    their email; without it, the bearer path is used, which may fail against
+    Cloud-only Jira hosts.
 
     An optional *user_jira_project_key* overrides the server-level project key
     so that duplicate searches and bug creation target the user's chosen project.
@@ -7365,6 +7370,7 @@ def _build_effective_jira_settings(
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
+        overrides["jira_auth_mode"] = "oauth"
     elif user_jira_token and user_jira_token.strip().startswith("ATST"):
         # An ATST token supplied in the regular field: route it to SA mode so
         # validation (which detects the prefix) and actual use agree.
@@ -7372,15 +7378,24 @@ def _build_effective_jira_settings(
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
+        overrides["jira_auth_mode"] = "oauth"
     elif user_jira_token and user_jira_token.strip():
-        overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
-        overrides["jira_pat"] = None
-        overrides["jira_oauth_access_token"] = None
-        overrides["jira_email"] = (
+        email = (
             user_jira_email.strip()
             if user_jira_email and user_jira_email.strip()
             else None
         )
+        if email:
+            overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
+            overrides["jira_pat"] = None
+            overrides["jira_auth_mode"] = "basic"
+        else:
+            # No email: the user token is a bearer PAT, not a basic-auth pair.
+            overrides["jira_pat"] = SecretStr(user_jira_token.strip())
+            overrides["jira_api_token"] = None
+            overrides["jira_auth_mode"] = "pat"
+        overrides["jira_oauth_access_token"] = None
+        overrides["jira_email"] = email
     if user_jira_project_key and user_jira_project_key.strip():
         overrides["jira_project_key"] = user_jira_project_key.strip()
     if not overrides:
@@ -11883,21 +11898,21 @@ async def get_admin_settings(
 
             item["options"] = await server_capable_providers()
 
-    # Authoritative resolved Jira auth mode (nonsecret) — the frontend must
-    # not infer it from possibly-masked credential values. Distinct from the
-    # user-selected `jira_auth_mode` setting item.
-    # Get DB overrides first — also the source of the internal
-    # jira_verified_method row (last method whose test SUCCEEDED, "" when
-    # never verified; not a user-editable setting).
+    # Authoritative selected Jira auth mode (nonsecret) — the frontend must
+    # not infer it from possibly-masked credential values. With no
+    # auto-detection the resolved mode IS the selected mode, so this now
+    # mirrors the normalized `jira_auth_mode` (empty when unset = Jira
+    # disabled). Distinct from the user-selected `jira_auth_mode` setting
+    # item. Also the source of the internal jira_verified_method row (last
+    # method whose test SUCCEEDED, "" when never verified; recorded only
+    # for successful tests of a SELECTED method; not user-editable).
     db_overrides = await storage.get_server_settings()
     verified_method = db_overrides.get("jira_verified_method", {}).get("value", "")
     for item in metadata:
         if item["key"] == "jira_url":
-            item["jira_resolved_mode"] = {
-                "sa": "oauth",
-                "cloud": "basic",
-                "server": "pat",
-            }.get(resolve_jira_connection(get_settings()).mode, "")
+            item["jira_resolved_mode"] = normalize_jira_auth_mode(
+                get_settings().jira_auth_mode
+            )
             item["jira_verified_method"] = verified_method
 
     # Update source and value for DB-overridden settings
@@ -12288,6 +12303,11 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     """Current-user ping against the effective Jira connection resolution."""
     if not settings.jira_url:
         return _test_result(False, "Jira URL is not configured")
+    if not normalize_jira_auth_mode(settings.jira_auth_mode):
+        return _test_result(
+            False,
+            "No Jira auth method selected — choose one in Server Settings",
+        )
     missing = jira_method_missing_fields(settings)
     if missing:
         return _test_result(
@@ -12296,12 +12316,6 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
             f"but missing: {', '.join(missing)}",
         )
     connection = resolve_jira_connection(settings)
-    if connection.mode == "none":
-        return _test_result(
-            False,
-            "No Jira credentials configured (set jira_api_token, jira_pat, "
-            "or jira_oauth_access_token)",
-        )
     connection = await complete_jira_connection(connection, settings.jira_ssl_verify)
     if not connection.api_base:
         return _test_result(
@@ -12320,9 +12334,8 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
         return _test_result(False, f"Jira connection failed: {exc}")
     auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat"}[connection.mode]
     # A method counts as configured only once its test succeeded — record
-    # the tested method (selected `jira_auth_mode`, legacy-resolved when
-    # unset) as an internal DB row. Not cleared on failure: the record
-    # reflects the last success, not the latest attempt.
+    # the tested (selected) method as an internal DB row. Not cleared on
+    # failure: the record reflects the last success, not the latest attempt.
     try:
         await storage.set_server_setting("jira_verified_method", auth_mode)
         logger.info("Jira verified method recorded: %s", auth_mode)

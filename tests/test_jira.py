@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from rootcoz.config import Settings, resolve_jira_auth
+from rootcoz.config import Settings
 from rootcoz.jira import (
     JiraClient,
     _collect_product_bug_reports,
@@ -34,9 +34,15 @@ _BASE_JIRA_ENV = {
 def _jira_settings_from_env(
     extra_env: dict[str, str],
 ) -> Generator[Settings]:
-    """Yield Settings built from the shared base env merged with *extra_env*."""
-    with patch.dict(os.environ, {**_BASE_JIRA_ENV, **extra_env}, clear=True):
-        yield Settings(_env_file=None)
+    """Yield Settings built from the shared base env merged with *extra_env*.
+
+    ``JIRA_AUTH_MODE`` is not an env var anymore (Server Settings only) —
+    the helper routes it into the init kwarg instead.
+    """
+    env = {**_BASE_JIRA_ENV, **extra_env}
+    auth_mode = env.pop("JIRA_AUTH_MODE", "")
+    with patch.dict(os.environ, env, clear=True):
+        yield Settings(_env_file=None, jira_auth_mode=auth_mode or None)
 
 
 @pytest.fixture
@@ -45,6 +51,7 @@ def jira_settings() -> Generator[Settings]:
     yield from _jira_settings_from_env(
         {
             "JIRA_URL": "https://testorg.atlassian.net",
+            "JIRA_AUTH_MODE": "basic",
             "JIRA_EMAIL": "user@example.com",
             "JIRA_API_TOKEN": "test-token",
             "JIRA_PROJECT_KEY": "PROJ",
@@ -58,6 +65,7 @@ def jira_server_settings() -> Generator[Settings]:
     yield from _jira_settings_from_env(
         {
             "JIRA_URL": "https://jira-server.example.com",
+            "JIRA_AUTH_MODE": "pat",
             "JIRA_PAT": "server-pat-token",
         }
     )
@@ -65,15 +73,15 @@ def jira_server_settings() -> Generator[Settings]:
 
 @pytest.fixture
 def jira_cloud_pat_settings() -> Generator[Settings]:
-    """Create Settings with JIRA_PAT + JIRA_EMAIL (no JIRA_API_TOKEN).
+    """Create Settings with a PAT used against an Atlassian Cloud host.
 
-    Email present → Cloud mode.  The PAT is used as the token value
-    for Cloud Basic auth (email, pat).
+    Explicit ``pat`` mode on an atlassian.net host: Bearer auth with the
+    Cloud v3 REST paths.
     """
     yield from _jira_settings_from_env(
         {
             "JIRA_URL": "https://myorg.atlassian.net",
-            "JIRA_EMAIL": "user@example.com",
+            "JIRA_AUTH_MODE": "pat",
             "JIRA_PAT": "ATATT3xFfGF0AbM93-cloud-api-token",
         }
     )
@@ -226,6 +234,7 @@ class TestJiraClient:
             _jira_settings_from_env(
                 {
                     "JIRA_URL": "https://jira.corp.example.com",
+                    "JIRA_AUTH_MODE": "basic",
                     "JIRA_EMAIL": "user@example.com",
                     "JIRA_API_TOKEN": "test-token",
                     "JIRA_PROJECT_KEY": "PROJ",
@@ -249,6 +258,7 @@ class TestJiraClient:
                 _jira_settings_from_env(
                     {
                         "JIRA_URL": url,
+                        "JIRA_AUTH_MODE": "pat",
                         "JIRA_PAT": "server-pat",
                         "JIRA_PROJECT_KEY": "PROJ",
                     }
@@ -265,6 +275,7 @@ class TestJiraClient:
             _jira_settings_from_env(
                 {
                     "JIRA_URL": "https://myorg.atlassian.net",
+                    "JIRA_AUTH_MODE": "pat",
                     "JIRA_PAT": "cloud-pat",
                     "JIRA_PROJECT_KEY": "PROJ",
                 }
@@ -276,16 +287,15 @@ class TestJiraClient:
         assert connection.search_path == "/rest/api/3/search/jql"
 
     async def test_cloud_pat_auth_detection(self, jira_cloud_pat_settings) -> None:
-        """JIRA_PAT + JIRA_EMAIL resolves to Cloud auth (email present = Cloud)."""
+        """Explicit pat mode against a Cloud host uses Bearer + v3 paths."""
         async with JiraClient(jira_cloud_pat_settings) as client:
             assert client._api_path == "/rest/api/3"
             assert client._search_path == "/rest/api/3/search/jql"
-            # Cloud uses Basic auth (email, token) — PAT used as the token
-            assert client._auth == (
-                "user@example.com",
-                "ATATT3xFfGF0AbM93-cloud-api-token",
+            # Bearer auth — the PAT is sent as the Authorization header
+            assert client._auth is None
+            assert client._headers["Authorization"] == (
+                "Bearer ATATT3xFfGF0AbM93-cloud-api-token"
             )
-            assert "Authorization" not in (client._headers or {})
 
     async def test_list_projects_returns_projects(self, jira_settings) -> None:
         """list_projects returns project key and name."""
@@ -723,6 +733,7 @@ class TestJiraConnectionResolver:
         return next(
             _jira_settings_from_env(
                 {
+                    "JIRA_AUTH_MODE": "oauth",
                     "JIRA_OAUTH_ACCESS_TOKEN": "ATST-test-token",
                     **extra_env,
                 }
@@ -772,34 +783,34 @@ class TestJiraConnectionResolver:
         assert conn.api_base == ""
         assert conn.site_url == "https://myorg.atlassian.net"
 
-    def test_sa_token_wins_over_email(self):
-        """ATST prefix takes precedence over the Cloud basic-auth pair."""
+    def test_sa_mode_wins_over_email(self):
+        """Explicit oauth mode: the SA token is used even with email+api token set."""
         settings = self._sa_settings(
             JIRA_URL="https://myorg.atlassian.net",
             JIRA_EMAIL="user@example.com",
             JIRA_API_TOKEN="regular-token",
         )
-        is_cloud, token = resolve_jira_auth(settings)
-        assert is_cloud is True
-        assert token == "ATST-test-token"
         conn = resolve_jira_connection(settings)
         assert conn.mode == "sa"
+        assert conn.headers["Authorization"] == "Bearer ATST-test-token"
 
-    def test_non_atst_sa_token_ignored(self):
-        """A non-ATST value in the SA token field falls back to regular modes."""
+    def test_unset_mode_ignores_all_credentials(self):
+        """No auto-detection: unset mode resolves to none even with full creds."""
         settings = next(
             _jira_settings_from_env(
                 {
                     "JIRA_URL": "https://jira.example.com",
                     "JIRA_EMAIL": "user@example.com",
                     "JIRA_API_TOKEN": "regular-token",
-                    "JIRA_OAUTH_ACCESS_TOKEN": "not-a-service-account-token",
+                    "JIRA_OAUTH_ACCESS_TOKEN": "ATST-test-token",
+                    "JIRA_PAT": "a-pat",
                 }
             )
         )
         conn = resolve_jira_connection(settings)
-        assert conn.mode == "cloud"
-        assert conn.auth == ("user@example.com", "regular-token")
+        assert conn.mode == "none"
+        assert conn.auth is None
+        assert conn.headers == {}
 
     @pytest.mark.asyncio
     async def test_complete_jira_connection_resolves_cloud_id(self):
@@ -859,14 +870,16 @@ class TestJiraConnectionResolver:
         assert conn.auth == ("user@example.com", "param-token")
         assert "env-secret-pat" not in str(conn.headers)
 
-    def test_legacy_unset_mode_sniffing_unchanged(self):
-        """Unset mode keeps the legacy chain: ATST prefix wins over email."""
+    def test_unset_mode_resolves_to_none(self):
+        """No auto-detection: unset mode + credentials resolves to none."""
         settings = self._sa_settings(
             JIRA_URL="https://myorg.atlassian.net",
             JIRA_EMAIL="user@example.com",
             JIRA_API_TOKEN="regular-token",
         )
-        assert resolve_jira_connection(settings).mode == "sa"
+        # _sa_settings pins oauth; drop the pin to exercise the unset case
+        unpinned = settings.model_copy(update={"jira_auth_mode": None})
+        assert resolve_jira_connection(unpinned).mode == "none"
 
 
 class TestExplicitJiraAuthMode:
@@ -967,6 +980,7 @@ class TestJiraClientServiceAccount:
             {
                 "JIRA_URL": "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432",
                 "JIRA_SITE_URL": "https://myorg.atlassian.net",
+                "JIRA_AUTH_MODE": "oauth",
                 "JIRA_OAUTH_ACCESS_TOKEN": "ATST-test-token",
                 "JIRA_PROJECT_KEY": "PROJ",
             }
@@ -992,6 +1006,7 @@ class TestJiraClientServiceAccount:
             _jira_settings_from_env(
                 {
                     "JIRA_URL": "https://myorg.atlassian.net",
+                    "JIRA_AUTH_MODE": "oauth",
                     "JIRA_OAUTH_ACCESS_TOKEN": "ATST-test-token",
                 }
             )
