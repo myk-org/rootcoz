@@ -11068,7 +11068,6 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
         configured = await storage.get_user_ai_credentials(username)
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    configured_by_lower = {p.lower(): p for p in configured}
     supported_set = set(supported)
 
     # A legacy row stored under a non-canonical spelling folds into the
@@ -11084,10 +11083,17 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
             (s for s in supported_set if s.lower() == provider.lower()), provider
         )
 
+    # Drifted legacy spellings (stored under a case variant that is no
+    # longer registered) belong to the catalog entry; a stored spelling
+    # that is itself registered belongs to that entry alone — the user
+    # credential store keeps case-distinct registered providers as
+    # separate credentials, so one must never mark the other configured.
+    drifted_lower = {p.lower() for p in configured if p not in supported_set}
+
     providers: list[dict[str, Any]] = [
         {
             "provider": p,
-            "configured": p.lower() in configured_by_lower,
+            "configured": p in configured or p.lower() in drifted_lower,
             "supports_user_keys": p in supported_set,
         }
         for p in sorted(supported_set | {_fold(p) for p in configured})

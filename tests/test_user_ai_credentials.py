@@ -2005,3 +2005,32 @@ async def test_set_user_credential_exact_match_wins_over_case_fallback(
     await main.set_user_ai_credential("foo", body, request)
     assert verify.await_args.args[0] == "foo"
     assert (await storage.get_user_ai_credentials("alice"))["foo"] == "private-value"
+
+
+@pytest.mark.asyncio
+async def test_user_credential_listing_keeps_case_distinct_configured_flags(
+    tmp_path, monkeypatch
+):
+    """Two case-differing registered providers report their own key only (#347).
+
+    The user credential store keeps case-distinct registered providers as
+    separate credentials, so a key stored for ``foo`` must not mark ``Foo``
+    configured — deleting the falsely marked entry would "succeed" without
+    revoking the key the listing showed.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "casedistinct.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["Foo", "foo"])
+    )
+    await storage.update_user_ai_credential(
+        "alice", "foo", "foo-key", registered_providers={"Foo", "foo"}
+    )
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    response = await main.get_user_ai_credentials(request)
+    assert (
+        response.body == b'{"providers":['
+        b'{"provider":"Foo","configured":false,"supports_user_keys":true},'
+        b'{"provider":"foo","configured":true,"supports_user_keys":true}]}'
+    )
