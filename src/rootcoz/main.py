@@ -11944,7 +11944,11 @@ async def set_free_ai_models_endpoint(
 
 
 async def _verify_and_store_server_provider_key(
-    provider: str, body: ServerProviderKeyInput, request: Request
+    provider: str,
+    body: ServerProviderKeyInput,
+    request: Request,
+    *,
+    replacing: bool,
 ) -> JSONResponse:
     """Shared add/rotate path: verify the key with a real turn, then store."""
     if provider not in await supported_key_providers():
@@ -11975,6 +11979,22 @@ async def _verify_and_store_server_provider_key(
                 }
             ),
             headers={"Cache-Control": "no-store"},
+        )
+    # Re-check the credential AFTER verification and BEFORE the write: the
+    # sidecar round-trip above can take seconds, and a concurrent add during
+    # it must not be silently overwritten by this one, nor a concurrent
+    # removal resurrected without its model selections.
+    exists = provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }
+    if exists and not replacing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    if replacing and not exists:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
     await storage.set_server_ai_credential(
         provider, key, request.state.username or "admin"
@@ -12079,7 +12099,9 @@ async def add_server_provider(
             status_code=409,
             detail=f"Provider '{provider}' already has a stored key; use rotate-key",
         )
-    return await _verify_and_store_server_provider_key(provider, body, request)
+    return await _verify_and_store_server_provider_key(
+        provider, body, request, replacing=False
+    )
 
 
 @app.post(
@@ -12098,7 +12120,9 @@ async def rotate_server_provider_key(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
     # The rotate body carries the provider again; the path is authoritative.
-    return await _verify_and_store_server_provider_key(provider, body, request)
+    return await _verify_and_store_server_provider_key(
+        provider, body, request, replacing=True
+    )
 
 
 @app.put(

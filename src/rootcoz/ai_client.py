@@ -231,6 +231,69 @@ def _raise_inactive_server_provider(provider: str) -> None:
     )
 
 
+class ExcludedServerModelError(ValueError):
+    """Model deselected from server credentials (admin model selection)."""
+
+
+# Managed providers (lowercase) and their selected (provider, model) pairs.
+_ServerPoolSelection = tuple[set[str], set[tuple[str, str]]]
+
+
+async def _load_server_pool_selection() -> _ServerPoolSelection | None:
+    """Managed server providers and their selected pairs; ``None`` on failure.
+
+    A provider is *managed* when it has a stored model selection or a stored
+    server key (#347): even with an empty selection (every model deselected)
+    the server pool stays scoped — "no rows" must mean "nothing exposed",
+    not "never scoped", or deselecting every model would re-expose the whole
+    catalog. Shared by :func:`scoped_models` discovery filtering and the
+    :func:`require_selected_server_pair` authorization check so both always
+    agree on what the server pool exposes.
+    """
+    selected_pairs: set[tuple[str, str]] = set()
+    selected_providers: set[str] = set()
+    try:
+        from rootcoz.storage import (
+            list_server_ai_providers,
+            list_server_provider_models,
+        )
+
+        for row in await list_server_provider_models():
+            selected_providers.add(row["provider"].lower())
+            selected_pairs.add((row["provider"].lower(), row["model"]))
+        for row in await list_server_ai_providers():
+            selected_providers.add(row["provider"].lower())
+    except sqlite3.Error, OSError:
+        logger.warning("Unable to load server provider model selection")
+        return None
+    return selected_providers, selected_pairs
+
+
+async def require_selected_server_pair(provider: str, model: str) -> None:
+    """Reject server-credential use of an admin-deselected model (#347).
+
+    :func:`scoped_models` already hides deselected pairs from discovery,
+    but a client sending the raw catalog pair must be re-checked here so
+    every server-source call and chat session creation refuses it. The
+    restriction scopes the server credential pool only — user-key calls
+    never pass through here and stay allowed.
+    """
+    selection = await _load_server_pool_selection()
+    if selection is None:
+        # Storage unavailable: discovery and the grant checks degrade the
+        # same way rather than failing every AI call.
+        return
+    selected_providers, selected_pairs = selection
+    if (
+        provider.lower() in selected_providers
+        and (provider.lower(), model) not in selected_pairs
+    ):
+        raise ExcludedServerModelError(
+            f"Model '{model}' is excluded from server credentials for "
+            f"provider '{provider}' by the administrator's model selection"
+        )
+
+
 # Cached settings picker options (monotonic_ts, provider list) — success and
 # failure alike, so a sidecar outage costs one attempt, not one per page load.
 _server_capable_cache: tuple[float, list[str]] | None = None
@@ -283,6 +346,10 @@ async def require_server_provider_grant(provider: str = "", model: str = "") -> 
             provider,
         )
         _raise_inactive_server_provider(provider)
+    if provider and model:
+        # Admin-deselected models are not runnable on server credentials,
+        # regardless of grant — the selection is the server pool (#347).
+        await require_selected_server_pair(provider, model)
     from rootcoz.storage import (
         can_user_use_free_providers,
         can_user_use_server_providers,
@@ -707,27 +774,10 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     # selection or stored server key) exposes only its selected models on
     # server credentials; a never-managed provider keeps its full catalog
     # (legacy behavior, e.g. ambient-auth providers).
-    selected_pairs: set[tuple[str, str]] = set()
-    selected_providers: set[str] = set()
-    try:
-        from rootcoz.storage import list_server_provider_models
-
-        for row in await list_server_provider_models():
-            selected_providers.add(row["provider"].lower())
-            selected_pairs.add((row["provider"].lower(), row["model"]))
-    except sqlite3.Error, OSError:
-        logger.warning("Unable to load server provider model selection")
-    # A stored server key marks the provider managed (#347): even with an
-    # empty selection (every model deselected) the server pool stays
-    # scoped — "no rows" must mean "nothing exposed", not "never scoped",
-    # or deselecting every model would re-expose the whole catalog.
-    try:
-        from rootcoz.storage import list_server_ai_providers
-
-        for row in await list_server_ai_providers():
-            selected_providers.add(row["provider"].lower())
-    except sqlite3.Error, OSError:
-        logger.warning("Unable to load server provider credentials")
+    selection = await _load_server_pool_selection()
+    if selection is None:
+        selection = (set(), set())
+    selected_providers, selected_pairs = selection
     for provider, entries in build_friendly_catalog(catalog).items():
         if active is not None and not is_server_provider_active(provider):
             # Server credential source withdrawn; user-key discovery below
@@ -867,6 +917,10 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
             # scoped_models withdrew the deactivated provider's server
             # source, so its models cannot match below — say why.
             _raise_inactive_server_provider(provider)
+        if force_server_credentials.get():
+            # Same clarity for deselected models: scoped_models withdrew
+            # the pair's server source, so it cannot match below.
+            await require_selected_server_pair(provider, model)
         if (
             status.get(provider, {}).get("unavailable")
             and not force_server_credentials.get()
@@ -1600,6 +1654,9 @@ async def call_ai(
             await require_server_provider_grant(provider, model)
         except InactiveServerProviderError as exc:
             logger.info("Chat AI reply discarded: provider deactivated mid-chat")
+            return AIResult(success=False, text=str(exc), error=str(exc))
+        except ExcludedServerModelError as exc:
+            logger.info("Chat AI reply discarded: model deselected mid-chat")
             return AIResult(success=False, text=str(exc), error=str(exc))
         except ValueError:
             logger.info("Chat AI reply discarded after server grant changed")

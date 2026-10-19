@@ -59,7 +59,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
-| GET | `/api/health` | Detailed health including database and AI sidecar |
+| GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |

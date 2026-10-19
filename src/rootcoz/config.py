@@ -545,7 +545,12 @@ class Settings(BaseSettings):
     )
     node_binary: str = Field(
         default="",
-        description="Node binary path for the sidecar and nested CLIs (NODE_BINARY). Restart required.",
+        description=(
+            "Node binary used to launch the pi-sidecar process (NODE_BINARY). "
+            "Restart required. Controls the sidecar process only — nested "
+            "processes spawned inside pi-config follow the sidecar's own "
+            "binary (upstream behavior) and cannot be retargeted separately."
+        ),
     )
     pi_sidecar_transcripts_dir: str = Field(
         default="",

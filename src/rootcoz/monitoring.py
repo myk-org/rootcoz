@@ -248,9 +248,15 @@ async def check_ai_provider() -> dict[str, str]:
     if not model:
         config_issues.append("AI_MODEL not set")
 
-    # Check sidecar health using shared helper
-    sidecar_port = os.getenv("SIDECAR_PORT", "9100")
-    sidecar_url = f"http://127.0.0.1:{sidecar_port}/health"
+    # Check sidecar health using shared helper. The probe URL follows the
+    # effective listener: SIDECAR_URL when configured (the entrypoint and
+    # _derive_sidecar_url_from_port keep it in sync with a DB sidecar_port
+    # override), else SIDECAR_PORT — never a hardcoded port.
+    sidecar_port = os.getenv("SIDECAR_PORT", "").strip() or "9100"
+    sidecar_base = os.getenv("SIDECAR_URL", "").strip() or (
+        f"http://127.0.0.1:{sidecar_port}"
+    )
+    sidecar_url = f"{sidecar_base.rstrip('/')}/health"
     sidecar_result = await _check_http_service(sidecar_url, ok_below=300)
     if sidecar_result["status"] == "error":
         error_issues.append(f"Sidecar unreachable: {sidecar_result.get('detail', '')}")
@@ -409,9 +415,16 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     checks["ai_provider"] = _safe(ai_check)
     checks["reportportal"] = _safe(rp_check)
 
-    # Determine overall status
+    # Determine overall status. The sidecar is a hard dependency — every AI
+    # feature routes through it and the container entrypoint tears the
+    # whole container down when it dies — so an unreachable sidecar is
+    # unhealthy (503), not degraded: deployment startup probes rely on
+    # /api/health failing while the sidecar is down, without depending on
+    # the sidecar's (possibly overridden) listener port.
     statuses = [c["status"] for c in checks.values()]
-    if checks["database"]["status"] == "error":
+    if checks["database"]["status"] == "error" or (
+        checks["ai_provider"]["status"] == "error"
+    ):
         overall = "unhealthy"
     elif any(s == "error" for s in statuses) or any(s == "degraded" for s in statuses):
         overall = "degraded"

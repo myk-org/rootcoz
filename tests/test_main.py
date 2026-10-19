@@ -8601,12 +8601,32 @@ class TestBuildReportContextChildScope:
 class TestStaticAssetHeaders:
     """Tests for GZip compression and cache headers on static assets."""
 
+    @staticmethod
+    def _healthy_client(test_client):
+        """Context manager: /api/health with a healthy mocked sidecar.
+
+        An unreachable sidecar is unhealthy (503) since #347 r3, so tests
+        asserting 200 from /api/health must mock the sidecar check.
+        """
+
+        @contextmanager
+        def _ctx():
+            with patch(
+                "rootcoz.monitoring.check_ai_provider",
+                new_callable=AsyncMock,
+                return_value={"status": "ok", "provider": "claude", "model": "m"},
+            ):
+                yield test_client
+
+        return _ctx()
+
     def test_gzip_middleware_registered(self, test_client):
         """Verify GZipMiddleware compresses responses above minimum size."""
-        response = test_client.get(
-            "/api/health",
-            headers={"Accept-Encoding": "gzip"},
-        )
+        with self._healthy_client(test_client) as client:
+            response = client.get(
+                "/api/health",
+                headers={"Accept-Encoding": "gzip"},
+            )
         # Health endpoint returns small JSON, may not be compressed
         # Just verify the middleware doesn't break anything
         assert response.status_code == 200
@@ -8620,7 +8640,8 @@ class TestStaticAssetHeaders:
 
     def test_non_assets_no_immutable_cache(self, test_client):
         """Verify non-asset paths don't get immutable cache headers."""
-        response = test_client.get("/api/health")
+        with self._healthy_client(test_client) as client:
+            response = client.get("/api/health")
         cache_control = response.headers.get("cache-control", "")
         assert "immutable" not in cache_control
 

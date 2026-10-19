@@ -45,7 +45,7 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; has_key: boolean; verified: boolean; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; models: Model[] }
 
 function providersState(): Provider[] {
   return [
@@ -53,6 +53,7 @@ function providersState(): Provider[] {
       provider: 'gemini',
       has_key: true,
       verified: true,
+      supports_key: true,
       models: [
         { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', included: true, free: false },
         { id: 'gemini-2.5-flash', name: 'Flash', included: false, free: false },
@@ -60,6 +61,16 @@ function providersState(): Provider[] {
       ],
     },
   ]
+}
+
+/** Un-keyed catalog entry — the server-providers list returns one per catalog provider. */
+function catalogEntry(provider: string, supports_key: boolean): Provider {
+  return { provider, has_key: false, verified: false, supports_key, models: [] }
+}
+
+/** Every catalog provider, all accepting session keys — the default addable state. */
+function keyableState(): Provider[] {
+  return [catalogEntry('gemini', true), catalogEntry('openai', true), catalogEntry('enmaas', true)]
 }
 
 /** GET response shape: {providers: [...]} — the real backend envelope. */
@@ -86,7 +97,7 @@ async function openModels(user: ReturnType<typeof userEvent.setup>) {
 describe('ServerProvidersCard add flow gate', () => {
   it('keeps Add disabled until the provider test passes, then finishes the add', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([]))
+    get.mockResolvedValue(listResult(keyableState()))
     render(<ServerProvidersCard />)
 
     await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
@@ -118,7 +129,7 @@ describe('ServerProvidersCard add flow gate', () => {
 
   it('keeps Add disabled and clears the key when the test fails', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([]))
+    get.mockResolvedValue(listResult(keyableState()))
     post.mockRejectedValueOnce(new Error('verification failed') as never)
     render(<ServerProvidersCard />)
 
@@ -135,7 +146,7 @@ describe('ServerProvidersCard add flow gate', () => {
 
   it('reports a rejected key from an ok:false response without verifying', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([]))
+    get.mockResolvedValue(listResult(keyableState()))
     post.mockResolvedValueOnce({
       ok: false,
       outcome: 'rejected',
@@ -156,7 +167,7 @@ describe('ServerProvidersCard add flow gate', () => {
 
   it('falls back to the outcome when the ok:false response has no message', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([]))
+    get.mockResolvedValue(listResult(keyableState()))
     post.mockResolvedValueOnce({ ok: false, outcome: 'inconclusive' } as never)
     render(<ServerProvidersCard />)
 
@@ -172,7 +183,7 @@ describe('ServerProvidersCard add flow gate', () => {
 
   it('submits a mixed-case catalog provider ID verbatim', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([]))
+    get.mockResolvedValue(listResult(keyableState()))
     render(<ServerProvidersCard />)
 
     // The picker offers the catalog's exact-case ID, not the folded key
@@ -194,7 +205,7 @@ describe('ServerProvidersCard add flow gate', () => {
 
   it('invalidates a passed test when the key changes', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([]))
+    get.mockResolvedValue(listResult(keyableState()))
     render(<ServerProvidersCard />)
 
     await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
@@ -213,8 +224,8 @@ describe('ServerProvidersCard provider list', () => {
   it('lists keyless providers with a deployment-credentials hint and no key controls; they stay addable', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
-      { provider: 'gemini', has_key: false, verified: false, models: [] },
-      { provider: 'openai', has_key: true, verified: true, models: [] },
+      catalogEntry('gemini', true),
+      { provider: 'openai', has_key: true, verified: true, supports_key: true, models: [] },
     ]))
     render(<ServerProvidersCard />)
 
@@ -233,6 +244,19 @@ describe('ServerProvidersCard provider list', () => {
     expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
   })
 
+  it('never offers catalog providers that cannot take session keys', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      catalogEntry('gemini', false), // ambient/deployment credentials
+      catalogEntry('openai', true),
+    ]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'openai' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'gemini' })).not.toBeInTheDocument()
+  })
+
   it('gives keyless providers model selection and free management without key buttons', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
@@ -240,6 +264,7 @@ describe('ServerProvidersCard provider list', () => {
         provider: 'vertex-claude',
         has_key: false,
         verified: false,
+        supports_key: false,
         models: [
           { id: 'claude-x', name: 'Claude X', included: true, free: true },
           { id: 'claude-y', name: 'Claude Y', included: false, free: false },

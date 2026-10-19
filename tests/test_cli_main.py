@@ -4743,7 +4743,7 @@ def test_admin_models_free_list(mock_client):
 
 
 def test_admin_server_providers_models_keeps_colons_in_ids(mock_client):
-    """Model IDs like llama3:8b keep their colons — only :free is a marker."""
+    """Model IDs like llama3:8b keep their colons — ids pass through verbatim."""
     mock_client.admin_set_server_provider_models.return_value = {
         "models": [{"id": "llama3:8b", "included": True, "free": False}]
     }
@@ -4765,8 +4765,8 @@ def test_admin_server_providers_models_keeps_colons_in_ids(mock_client):
     )
 
 
-def test_admin_server_providers_models_trailing_free_marker(mock_client):
-    """A trailing :free (case-insensitive) marks the pair free, keeping the ID."""
+def test_admin_server_providers_models_free_option_marks_pairs(mock_client):
+    """--free selects the free subset; ids never carry marker syntax."""
     mock_client.admin_set_server_provider_models.return_value = {"models": []}
     result = runner.invoke(
         app,
@@ -4777,7 +4777,9 @@ def test_admin_server_providers_models_trailing_free_marker(mock_client):
             "--provider",
             "ollama",
             "--models",
-            "llama3:8b:free,model,llama3:70b:FREE",
+            "llama3:8b,model,llama3:70b",
+            "--free",
+            "llama3:8b,llama3:70b",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -4787,6 +4789,65 @@ def test_admin_server_providers_models_trailing_free_marker(mock_client):
             {"id": "llama3:8b", "included": True, "free": True},
             {"id": "model", "included": True, "free": False},
             {"id": "llama3:70b", "included": True, "free": True},
+        ],
+    )
+
+
+def test_admin_server_providers_models_free_entry_auto_included(mock_client):
+    """A --free entry missing from --models is auto-included (free ⊆ included)."""
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "google",
+            "--models",
+            "gemini-2.5-pro",
+            "--free",
+            "gemini-2.5-flash",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "google",
+        [
+            {"id": "gemini-2.5-pro", "included": True, "free": False},
+            {"id": "gemini-2.5-flash", "included": True, "free": True},
+        ],
+    )
+
+
+def test_admin_server_providers_models_openrouter_free_id_verbatim(mock_client):
+    """Real ':free'-suffixed OpenRouter ids pass through verbatim (#347 r3).
+
+    The trailing-:free marker syntax was removed exactly because it would
+    mangle these ids into the paid base id; free selection is --free only.
+    """
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "openrouter",
+            "--models",
+            "meta-llama/llama-3-8b-instruct:free",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "openrouter",
+        [
+            {
+                "id": "meta-llama/llama-3-8b-instruct:free",
+                "included": True,
+                "free": False,
+            }
         ],
     )
 
@@ -6874,6 +6935,33 @@ class TestAdminServerProvidersCommands:
         assert result.exit_code == 1
         assert "Key NOT stored (rejected)" in result.output
 
+    def test_server_providers_add_rejected_key_json_exits_nonzero(self, mock_client):
+        """--json prints the payload but still exits 1 on ok:false (#347 r3)."""
+        mock_client.admin_add_server_provider.return_value = {
+            "outcome": "rejected",
+            "ok": False,
+            "message": "Check the key and selected model; existing credential unchanged.",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "admin",
+                "server-providers",
+                "add",
+                "--provider",
+                "google",
+                "--api-key",
+                "g-key-4",  # pragma: allowlist secret
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["outcome"] == "rejected"
+
     def test_server_providers_rotate_key(self, mock_client):
         mock_client.admin_rotate_server_provider_key.return_value = {
             "outcome": "accepted",
@@ -6901,7 +6989,34 @@ class TestAdminServerProvidersCommands:
             "gemini-2.5-pro",  # pragma: allowlist secret
         )
 
-    def test_server_providers_models_parses_free_suffix(self, mock_client):
+    def test_server_providers_rotate_key_rejected_json_exits_nonzero(self, mock_client):
+        """--json prints the payload but still exits 1 on ok:false (#347 r3)."""
+        mock_client.admin_rotate_server_provider_key.return_value = {
+            "outcome": "inconclusive",
+            "ok": False,
+            "message": "Try again when the provider is available; existing credential unchanged.",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "admin",
+                "server-providers",
+                "rotate-key",
+                "--provider",
+                "google",
+                "--api-key",
+                "g-key-5",  # pragma: allowlist secret
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["outcome"] == "inconclusive"
+
+    def test_server_providers_models_free_option(self, mock_client):
         mock_client.admin_set_server_provider_models.return_value = {
             "provider": "google",
             "models": [],
@@ -6915,7 +7030,9 @@ class TestAdminServerProvidersCommands:
                 "--provider",
                 "google",
                 "--models",
-                "gemini-2.5-pro,gemini-2.5-flash:free",
+                "gemini-2.5-pro,gemini-2.5-flash",
+                "--free",
+                "gemini-2.5-flash",
             ],
         )
         assert result.exit_code == 0

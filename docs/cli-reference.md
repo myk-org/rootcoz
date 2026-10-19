@@ -262,7 +262,7 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `server-providers list` | — | Server provider key state and per-model selection. |
 | `server-providers add` | `--provider`, `--api-key`, `--verification-model` | Add a server provider key (verified with a real sidecar turn before storing). |
 | `server-providers rotate-key` | `--provider`, `--api-key`, `--verification-model` | Replace a key (re-verified first). |
-| `server-providers models` | `--provider`, `--models` | Set the provider's exposed models; comma-separated ids, a `:free` suffix marks a free pair (e.g. `gemini-2.5-pro,gemini-2.5-flash:free`). Models not listed are deselected. |
+| `server-providers models` | `--provider`, `--models`, `--free` | Set the provider's exposed models; comma-separated ids passed verbatim (real ids may end in `:free`). `--free` lists the free subset (free implies included; entries not in `--models` are auto-included). Models not listed are deselected. |
 | `server-providers remove` | `--provider` | Remove the key, selection, and free pairs. |
 
 See [Managing Users and Server Settings](manage-users-and-server-settings.html) for what these settings mean.

@@ -163,8 +163,12 @@ ENV DO_NOT_TRACK=1
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health && curl -f http://localhost:${SIDECAR_PORT:-9100}/health || exit 1
+# Probe the backend only: /api/health validates the sidecar via the
+# effective (possibly DB-overridden) sidecar port, so the healthcheck never
+# depends on the sidecar listener port itself. The check rounds can take a
+# few seconds (dependency probes run with internal timeouts), hence 10s.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8000}/api/health || exit 1
 
 # Use uv run for uvicorn
 # --no-sync prevents uv from attempting to modify the venv at runtime.

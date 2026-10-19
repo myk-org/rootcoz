@@ -11,7 +11,7 @@ import { ModelCombobox } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; models: ServerProviderModel[] }
 
 /** GET /api/admin/server-providers — one entry per catalog + stored provider. */
 type ServerProviderListResult = { providers: ServerProvider[] }
@@ -75,10 +75,13 @@ export function ServerProvidersCard() {
   // management without key controls. Only stored-key entries are addable.
   const listed = providers ?? []
   const added = new Set(listed.filter((item) => item.has_key).map((item) => normalizeProvider(item.provider)))
+  // Only providers the server accepts keys for are offered — ambient/
+  // deployment-credential providers would just 400 on key verification.
+  const keySupported = new Set(listed.filter((item) => item.supports_key).map((item) => normalizeProvider(item.provider)))
   // The catalog hook folds keys for lookups; submissions must use the
   // exact-case ID the backend's supported-provider check expects.
   const addable = Object.keys(catalog)
-    .filter((id) => !added.has(id))
+    .filter((id) => !added.has(id) && keySupported.has(id))
     .map((id) => originalIds[id] ?? id)
   const provider = editing ?? selected
 

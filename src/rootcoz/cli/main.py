@@ -3724,22 +3724,26 @@ def admin_models_free_remove(
 # -- Server providers (Admin, #347) -------------------------------------------
 
 
-def _parse_server_provider_models(spec: str) -> list[dict[str, Any]]:
-    """Parse a "model,model:free,..." selection spec into API entries.
+def _parse_server_provider_models(models: str, free: str = "") -> list[dict[str, Any]]:
+    """Parse a ``--models``/``--free`` selection into API entries.
 
-    A case-insensitive trailing ``:free`` marks the pair free (free implies
-    included); models absent from the spec are deselected. Model IDs may
-    contain colons themselves (e.g. ``llama3:8b``) — only the trailing
-    ``:free`` marker is stripped, the rest of the ID stays intact.
+    Model IDs pass through verbatim — real IDs may genuinely end in
+    ``:free`` (OpenRouter free variants like
+    ``meta-llama/llama-3-8b-instruct:free``) or contain colons, so no
+    marker syntax is allowed; free pairs are selected with the separate
+    ``--free`` option and auto-included (free ⊆ included, matching the
+    API's normalization). Models absent from the selection are deselected.
     """
-    entries: list[dict[str, Any]] = []
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        free = part.lower().endswith(":free")
-        model = part[: -len(":free")].strip() if free else part
-        entries.append({"id": model, "included": True, "free": free})
+    included = [part.strip() for part in models.split(",") if part.strip()]
+    free_ids = {part.strip() for part in free.split(",") if part.strip()}
+    entries = [
+        {"id": model, "included": True, "free": model in free_ids} for model in included
+    ]
+    # A --free entry not repeated in --models is auto-included.
+    entries.extend(
+        {"id": model, "included": True, "free": True}
+        for model in sorted(free_ids - set(included))
+    )
     return entries
 
 
@@ -3783,14 +3787,15 @@ def admin_server_providers_add(
         lambda c: c.admin_add_server_provider(provider, api_key, verification_model),
         emit_output=False,
     )
-    if not _state.get("json", False):
-        if data.get("ok"):
+    if data.get("ok"):
+        if not _state.get("json", False):
             typer.echo(f"Stored verified key for {provider}")
-        else:
-            typer.echo(
-                f"Key NOT stored ({data.get('outcome')}): {data.get('message', '')}"
-            )
-            raise typer.Exit(code=1)
+        return
+    # A rejected/inconclusive key check fails the command in BOTH output
+    # modes — --json still prints the payload, then exits 1.
+    if not _state.get("json", False):
+        typer.echo(f"Key NOT stored ({data.get('outcome')}): {data.get('message', '')}")
+    raise typer.Exit(code=1)
 
 
 @admin_server_providers_app.command("rotate-key")
@@ -3810,14 +3815,17 @@ def admin_server_providers_rotate(
         ),
         emit_output=False,
     )
-    if not _state.get("json", False):
-        if data.get("ok"):
+    if data.get("ok"):
+        if not _state.get("json", False):
             typer.echo(f"Rotated key for {provider}")
-        else:
-            typer.echo(
-                f"Key NOT rotated ({data.get('outcome')}): {data.get('message', '')}"
-            )
-            raise typer.Exit(code=1)
+        return
+    # A rejected/inconclusive key check fails the command in BOTH output
+    # modes — --json still prints the payload, then exits 1.
+    if not _state.get("json", False):
+        typer.echo(
+            f"Key NOT rotated ({data.get('outcome')}): {data.get('message', '')}"
+        )
+    raise typer.Exit(code=1)
 
 
 @admin_server_providers_app.command("models")
@@ -3827,23 +3835,30 @@ def admin_server_providers_models(
         ...,
         "--models",
         help=(
-            "Full selection: comma-separated model ids, ':free' suffix marks a "
-            "free pair (e.g. 'gemini-2.5-pro,gemini-2.5-flash:free'). "
+            "Full selection: comma-separated model ids, passed verbatim. "
             "Models not listed are deselected."
+        ),
+    ),
+    free: str = typer.Option(
+        "",
+        "--free",
+        help=(
+            "Comma-separated model ids to declare free (subset of --models; "
+            "entries not in --models are auto-included)."
         ),
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Set which models a provider exposes on server credentials."""
-    entries = _parse_server_provider_models(models)
+    entries = _parse_server_provider_models(models, free)
     _run_client_command(
         json_output,
         lambda c: c.admin_set_server_provider_models(provider, entries),
         emit_output=False,
     )
     if not _state.get("json", False):
-        free = sum(1 for e in entries if e["free"])
-        typer.echo(f"Set {len(entries)} model(s) for {provider} ({free} free)")
+        free_count = sum(1 for e in entries if e["free"])
+        typer.echo(f"Set {len(entries)} model(s) for {provider} ({free_count} free)")
 
 
 @admin_server_providers_app.command("remove")

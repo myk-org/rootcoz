@@ -242,6 +242,71 @@ async def test_rotate_requires_existing_key_and_reverifies(client, monkeypatch):
     assert await storage.get_server_ai_credential("google") == SECRET
 
 
+# --- Concurrent add/remove during verification (#347 r3) ---
+
+
+async def test_concurrent_add_during_verification_returns_409(client, monkeypatch):
+    """A key stored by a concurrent add during verification is not overwritten.
+
+    The duplicate check runs once before verification and once after it —
+    the second check is what catches the race, so the mock sequencing
+    (empty listing first, existing key second) proves the re-check fires.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    stored = AsyncMock()
+    monkeypatch.setattr(storage, "set_server_ai_credential", stored)
+    monkeypatch.setattr(
+        storage,
+        "list_server_ai_providers",
+        AsyncMock(side_effect=[[], [{"provider": "google"}]]),
+    )
+    response = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert response.status_code == 409
+    # Verification ran (and passed) before the re-check rejected the write.
+    assert verified == [("google", "gemini-2.5-pro", SECRET)]
+    stored.assert_not_awaited()
+
+
+async def test_concurrent_remove_during_rotation_returns_404(client, monkeypatch):
+    """A key removed while its rotation verifies is not resurrected.
+
+    The pre-check sees the existing key, verification passes, then the
+    post-verification re-check finds it gone — a 404 matching the
+    absent-provider behavior, and no write.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    stored = AsyncMock()
+    monkeypatch.setattr(storage, "set_server_ai_credential", stored)
+    monkeypatch.setattr(
+        storage,
+        "list_server_ai_providers",
+        AsyncMock(side_effect=[[{"provider": "google"}], []]),
+    )
+    response = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert response.status_code == 404
+    stored.assert_not_awaited()
+
+
 async def test_list_reports_key_state_and_model_flags(client, monkeypatch):
     _fake_catalog(monkeypatch, CATALOG)
     _mock_supported(monkeypatch, ["google", "openai"])
@@ -393,6 +458,9 @@ async def test_call_ai_passes_server_key_as_session_api_key(tmp_path, monkeypatc
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-call.db")
     await storage.init_db()
     await storage.set_server_ai_credential("p", SECRET, "admin")
+    # The pair must be selected: a stored key makes the provider managed,
+    # so an unselected model is excluded from server credentials.
+    await storage.set_server_provider_models("p", [{"id": "m"}], "admin")
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
@@ -432,6 +500,7 @@ async def test_call_ai_once_passes_server_key_and_cleans_up(tmp_path, monkeypatc
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-once.db")
     await storage.init_db()
     await storage.set_server_ai_credential("p", SECRET, "admin")
+    await storage.set_server_provider_models("p", [{"id": "m"}], "admin")
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
@@ -478,7 +547,124 @@ async def test_user_key_still_wins_over_server_key(tmp_path, monkeypatch):
         ai_client.ai_username.reset(token)
 
 
-# --- Deselected models are never stored (#347 review) ---
+# --- Deselected models: never stored, never runnable on server creds ---
+# (storage/exposure: #347 review; server-credential authorization: #347 r3)
+
+
+async def test_call_ai_rejects_deselected_model_on_server_credentials(
+    tmp_path, monkeypatch
+):
+    """A raw catalog pair deselected by the admin must not run on server creds."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-excluded.db")
+    await storage.init_db()
+    await storage.set_server_ai_credential("p", SECRET, "admin")
+    await storage.set_server_provider_models("p", [{"id": "other"}], "admin")
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    sidecar = AsyncMock(return_value=AIResult(success=True, text="ok"))
+    monkeypatch.setattr(ai_client, "_call_ai", sidecar)
+    token = ai_client.ai_username.set("admin")
+    try:
+        with pytest.raises(ai_client.ExcludedServerModelError) as excinfo:
+            await real_call_ai("prompt", ai_provider="p", ai_model="m")
+        # The rejection names the excluded model and provider.
+        assert "'m'" in str(excinfo.value)
+        assert "'p'" in str(excinfo.value)
+        sidecar.assert_not_called()
+        # Selecting the pair restores the server-credential call.
+        await storage.set_server_provider_models("p", [{"id": "m"}], "admin")
+        result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
+        assert result.success
+        assert result.credential_source == "server"
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+async def test_call_ai_once_rejects_deselected_model_on_server_credentials(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-excluded-once.db")
+    await storage.init_db()
+    await storage.set_server_ai_credential("p", SECRET, "admin")
+    await storage.set_server_provider_models("p", [], "admin")
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    sidecar = AsyncMock(return_value=AIResult(success=True, text="ok"))
+    monkeypatch.setattr(ai_client, "_call_ai", sidecar)
+    token = ai_client.ai_username.set("admin")
+    try:
+        with pytest.raises(ai_client.ExcludedServerModelError, match="'m'"):
+            await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+        sidecar.assert_not_called()
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+async def test_user_key_can_run_model_excluded_from_server_pool(tmp_path, monkeypatch):
+    """The restriction scopes server credentials only — user keys stay allowed."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-excluded-user.db")
+    await storage.init_db()
+    await storage.create_user("alice")
+    await storage.update_user_ai_credential("alice", "p", "user-key-value-7")
+    await storage.set_server_ai_credential("p", SECRET, "admin")
+    await storage.set_server_provider_models("p", [{"id": "other"}], "admin")
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(
+        ai_client, "supported_key_providers", AsyncMock(return_value=["p"])
+    )
+    sidecar = AsyncMock(return_value=AIResult(success=True, text="ok"))
+    monkeypatch.setattr(ai_client, "_call_user_session", sidecar)
+    token = ai_client.ai_username.set("alice")
+    try:
+        result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
+        assert result.success
+        assert result.credential_source == "user"
+        used_key = sidecar.call_args.kwargs["api_key"]  # pragma: allowlist secret
+        assert used_key == "user-key-value-7"  # pragma: allowlist secret
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_chat_session_creation_rejects_deselected_model(monkeypatch, tmp_path):
+    """Chat session creation refuses a deselected pair on server credentials."""
+    from rootcoz.engine import chat
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat-excluded.db")
+    await storage.init_db()
+    await storage.set_server_ai_credential("openai", SECRET, "admin")
+    await storage.set_server_provider_models("openai", [{"id": "other"}], "admin")
+    create = AsyncMock(return_value="chat-sid")
+    monkeypatch.setattr(
+        chat, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        ai_client, "server_provider_key", AsyncMock(return_value=SECRET)
+    )
+    monkeypatch.setattr(chat, "create_session_safely", create)
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    monkeypatch.setattr(chat, "get_sidecar_client", lambda: object())
+    choice = ai_client._selected_credential_source.set("server")
+    token = ai_client.ai_username.set("admin")
+    try:
+        assert (
+            await chat._create_chat_session(
+                system_prompt="hi",
+                ai_provider="openai",
+                ai_model="m",
+                repo_path=tmp_path,
+            )
+            is None
+        )
+        create.assert_not_awaited()
+    finally:
+        ai_client._selected_credential_source.reset(choice)
+        ai_client.ai_username.reset(token)
 
 
 async def test_deselected_model_is_not_stored_or_exposed(client, monkeypatch):
