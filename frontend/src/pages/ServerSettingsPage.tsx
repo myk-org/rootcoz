@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
-import { api, ApiError, type TestIntegrationResult } from '@/lib/api'
+import { api, ApiError, extractApiDetail, type TestIntegrationResult } from '@/lib/api'
 import { useLatestRef } from '@/lib/useLatestRef'
 import { useSSE } from '@/lib/useSSE'
 import { useAuth } from '@/lib/auth'
@@ -37,7 +37,7 @@ import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
 import { useCursorAuthStatus } from '@/lib/useProviderOptions'
-import { FreeModelsCard } from '@/components/shared/FreeModelsCard'
+import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 
@@ -72,7 +72,7 @@ interface CategoryGroup {
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
   'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Prow',
-  'Auth & Security', 'Web Push',
+  'Auth & Security', 'Web Push', 'Notifications', 'Sidecar',
 ]
 
 // Categories with a test-connection endpoint (category -> integration id).
@@ -401,6 +401,21 @@ function SourceBadge({ source }: { source: 'default' | 'env' | 'db' }) {
   )
 }
 
+function SaveToDbButton({ saving, onClick }: { saving: boolean; onClick: () => void }) {
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      onClick={onClick}
+      disabled={saving}
+      className="h-6 px-2 text-xs text-text-tertiary hover:text-text-secondary"
+    >
+      {saving && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+      Save to DB
+    </Button>
+  )
+}
+
 function EnvVarWarning({ setting }: { setting: ServerSetting }) {
   if (setting.source !== 'db' || !setting.has_env_var) return null
   const valuesMatch = setting.env_var_value !== undefined && setting.value === setting.env_var_value
@@ -473,6 +488,12 @@ export function ServerSettingsPage() {
   const [testingCategory, setTestingCategory] = useState<string | null>(null)
   const [testResult, setTestResult] = useState<{ category: string; result: TestIntegrationResult } | null>(null)
 
+  // Save-response warnings (e.g. the non-loopback sidecar_host trust warning).
+  const [saveWarning, setSaveWarning] = useState<string | null>(null)
+
+  // "Save to DB" in-flight key (persisting an env-sourced setting into the DB).
+  const [persistingKey, setPersistingKey] = useState<string | null>(null)
+
   // Debounced search
   const [searchInput, setSearchInput] = useState('')
   useEffect(() => {
@@ -517,14 +538,16 @@ export function ServerSettingsPage() {
   // ---- Shared save helper ----
   async function saveSettings(updates: Record<string, string>): Promise<boolean> {
     dispatch({ type: 'SAVE_START' })
+    setSaveWarning(null)
     try {
-      await api.put('/api/admin/settings', { settings: updates })
+      const result = await api.put<{ warnings?: string[] }>('/api/admin/settings', { settings: updates })
       // Keep controls disabled until the refetched values are rendered —
       // otherwise a re-opened editor can save the stale value over the fresh one.
       await fetchSettings(true)
       // A saved key's cached reveal is stale — clear it so the fresh masked value shows (#343).
       dispatch({ type: 'CLEAR_REVEALED', keys: Object.keys(updates) })
       dispatch({ type: 'SAVE_SUCCESS' })
+      if (result?.warnings?.length) setSaveWarning(result.warnings.join(' '))
       return true
     } catch (err) {
       let msg = 'Failed to save'
@@ -571,6 +594,22 @@ export function ServerSettingsPage() {
   async function handleBooleanToggle(key: string, currentValue: string) {
     const newValue = currentValue === 'true' ? 'false' : 'true'
     await saveSettingValue(key, newValue)
+  }
+
+  // ---- Persist an env-sourced setting into the DB ----
+  async function handlePersistEnv(key: string) {
+    setPersistingKey(key)
+    try {
+      await api.persistSetting(key)
+      await fetchSettings(true)
+    } catch (err) {
+      const msg = err instanceof ApiError
+        ? extractApiDetail(err) ?? `Save to DB failed (${err.status})`
+        : 'Failed to save to DB'
+      dispatch({ type: 'SAVE_ERROR', error: msg })
+    } finally {
+      setPersistingKey(null)
+    }
   }
 
   // ---- Peer config structured editor ----
@@ -805,6 +844,11 @@ export function ServerSettingsPage() {
   // ---- Per-category card (shared by the tab view and search results) ----
   function renderCategory(category: string, settings: ServerSetting[]) {
     const isCollapsed = state.collapsedCategories.has(category)
+    // "Save to DB" affordance for env-sourced rows (null for db/default rows).
+    const saveToDbNode = (s: ServerSetting) =>
+      s.source === 'env' ? (
+        <SaveToDbButton saving={persistingKey === s.key} onClick={() => handlePersistEnv(s.key)} />
+      ) : null
     // Search must be able to find every Jira field, so auth-method hiding
     // only applies in the tab view.
     const rowSettings = category === 'Jira' && !state.search
@@ -886,6 +930,7 @@ export function ServerSettingsPage() {
                       key={setting.key}
                       setting={setting}
                       editing={aiProviderEditing}
+                      saveToDbNode={saveToDbNode(setting)}
                       onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
                       onCancel={() => {
                         setAiProviderEditing(false)
@@ -920,6 +965,7 @@ export function ServerSettingsPage() {
                       key={setting.key}
                       setting={setting}
                       editing={aiModelEditing}
+                      saveToDbNode={saveToDbNode(setting)}
                       onStartEdit={(v) => { setAiModelValue(v); setAiModelEditing(true) }}
                       onCancel={() => setAiModelEditing(false)}
                       onSave={() => handleSaveAiModel(aiModelValue)}
@@ -971,6 +1017,7 @@ export function ServerSettingsPage() {
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
                         <SourceBadge source={setting.source} />
+                        {saveToDbNode(setting)}
                         <EnvVarWarning setting={setting} />
                       </div>
                       {serverProvidersEditing ? (
@@ -1097,6 +1144,7 @@ export function ServerSettingsPage() {
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
                         <SourceBadge source={setting.source} />
+                        {saveToDbNode(setting)}
                         <EnvVarWarning setting={setting} />
                       </div>
                       {peerEditing ? (
@@ -1170,6 +1218,7 @@ export function ServerSettingsPage() {
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
                         <SourceBadge source={setting.source} />
+                        {saveToDbNode(setting)}
                         <EnvVarWarning setting={setting} />
                       </div>
                       <p className="text-xs text-text-tertiary">
@@ -1186,6 +1235,7 @@ export function ServerSettingsPage() {
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
                         <SourceBadge source={setting.source} />
+                        {saveToDbNode(setting)}
                         <EnvVarWarning setting={setting} />
                       </div>
                       {reposEditing ? (
@@ -1246,6 +1296,7 @@ export function ServerSettingsPage() {
                   <SettingRow
                     key={setting.key}
                     setting={setting}
+                    saveToDbNode={saveToDbNode(setting)}
                     isEditing={state.editingKey === setting.key}
                     editValue={state.editValue}
                     saving={state.saving}
@@ -1273,7 +1324,7 @@ export function ServerSettingsPage() {
                 )
               })}
             </div>
-            {category === 'AI' && <FreeModelsCard />}
+            {category === 'AI' && <ServerProvidersCard />}
 
           </CardContent>
         )}
@@ -1351,6 +1402,11 @@ export function ServerSettingsPage() {
           <p role="alert" className="text-center text-signal-red text-sm py-2">{state.saveError}</p>
         )}
 
+        {/* Save-response warnings (e.g. sidecar_host trust warning) */}
+        {saveWarning && (
+          <p role="status" className="text-center text-signal-amber text-sm py-2">{saveWarning}</p>
+        )}
+
         {/* Loading skeleton */}
         {state.loading ? (
           <div className="space-y-4">
@@ -1402,6 +1458,7 @@ export function ServerSettingsPage() {
 interface AiSettingRowProps {
   setting: ServerSetting
   editing: boolean
+  saveToDbNode?: React.ReactNode
   onStartEdit: (currentValue: string) => void
   onCancel: () => void
   onSave: () => void
@@ -1419,6 +1476,7 @@ interface AiSettingRowProps {
 function AiSettingRow({
   setting,
   editing,
+  saveToDbNode,
   onStartEdit,
   onCancel,
   onSave,
@@ -1437,6 +1495,7 @@ function AiSettingRow({
       <div className="flex items-center gap-2">
         <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
         <SourceBadge source={setting.source} />
+        {saveToDbNode}
         <EnvVarWarning setting={setting} />
       </div>
       {editing ? (
@@ -1492,6 +1551,7 @@ function AiSettingRow({
 
 interface SettingRowProps {
   setting: ServerSetting
+  saveToDbNode?: React.ReactNode
   isEditing: boolean
   editValue: string
   saving: boolean
@@ -1513,6 +1573,7 @@ interface SettingRowProps {
 
 function SettingRow({
   setting,
+  saveToDbNode,
   isEditing,
   editValue,
   saving,
@@ -1551,6 +1612,7 @@ function SettingRow({
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
           <SourceBadge source={setting.source} />
+          {saveToDbNode}
           <EnvVarWarning setting={setting} />
           {setting.restart_required && <RestartBadge />}
         </div>
@@ -1608,6 +1670,7 @@ function SettingRow({
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
             <SourceBadge source={setting.source} />
+            {saveToDbNode}
             <EnvVarWarning setting={setting} />
             {setting.restart_required && <RestartBadge />}
             {setting.sensitive && (
@@ -1787,7 +1850,7 @@ function RestartBadge() {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="inline-flex cursor-help items-center gap-0.5 rounded-full bg-signal-orange/10 px-1.5 py-0.5 text-xs text-signal-orange">
+        <span aria-label="Restart required" className="inline-flex cursor-help items-center gap-0.5 rounded-full bg-signal-orange/10 px-1.5 py-0.5 text-xs text-signal-orange">
           <AlertTriangle className="h-3 w-3" />
           ⚠️
         </span>

@@ -9,6 +9,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     HttpUrl,
+    SecretStr,
     Strict,
     StringConstraints,
     field_validator,
@@ -1594,6 +1595,28 @@ class SetFreeAiModelsRequest(BaseModel):
     # instead of silently erasing a concurrent admin's change. Omitted
     # keeps last-write-wins for callers that did not read first.
     expected_version: str | None = None
+
+
+class ServerProviderKeyInput(BaseModel):
+    """Admin server-provider add/rotate body — the key is verified before storing."""
+
+    provider: Annotated[str, Strict(), StringConstraints(min_length=1)]
+    api_key: SecretStr
+    verification_model: Annotated[str, Strict(), StringConstraints(min_length=1)]
+
+
+class ServerProviderModelEntry(BaseModel):
+    """One model in a per-provider server model selection (#347)."""
+
+    id: Annotated[str, Strict(), StringConstraints(min_length=1)]
+    included: Annotated[bool, Strict()] = False
+    free: Annotated[bool, Strict()] = False
+
+
+class SetServerProviderModelsRequest(BaseModel):
+    """Admin PUT /api/admin/server-providers/{provider}/models body."""
+
+    models: list[ServerProviderModelEntry]
 
 
 class SetCanViewReportsRequest(BaseModel):

@@ -508,7 +508,11 @@ def validate_startup_config() -> StartupConfigResult:
         )
 
     # Slack webhook (optional integration)
-    slack_url = os.getenv("SLACK_WEBHOOK_URL", "")
+    slack_url = (
+        settings.slack_webhook_url.get_secret_value()
+        if settings.slack_webhook_url
+        else ""
+    )
     if slack_url and not slack_url.startswith("https://"):
         findings.append(
             _ConfigFinding(
@@ -519,8 +523,8 @@ def validate_startup_config() -> StartupConfigResult:
         )
 
     # SMTP config partial check (optional integration)
-    smtp_host = os.getenv("SMTP_HOST", "")
-    alert_email_to = os.getenv("ALERT_EMAIL_TO", "")
+    smtp_host = settings.smtp_host
+    alert_email_to = settings.alert_email_to
     if smtp_host and not alert_email_to:
         findings.append(
             _ConfigFinding(
@@ -628,13 +632,19 @@ async def send_slack_alert(message: str, webhook_url: str | None = None) -> bool
 
     Args:
         message: Text message to send.
-        webhook_url: Slack webhook URL. Falls back to SLACK_WEBHOOK_URL env var.
+        webhook_url: Slack webhook URL. Falls back to the slack_webhook_url
+            Server Setting (DB override over the SLACK_WEBHOOK_URL env default).
 
     Returns:
         True if sent successfully, False otherwise.
         Never raises — alerting failures are swallowed.
     """
-    url = webhook_url or os.getenv("SLACK_WEBHOOK_URL", "")
+    url = webhook_url
+    if not url:
+        from rootcoz.config import get_settings
+
+        stored = get_settings().slack_webhook_url
+        url = stored.get_secret_value() if stored else ""
     if not url:
         return False
     try:
@@ -668,23 +678,29 @@ def send_email_alert(
 ) -> bool:
     """Send an email alert via SMTP.
 
-    All parameters fall back to environment variables when not provided.
+    All parameters fall back to the SMTP Server Settings (DB override over
+    the SMTP_* env defaults) when not provided.
     Never raises — alerting failures are swallowed.
 
     Returns:
         True if sent successfully, False otherwise.
     """
-    host = smtp_host or os.getenv("SMTP_HOST", "")
+    from rootcoz.config import get_settings
+
+    settings = get_settings()
+    host = smtp_host or settings.smtp_host
     if not host:
         return False
-    to_addr = alert_email_to or os.getenv("ALERT_EMAIL_TO", "")
+    to_addr = alert_email_to or settings.alert_email_to
     if not to_addr:
         return False
     try:
-        port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
-        user = smtp_user or os.getenv("SMTP_USER", "")
-        password = smtp_password or os.getenv("SMTP_PASSWORD", "")
-        from_addr = smtp_from or os.getenv("SMTP_FROM", user or f"rootcoz@{host}")
+        port = smtp_port or settings.smtp_port
+        user = smtp_user or settings.smtp_user
+        password = smtp_password or (
+            settings.smtp_password.get_secret_value() if settings.smtp_password else ""
+        )
+        from_addr = smtp_from or settings.smtp_from or user or f"rootcoz@{host}"
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = from_addr

@@ -59,30 +59,47 @@ def valid_session_id(session_id: str) -> bool:
     return bool(SESSION_ID_RE.match(session_id))
 
 
-def write_transcript_env_bridge(enabled: bool | None) -> None:
-    """Persist the DB-configured record_transcripts value for the entrypoint.
+def write_sidecar_env_bridge(values: dict[str, str | None]) -> None:
+    """Persist DB-configured sidecar env overrides for the entrypoint (#347).
 
-    ``enabled=None`` means no DB override exists — nothing is assigned, so the
-    deployment environment (compose/Helm) stays in control. Values are
-    shell-quoted: a directory or value containing spaces must survive
-    ``source`` under ``set -e``.
+    Generalizes the RECORD_TRANSCRIPTS bridge: the entrypoint sources this
+    fixed path before starting the sidecar. ``None`` (or empty) means no DB
+    override — nothing is assigned for that var, so the deployment
+    environment (compose/Helm) controls the sidecar. Values are
+    shell-quoted: a value containing spaces must survive ``source`` under
+    ``set -e``.
 
     Best-effort: environments without a writable /data (local dev without a
-    container) simply skip the bridge — the deployment env still controls the
-    sidecar there.
+    container) simply skip the bridge — the deployment env still controls
+    the sidecar there.
     """
     try:
         ENV_BRIDGE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if enabled is None:
-            # Comment-only file: sourcing it assigns nothing.
-            content = "# no DB override for RECORD_TRANSCRIPTS\n"
-        else:
-            content = (
-                f"RECORD_TRANSCRIPTS={shlex.quote('true' if enabled else 'false')}\n"
-            )
-        ENV_BRIDGE_PATH.write_text(content)
+        lines = [
+            f"{var}={shlex.quote(value)}"
+            for var, value in sorted(values.items())
+            if value
+        ]
+        ENV_BRIDGE_PATH.write_text(
+            "\n".join(lines) + "\n" if lines else "# no DB overrides for the sidecar\n"
+        )
     except OSError:
-        logger.warning("Unable to write transcript env bridge at %s", ENV_BRIDGE_PATH)
+        logger.warning("Unable to write sidecar env bridge at %s", ENV_BRIDGE_PATH)
+
+
+def write_transcript_env_bridge(enabled: bool | None) -> None:
+    """Backward-compatible single-var writer (RECORD_TRANSCRIPTS only).
+
+    Prefer :func:`write_sidecar_env_bridge` — this wrapper must not be used
+    alongside other bridged vars, it would drop their assignments.
+    """
+    write_sidecar_env_bridge(
+        {
+            "RECORD_TRANSCRIPTS": None
+            if enabled is None
+            else ("true" if enabled else "false")
+        }
+    )
 
 
 @dataclass(frozen=True)

@@ -8774,14 +8774,36 @@ class TestAdminSettingsEndpoints:
         assert "Unknown settings" in response.json()["detail"]
 
     def test_put_settings_server_only_rejected(self, test_client) -> None:
-        """PUT rejects server-only settings (env-only toggles)."""
+        """PUT rejects bootstrap-only settings (db_path/debug — env-only forever, #347)."""
         response = test_client.put(
             "/api/admin/settings",
-            json={"settings": {"auto_push_exporters": "reportportal"}},
+            json={"settings": {"db_path": "/tmp/other.db", "debug": "true"}},
         )
         assert response.status_code == 400
-        assert "Server-only" in response.json()["detail"]
-        assert "auto_push_exporters" in response.json()["detail"]
+        assert "Unknown settings" in response.json()["detail"]
+        assert "db_path" in response.json()["detail"]
+        assert "debug" in response.json()["detail"]
+
+    def test_put_settings_previously_blocked_now_settable(self, test_client) -> None:
+        """#347: the former _SERVER_ONLY_SETTINGS are admin-settable now."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "auto_push_exporters": "reportportal",
+                    "allowed_users": "alice,bob",
+                    "require_approval": "false",
+                    "public_base_url": "https://rootcoz.example.com",
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert set(response.json()["updated"]) == {
+            "auto_push_exporters",
+            "allowed_users",
+            "require_approval",
+            "public_base_url",
+        }
 
     def test_put_settings_empty_body(self, test_client) -> None:
         """PUT with no settings returns 400."""

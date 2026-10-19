@@ -232,6 +232,54 @@ class RootCozClient:
         """List admin-declared free provider+model pairs."""
         return self._request("GET", "/api/admin/free-models")
 
+    def admin_list_server_providers(self) -> dict[str, Any]:
+        """List server provider key state and per-model selection."""
+        return self._request("GET", "/api/admin/server-providers")
+
+    def admin_add_server_provider(
+        self, provider: str, api_key: str, verification_model: str
+    ) -> dict[str, Any]:
+        """Add a server provider key (verified before storing)."""
+        return self._request(
+            "POST",
+            "/api/admin/server-providers",
+            json={
+                "provider": provider,
+                "api_key": api_key,
+                "verification_model": verification_model,
+            },
+        )
+
+    def admin_rotate_server_provider_key(
+        self, provider: str, api_key: str, verification_model: str
+    ) -> dict[str, Any]:
+        """Replace a server provider key (re-verified before storing)."""
+        return self._request(
+            "POST",
+            f"/api/admin/server-providers/{quote(provider, safe='')}/rotate-key",
+            json={
+                "provider": provider,
+                "api_key": api_key,
+                "verification_model": verification_model,
+            },
+        )
+
+    def admin_set_server_provider_models(
+        self, provider: str, models: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Replace one provider's selected models ({id, included, free} entries)."""
+        return self._request(
+            "PUT",
+            f"/api/admin/server-providers/{quote(provider, safe='')}/models",
+            json={"models": models},
+        )
+
+    def admin_delete_server_provider(self, provider: str) -> dict[str, Any]:
+        """Remove a server provider's key, selection, and free pairs."""
+        return self._request(
+            "DELETE", f"/api/admin/server-providers/{quote(provider, safe='')}"
+        )
+
     def admin_set_free_models(
         self,
         models: list[dict[str, str]],
@@ -354,6 +402,10 @@ class RootCozClient:
     def admin_reset_setting(self, key: str) -> dict[str, Any]:
         """Reset a server setting to env/default. DELETE /api/admin/settings/{key}"""
         return self._request("DELETE", f"/api/admin/settings/{key}")
+
+    def admin_persist_setting(self, key: str) -> dict[str, Any]:
+        """Persist an env-sourced setting's value to DB. POST /api/admin/settings/{key}/persist"""
+        return self._request("POST", f"/api/admin/settings/{key}/persist")
 
     def admin_settings_history(
         self, key: str = "", limit: int = 100

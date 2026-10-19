@@ -3,6 +3,7 @@ import contextlib
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import logging.handlers
@@ -183,10 +184,12 @@ from rootcoz.models import (
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
     ReportPortalPushResult,
+    ServerProviderKeyInput,
     SetCanUseServerProvidersRequest,
     SetCanViewReportsRequest,
     SetFreeAiModelsRequest,
     SetReviewedRequest,
+    SetServerProviderModelsRequest,
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
@@ -270,7 +273,7 @@ from rootcoz.token_tracking import (
 from rootcoz.transcripts import (
     transcript_path,
     transcript_summary,
-    write_transcript_env_bridge,
+    write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import redact_urls_in_text
 from rootcoz.utils import (
@@ -301,33 +304,62 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "reportportal_api_token",
         "admin_key",
         "vapid_private_key",
+        "smtp_password",
+        "slack_webhook_url",
     }
 )
 
 # Server-only settings that should not be exposed to API clients.
-# These are deployment/admin toggles, not analysis configuration.
+# Everything else is admin-settable via Server Settings (#347); these two
+# are process/deployment bootstrap with no Settings field at all.
 _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
     {
-        "default_user_role",
+        "db_path",
         "debug",
+    }
+)
+
+# Admin-management settings hidden from the any-role
+# /api/default-server-settings defaults payload: they configure the server,
+# not per-request analysis defaults, and several (allowed_users,
+# admin_wait_approve_msg) reveal information non-admins never saw before
+# #347 unblocked them for admin management.
+_DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
+    {
+        "default_user_role",
         "secure_cookies",
         "trust_proxy_headers",
         "require_approval",
-        "allowed_users",
         "admin_wait_approve_msg",
+        "allowed_users",
         "log_level",
-        "db_path",
+        "metadata_rules_file",
         "enable_github_issues",
         "enable_reportportal",
         "enable_auto_review",
         "auto_push_exporters",
-        "metadata_rules_file",
         "public_base_url",
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
         "vapid_claim_email",
         "vapid_public_key",
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "slack_webhook_url",
+        "alert_email_to",
+        "session_ttl_hours",
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     }
 )
 
@@ -338,9 +370,18 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "secure_cookies",
         "trust_proxy_headers",
         "metadata_rules_file",
+        "log_level",
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     }
 )
 
@@ -407,6 +448,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "admin_wait_approve_msg",
         "allowed_users",
         "default_user_role",
+        "session_ttl_hours",
     ],
     "Prow": [
         "prow_url",
@@ -423,6 +465,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "poll_interval_minutes",
         "max_wait_minutes",
         "metadata_rules_file",
+        "log_level",
         "enable_auto_review",  # runtime toggle, no restart required
         "auto_push_exporters",  # runtime toggle, no restart required
     ],
@@ -430,6 +473,27 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
+    ],
+    "Notifications": [
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "alert_email_to",
+        "slack_webhook_url",
+    ],
+    # Restart-required: the sidecar starts once at container boot and reads
+    # these from the /data/pi-sidecar/env bridge the entrypoint sources.
+    "Sidecar": [
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     ],
 }
 
@@ -1570,6 +1634,76 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
         logger.exception("Failed to resume waiting jobs after startup")
 
 
+# Settings whose DB overrides reach the sidecar through the
+# /data/pi-sidecar/env bridge the entrypoint sources at container start
+# (#347). The sidecar starts once per boot, so these are restart-required.
+_SIDECAR_BRIDGE_SETTINGS: tuple[str, ...] = (
+    "sidecar_host",
+    "sidecar_port",
+    "sidecar_url",
+    "acpx_agents",
+    "cli_agents",
+    "pi_sidecar_log_level",
+    "node_binary",
+    "pi_sidecar_transcripts_dir",
+)
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for loopback bind addresses (127.0.0.0/8, ::1, localhost)."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _write_sidecar_env_bridge() -> None:
+    """Write the full sidecar env bridge from the current DB overrides.
+
+    Every bridged var is written in one pass: a var with no DB override is
+    left unassigned so the deployment environment governs. Callers must
+    always write the full set — a partial write would drop the others.
+    """
+    from rootcoz.config import db_setting_is_set, get_db_setting
+
+    values: dict[str, str | None] = {"RECORD_TRANSCRIPTS": None}
+    if db_setting_is_set("record_transcripts"):
+        values["RECORD_TRANSCRIPTS"] = (
+            "true" if get_settings().record_transcripts else "false"
+        )
+    for key in _SIDECAR_BRIDGE_SETTINGS:
+        values[key.upper()] = get_db_setting(key) if db_setting_is_set(key) else None
+    write_sidecar_env_bridge(values)
+
+
+def _apply_log_level_setting() -> None:
+    """Apply a DB-configured log_level to rootcoz loggers (restart-required).
+
+    Modules create their loggers at import time with the LOG_LEVEL env
+    default; a DB override re-levels every existing rootcoz logger at
+    startup. shortcut: loggers created later keep the env default — a
+    restart-level setting by design, upgrade to a logging Filter if loggers
+    must follow it live.
+    """
+    from rootcoz.config import db_setting_is_set, get_settings
+
+    if not db_setting_is_set("log_level"):
+        return
+    name = get_settings().log_level.strip().upper()
+    level = getattr(logging, name, None)
+    if not isinstance(level, int):
+        logger.warning("Ignoring invalid log_level setting: %r", name)
+        return
+    applied = 0
+    for logger_name, candidate in list(logging.Logger.manager.loggerDict.items()):
+        if logger_name.startswith("rootcoz") and isinstance(candidate, logging.Logger):
+            candidate.setLevel(level)
+            applied += 1
+    logger.info("Applied DB log_level=%s to %d rootcoz logger(s)", name, applied)
+
+
 async def _apply_transcript_recording_setting() -> bool:
     """Persist + live-apply the record_transcripts DB state.
 
@@ -1577,6 +1711,10 @@ async def _apply_transcript_recording_setting() -> bool:
     running sidecar through its runtime toggle (pi-sidecar >= 4.14.0 — no
     restart needed). Without an override nothing is assigned and the
     deployment environment governs, both on disk and at runtime.
+
+    The bridge write carries every sidecar setting (#347), not just
+    RECORD_TRANSCRIPTS — the other sidecar vars have no runtime toggle and
+    apply at the next restart.
 
     Returns True when the runtime toggle reached the sidecar (or had nothing
     to push); False when the sidecar was unreachable/rejected it — callers
@@ -1590,7 +1728,7 @@ async def _apply_transcript_recording_setting() -> bool:
         if db_setting_is_set("record_transcripts")
         else None
     )
-    write_transcript_env_bridge(enabled)
+    _write_sidecar_env_bridge()
     return await sidecar_transcripts.sync_transcript_recording(enabled)
 
 
@@ -1609,6 +1747,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from rootcoz.config import load_db_settings
 
     await load_db_settings()
+    _apply_log_level_setting()
 
     # Keep the transcript recording state in sync everywhere: the env bridge
     # persists the DB value for the next boot, and the sidecar runtime toggle
@@ -1932,7 +2071,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             str(expires_at_str), "%Y-%m-%d %H:%M:%S"
                         ).replace(tzinfo=UTC)
                         remaining = expires_at - datetime.now(UTC)
-                        if remaining < timedelta(hours=storage.SESSION_TTL_HOURS / 2):
+                        if remaining < timedelta(
+                            hours=storage.current_session_ttl_hours() / 2
+                        ):
                             # Await renewal so cookie refresh is only set after confirmed DB update
                             try:
                                 renewed = await storage.renew_session(session_token)
@@ -2101,7 +2242,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     httponly=True,
                     samesite="lax",
                     secure=settings.secure_cookies,
-                    max_age=storage.SESSION_TTL_SECONDS,
+                    max_age=storage.current_session_ttl_seconds(),
                 )
                 # Clear legacy cookie after migration
                 response.delete_cookie(
@@ -9346,7 +9487,7 @@ async def get_default_server_settings(
 
     result: dict[str, Any] = {}
     for field_name in type(settings).model_fields:
-        if field_name in _SENSITIVE_SETTINGS or field_name in _SERVER_ONLY_SETTINGS:
+        if field_name in _SENSITIVE_SETTINGS or field_name in _DEFAULTS_HIDDEN_SETTINGS:
             continue
         value = getattr(settings, field_name)
         # Skip SecretStr fields (defensive — all should be in _SENSITIVE_SETTINGS)
@@ -10582,7 +10723,7 @@ async def login(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
     # Clear legacy cookie after migration
     response.delete_cookie(
@@ -10692,7 +10833,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
 
     logger.info(f"[AUDIT] User '{username}' rotated their own API key")
@@ -10777,7 +10918,7 @@ async def register_user(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
     # Clear legacy session cookie after migration
     response.delete_cookie(
@@ -10956,19 +11097,12 @@ class AiCredentialInput(BaseModel):
     model: str
 
 
-@app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
-async def set_user_ai_credential(
-    provider: str, body: AiCredentialInput, request: Request
-) -> JSONResponse:
-    """Encrypt and save a key for a sidecar-confirmed provider."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    username = await _credential_user(request)
-    if provider not in await supported_key_providers():
-        raise HTTPException(
-            status_code=400, detail="Provider does not support session API keys"
-        )
-    key = body.api_key.get_secret_value()
+def _validate_submitted_api_key(key: str) -> str | None:
+    """Rejection detail for a submitted provider key, or None when valid.
+
+    Shared by the user and admin (server provider) credential flows: strip
+    Unicode whitespace (including the BOM), cap at 1024 UTF-16 code units.
+    """
     try:
         valid = (
             bool(
@@ -10982,8 +11116,24 @@ async def set_user_ai_credential(
         valid = False
     if valid and len(key) < 8:
         valid = False
-    if not valid:
-        raise HTTPException(status_code=400, detail="API key must be 8-1024 characters")
+    return None if valid else "API key must be 8-1024 characters"
+
+
+@app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
+async def set_user_ai_credential(
+    provider: str, body: AiCredentialInput, request: Request
+) -> JSONResponse:
+    """Encrypt and save a key for a sidecar-confirmed provider."""
+    _require_reviewer(request)
+    _check_allow_list(request)
+    username = await _credential_user(request)
+    if provider not in await supported_key_providers():
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    key = body.api_key.get_secret_value()
+    if error := _validate_submitted_api_key(key):
+        raise HTTPException(status_code=400, detail=error)
     from rootcoz.ai_client import verify_ai_key
 
     model = body.model.strip()
@@ -11727,6 +11877,274 @@ async def set_free_ai_models_endpoint(
     }
 
 
+# --- Admin server provider credentials (#347) ---
+
+
+async def _verify_and_store_server_provider_key(
+    provider: str, body: ServerProviderKeyInput, request: Request
+) -> JSONResponse:
+    """Shared add/rotate path: verify the key with a real turn, then store."""
+    if provider not in await supported_key_providers():
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    key = body.api_key.get_secret_value()
+    if error := _validate_submitted_api_key(key):
+        raise HTTPException(status_code=400, detail=error)
+    from rootcoz.ai_client import verify_ai_key
+
+    model = body.verification_model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Select a model to verify the key")
+    outcome = await verify_ai_key(provider, model, key)
+    if outcome != "accepted":
+        # Mirror the user flow: report the outcome, never store an untested key.
+        message = {
+            "rejected": "Check the key and selected model; existing credential unchanged.",
+            "inconclusive": "Try again when the provider is available; existing credential unchanged.",
+        }.get(outcome)
+        return JSONResponse(
+            content=strip_sensitive_from_response(
+                {
+                    "outcome": outcome,
+                    "ok": False,
+                    **({"message": message} if message else {}),
+                }
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+    await storage.set_server_ai_credential(
+        provider, key, request.state.username or "admin"
+    )
+    logger.info(
+        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified)",
+        request.state.username,
+        provider,
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/admin/server-providers", operation_id="listServerProviders")
+async def list_server_providers_endpoint(request: Request) -> JSONResponse:
+    """List server provider key state and per-model selection (admin only).
+
+    Never returns keys. One entry per catalog provider (plus stored
+    providers that left the catalog), each with key presence, verification
+    state, and its models with ``included`` + ``free`` flags.
+    """
+    _require_admin(request)
+    catalog = await _get_model_catalog()
+    stored = {row["provider"]: row for row in await storage.list_server_ai_providers()}
+    selections: dict[str, dict[str, bool]] = {}
+    for row in await storage.list_server_provider_models():
+        selections.setdefault(row["provider"].lower(), {})[row["model"]] = True
+    free_by_provider: dict[str, set[str]] = {}
+    for row in await storage.list_free_ai_models():
+        free_by_provider.setdefault(row["provider"].lower(), set()).add(row["model"])
+    supported = set(await supported_key_providers())
+
+    models_by_provider: dict[str, list[dict[str, Any]]] = {}
+    for entry in catalog:
+        provider = entry.get("provider")
+        model = entry.get("id")
+        if not isinstance(provider, str) or not isinstance(model, str) or not model:
+            continue
+        models_by_provider.setdefault(provider, []).append(
+            {"id": model, "name": entry.get("name") or model}
+        )
+    # Stored selections whose model left the catalog stay visible so the UI
+    # can render and clear them (stale pairs are ignored at runtime).
+    for provider_lower, selected in selections.items():
+        provider = next(
+            (p for p in models_by_provider if p.lower() == provider_lower),
+            provider_lower,
+        )
+        known = {m["id"] for m in models_by_provider.get(provider, [])}
+        for model in selected:
+            if model not in known:
+                models_by_provider.setdefault(provider, []).append({"id": model})
+
+    providers = []
+    for provider in sorted(set(models_by_provider) | set(stored)):
+        provider_lower = provider.lower()
+        models = [
+            {
+                "id": m["id"],
+                "name": m.get("name") or m["id"],
+                "included": m["id"] in selections.get(provider_lower, {}),
+                "free": m["id"] in free_by_provider.get(provider_lower, set()),
+            }
+            for m in models_by_provider.get(provider, [])
+        ]
+        record = stored.get(provider)
+        providers.append(
+            {
+                "provider": provider,
+                "has_key": record is not None,
+                "verified": record is not None,
+                "verified_at": record.get("verified_at", "") if record else "",
+                "supports_key": provider in supported,
+                "models": models,
+            }
+        )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"providers": providers}),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/admin/server-providers", operation_id="addServerProvider")
+async def add_server_provider(
+    request: Request, body: ServerProviderKeyInput
+) -> JSONResponse:
+    """Add a server provider key (admin only) — verified before storing."""
+    _require_admin(request)
+    provider = body.provider.strip()
+    if provider in {
+        row["provider"] for row in await storage.list_server_ai_providers()
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    return await _verify_and_store_server_provider_key(provider, body, request)
+
+
+@app.post(
+    "/api/admin/server-providers/{provider:path}/rotate-key",
+    operation_id="rotateServerProviderKey",
+)
+async def rotate_server_provider_key(
+    provider: str, request: Request, body: ServerProviderKeyInput
+) -> JSONResponse:
+    """Replace a server provider key (admin only) — re-verified before storing."""
+    _require_admin(request)
+    if provider not in {
+        row["provider"] for row in await storage.list_server_ai_providers()
+    }:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    # The rotate body carries the provider again; the path is authoritative.
+    return await _verify_and_store_server_provider_key(provider, body, request)
+
+
+@app.put(
+    "/api/admin/server-providers/{provider:path}/models",
+    operation_id="setServerProviderModels",
+)
+async def set_server_provider_models_endpoint(
+    provider: str, request: Request, body: SetServerProviderModelsRequest
+) -> JSONResponse:
+    """Replace one provider's selected models and free pairs (admin only).
+
+    ``free ⊆ included`` is normalized here: marking a model free auto-includes
+    it, unchecking include clears the free flag. New pairs are validated
+    against the current sidecar catalog (provider case-insensitively, model
+    id exactly) like the standalone free-models save; stored selections and
+    free pairs pass through unvalidated so stale survivors never block an
+    unrelated edit.
+    """
+    _require_admin(request)
+    # Last entry per model id wins; flags are normalized after the merge.
+    merged: dict[str, dict[str, bool]] = {}
+    for entry in body.models:
+        merged[entry.id] = {"included": entry.included, "free": entry.free}
+    entries = [
+        {
+            "id": model_id,
+            "included": flags["included"] or flags["free"],
+            "free": flags["free"] and (flags["included"] or flags["free"]),
+        }
+        for model_id, flags in merged.items()
+    ]
+
+    existing = {
+        row["model"]
+        for row in await storage.list_server_provider_models()
+        if row["provider"].lower() == provider.lower()
+    } | {
+        row["model"]
+        for row in await storage.list_free_ai_models()
+        if row["provider"].lower() == provider.lower()
+    }
+    catalog_pairs = {
+        (
+            str(entry.get("provider") or "").lower(),
+            str(entry.get("id") or ""),
+        )
+        for entry in await _get_model_catalog()
+    }
+    unknown = [
+        {"provider": provider, "model": e["id"]}
+        for e in entries
+        if e["id"] not in existing and (provider.lower(), e["id"]) not in catalog_pairs
+    ]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Unknown models in server provider selection",
+                "unknown": unknown,
+            },
+        )
+    await storage.set_server_provider_models(
+        provider, entries, request.state.username or "admin"
+    )
+    logger.info(
+        "[AUDIT] Admin '%s' set server provider models for '%s': %d included, %d free",
+        request.state.username,
+        provider,
+        sum(1 for e in entries if e["included"]),
+        sum(1 for e in entries if e["free"]),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response(
+            {"provider": provider, "models": entries}
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete(
+    "/api/admin/server-providers/{provider:path}", operation_id="deleteServerProvider"
+)
+async def delete_server_provider_endpoint(
+    provider: str, request: Request
+) -> JSONResponse:
+    """Remove a server provider's key, selection, and free pairs (admin only).
+
+    Returns 200 with a warning payload listing the affected selected/free
+    models — the frontend renders the pre-delete confirm from the GET list,
+    and the response records what the deletion actually removed.
+    """
+    _require_admin(request)
+    has_key = provider in {
+        row["provider"] for row in await storage.list_server_ai_providers()
+    }
+    current = await storage.list_server_provider_models()
+    has_selection = any(row["provider"].lower() == provider.lower() for row in current)
+    if not has_key and not has_selection:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' is not configured"
+        )
+    affected = await storage.delete_server_ai_provider(provider)
+    logger.info(
+        "[AUDIT] Admin '%s' deleted server provider '%s' (selected=%d, free=%d)",
+        request.state.username,
+        provider,
+        len(affected["selected_models"]),
+        len(affected["free_models"]),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"ok": True, "warnings": affected}),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
 async def list_users_endpoint(request: Request) -> dict[str, Any]:
     """List all users (admin and regular)."""
@@ -11975,7 +12393,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     errors = []
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket"):
+    for key in ("prow_url", "gcs_bucket", "default_user_role"):
         if key not in settings_updates:
             continue
         value = settings_updates[key]
@@ -11994,7 +12412,17 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key in ("prow_url", "gcs_bucket"):
+        if key == "log_level" and str(value).strip().upper() not in (
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        ):
+            errors.append(
+                "log_level: must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
+            )
+        if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
         # Check integer fields
         annotation = field_info.annotation
@@ -12034,10 +12462,33 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         )
 
     username = request.state.username or "admin"
+    warnings = await _save_settings_to_db(settings_updates, username)
 
-    # Save each setting to DB and apply to running process.
-    # Empty/null = reset: delete from DB so resolution falls through to env
-    # (request → DB → env; first non-empty wins).
+    logger.info(
+        "Admin settings updated: keys=%s, by=%s",
+        list(settings_updates.keys()),
+        username,
+    )
+
+    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
+    if warnings:
+        content["warnings"] = warnings
+    return JSONResponse(
+        content=content,
+        status_code=200,
+    )
+
+
+async def _save_settings_to_db(
+    settings_updates: dict[str, Any], username: str
+) -> list[str]:
+    """Persist validated settings updates to the DB store and apply them.
+
+    Shared save path for the PUT update and the env→DB persist endpoints.
+    Empty/null = reset: delete from DB so resolution falls through to env
+    (request → DB → env; first non-empty wins). Returns user-facing
+    warnings; values are never logged.
+    """
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         if not str_value:
@@ -12066,34 +12517,74 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     if cache_updates:
         update_db_settings_cache(cache_updates)
 
-    # Persist the transcript recording switch for the container entrypoint —
-    # the sidecar reads RECORD_TRANSCRIPTS from its process env at start, so
-    # the bridge file is how a DB toggle reaches it after a restart.
+    # Persist the transcript recording switch (and the other sidecar
+    # settings) for the container entrypoint — the sidecar reads these from
+    # its process env at start, so the bridge file is how a DB toggle
+    # reaches it after a restart.
     warnings: list[str] = []
-    if "record_transcripts" in settings_updates:
+    if "record_transcripts" in settings_updates or any(
+        key in settings_updates for key in _SIDECAR_BRIDGE_SETTINGS
+    ):
         synced = await _apply_transcript_recording_setting()
-        if not synced:
+        if not synced and "record_transcripts" in settings_updates:
             warnings.append(
                 "record_transcripts was saved, but the running sidecar could "
                 "not be updated — it applies after a restart or a later "
                 "successful sync"
             )
+    # A non-loopback sidecar bind is exposed to the network — same trust
+    # class as trust_proxy_headers: only safe behind a trusted network.
+    if "sidecar_host" in settings_updates:
+        host = str(settings_updates.get("sidecar_host") or "").strip()
+        if host and not _is_loopback_host(host):
+            warnings.append(
+                f"sidecar_host '{host}' is not a loopback address — the sidecar "
+                "will listen on an external interface. Only do this on a "
+                "trusted network (same trust class as trust_proxy_headers)."
+            )
 
     _broadcast_settings_change()
+    return warnings
+
+
+@app.post("/api/admin/settings/{key}/persist", operation_id="persistAdminSetting")
+async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
+    """Persist an env-sourced setting's current value to the DB store.
+
+    The migration path for env ↔ Server Settings parity (#347): deployments
+    save their current env values once, then drop the envs — the setting no
+    longer reverts to its default on restart. Runs server-side because the
+    UI never sees decrypted sensitive env values.
+    """
+    _require_admin(request)
+    if key not in Settings.model_fields:
+        raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
+    if key in _SERVER_ONLY_SETTINGS:
+        raise HTTPException(
+            status_code=400, detail=f"Server-only setting (env var only): {key}"
+        )
+    # Env var name per the Settings field mapping (see _get_settings_metadata)
+    env_value = os.environ.get(key.upper())
+    if not env_value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Setting '{key}' has no env value set",
+        )
+    # Same validation the PUT path applies to admin-typed values
+    try:
+        Settings.model_validate({key: env_value})
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}'"
+        ) from exc
+
+    username = request.state.username or "admin"
+    await _save_settings_to_db({key: env_value}, username)
 
     logger.info(
-        "Admin settings updated: keys=%s, by=%s",
-        list(settings_updates.keys()),
-        username,
+        "[AUDIT] Admin setting persisted from env: key=%s, by=%s", key, username
     )
-
-    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
-    if warnings:
-        content["warnings"] = warnings
-    return JSONResponse(
-        content=content,
-        status_code=200,
-    )
+    return JSONResponse(content={"key": key, "source": "db"})
 
 
 @app.get("/api/admin/settings/history", operation_id="getSettingsHistory")
@@ -12138,9 +12629,9 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     # environment controls the sidecar again, and the runtime override is
     # dropped so the boot env governs immediately.
     content: dict[str, Any] = {"reset": key}
-    if key == "record_transcripts":
+    if key == "record_transcripts" or key in _SIDECAR_BRIDGE_SETTINGS:
         synced = await _apply_transcript_recording_setting()
-        if not synced:
+        if not synced and key == "record_transcripts":
             content["warnings"] = [
                 (
                     "record_transcripts was reset, but the running sidecar could "

@@ -342,6 +342,30 @@ async def session_key(provider: str) -> str | None:
     return key
 
 
+async def server_provider_key(provider: str) -> str | None:
+    """Admin-stored server provider key (#347), or None.
+
+    A stored key wins over the deployment's env/ambient credentials and is
+    passed as a per-session apiKey exactly like a user key. Unreadable or
+    unreachable storage falls back to the env bootstrap with a warning —
+    the deployment credentials still authenticate the call.
+    """
+    from rootcoz.storage import UnreadableAiCredentialsError, get_server_ai_credential
+
+    try:
+        return await get_server_ai_credential(provider)
+    except UnreadableAiCredentialsError:
+        logger.warning(
+            "Server AI credential store unreadable for provider=%s; "
+            "using deployment credentials",
+            provider,
+        )
+        return None
+    except sqlite3.Error, OSError, RuntimeError:
+        logger.warning("Unable to read server AI credential for provider=%s", provider)
+        return None
+
+
 # Pi-sidecar's catalog is the provider/model contract.  These aliases only
 # preserve unambiguous legacy spelling; friendly provider names are resolved
 # against the selected model below and never choose a default route.
@@ -678,12 +702,30 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     active = _active_server_provider_entries()
     if active is not None:
         logger.debug("active_server_providers filtering active: %s", sorted(active))
+    # Admin-selected server models (#347): a provider with a stored selection
+    # exposes only those models on server credentials; a provider without one
+    # keeps its full catalog (legacy behavior, e.g. ambient-auth providers).
+    selected_pairs: set[tuple[str, str]] = set()
+    selected_providers: set[str] = set()
+    try:
+        from rootcoz.storage import list_server_provider_models
+
+        for row in await list_server_provider_models():
+            selected_providers.add(row["provider"].lower())
+            selected_pairs.add((row["provider"].lower(), row["model"]))
+    except sqlite3.Error, OSError:
+        logger.warning("Unable to load server provider model selection")
     for provider, entries in build_friendly_catalog(catalog).items():
         if active is not None and not is_server_provider_active(provider):
             # Server credential source withdrawn; user-key discovery below
             # can still surface this provider's models with 'user' only.
             continue
+        has_selection = provider.lower() in selected_providers
         for entry in entries:
+            if has_selection and (provider.lower(), entry["id"]) not in selected_pairs:
+                # Admin deselected this model from server exposure; user-key
+                # discovery below can still surface it with 'user' only.
+                continue
             pairs[(provider, entry["id"])] = {
                 **entry,
                 "credential_sources": ["server"],
@@ -1398,16 +1440,21 @@ async def call_ai(
 ) -> AIResult:
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
-    key = None
+    # user key drives the credential source; a server key (#347) only
+    # replaces the deployment's env/ambient credentials inside the session.
+    user_key = None
+    server_key = None
     if not kwargs.get("session_id"):
         if _selected_credential_source.get() != "server":
-            key = await session_key(provider)
-        if key is not None:
+            user_key = await session_key(provider)
+        if user_key is None:
+            server_key = await server_provider_key(provider)
+        if (key := user_key or server_key) is not None:
             kwargs["api_key"] = key
     else:
         kwargs.pop("api_key", None)
     username = ai_username.get()
-    sidecar_call = _call_user_session if key is not None else _call_ai
+    sidecar_call = _call_user_session if user_key is not None else _call_ai
     session_id = kwargs.get("session_id")
     if session_id:
         from rootcoz.storage import get_ai_session_source
@@ -1436,7 +1483,7 @@ async def call_ai(
                 error="AI session unavailable",
             )
     else:
-        source = "user" if key is not None else "server"
+        source = "user" if user_key is not None else "server"
         if chat_session_source.get() and source != chat_session_source.get():
             logger.info("Chat AI call rejected: selected credential source unavailable")
             return AIResult(
@@ -1455,6 +1502,7 @@ async def call_ai(
                 "AI session owner account changed during session creation"
             )
         account_id = account["id"] if account else None
+    key = user_key if user_key is not None else server_key
     if session_id and source == "user":
         # Only the current owner's provider key can redact a keyed session.
         key = await session_key(provider)
@@ -1473,6 +1521,12 @@ async def call_ai(
                 error="AI session unavailable",
             )
         sidecar_call = _call_user_session
+    if session_id and source == "server" and server_key is None:
+        # A resumed server session keeps its creation-time key in the
+        # sidecar; fetch the stored one so error redaction can strip it.
+        server_key = await server_provider_key(provider)
+        if key is None:
+            key = server_key
     result = await _call_with_safe_error(
         sidecar_call,
         *args,
@@ -1504,7 +1558,7 @@ async def call_ai(
                 error="Server provider access requires an administrator grant",
             )
     result.credential_source = source
-    if not session_id and result.session_id and key is None:
+    if not session_id and result.session_id and user_key is None:
         await _remember_session_source(result.session_id, provider, account_id)
     return result
 
@@ -1514,14 +1568,18 @@ async def call_ai_once(
 ) -> AIResult:
     """Call Pi-sidecar once with a validated, unchanged catalog pair."""
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
-    key = None
+    user_key = None
     if _selected_credential_source.get() != "server":
-        key = await session_key(provider)
-    if key is not None:
+        user_key = await session_key(provider)
+    server_key = None if user_key is not None else await server_provider_key(provider)
+    key = user_key if user_key is not None else server_key
+    if user_key is not None:
         kwargs["api_key"] = key
         kwargs["once"] = True
         sidecar_call = _call_user_session
     else:
+        if server_key is not None:
+            kwargs["api_key"] = server_key
         await require_server_provider_grant(provider, model)
         # The library's call_ai_once wipes result.session_id before usage
         # recording sees it; use the multi-turn call and clean up here so
@@ -1535,14 +1593,14 @@ async def call_ai_once(
         ai_model=model,
         **kwargs,
     )
-    if key is None and result.session_id:
+    if user_key is None and result.session_id:
         result.transcript_session_id = result.session_id
         try:
             await delete_ai_session(get_sidecar_client(), result.session_id)
             result.session_id = None
         except httpx.HTTPError, OSError, RuntimeError, ValueError:
             logger.warning("Unable to clean up one-shot AI session")
-    result.credential_source = "user" if key is not None else "server"
+    result.credential_source = "user" if user_key is not None else "server"
     return result
 
 

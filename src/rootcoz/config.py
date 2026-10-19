@@ -501,6 +501,99 @@ class Settings(BaseSettings):
         description="Path to a YAML/JSON file defining name-based metadata rules for auto-assignment",
     )
 
+    # Log level for rootcoz loggers (restart-required: applied at startup).
+    # Empty = LOG_LEVEL env / library default.
+    log_level: str = Field(
+        default="",
+        description=(
+            "Logging level for rootcoz loggers (DEBUG, INFO, WARNING, ERROR, "
+            "CRITICAL). Applied at server startup — restart required."
+        ),
+    )
+
+    # --- Sidecar settings (#347) ---
+    # The sidecar starts once at container boot; these DB overrides reach it
+    # through the /data/pi-sidecar/env bridge the entrypoint sources. Empty
+    # string = no override: the deployment environment (compose/Helm) governs.
+    # Restart required — the running processes keep their boot values.
+    sidecar_host: str = Field(
+        default="",
+        description=(
+            "Bind host for the pi-sidecar server (SIDECAR_HOST). Non-loopback "
+            "values are warned about on save — same trust class as "
+            "trust_proxy_headers. Restart required."
+        ),
+    )
+    sidecar_port: str = Field(
+        default="",
+        description="Port for the pi-sidecar server (SIDECAR_PORT). Restart required.",
+    )
+    sidecar_url: str = Field(
+        default="",
+        description="Base URL rootcoz uses to reach the sidecar (SIDECAR_URL). Restart required.",
+    )
+    acpx_agents: str = Field(
+        default="",
+        description="ACPX agent spec for the sidecar (ACPX_AGENTS). Restart required.",
+    )
+    cli_agents: str = Field(
+        default="",
+        description="CLI agent spec for the sidecar (CLI_AGENTS). Restart required.",
+    )
+    pi_sidecar_log_level: str = Field(
+        default="",
+        description="Log level for the pi-sidecar server (PI_SIDECAR_LOG_LEVEL). Restart required.",
+    )
+    node_binary: str = Field(
+        default="",
+        description="Node binary path for the sidecar and nested CLIs (NODE_BINARY). Restart required.",
+    )
+    pi_sidecar_transcripts_dir: str = Field(
+        default="",
+        description=(
+            "Directory for pi-sidecar session transcripts "
+            "(PI_SIDECAR_TRANSCRIPTS_DIR). Restart required."
+        ),
+    )
+
+    # --- Notifications (#347) ---
+    smtp_host: str = Field(default="", description="SMTP server host for email alerts.")
+    smtp_port: int = Field(default=587, gt=0, description="SMTP server port.")
+    smtp_user: str = Field(default="", description="SMTP username.")
+    smtp_password: SecretStr | None = Field(
+        default=None, description="SMTP password.", repr=False
+    )
+    smtp_from: str = Field(
+        default="", description="From address for email alerts. Defaults to smtp_user."
+    )
+    slack_webhook_url: SecretStr | None = Field(
+        default=None, description="Slack webhook URL for alerts.", repr=False
+    )
+    alert_email_to: str = Field(
+        default="", description="Recipient address for email alerts."
+    )
+
+    # --- Auth (#347) ---
+    session_ttl_hours: int = Field(
+        default=720,
+        description="Login session lifetime in hours (SESSION_TTL_HOURS).",
+    )
+
+    @field_validator("session_ttl_hours", mode="before")
+    @classmethod
+    def _coerce_session_ttl(cls, v: object) -> int:
+        """Tolerate bad values like the env parser always did (boot default)."""
+        if isinstance(v, bool):
+            return 720
+        if isinstance(v, int):
+            return max(1, v)
+        if isinstance(v, str):
+            try:
+                return max(1, int(v))
+            except ValueError:
+                return 720
+        return 720
+
     # Admin approval for new user registrations
     require_approval: bool = Field(
         default=True,

@@ -194,6 +194,20 @@ def _parse_session_ttl() -> int:
 
 SESSION_TTL_HOURS = _parse_session_ttl()
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
+
+
+def current_session_ttl_hours() -> int:
+    """Effective session TTL (#347): Settings (DB override) over the env boot default."""
+    from rootcoz.config import get_settings
+
+    return get_settings().session_ttl_hours
+
+
+def current_session_ttl_seconds() -> int:
+    """Cookie max-age companion of :func:`current_session_ttl_hours`."""
+    return current_session_ttl_hours() * 3600
+
+
 MIN_KEY_LENGTH = 16
 VALID_USER_STATUSES = ("active", "pending", "rejected")
 AI_SYSTEM_USERNAME = "rootcoz-ai"
@@ -1342,6 +1356,34 @@ async def init_db() -> None:
                 created_by TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(provider, model)
+            )
+        """)
+
+        # Admin-managed server provider credentials (#347): one encrypted
+        # API key per exact Pi provider ID (same at-rest pattern as the user
+        # AI credential map). verified_at records the last successful
+        # verification (add or rotate) — a stored key is always a tested key.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS server_ai_providers (
+                provider TEXT PRIMARY KEY,
+                api_key_enc TEXT NOT NULL,
+                verified_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_by TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_by TEXT,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+
+        # Admin-selected models exposed on server credentials per provider
+        # (#347). A row means "included"; free flags live in free_ai_models
+        # (same pairs the standalone free-models management uses). A provider
+        # with no rows exposes its full catalog (legacy behavior).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS server_provider_models (
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                PRIMARY KEY (provider, model)
             )
         """)
 
@@ -5752,6 +5794,160 @@ async def set_free_ai_models(
     return await list_free_ai_models()
 
 
+# --- Admin-managed server provider credentials (#347) ---
+
+
+async def get_server_ai_credential(provider: str) -> str | None:
+    """Read one admin-stored server provider key (decrypted), or None.
+
+    Raises :class:`UnreadableAiCredentialsError` when the stored value
+    cannot be decrypted — a corrupt store must never silently fall back to
+    a stale key.
+    """
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT api_key_enc FROM server_ai_providers WHERE provider = ?",
+                (provider,),
+            )
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        key = decrypt_value(row[0])
+    except (RuntimeError, OSError, UnicodeDecodeError, ValueError) as exc:
+        logger.warning(
+            "Unreadable server AI credential for provider=%s; refusing access", provider
+        )
+        raise UnreadableAiCredentialsError(
+            "Stored server AI credentials are unreadable"
+        ) from exc
+    return key or None
+
+
+async def list_server_ai_providers() -> list[dict[str, Any]]:
+    """List stored server provider credentials without exposing keys."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT provider, verified_at, created_by, updated_by, updated_at"
+            " FROM server_ai_providers ORDER BY provider"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> None:
+    """Upsert one admin-stored server provider key (encrypted at rest)."""
+    async with _connect_db() as db:
+        await db.execute(
+            "INSERT INTO server_ai_providers (provider, api_key_enc, created_by, updated_by)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(provider) DO UPDATE SET"
+            " api_key_enc = excluded.api_key_enc, verified_at = datetime('now'),"
+            " updated_by = excluded.updated_by, updated_at = datetime('now')",
+            (provider, encrypt_value(key), updated_by, updated_by),
+        )
+        await db.commit()
+
+
+async def list_server_provider_models() -> list[dict[str, Any]]:
+    """List admin-selected (included) server provider model pairs."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT provider, model FROM server_provider_models ORDER BY provider, model"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def set_server_provider_models(
+    provider: str, models: list[dict[str, Any]], updated_by: str
+) -> None:
+    """Replace one provider's selected models and free pairs atomically.
+
+    ``models`` holds ``{"id", "free"}`` entries — the caller normalizes
+    ``free ⊆ included`` before this runs. Included models become rows in
+    ``server_provider_models``; free flags are written to the same
+    ``free_ai_models`` table the standalone free-models management uses.
+    Only this provider's pairs are touched; other providers' free pairs and
+    their creator/timestamp history survive untouched.
+    """
+    included = sorted({entry["id"] for entry in models if entry.get("id")})
+    free = sorted({entry["id"] for entry in models if entry.get("free")})
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            "DELETE FROM server_provider_models WHERE provider = ?", (provider,)
+        )
+        if included:
+            await db.executemany(
+                "INSERT INTO server_provider_models (provider, model) VALUES (?, ?)",
+                [(provider, model) for model in included],
+            )
+        # Free-pair identity is case-insensitive on the provider (the same
+        # rule set_free_ai_models applies), so a drifted spelling of this
+        # provider is synced, never duplicated.
+        rows = await (
+            await db.execute(
+                "SELECT model FROM free_ai_models WHERE lower(provider) = lower(?)",
+                (provider,),
+            )
+        ).fetchall()
+        existing = {row[0] for row in rows}
+        dropped = existing - set(free)
+        if dropped:
+            await db.executemany(
+                "DELETE FROM free_ai_models WHERE lower(provider) = lower(?) AND model = ?",
+                [(provider, model) for model in dropped],
+            )
+        additions = [model for model in free if model not in existing]
+        if additions:
+            await db.executemany(
+                "INSERT INTO free_ai_models (provider, model, created_by) VALUES (?, ?, ?)",
+                [(provider, model, updated_by) for model in additions],
+            )
+        await db.commit()
+
+
+async def delete_server_ai_provider(provider: str) -> dict[str, list[str]]:
+    """Remove a server provider's key, selected models, and free pairs.
+
+    Returns the affected model ids for the deletion warning payload —
+    the frontend renders the confirm from them. Selections and free pairs
+    go away with the provider: a removed provider falls back to the full
+    catalog (env/ambient credentials), never a stale restricted set.
+    """
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        selected = [
+            row[0]
+            for row in await (
+                await db.execute(
+                    "SELECT model FROM server_provider_models WHERE provider = ?",
+                    (provider,),
+                )
+            ).fetchall()
+        ]
+        free = [
+            row[0]
+            for row in await (
+                await db.execute(
+                    "SELECT model FROM free_ai_models WHERE lower(provider) = lower(?)",
+                    (provider,),
+                )
+            ).fetchall()
+        ]
+        await db.execute(
+            "DELETE FROM server_ai_providers WHERE provider = ?", (provider,)
+        )
+        await db.execute(
+            "DELETE FROM server_provider_models WHERE provider = ?", (provider,)
+        )
+        await db.execute(
+            "DELETE FROM free_ai_models WHERE lower(provider) = lower(?)", (provider,)
+        )
+        await db.commit()
+    return {"selected_models": selected, "free_models": free}
+
+
 async def track_user(username: str) -> None:
     """Track user activity — insert if new, update last_seen if existing.
 
@@ -5782,10 +5978,12 @@ async def track_user(username: str) -> None:
 async def create_session(
     username: str,
     is_admin: bool = False,
-    ttl_hours: int = SESSION_TTL_HOURS,
+    ttl_hours: int | None = None,
     role: str = "reviewer",
 ) -> str:
     """Create an opaque session token. Returns raw token."""
+    if ttl_hours is None:
+        ttl_hours = current_session_ttl_hours()
     token = secrets.token_urlsafe(32)
     token_hash = _hash_session_token(token)
     expires_at = datetime.now(UTC) + timedelta(hours=ttl_hours)
@@ -5822,7 +6020,7 @@ async def renew_session(token: str) -> bool:
     Returns True if the session was found and renewed, False otherwise.
     """
     token_hash = _hash_session_token(token)
-    new_expires = datetime.now(UTC) + timedelta(hours=SESSION_TTL_HOURS)
+    new_expires = datetime.now(UTC) + timedelta(hours=current_session_ttl_hours())
     expires_str = new_expires.strftime("%Y-%m-%d %H:%M:%S")
     async with _connect_db() as db:
         cursor = await db.execute(
