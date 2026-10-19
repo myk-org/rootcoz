@@ -405,6 +405,74 @@ describe('ServerProvidersCard model multi-select', () => {
     expect(screen.getByRole('checkbox', { name: 'gemini-2.5-flash' })).toBeInTheDocument()
     expect(screen.queryByRole('checkbox', { name: 'gemini-2.5-pro' })).not.toBeInTheDocument()
   })
+
+  it('scopes Select all to the filtered list, leaving hidden models untouched', async () => {
+    const user = userEvent.setup()
+    // Hidden pro is included AND free — both flags must survive Select all
+    const state = providersState()
+    state[0].models[0] = { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', included: true, free: true }
+    get.mockResolvedValue(listResult(state))
+    await openModels(user)
+
+    await user.type(screen.getByRole('textbox', { name: 'Filter models' }), 'flash')
+
+    // Only flash is visible and none of the visible models is included →
+    // unchecked, not indeterminate, even though pro is included overall
+    const selectAll = screen.getByRole('checkbox', { name: 'Select all' }) as HTMLInputElement
+    expect(selectAll).not.toBeChecked()
+    expect(selectAll.indeterminate).toBe(false)
+
+    await user.click(selectAll)
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/server-providers/gemini/models', {
+        models: [
+          { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', included: true, free: true },
+          { id: 'gemini-2.5-flash', name: 'Flash', included: true, free: false },
+          { id: 'gemini-2.0', name: '', included: false, free: false },
+        ],
+      }),
+    )
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    // All visible models included → checked
+    expect(screen.getByRole('checkbox', { name: 'Select all' })).toBeChecked()
+
+    // Unchecking deselects only the visible model; hidden flags untouched
+    await user.click(screen.getByRole('checkbox', { name: 'Select all' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/server-providers/gemini/models', {
+        models: [
+          { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', included: true, free: true },
+          { id: 'gemini-2.5-flash', name: 'Flash', included: false, free: false },
+          { id: 'gemini-2.0', name: '', included: false, free: false },
+        ],
+      }),
+    )
+    expect((screen.getByRole('checkbox', { name: 'Select all' }) as HTMLInputElement).indeterminate).toBe(false)
+  })
+
+  it('marks Select all indeterminate over the filtered subset', async () => {
+    const user = userEvent.setup()
+    await openModels(user)
+
+    // pro (included) and flash (not) are visible; gemini-2.0 is hidden
+    await user.type(screen.getByRole('textbox', { name: 'Filter models' }), '2.5')
+    const selectAll = screen.getByRole('checkbox', { name: 'Select all' }) as HTMLInputElement
+    expect(selectAll).not.toBeChecked()
+    expect(selectAll.indeterminate).toBe(true)
+
+    // Selecting all visible models flips only those two
+    await user.click(selectAll)
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/server-providers/gemini/models', {
+        models: [
+          { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', included: true, free: false },
+          { id: 'gemini-2.5-flash', name: 'Flash', included: true, free: false },
+          { id: 'gemini-2.0', name: '', included: false, free: false },
+        ],
+      }),
+    )
+    expect(screen.getByRole('checkbox', { name: 'Select all' })).toBeChecked()
+  })
 })
 
 describe('ServerProvidersCard free pill', () => {

@@ -270,9 +270,11 @@ export function ServerProvidersCard() {
 
 /**
  * Per-provider model multi-select: filter box, Select all (indeterminate when
- * partial), per-model include checkmarks and a free pill on every row.
- * Changes autosave (PUT) with a "Saved" notice; free ⊂ included — marking a
- * model free auto-includes it, unchecking include clears the free flag.
+ * partial) over the visible, filter-matching subset, per-model include
+ * checkmarks and a free pill on every row. Changes autosave (PUT) with a
+ * "Saved" notice; free ⊂ included — marking a model free auto-includes it,
+ * unchecking include clears the free flag. Select all only flips visible
+ * models — hidden ones keep their included and free flags.
  */
 function ProviderModels({ provider, models }: { provider: string; models: ServerProviderModel[] }) {
   // draft: admin's in-flight selection; saved: failure-recovery baseline
@@ -341,17 +343,24 @@ function ProviderModels({ provider, models }: { provider: string; models: Server
       : m))
   }
 
-  function toggleAll() {
-    const all = draft.every((m) => m.included)
-    update(draft.map((m) => ({ ...m, included: !all, free: !all ? m.free : false })))
-  }
-
   const query = filter.toLowerCase()
   const filtered = draft.filter((m) =>
     m.id.toLowerCase().includes(query) || (m.name ?? '').toLowerCase().includes(query))
+
+  // Select all toggles only the visible (filter-matching) models; hidden
+  // ones keep their included and free flags untouched.
+  function toggleAll() {
+    const all = filtered.every((m) => m.included)
+    const visible = new Set(filtered.map((m) => m.id))
+    update(draft.map((m) => visible.has(m.id)
+      ? { ...m, included: !all, free: !all ? m.free : false }
+      : m))
+  }
+
   const includedCount = draft.filter((m) => m.included).length
-  const allIncluded = draft.length > 0 && includedCount === draft.length
-  const partial = includedCount > 0 && !allIncluded
+  const visibleIncluded = filtered.filter((m) => m.included).length
+  const allIncluded = filtered.length > 0 && visibleIncluded === filtered.length
+  const partial = visibleIncluded > 0 && !allIncluded
 
   return (
     <div className="flex flex-wrap items-center gap-2">

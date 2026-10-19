@@ -1685,16 +1685,15 @@ def _sidecar_host_supports_loopback_probe(host: str) -> bool:
 
     The container entrypoint probes ``http://127.0.0.1:$SIDECAR_PORT`` and
     aborts startup when it fails, and the probe result persists under
-    ``/data`` — a bind address that can never answer on loopback would
-    brick every subsequent restart before the UI could undo it. Allowed:
-    loopback, the wildcard addresses (``0.0.0.0`` / ``::`` — they answer on
-    127.0.0.1 too), and empty (deployment default).
+    ``/data`` — a bind address that can never answer on 127.0.0.1 would
+    brick every subsequent restart before the UI could undo it. The probe
+    is a fixed IPv4 call to 127.0.0.1, so only the deployment default
+    (empty), ``0.0.0.0`` (answers on 127.0.0.1 too), and ``127.0.0.1``
+    itself are known-safe (#347 r4): every other spelling — ``::1``,
+    ``127.0.0.2``, ``localhost``, ``::`` — can bind an address the probe
+    never reaches.
     """
-    if not host:
-        return True
-    if host in ("0.0.0.0", "::"):
-        return True
-    return _is_loopback_host(host)
+    return host.strip() in ("", "0.0.0.0", "127.0.0.1")
 
 
 def _derive_sidecar_url_from_port() -> None:
@@ -11943,6 +11942,56 @@ async def set_free_ai_models_endpoint(
 # --- Admin server provider credentials (#347) ---
 
 
+async def _seed_server_provider_selection(provider: str, updated_by: str) -> None:
+    """Seed a full-catalog selection for a newly-keyed provider (#347 r4).
+
+    A stored key makes a provider *managed* (see
+    ``ai_client._load_server_pool_selection``), and a managed provider with
+    no selection rows exposes nothing — so adding a verified key to a
+    provider that served its whole catalog via deployment credentials
+    would silently withdraw every model from discovery and
+    ``require_selected_server_pair``. Seeding one row per current catalog
+    model (free flags preserved) keeps the exposure exactly as it was.
+    An existing admin selection stays authoritative — a restriction must
+    survive a key add — and the rotate path never reseeds for the same
+    reason.
+    """
+    if any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_server_provider_models()
+    ):
+        return
+    free_models = {
+        row["model"]
+        for row in await storage.list_free_ai_models()
+        if row["provider"].lower() == provider.lower()
+    }
+    catalog_models = [
+        entry["id"]
+        for entry in await _get_model_catalog()
+        if isinstance(entry.get("provider"), str)
+        and entry["provider"].lower() == provider.lower()
+        and isinstance(entry.get("id"), str)
+        and entry["id"]
+    ]
+    entries = [{"id": model, "free": model in free_models} for model in catalog_models]
+    # Free pairs whose model left the catalog survive the seeding (stale
+    # pairs are ignored at runtime) so a key add never rewrites unrelated
+    # free-model state.
+    entries.extend(
+        {"id": model, "free": True}
+        for model in sorted(free_models - set(catalog_models))
+    )
+    if entries:
+        await storage.set_server_provider_models(provider, entries, updated_by)
+        logger.info(
+            "[AUDIT] Seeded full-catalog model selection for newly-keyed "
+            "provider '%s' (%d models)",
+            provider,
+            len(entries),
+        )
+
+
 async def _verify_and_store_server_provider_key(
     provider: str,
     body: ServerProviderKeyInput,
@@ -11999,6 +12048,10 @@ async def _verify_and_store_server_provider_key(
     await storage.set_server_ai_credential(
         provider, key, request.state.username or "admin"
     )
+    if not replacing:
+        await _seed_server_provider_selection(
+            provider, request.state.username or "admin"
+        )
     logger.info(
         "[AUDIT] Admin '%s' stored server provider key for '%s' (verified)",
         request.state.username,
@@ -12016,7 +12069,10 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
 
     Never returns keys. One entry per catalog provider (plus stored
     providers that left the catalog), each with key presence, verification
-    state, and its models with ``included`` + ``free`` flags.
+    state, a ``managed`` flag, and its models with ``included`` + ``free``
+    flags — unmanaged providers (no stored key, no selection rows) report
+    their whole catalog as included, matching what the server pool
+    actually exposes for them.
     """
     _require_admin(request)
     catalog = await _get_model_catalog()
@@ -12059,11 +12115,19 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     providers = []
     for provider in sorted(set(models_by_provider) | set(stored)):
         provider_lower = provider.lower()
+        # Managed = stored selection rows or a stored key — the same rule
+        # ``ai_client._load_server_pool_selection`` scopes the server pool
+        # with. An unmanaged provider exposes its whole catalog, so the
+        # listing must report every catalog model included: reporting them
+        # unchecked would let one Free-pill click PUT a draft with a single
+        # model and silently withdraw the rest of the catalog (#347 r4).
+        managed = provider_lower in selections or normalize_provider(provider) in stored
+        selected = selections.get(provider_lower, {})
         models = [
             {
                 "id": m["id"],
                 "name": m.get("name") or m["id"],
-                "included": m["id"] in selections.get(provider_lower, {}),
+                "included": (m["id"] in selected) if managed else True,
                 "free": m["id"] in free_by_provider.get(provider_lower, set()),
             }
             for m in models_by_provider.get(provider, [])
@@ -12072,6 +12136,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         providers.append(
             {
                 "provider": provider,
+                "managed": managed,
                 "has_key": record is not None,
                 "verified": record is not None,
                 "verified_at": record.get("verified_at", "") if record else "",
@@ -12221,7 +12286,14 @@ async def delete_server_provider_endpoint(
     }
     current = await storage.list_server_provider_models()
     has_selection = any(row["provider"].lower() == provider.lower() for row in current)
-    if not has_key and not has_selection:
+    # Free pairs alone configure a provider too (#347 r4): deletion removes
+    # them, so the existence check must see them or a free-pairs-only
+    # provider 404s while its free pairs survive untouched.
+    has_free = any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_free_ai_models()
+    )
+    if not has_key and not has_selection and not has_free:
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' is not configured"
         )
@@ -12577,8 +12649,8 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             if host and not _sidecar_host_supports_loopback_probe(host):
                 errors.append(
                     f"sidecar_host: '{host}' would break the container loopback "
-                    "health probe (startup would fail on every restart) — use a "
-                    "loopback address, 0.0.0.0, ::, or leave it empty"
+                    "health probe (startup would fail on every restart) — use "
+                    "127.0.0.1, 0.0.0.0, or leave it empty"
                 )
         # Check integer fields
         annotation = field_info.annotation

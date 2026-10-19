@@ -6912,6 +6912,39 @@ class TestAdminServerProvidersCommands:
             "gemini-2.5-pro",  # pragma: allowlist secret
         )
 
+    def test_server_providers_add_prompts_hidden_when_flag_omitted(self, mock_client):
+        """--api-key omitted falls back to a hidden prompt (#347 r4).
+
+        A required plain option lands the key in shell history and ps
+        output; the prompt path keeps it out of both.
+        """
+        mock_client.admin_add_server_provider.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "add",
+                "--provider",
+                "google",
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+            input="g-key-6\n",  # pragma: allowlist secret
+        )
+        assert result.exit_code == 0
+        assert "Stored verified key for google" in result.output
+        # The hidden prompt never echoes the key back.
+        assert "g-key-6" not in result.output  # pragma: allowlist secret
+        mock_client.admin_add_server_provider.assert_called_once_with(
+            "google",
+            "g-key-6",  # pragma: allowlist secret
+            "gemini-2.5-pro",
+        )
+
     def test_server_providers_add_rejected_key_exits_nonzero(self, mock_client):
         mock_client.admin_add_server_provider.return_value = {
             "outcome": "rejected",
@@ -6987,6 +7020,36 @@ class TestAdminServerProvidersCommands:
             "google",
             "g-key-3",
             "gemini-2.5-pro",  # pragma: allowlist secret
+        )
+
+    def test_server_providers_rotate_key_prompts_hidden_when_flag_omitted(
+        self, mock_client
+    ):
+        """rotate-key --api-key omitted falls back to a hidden prompt (#347 r4)."""
+        mock_client.admin_rotate_server_provider_key.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "rotate-key",
+                "--provider",
+                "google",
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+            input="g-key-7\n",  # pragma: allowlist secret
+        )
+        assert result.exit_code == 0
+        assert "Rotated key for google" in result.output
+        assert "g-key-7" not in result.output  # pragma: allowlist secret
+        mock_client.admin_rotate_server_provider_key.assert_called_once_with(
+            "google",
+            "g-key-7",  # pragma: allowlist secret
+            "gemini-2.5-pro",
         )
 
     def test_server_providers_rotate_key_rejected_json_exits_nonzero(self, mock_client):

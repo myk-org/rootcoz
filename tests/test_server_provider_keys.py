@@ -242,6 +242,103 @@ async def test_rotate_requires_existing_key_and_reverifies(client, monkeypatch):
     assert await storage.get_server_ai_credential("google") == SECRET
 
 
+# --- Key add seeds a full selection: exposure never shrinks (#347 r4) ---
+
+
+async def test_add_key_to_unmanaged_provider_seeds_full_selection(client, monkeypatch):
+    """A stored key makes a provider managed — its whole catalog is seeded.
+
+    Without seeding, adding a verified key to a provider that served models
+    via deployment credentials would silently withdraw every model from
+    discovery and make require_selected_server_pair reject them all.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    # A pre-existing free pair must survive the seeding untouched.
+    await storage.set_free_ai_models([("google", "gemini-2.5-flash")], "admin")
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert added.status_code == 200
+    assert added.json()["ok"] is True
+    # Every catalog model became a selection row — exposure unchanged.
+    selection = await storage.list_server_provider_models()
+    assert {(row["provider"], row["model"]) for row in selection} == {
+        ("google", "gemini-2.5-pro"),
+        ("google", "gemini-2.5-flash"),
+    }
+    # The pre-existing free pair survived.
+    free = await storage.list_free_ai_models()
+    assert [(row["provider"], row["model"]) for row in free] == [
+        ("google", "gemini-2.5-flash")
+    ]
+    # Discovery and the authorization check are unchanged for the provider.
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [m["id"] for m in scoped["google"]] == [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ]
+    finally:
+        ai_client.force_server_credentials.reset(token)
+    await ai_client.require_selected_server_pair("google", "gemini-2.5-flash")
+    # Untouched providers stay unmanaged with their full catalog.
+    assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
+
+
+async def test_existing_selection_survives_key_add_and_rotate(client, monkeypatch):
+    """An admin selection is authoritative — neither add nor rotate reseeds it."""
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    await storage.set_server_ai_credential("google", "old-key-value-2", "admin")
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+    rotated = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert rotated.status_code == 200
+    selection = await storage.list_server_provider_models()
+    assert [(row["provider"], row["model"]) for row in selection] == [
+        ("google", "gemini-2.5-pro")
+    ]
+    # The same holds when the selection predates the first key: a key add
+    # over a selection-only provider must not widen the admin's choice.
+    await storage.delete_server_ai_provider("google")
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert added.status_code == 200
+    selection = await storage.list_server_provider_models()
+    assert [(row["provider"], row["model"]) for row in selection] == [
+        ("google", "gemini-2.5-pro")
+    ]
+
+
 # --- Concurrent add/remove during verification (#347 r3) ---
 
 
@@ -330,6 +427,56 @@ async def test_list_reports_key_state_and_model_flags(client, monkeypatch):
     assert models["gemini-2.5-flash"]["included"] is False
     # Keys never appear in the listing.
     assert SECRET not in response.text
+
+
+async def test_list_reports_unmanaged_provider_whole_catalog_included(
+    client, monkeypatch
+):
+    """An unmanaged provider's GET listing must match what it exposes (#347 r4).
+
+    No key + no selection rows means the server pool serves the provider's
+    whole catalog, so every catalog model must report ``included`` —
+    reporting them unchecked would let one Free-pill click PUT a single-model
+    draft and silently withdraw the rest of the catalog. The ``managed``
+    flag tells the UI which rule the flags follow.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google", "openai"])
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+    response = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert response.status_code == 200
+    providers = {p["provider"]: p for p in response.json()["providers"]}
+    # Managed (key + selection): flags follow the stored selection.
+    assert providers["google"]["managed"] is True
+    google_models = {m["id"]: m for m in providers["google"]["models"]}
+    assert google_models["gemini-2.5-pro"]["included"] is True
+    assert google_models["gemini-2.5-flash"]["included"] is False
+    # Unmanaged (env/ambient credentials): whole catalog included.
+    assert providers["openai"]["managed"] is False
+    openai_models = {m["id"]: m for m in providers["openai"]["models"]}
+    assert openai_models["gpt-5.6-luna"]["included"] is True
+    # A draft PUT built from that listing (everything left checked) keeps
+    # the provider's full exposure instead of shrinking it to one model.
+    saved = client.put(
+        "/api/admin/server-providers/openai/models",
+        headers=_admin_headers(),
+        json={
+            "models": [
+                {"id": m["id"], "included": m["included"], "free": m["free"]}
+                for m in providers["openai"]["models"]
+            ]
+        },
+    )
+    assert saved.status_code == 200
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
+    finally:
+        ai_client.force_server_credentials.reset(token)
 
 
 async def test_models_endpoint_normalizes_free_subset_and_validates(
@@ -421,6 +568,33 @@ async def test_delete_returns_warning_payload(client, monkeypatch):
     assert await storage.list_server_ai_providers() == []
     missing = client.delete(
         "/api/admin/server-providers/google", headers=_admin_headers()
+    )
+    assert missing.status_code == 404
+
+
+async def test_free_pairs_only_provider_deletes_cleanly(client, monkeypatch):
+    """A provider configured solely via free pairs must be removable (#347 r4).
+
+    Deletion removes free_ai_models rows too, so the existence check must
+    see them — or a free-pairs-only provider 404s and its pairs survive
+    with no way to clear them.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    await storage.set_free_ai_models([("google", "gemini-2.5-pro")], "admin")
+    deleted = client.delete(
+        "/api/admin/server-providers/google", headers=_admin_headers()
+    )
+    assert deleted.status_code == 200
+    assert deleted.json() == {
+        "ok": True,
+        "warnings": {"selected_models": [], "free_models": ["gemini-2.5-pro"]},
+    }
+    assert await storage.list_free_ai_models() == []
+    assert await storage.list_server_provider_models() == []
+    assert await storage.list_server_ai_providers() == []
+    # A provider with nothing configured at all still 404s.
+    missing = client.delete(
+        "/api/admin/server-providers/openai", headers=_admin_headers()
     )
     assert missing.status_code == 404
 

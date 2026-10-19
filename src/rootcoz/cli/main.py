@@ -3774,7 +3774,12 @@ def admin_server_providers_add(
     api_key: str = typer.Option(
         ...,
         "--api-key",
-        help="Provider API key (verified with a real sidecar turn before storing).",
+        help=(
+            "Provider API key (verified with a real sidecar turn before "
+            "storing); prompted hidden when the flag is omitted."
+        ),
+        prompt=True,
+        hide_input=True,
     ),
     verification_model: str = typer.Option(
         ..., "--verification-model", help="Model used to test the key."
@@ -3801,7 +3806,13 @@ def admin_server_providers_add(
 @admin_server_providers_app.command("rotate-key")
 def admin_server_providers_rotate(
     provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
-    api_key: str = typer.Option(..., "--api-key", help="New provider API key."),
+    api_key: str = typer.Option(
+        ...,
+        "--api-key",
+        help="New provider API key; prompted hidden when the flag is omitted.",
+        prompt=True,
+        hide_input=True,
+    ),
     verification_model: str = typer.Option(
         ..., "--verification-model", help="Model used to test the new key."
     ),

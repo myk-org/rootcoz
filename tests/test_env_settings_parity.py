@@ -95,7 +95,7 @@ def test_save_sidecar_settings_writes_bridge_and_warns_on_non_loopback(client, b
 
 
 def test_save_loopback_sidecar_host_has_no_warning(client, bridge):
-    for host in ("127.0.0.1", "::1", "localhost"):
+    for host in ("127.0.0.1", ""):
         response = client.put(
             "/api/admin/settings",
             headers=_admin_headers(),
@@ -423,8 +423,19 @@ def test_sidecar_port_and_host_validation_on_save(client):
         assert response.status_code == 400, bad_port
         assert "sidecar_port" in response.json()["detail"]
     # A specific non-loopback bind would break the entrypoint's loopback
-    # health probe on every restart — rejected outright.
-    for bad_host in ("10.0.0.5", "sidecar.example.com"):
+    # health probe on every restart — rejected outright. Only empty,
+    # 0.0.0.0, and 127.0.0.1 are accepted (#347 r4): the probe is a fixed
+    # IPv4 call to 127.0.0.1, so every other loopback spelling (::1,
+    # 127.0.0.2, localhost, ::) can bind an address it never reaches.
+    for bad_host in (
+        "10.0.0.5",
+        "sidecar.example.com",
+        "::1",
+        "::",
+        "127.0.0.2",
+        "127.1.2.3",
+        "localhost",
+    ):
         response = client.put(
             "/api/admin/settings",
             headers=_admin_headers(),
@@ -432,8 +443,9 @@ def test_sidecar_port_and_host_validation_on_save(client):
         )
         assert response.status_code == 400, bad_host
         assert "sidecar_host" in response.json()["detail"]
-    # Loopback, wildcard, and empty stay saveable.
-    for host in ("", "127.0.0.1", "::1", "localhost", "0.0.0.0"):
+        assert "127.0.0.1" in response.json()["detail"]
+    # The deployment default, wildcard, and exact probe address stay saveable.
+    for host in ("", "127.0.0.1", "0.0.0.0"):
         response = client.put(
             "/api/admin/settings",
             headers=_admin_headers(),
