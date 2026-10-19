@@ -11059,24 +11059,37 @@ async def _credential_user(request: Request) -> str:
 async def get_user_ai_credentials(request: Request) -> JSONResponse:
     """List supported provider IDs and configured flags; never return keys."""
     username = await _credential_user(request)
-    supported = {p.lower() for p in await supported_key_providers()}
+    # Advertise the sidecar's exact-case provider ids; a key stored under
+    # any case spelling folds into the catalog entry it belongs to (the
+    # write path canonicalizes, but older rows and cross-case duplicates
+    # must not split one provider into two rows).
+    supported = await supported_key_providers()
     try:
         configured = await storage.get_user_ai_credentials(username)
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    configured_by_lower = {p.lower(): p for p in configured}
+    supported_set = set(supported)
+
+    # A legacy row stored under a non-canonical spelling folds into the
+    # exact-case catalog entry when one exists; only providers that left
+    # the catalog entirely keep their stored spelling (configured, no
+    # longer key-supported) so the UI can still render and clear them.
+    def _fold(provider: str) -> str:
+        return next(
+            (s for s in supported_set if s.lower() == provider.lower()), provider
+        )
+
+    providers: list[dict[str, Any]] = [
+        {
+            "provider": p,
+            "configured": p.lower() in configured_by_lower,
+            "supports_user_keys": p in supported_set,
+        }
+        for p in sorted(supported_set | {_fold(p) for p in configured})
+    ]
     return JSONResponse(
-        content=strip_sensitive_from_response(
-            {
-                "providers": [
-                    {
-                        "provider": p,
-                        "configured": p in configured,
-                        "supports_user_keys": p.lower() in supported,
-                    }
-                    for p in sorted(set(supported) | configured.keys())
-                ]
-            }
-        ),
+        content=strip_sensitive_from_response({"providers": providers}),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -11161,16 +11174,22 @@ def _validate_submitted_api_key(key: str) -> str | None:
     return None if valid else "API key must be 8-1024 characters"
 
 
-async def _is_supported_key_provider(provider: str) -> bool:
-    """Case-insensitive membership in the sidecar's supported-key catalog.
+async def _canonical_key_provider_id(provider: str) -> str | None:
+    """The sidecar's exact-case id for a provider, matched ignoring case.
 
-    The catalog reports exact sidecar IDs that may be mixed-case (e.g.
-    ``EnMaaS``), while a raw API/CLI caller may post the same provider in
-    any case — an exact-case test here would 400 a supported provider
-    with the misleading "does not support session API keys" (#347).
+    The sidecar's catalog — and its ``/sessions`` endpoint — is
+    case-sensitive: it reports mixed-case IDs like ``EnMaaS`` and rejects
+    a lowercase spelling, so a caller posting ``enmaas`` passes the
+    support gate yet fails sidecar verification as "inconclusive" (#347).
+    Verification and storage must therefore use the canonical id this
+    returns. ``None`` means the catalog does not list the provider;
+    callers gate on that.
     """
-    supported = {p.lower() for p in await supported_key_providers()}
-    return provider.lower() in supported
+    lowered = provider.lower()
+    for candidate in await supported_key_providers():
+        if candidate.lower() == lowered:
+            return candidate
+    return None
 
 
 @app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
@@ -11181,10 +11200,16 @@ async def set_user_ai_credential(
     _require_reviewer(request)
     _check_allow_list(request)
     username = await _credential_user(request)
-    if not await _is_supported_key_provider(provider):
+    # Resolve to the sidecar's exact-case id: the gate below accepts any
+    # caller spelling (#347), but verification and storage must use the
+    # canonical id or the sidecar rejects the session and the stored row
+    # drifts from the catalog's spelling.
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
         raise HTTPException(
             status_code=400, detail="Provider does not support session API keys"
         )
+    provider = canonical
     key = body.api_key.get_secret_value()
     if error := _validate_submitted_api_key(key):
         raise HTTPException(status_code=400, detail=error)
@@ -12012,10 +12037,16 @@ async def _verify_and_store_server_provider_key(
     replacing: bool,
 ) -> JSONResponse:
     """Shared add/rotate path: verify the key with a real turn, then store."""
-    if not await _is_supported_key_provider(provider):
+    # Resolve to the sidecar's exact-case id up front (#347): verification,
+    # the duplicate check, and storage all see the canonical spelling, so
+    # a lowercase add behaves identically to the catalog's ``EnMaaS`` and
+    # cannot create a mixed-case duplicate row.
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
         raise HTTPException(
             status_code=400, detail="Provider does not support session API keys"
         )
+    provider = canonical
     key = body.api_key.get_secret_value()
     if error := _validate_submitted_api_key(key):
         raise HTTPException(status_code=400, detail=error)
@@ -12125,7 +12156,14 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 models_by_provider.setdefault(provider, []).append({"id": model})
 
     providers = []
-    for provider in sorted(set(models_by_provider) | set(stored)):
+    # Case-insensitive union (#347): the stored map is keyed by the
+    # normalized (lowercase) spelling, so its keys must fold into the
+    # catalog's mixed-case entry (e.g. ``EnMaaS``) instead of splitting
+    # the listing into a second lowercase row.
+    listed_ids = {p.lower(): p for p in models_by_provider}
+    for stored_id in stored:
+        listed_ids.setdefault(stored_id.lower(), stored_id)
+    for provider in sorted(listed_ids.values()):
         provider_lower = provider.lower()
         # Managed = stored selection rows or a stored key — the same rule
         # ``ai_client._load_server_pool_selection`` scopes the server pool

@@ -1308,6 +1308,37 @@ async def test_call_ai_uses_key_only_for_new_sessions(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_set_user_credential_canonicalizes_provider_id(tmp_path, monkeypatch):
+    """A lowercase user-credential PUT verifies and stores canonically (#347).
+
+    The sidecar is case-sensitive: posting ``enmaas`` when its catalog says
+    ``EnMaaS`` would fail session verification and store a drifted row.
+    The PUT must resolve the canonical id before verifying and storing.
+    """
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["EnMaaS"])
+    )
+    verified = []
+
+    async def verify(provider, model, key):
+        verified.append((provider, model, key))
+        return "accepted"
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", verify)
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="reviewer"))
+    new_key = "user-canonical-key"  # pragma: allowlist secret
+    response = await main.set_user_ai_credential(
+        "enmaas", main.AiCredentialInput(api_key=new_key, model="m"), request
+    )
+    assert response.status_code == 200
+    assert verified == [("EnMaaS", "m", new_key)]
+    stored = await storage.get_user_ai_credentials("alice")
+    assert list(stored) == ["EnMaaS"]
+    assert "enmaas" not in stored
+
+
+@pytest.mark.asyncio
 async def test_rotating_credential_deletes_sidecar_session(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "revoke.db")
     await storage.init_db()
@@ -1924,3 +1955,29 @@ class TestAmbientAuthProviderExclusion:
         # The uncached save gate still fails closed on discovery errors
         client.get_providers.side_effect = httpx.ConnectError("sidecar down")
         assert await ai_client.supported_key_providers() == []
+
+
+@pytest.mark.asyncio
+async def test_user_credential_listing_folds_case_variants(tmp_path, monkeypatch):
+    """Exact-case catalog ids only — a legacy mixed-case stored row folds in.
+
+    The listing must never split one provider into two rows (catalog entry
+    plus a case-variant stored key): the write path canonicalizes, and this
+    read path folds whatever history left behind.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "fold.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    # Catalog reports mixed case; a legacy row was stored lowercase
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["EnMaaS"])
+    )
+    await storage.update_user_ai_credential(
+        "alice", "enmaas", "legacy-key", registered_providers=["EnMaaS"]
+    )
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    response = await main.get_user_ai_credentials(request)
+    assert (
+        response.body
+        == b'{"providers":[{"provider":"EnMaaS","configured":true,"supports_user_keys":true}]}'
+    )

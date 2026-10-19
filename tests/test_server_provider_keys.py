@@ -233,7 +233,7 @@ async def test_add_accepts_lowercase_provider_id_of_mixed_case_provider(
     """
     _fake_catalog(monkeypatch, [{"provider": "EnMaaS", "id": "enmaas-1"}])
     _mock_supported(monkeypatch, ["EnMaaS"])
-    _mock_verify(monkeypatch, "accepted")
+    verified = _mock_verify(monkeypatch, "accepted")
     response = client.post(
         "/api/admin/server-providers",
         headers=_admin_headers(),
@@ -246,13 +246,43 @@ async def test_add_accepts_lowercase_provider_id_of_mixed_case_provider(
     assert response.status_code == 200
     assert response.json() == {"outcome": "accepted", "ok": True}
     assert "does not support session API keys" not in response.text
+    # Verification and storage used the sidecar's exact-case id — the
+    # sidecar itself is case-sensitive and rejects a raw lowercase id.
+    assert verified == [("EnMaaS", "enmaas-1", SECRET)]
     stored = await storage.list_server_ai_providers()
-    assert [row["provider"] for row in stored] == ["enmaas"]
+    assert [row["provider"] for row in stored] == ["EnMaaS"]
     listed = client.get("/api/admin/server-providers", headers=_admin_headers())
     assert listed.status_code == 200
-    entry = next(p for p in listed.json()["providers"] if p["provider"] == "enmaas")
+    providers = listed.json()["providers"]
+    assert [p["provider"] for p in providers] == ["EnMaaS"]
+    entry = providers[0]
     assert entry["has_key"] is True
     assert entry["supports_key"] is True
+
+
+async def test_add_canonicalizes_before_duplicate_check(client, monkeypatch):
+    """A case-drifted stored row still blocks a canonical-case add (#347).
+
+    Canonicalization happens before the duplicate check, so adding
+    ``EnMaaS`` over a row stored as ``enmaas`` is a 409 — never a second
+    mixed-case duplicate row.
+    """
+    _fake_catalog(monkeypatch, [{"provider": "EnMaaS", "id": "enmaas-1"}])
+    _mock_supported(monkeypatch, ["EnMaaS"])
+    _mock_verify(monkeypatch, "accepted")
+    await storage.set_server_ai_credential("enmaas", SECRET, "admin")
+    conflict = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "EnMaaS",
+            "api_key": SECRET,
+            "verification_model": "enmaas-1",
+        },
+    )
+    assert conflict.status_code == 409
+    stored = await storage.list_server_ai_providers()
+    assert [row["provider"] for row in stored] == ["enmaas"]
 
 
 async def test_rotate_requires_existing_key_and_reverifies(client, monkeypatch):
