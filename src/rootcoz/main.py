@@ -11059,7 +11059,7 @@ async def _credential_user(request: Request) -> str:
 async def get_user_ai_credentials(request: Request) -> JSONResponse:
     """List supported provider IDs and configured flags; never return keys."""
     username = await _credential_user(request)
-    supported = await supported_key_providers()
+    supported = {p.lower() for p in await supported_key_providers()}
     try:
         configured = await storage.get_user_ai_credentials(username)
     except storage.UnreadableAiCredentialsError as exc:
@@ -11071,7 +11071,7 @@ async def get_user_ai_credentials(request: Request) -> JSONResponse:
                     {
                         "provider": p,
                         "configured": p in configured,
-                        "supports_user_keys": p in supported,
+                        "supports_user_keys": p.lower() in supported,
                     }
                     for p in sorted(set(supported) | configured.keys())
                 ]
@@ -11161,6 +11161,18 @@ def _validate_submitted_api_key(key: str) -> str | None:
     return None if valid else "API key must be 8-1024 characters"
 
 
+async def _is_supported_key_provider(provider: str) -> bool:
+    """Case-insensitive membership in the sidecar's supported-key catalog.
+
+    The catalog reports exact sidecar IDs that may be mixed-case (e.g.
+    ``EnMaaS``), while a raw API/CLI caller may post the same provider in
+    any case — an exact-case test here would 400 a supported provider
+    with the misleading "does not support session API keys" (#347).
+    """
+    supported = {p.lower() for p in await supported_key_providers()}
+    return provider.lower() in supported
+
+
 @app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
 async def set_user_ai_credential(
     provider: str, body: AiCredentialInput, request: Request
@@ -11169,7 +11181,7 @@ async def set_user_ai_credential(
     _require_reviewer(request)
     _check_allow_list(request)
     username = await _credential_user(request)
-    if provider not in await supported_key_providers():
+    if not await _is_supported_key_provider(provider):
         raise HTTPException(
             status_code=400, detail="Provider does not support session API keys"
         )
@@ -12000,7 +12012,7 @@ async def _verify_and_store_server_provider_key(
     replacing: bool,
 ) -> JSONResponse:
     """Shared add/rotate path: verify the key with a real turn, then store."""
-    if provider not in await supported_key_providers():
+    if not await _is_supported_key_provider(provider):
         raise HTTPException(
             status_code=400, detail="Provider does not support session API keys"
         )
@@ -12089,7 +12101,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     free_by_provider: dict[str, set[str]] = {}
     for row in await storage.list_free_ai_models():
         free_by_provider.setdefault(row["provider"].lower(), set()).add(row["model"])
-    supported = set(await supported_key_providers())
+    supported = {p.lower() for p in await supported_key_providers()}
 
     models_by_provider: dict[str, list[dict[str, Any]]] = {}
     for entry in catalog:
@@ -12140,7 +12152,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 "has_key": record is not None,
                 "verified": record is not None,
                 "verified_at": record.get("verified_at", "") if record else "",
-                "supports_key": provider in supported,
+                "supports_key": provider.lower() in supported,
                 "models": models,
             }
         )

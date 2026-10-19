@@ -220,6 +220,41 @@ def test_add_rejects_unsupported_provider_and_bad_key(client, monkeypatch):
     assert short.status_code == 400
 
 
+async def test_add_accepts_lowercase_provider_id_of_mixed_case_provider(
+    client, monkeypatch
+):
+    """The supported-provider gate is case-insensitive (#347).
+
+    The sidecar catalog reports mixed-case IDs (e.g. ``EnMaaS``), but a
+    raw API/CLI caller may post the same provider in lowercase — that
+    must pass the gate instead of the misleading "does not support
+    session API keys" 400. The shared add/rotate gate and the listing's
+    ``supports_key`` flag both match ignoring case.
+    """
+    _fake_catalog(monkeypatch, [{"provider": "EnMaaS", "id": "enmaas-1"}])
+    _mock_supported(monkeypatch, ["EnMaaS"])
+    _mock_verify(monkeypatch, "accepted")
+    response = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "enmaas",
+            "api_key": SECRET,
+            "verification_model": "enmaas-1",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"outcome": "accepted", "ok": True}
+    assert "does not support session API keys" not in response.text
+    stored = await storage.list_server_ai_providers()
+    assert [row["provider"] for row in stored] == ["enmaas"]
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert listed.status_code == 200
+    entry = next(p for p in listed.json()["providers"] if p["provider"] == "enmaas")
+    assert entry["has_key"] is True
+    assert entry["supports_key"] is True
+
+
 async def test_rotate_requires_existing_key_and_reverifies(client, monkeypatch):
     _mock_supported(monkeypatch, ["google"])
     missing = client.post(
