@@ -2,18 +2,17 @@
 
 import asyncio
 import json
-import os
 from typing import Any
 
 from pywebpush import WebPushException, webpush
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.storage import (
     delete_stale_push_subscriptions,
     get_push_subscriptions_for_users,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 
 async def _send_one(

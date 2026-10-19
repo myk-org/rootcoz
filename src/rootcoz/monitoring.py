@@ -26,9 +26,10 @@ from typing import Any
 
 import aiosqlite
 import httpx
-from simple_logger.logger import get_logger
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 _APP_STARTED_AT = time.monotonic()
 

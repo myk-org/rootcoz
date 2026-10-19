@@ -3727,17 +3727,19 @@ def admin_models_free_remove(
 def _parse_server_provider_models(spec: str) -> list[dict[str, Any]]:
     """Parse a "model,model:free,..." selection spec into API entries.
 
-    A ``:free`` suffix marks the pair free (free implies included); models
-    absent from the spec are deselected.
+    A case-insensitive trailing ``:free`` marks the pair free (free implies
+    included); models absent from the spec are deselected. Model IDs may
+    contain colons themselves (e.g. ``llama3:8b``) — only the trailing
+    ``:free`` marker is stripped, the rest of the ID stays intact.
     """
     entries: list[dict[str, Any]] = []
     for part in spec.split(","):
         part = part.strip()
         if not part:
             continue
-        model, _, flag = part.partition(":")
-        free = flag.strip().lower() == "free"
-        entries.append({"id": model.strip(), "included": True, "free": free})
+        free = part.lower().endswith(":free")
+        model = part[: -len(":free")].strip() if free else part
+        entries.append({"id": model, "included": True, "free": free})
     return entries
 
 

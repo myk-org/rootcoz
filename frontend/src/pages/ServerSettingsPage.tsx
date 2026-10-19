@@ -110,6 +110,10 @@ function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
   return new Set(JIRA_METHODS.filter(m => m.id !== method).flatMap(m => m.fields))
 }
 
+// Server-only settings (env/CLI-owned, never persistable to the DB) — the
+// known set, kept alongside the backend's server-only metadata marker.
+const SERVER_ONLY_SETTING_KEYS = new Set(['admin_key', 'db_path', 'debug'])
+
 // Active Jira auth method. The backend exposes the authoritative mode on the
 // jira_url settings item (`jira_auth_mode`: sa→oauth, cloud→basic, server→pat);
 // the local inference below is only a fallback for older servers without it.
@@ -844,9 +848,10 @@ export function ServerSettingsPage() {
   // ---- Per-category card (shared by the tab view and search results) ----
   function renderCategory(category: string, settings: ServerSetting[]) {
     const isCollapsed = state.collapsedCategories.has(category)
-    // "Save to DB" affordance for env-sourced rows (null for db/default rows).
+    // "Save to DB" affordance for env-sourced rows (null for db/default rows
+    // and for server-only settings the backend owns exclusively).
     const saveToDbNode = (s: ServerSetting) =>
-      s.source === 'env' ? (
+      s.source === 'env' && !SERVER_ONLY_SETTING_KEYS.has(s.key) ? (
         <SaveToDbButton saving={persistingKey === s.key} onClick={() => handlePersistEnv(s.key)} />
       ) : null
     // Search must be able to find every Jira field, so auth-method hiding

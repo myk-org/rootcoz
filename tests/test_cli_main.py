@@ -4739,6 +4739,79 @@ def test_admin_models_free_list(mock_client):
     mock_client.admin_list_free_models.assert_called_once()
 
 
+# --- Server provider model spec parsing keeps colons in IDs (#347 review) ---
+
+
+def test_admin_server_providers_models_keeps_colons_in_ids(mock_client):
+    """Model IDs like llama3:8b keep their colons — only :free is a marker."""
+    mock_client.admin_set_server_provider_models.return_value = {
+        "models": [{"id": "llama3:8b", "included": True, "free": False}]
+    }
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "ollama",
+            "--models",
+            "llama3:8b",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "ollama", [{"id": "llama3:8b", "included": True, "free": False}]
+    )
+
+
+def test_admin_server_providers_models_trailing_free_marker(mock_client):
+    """A trailing :free (case-insensitive) marks the pair free, keeping the ID."""
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "ollama",
+            "--models",
+            "llama3:8b:free,model,llama3:70b:FREE",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "ollama",
+        [
+            {"id": "llama3:8b", "included": True, "free": True},
+            {"id": "model", "included": True, "free": False},
+            {"id": "llama3:70b", "included": True, "free": True},
+        ],
+    )
+
+
+def test_admin_server_providers_models_plain_id(mock_client):
+    """A plain model id without colons parses unchanged and not free."""
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "openai",
+            "--models",
+            "gpt-5.6-luna",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "openai", [{"id": "gpt-5.6-luna", "included": True, "free": False}]
+    )
+
+
 def test_admin_models_free_add(mock_client):
     mock_client.admin_list_free_models.return_value = {
         "models": [],

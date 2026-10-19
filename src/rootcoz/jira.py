@@ -8,15 +8,14 @@ filing duplicate bug reports.
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Self
 from urllib.parse import urlparse
 
 import httpx
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.config import Settings, resolve_jira_auth
 from rootcoz.issue_matching import filter_issue_matches_with_ai
 from rootcoz.models import (
@@ -26,7 +25,7 @@ from rootcoz.models import (
     ProductBugReport,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # JQL reserved characters that need to be stripped from search keywords
 _JQL_SPECIAL_CHARS = set(r'"\'{}[]()~^&|!?*%+-:')

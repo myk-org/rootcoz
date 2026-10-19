@@ -1,7 +1,6 @@
 """Jenkins API client wrapper."""
 
 import json
-import os
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,9 +8,10 @@ import jenkins
 import requests
 import urllib3
 from pydantic import HttpUrl
-from simple_logger.logger import get_logger
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 
 class JenkinsClient(jenkins.Jenkins):

@@ -21,9 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from simple_logger.logger import get_logger
+from rootcoz import get_child_logger
 
-logger = get_logger(name=__name__)
+logger = get_child_logger(__name__)
 
 MCP_SERVER_NAME = "rootcoz-http"
 _TOOLS_FILE_ENV = "ROOTCOZ_HTTP_TOOLS_FILE"

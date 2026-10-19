@@ -26,9 +26,10 @@ from pi_sidecar_client import (
 )
 from pi_sidecar_client import call_ai as _call_ai
 from pi_sidecar_client import list_models as _list_models_raw
-from simple_logger.logger import get_logger
 
-logger = get_logger(name=__name__)
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")

@@ -634,6 +634,63 @@ async def test_credential_read_and_delete_are_case_insensitive(tmp_path, monkeyp
     assert await storage.list_free_ai_models() == []
 
 
+async def test_corrupt_ciphertext_never_becomes_an_api_key(
+    tmp_path, monkeypatch, caplog
+):
+    """A corrupt store surfaces as unreadable — the ciphertext is never a key.
+
+    decrypt_value preserves the ciphertext on decryption failure; the
+    credential read must detect that convention and take the failure path
+    so the sidecar never receives ciphertext as an apiKey (#347 review).
+    """
+    import logging
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "corrupt.db")
+    await storage.init_db()
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    # Corrupt the stored ciphertext (bit rot / rotated encryption key).
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE server_ai_providers SET api_key_enc = api_key_enc || 'corrupted'"
+        )
+        await db.commit()
+
+    storage_logger = logging.getLogger("rootcoz.storage")
+    storage_logger.addHandler(caplog.handler)
+    try:
+        with pytest.raises(storage.UnreadableAiCredentialsError):
+            await storage.get_server_ai_credential("google")
+    finally:
+        storage_logger.removeHandler(caplog.handler)
+    assert "refusing access" in caplog.text
+
+    # The handled caller path: no credential, never the ciphertext.
+    from rootcoz.ai_client import server_provider_key
+
+    assert await server_provider_key("google") is None
+
+
+async def test_list_joins_stored_key_case_insensitively(client, monkeypatch):
+    """A case-drifted stored row keys the catalog entry — no split rows.
+
+    Storage matches providers case-insensitively; the listing join must
+    too, or a key stored as ``Google`` shows up as both a keyed ``Google``
+    and an unkeyed ``google`` entry (#347 review).
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    await storage.set_server_ai_credential("Google", SECRET, "admin")
+    response = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert response.status_code == 200
+    providers = response.json()["providers"]
+    assert [p["provider"] for p in providers] == ["google", "openai"]
+    by_provider = {p["provider"]: p for p in providers}
+    assert by_provider["google"]["has_key"] is True
+    assert by_provider["google"]["verified"] is True
+    assert by_provider["openai"]["has_key"] is False
+    assert SECRET not in response.text
+
+
 async def test_endpoint_key_checks_are_case_insensitive(client, monkeypatch):
     _fake_catalog(monkeypatch, CATALOG)
     _mock_supported(monkeypatch, ["google"])

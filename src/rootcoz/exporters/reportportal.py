@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import threading
 import urllib.parse
 import warnings
@@ -18,8 +17,8 @@ import requests as _requests
 import urllib3
 from pydantic import ValidationError
 from reportportal_client import RPClient
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
 
 if TYPE_CHECKING:
@@ -38,7 +37,7 @@ _RP_PUSH_ERRORS: tuple[type[Exception], ...] = (
     KeyError,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 _RPCLIENT_INIT_LOCK = threading.Lock()
 
 # Disable RPClient's background "RP-API-Info-Prefetch" thread.  RPClient

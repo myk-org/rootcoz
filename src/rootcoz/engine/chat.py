@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from pi_sidecar_client import get_sidecar_client
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     call_ai,
@@ -29,7 +29,7 @@ from rootcoz.engine.http_mcp import (
 from rootcoz.jira import JiraConnection, resolve_jira_connection_from_params
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
-logger = get_logger(name=__name__)
+logger = get_child_logger(__name__)
 
 _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
 

@@ -17,11 +17,12 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 
 import aiosqlite
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.comment_enrichment import detect_mentions
 from rootcoz.encryption import (
     decrypt_value,
+    decrypt_value_or_none,
     encrypt_value,
     get_hmac_secret,
     strip_sensitive_from_response,
@@ -34,7 +35,7 @@ from rootcoz.models import (
     PatternLiteral,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
@@ -5819,7 +5820,7 @@ async def get_server_ai_credential(provider: str) -> str | None:
     if row is None:
         return None
     try:
-        key = decrypt_value(row[0])
+        key = decrypt_value_or_none(row[0])
     except (RuntimeError, OSError, UnicodeDecodeError, ValueError) as exc:
         logger.warning(
             "Unreadable server AI credential for provider=%s; refusing access", provider
@@ -5827,6 +5828,16 @@ async def get_server_ai_credential(provider: str) -> str | None:
         raise UnreadableAiCredentialsError(
             "Stored server AI credentials are unreadable"
         ) from exc
+    if key is None:
+        # decrypt_value preserves ciphertext on failure; a corrupt store
+        # must surface as unreadable, never leak the ciphertext as a key.
+        logger.warning(
+            "Undecryptable server AI credential for provider=%s; refusing access",
+            provider,
+        )
+        raise UnreadableAiCredentialsError(
+            "Stored server AI credentials are unreadable"
+        )
     return key or None
 
 

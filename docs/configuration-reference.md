@@ -231,7 +231,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `NODE_BINARY` | empty | string | no | **yes** | yes (restart) |
     | `PI_SIDECAR_TRANSCRIPTS_DIR` | empty | string | no | **yes** | yes (restart) |
 
-    `SIDECAR_HOST` accepts only values the container's loopback health probe can still reach: loopback addresses, `0.0.0.0`/`::` (wildcard binds that also answer on `127.0.0.1`), or empty. A specific non-loopback address is rejected with a `400` on save — the entrypoint probes `http://127.0.0.1:$SIDECAR_PORT` before every boot and aborts when it fails, so such a value would brick every restart. `0.0.0.0` is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as `TRUST_PROXY_HEADERS` — only do it on a network you control. `SIDECAR_PORT` must be an integer between 1 and 65535. When `SIDECAR_PORT` is overridden and `SIDECAR_URL` is not set, rootcoz derives `SIDECAR_URL=http://127.0.0.1:<port>` so the Python client follows the listener; an explicit `SIDECAR_URL` always wins.
+    `SIDECAR_HOST` accepts only values the container's loopback health probe can still reach: loopback addresses, `0.0.0.0`/`::` (wildcard binds that also answer on `127.0.0.1`), or empty. A specific non-loopback address is rejected with a `400` on save — the entrypoint probes `http://127.0.0.1:$SIDECAR_PORT` before every boot and aborts when it fails, so such a value would brick every restart. `0.0.0.0` is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as `TRUST_PROXY_HEADERS` — only do it on a network you control. `SIDECAR_PORT` must be an integer between 1 and 65535. When `SIDECAR_PORT` is overridden and `SIDECAR_URL` is not set, rootcoz derives `SIDECAR_URL=http://127.0.0.1:<port>` so the Python client follows the listener; an explicit `SIDECAR_URL` always wins. Because the derived value is exported into the process environment, `SIDECAR_URL` shows as env-sourced in Server Settings, but the persist path rejects it — persisting the derived URL would pin it and silently beat the port derivation after a later `sidecar_port` change. Persist `sidecar_port` instead.
 
 ### Environment variable audit (#347)
 
@@ -317,7 +317,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `SLACK_WEBHOOK_URL` | `slack_webhook_url` | Notifications | runtime (sensitive) |
 | `SIDECAR_HOST` | `sidecar_host` | Sidecar | restart (env bridge) |
 | `SIDECAR_PORT` | `sidecar_port` | Sidecar | restart (env bridge) |
-| `SIDECAR_URL` | `sidecar_url` | Sidecar | restart (env bridge) |
+| `SIDECAR_URL` | `sidecar_url` | Sidecar | restart (env bridge; derived from `sidecar_port` when unset — not persistable) |
 | `ACPX_AGENTS` | `acpx_agents` | Sidecar | restart (env bridge) |
 | `CLI_AGENTS` | `cli_agents` | Sidecar | restart (env bridge) |
 | `PI_SIDECAR_LOG_LEVEL` | `pi_sidecar_log_level` | Sidecar | restart (env bridge) |
@@ -334,6 +334,8 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `CLAUDE_CODE_USE_VERTEX` | — (no setting) | excluded | env-only (Vertex toggle) |
 | `CLOUD_ML_REGION` | — (no setting) | excluded | env-only (Vertex) |
 | `ANTHROPIC_VERTEX_PROJECT_ID` | — (no setting) | excluded | env-only (Vertex) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | — (no setting) | excluded | env-only (Vertex gcloud credential mount) |
+| `CLOUDSDK_CONFIG` | — (no setting) | excluded | env-only (Vertex gcloud config mount) |
 | `PI_SIDECAR_AGENT_DIR` | — (no setting) | excluded | env-only (sidecar agent dir) |
 | `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | — (no setting) | excluded | env-only (sidecar pruning) |
 | `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | — (no setting) | excluded | env-only (sidecar pruning) |
@@ -357,6 +359,8 @@ These are read straight from the process environment and have no `Settings` fiel
 | `CLAUDE_CODE_USE_VERTEX` | unset | Set to `1` to authenticate Claude through Vertex AI |
 | `CLOUD_ML_REGION` | unset | Vertex region, used with `CLAUDE_CODE_USE_VERTEX` |
 | `ANTHROPIC_VERTEX_PROJECT_ID` | unset | Vertex project, used with `CLAUDE_CODE_USE_VERTEX` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Vertex service-account key file the Helm chart mounts (`/gcloud-credentials/application_default_credentials.json`) |
+| `CLOUDSDK_CONFIG` | unset | gcloud config directory for the Vertex credential mount (`/gcloud-credentials` in the chart) |
 | `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
 
 #### Transcript retention

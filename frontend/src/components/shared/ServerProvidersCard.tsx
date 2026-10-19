@@ -44,7 +44,7 @@ export function ServerProvidersCard() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [removeTarget, setRemoveTarget] = useState<{ provider: string; warning: RemoveWarning } | null>(null)
-  const { providers: catalog } = useProviderCatalog()
+  const { providers: catalog, originalIds } = useProviderCatalog()
 
   function refreshProviders() {
     return api.get<ServerProviderListResult>('/api/admin/server-providers')
@@ -70,10 +70,16 @@ export function ServerProvidersCard() {
     setError('')
   }
 
-  // GET lists every catalog provider; only stored-key entries are configured.
-  const listed = (providers ?? []).filter((item) => item.has_key)
-  const added = new Set(listed.map((item) => normalizeProvider(item.provider)))
-  const addable = Object.keys(catalog).filter((id) => !added.has(normalizeProvider(id)))
+  // GET lists every catalog provider; keyless entries run on deployment
+  // credentials (env keys, gcloud/Vertex mount) and keep model + free
+  // management without key controls. Only stored-key entries are addable.
+  const listed = providers ?? []
+  const added = new Set(listed.filter((item) => item.has_key).map((item) => normalizeProvider(item.provider)))
+  // The catalog hook folds keys for lookups; submissions must use the
+  // exact-case ID the backend's supported-provider check expects.
+  const addable = Object.keys(catalog)
+    .filter((id) => !added.has(id))
+    .map((id) => originalIds[id] ?? id)
   const provider = editing ?? selected
 
   async function runTest() {
@@ -189,9 +195,15 @@ export function ServerProvidersCard() {
               <li key={item.provider} className="space-y-2 py-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="mr-auto font-mono text-sm text-text-primary break-all">{item.provider}</span>
-                  <Badge variant={item.verified ? 'success' : 'warning'}>{item.verified ? 'Verified' : 'Unverified'}</Badge>
-                  <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setTested(false); setEditing(item.provider); setError('') }} aria-label={`Rotate ${item.provider} key`}>Rotate key</Button>
-                  <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => requestRemove(item.provider)} aria-label={`Remove ${item.provider}`}>Remove</Button>
+                  {item.has_key ? (
+                    <>
+                      <Badge variant={item.verified ? 'success' : 'warning'}>{item.verified ? 'Verified' : 'Unverified'}</Badge>
+                      <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setTested(false); setEditing(item.provider); setError('') }} aria-label={`Rotate ${item.provider} key`}>Rotate key</Button>
+                      <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => requestRemove(item.provider)} aria-label={`Remove ${item.provider}`}>Remove</Button>
+                    </>
+                  ) : (
+                    <Badge variant="outline">Deployment credentials</Badge>
+                  )}
                 </div>
                 <ProviderModels provider={item.provider} models={item.models} />
               </li>
@@ -260,42 +272,56 @@ export function ServerProvidersCard() {
  * model free auto-includes it, unchecking include clears the free flag.
  */
 function ProviderModels({ provider, models }: { provider: string; models: ServerProviderModel[] }) {
-  const [draft, setDraft] = useState(models)
-  const [synced, setSynced] = useState(models)
+  // draft: admin's in-flight selection; saved: failure-recovery baseline
+  // (last server-confirmed list); synced: snapshot the state was synced to.
+  // One state object so the async rollback can read the latest `saved`
+  // through a functional update — a stale closure must never win.
+  const [edit, setEdit] = useState({ draft: models, saved: models, synced: models })
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
-  const savedRef = useRef(models)
+  // Monotonic edit sequence: a failed save only rolls the draft back when
+  // it is still the latest queued edit — a later save's outcome wins.
+  const seqRef = useRef(0)
   const chainRef = useRef(Promise.resolve())
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  // A fresh server snapshot (add/remove refetch) resets the draft — adjust
-  // state during render instead of a setState-in-effect sync.
-  if (synced !== models) {
-    setSynced(models)
-    setDraft(models)
+  // A fresh server snapshot (add/remove/rotate refetch) resets the draft —
+  // adjust state during render instead of a setState-in-effect sync. The
+  // failure-recovery baseline follows the refreshed snapshot, so a later
+  // failed PUT restores the post-refetch selection, not the pre-refetch one.
+  if (edit.synced !== models) {
+    setEdit({ draft: models, saved: models, synced: models })
   }
 
   useEffect(() => () => clearTimeout(noticeTimer.current), [])
 
+  const { draft } = edit
+
   function update(next: ServerProviderModel[]) {
-    setDraft(next)
+    setEdit((prev) => ({ ...prev, draft: next }))
     setError('')
+    const seq = ++seqRef.current
     // Serialize saves: every mutation PUTs the full list, so queued saves are
     // last-write-wins and an error reverts to the last saved snapshot.
     chainRef.current = chainRef.current.then(async () => {
       try {
         await api.put(`/api/admin/server-providers/${encodeURIComponent(provider)}/models`, { models: next })
-        savedRef.current = next
+        setEdit((prev) => ({ ...prev, saved: next }))
         setNotice('Saved')
         clearTimeout(noticeTimer.current)
         noticeTimer.current = setTimeout(() => setNotice(''), 2500)
         // Free flags in every model picker come from the shared catalog cache.
         resetProviderCatalogCache()
       } catch {
-        setDraft(savedRef.current)
-        setError('Could not save models')
+        // Only the latest queued edit may settle the visible draft; when a
+        // newer edit was queued behind this failure, its success (or its own
+        // failure) decides what the admin sees.
+        if (seqRef.current === seq) {
+          setEdit((prev) => ({ ...prev, draft: prev.saved }))
+          setError('Could not save models')
+        }
       }
     })
   }

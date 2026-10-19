@@ -31,7 +31,10 @@ vi.mock('@/lib/useProviderOptions', () => ({
         { id: 'gemini-2.5-flash', name: 'Flash' },
       ],
       openai: [{ id: 'gpt-4o', name: 'GPT-4o' }],
+      // Mixed-case catalog ID, exposed folded with its exact-case original.
+      enmaas: [{ id: 'enmaas-f1', name: 'F1' }],
     },
+    originalIds: { enmaas: 'EnMaaS' },
     providerStatus: {},
   }),
 }))
@@ -167,6 +170,28 @@ describe('ServerProvidersCard add flow gate', () => {
     expect(screen.getByRole('button', { name: '+ Add provider' })).toBeDisabled()
   })
 
+  it('submits a mixed-case catalog provider ID verbatim', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([]))
+    render(<ServerProvidersCard />)
+
+    // The picker offers the catalog's exact-case ID, not the folded key
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(await screen.findByRole('option', { name: 'EnMaaS' }))
+    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'enmaas-f1')
+    await user.type(screen.getByLabelText('API key'), 'sk-test')
+
+    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith('/api/admin/server-providers', {
+        provider: 'EnMaaS',
+        api_key: 'sk-test', // pragma: allowlist secret
+        verification_model: 'enmaas-f1',
+      }),
+    )
+    expect(await screen.findByRole('status')).toHaveTextContent('Provider verified')
+  })
+
   it('invalidates a passed test when the key changes', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([]))
@@ -185,7 +210,7 @@ describe('ServerProvidersCard add flow gate', () => {
 })
 
 describe('ServerProvidersCard provider list', () => {
-  it('lists only stored-key providers; unkeyed catalog entries are addable', async () => {
+  it('lists keyless providers with a deployment-credentials hint and no key controls; they stay addable', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
       { provider: 'gemini', has_key: false, verified: false, models: [] },
@@ -193,19 +218,72 @@ describe('ServerProvidersCard provider list', () => {
     ]))
     render(<ServerProvidersCard />)
 
-    // gemini has no stored key: not in the configured list, but addable
+    // gemini has no stored key: still listed (deployment credentials), but
+    // without rotate/remove buttons or a verified state
+    expect(await screen.findByText('gemini')).toBeInTheDocument()
+    expect(screen.getByText('Deployment credentials')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate gemini key' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove gemini' })).not.toBeInTheDocument()
-    expect(await screen.findByRole('list', { name: 'Configured server providers' }))
+    expect(screen.queryByText('Unverified')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Rotate openai key' })).toBeInTheDocument()
 
+    // A stored key can still be added for the keyless provider
     await user.click(screen.getByRole('combobox', { name: 'Provider' }))
     expect(await screen.findByRole('option', { name: 'gemini' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
   })
 
-  it('shows the empty state when no stored-key providers exist', async () => {
+  it('gives keyless providers model selection and free management without key buttons', async () => {
+    const user = userEvent.setup()
     get.mockResolvedValue(listResult([
-      { provider: 'gemini', has_key: false, verified: false, models: [] },
+      {
+        provider: 'vertex-claude',
+        has_key: false,
+        verified: false,
+        models: [
+          { id: 'claude-x', name: 'Claude X', included: true, free: true },
+          { id: 'claude-y', name: 'Claude Y', included: false, free: false },
+        ],
+      },
     ]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByText('vertex-claude')).toBeInTheDocument()
+    expect(screen.getByText('Deployment credentials')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate vertex-claude key' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove vertex-claude' })).not.toBeInTheDocument()
+
+    // Model scoping works
+    await user.click(screen.getByRole('button', { name: 'vertex-claude models' }))
+    await screen.findByRole('checkbox', { name: 'Select all' })
+    expect(screen.getByRole('checkbox', { name: 'claude-x' })).toBeChecked()
+    await user.click(screen.getByRole('checkbox', { name: 'claude-y' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/server-providers/vertex-claude/models', {
+        models: [
+          { id: 'claude-x', name: 'Claude X', included: true, free: true },
+          { id: 'claude-y', name: 'Claude Y', included: true, free: false },
+        ],
+      }),
+    )
+
+    // Free pairs stay visible and removable
+    const pill = screen.getByRole('button', { name: 'Toggle claude-x free' })
+    expect(pill).toHaveAttribute('aria-pressed', 'true')
+    await user.click(pill)
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/server-providers/vertex-claude/models', {
+        models: [
+          { id: 'claude-x', name: 'Claude X', included: true, free: false },
+          { id: 'claude-y', name: 'Claude Y', included: true, free: false },
+        ],
+      }),
+    )
+    expect(screen.getByRole('button', { name: 'Toggle claude-x free' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('shows the empty state only when the server reports no providers at all', async () => {
+    get.mockResolvedValue(listResult([]))
     render(<ServerProvidersCard />)
 
     expect(await screen.findByText('No server providers configured.')).toBeInTheDocument()
@@ -243,6 +321,55 @@ describe('ServerProvidersCard model multi-select', () => {
     await user.click(screen.getByRole('checkbox', { name: 'gemini-2.0' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
     expect((screen.getByRole('checkbox', { name: 'Select all' }) as HTMLInputElement).indeterminate).toBe(true)
+  })
+
+  it('keeps a queued successful edit visible when an earlier save fails', async () => {
+    const user = userEvent.setup()
+    let rejectFirst!: (reason?: unknown) => void
+    put.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+    put.mockResolvedValueOnce({} as never)
+    await openModels(user)
+
+    // Edit A is in flight (will fail); edit B is queued behind it and succeeds
+    await user.click(screen.getByRole('checkbox', { name: 'gemini-2.5-flash' }))
+    await user.click(screen.getByRole('checkbox', { name: 'gemini-2.0' }))
+
+    rejectFirst(new Error('save failed'))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    // B's saved result stays visible — A's failure must not roll it back
+    expect(screen.getByRole('checkbox', { name: 'gemini-2.5-flash' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'gemini-2.0' })).toBeChecked()
+  })
+
+  it('restores the refreshed baseline when a save fails after a refetch', async () => {
+    const user = userEvent.setup()
+    const before = providersState()
+    const after = providersState()
+    // Another admin included flash while we held the pre-refetch snapshot
+    after[0].models[1] = { id: 'gemini-2.5-flash', name: 'Flash', included: true, free: false }
+    let refetched = false
+    get.mockImplementation(async () => listResult(refetched ? after : before))
+    render(<ServerProvidersCard />)
+
+    // A rotation refetches the provider list → the draft is replaced from
+    // the refreshed models
+    await user.click(await screen.findByRole('button', { name: 'Rotate gemini key' }))
+    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
+    await user.type(screen.getByLabelText('API key'), 'new-secret')
+    refetched = true
+    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('API key verified and rotated.')
+
+    put.mockRejectedValueOnce(new Error('save failed') as never)
+    await user.click(screen.getByRole('button', { name: 'gemini models' }))
+    await screen.findByRole('checkbox', { name: 'Select all' })
+    await user.click(screen.getByRole('checkbox', { name: 'gemini-2.0' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save models')
+    // Rolled back to the refreshed snapshot, not the pre-refetch selection
+    expect(screen.getByRole('checkbox', { name: 'gemini-2.5-flash' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'gemini-2.0' })).not.toBeChecked()
   })
 
   it('filters the model list', async () => {

@@ -7,15 +7,15 @@ job names.  The first rule whose pattern matches wins for scalar fields
 
 import fnmatch
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
 
 import yaml
-from simple_logger.logger import get_logger
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 
 def load_metadata_rules(path: str) -> list[dict[str, Any]]:

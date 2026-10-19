@@ -322,6 +322,14 @@ _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
     }
 )
 
+# Settings whose value is derived from another setting at boot: the
+# entrypoint/startup derives SIDECAR_URL from SIDECAR_PORT and exports it
+# into the process env, so it shows as env-sourced — but persisting it
+# would pin an explicit URL that silently beats the port derivation, and a
+# later sidecar_port change would then break AI calls. Persist the source
+# setting instead.
+_DERIVED_SETTINGS: frozenset[str] = frozenset({"sidecar_url"})
+
 # Admin-management settings hidden from the any-role
 # /api/default-server-settings defaults payload: they configure the server,
 # not per-request analysis defaults, and several (allowed_users,
@@ -570,6 +578,16 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
                 "sensitive": is_sensitive,
                 "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
                 "source": "default",  # Will be overridden by caller
+                # Persistability contract (#347): server-only settings are
+                # env bootstrap the persist/reset/PUT paths always reject,
+                # and derived settings must not be pinned (see
+                # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
+                "server_only": field_name in _SERVER_ONLY_SETTINGS,
+                "derived": field_name in _DERIVED_SETTINGS,
+                "persistable": (
+                    field_name not in _SERVER_ONLY_SETTINGS
+                    and field_name not in _DERIVED_SETTINGS
+                ),
             }
         )
 
@@ -872,7 +890,7 @@ _LOG_FILE = get_log_file()
 
 logger = get_logger(
     name=__name__,
-    level=os.environ.get("LOG_LEVEL", "INFO"),
+    level=logging.NOTSET,  # level authority: the rootcoz parent logger (#347)
     **({"filename": _LOG_FILE} if _LOG_FILE else {}),
 )
 
@@ -1716,13 +1734,13 @@ def _write_sidecar_env_bridge() -> None:
 
 
 def _apply_log_level_setting() -> None:
-    """Apply a DB-configured log_level to rootcoz loggers (restart-required).
+    """Apply a DB-configured log_level to the rootcoz logger tree (restart-required).
 
-    Modules create their loggers at import time with the LOG_LEVEL env
-    default; a DB override re-levels every existing rootcoz logger at
-    startup. shortcut: loggers created later keep the env default — a
-    restart-level setting by design, upgrade to a logging Filter if loggers
-    must follow it live.
+    Every rootcoz module logger is created NOTSET and inherits from the
+    ``rootcoz`` parent logger (see rootcoz.get_child_logger), so setting
+    the parent level covers the whole tree — including modules imported
+    lazily after this ran, which the old walk-existing-loggers approach
+    missed.
     """
     from rootcoz.config import db_setting_is_set, get_settings
 
@@ -1733,12 +1751,8 @@ def _apply_log_level_setting() -> None:
     if not isinstance(level, int):
         logger.warning("Ignoring invalid log_level setting: %r", name)
         return
-    applied = 0
-    for logger_name, candidate in list(logging.Logger.manager.loggerDict.items()):
-        if logger_name.startswith("rootcoz") and isinstance(candidate, logging.Logger):
-            candidate.setLevel(level)
-            applied += 1
-    logger.info("Applied DB log_level=%s to %d rootcoz logger(s)", name, applied)
+    logging.getLogger("rootcoz").setLevel(level)
+    logger.info("Applied DB log_level=%s to the rootcoz logger tree", name)
 
 
 async def _apply_transcript_recording_setting() -> bool:
@@ -10860,10 +10874,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
 
     response = JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
     response.set_cookie(
         "rootcoz_session",
@@ -10945,10 +10956,7 @@ async def register_user(request: Request) -> JSONResponse:
 
     response = JSONResponse(
         content=content,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
     response.set_cookie(
         "rootcoz_session",
@@ -10985,10 +10993,7 @@ async def check_needs_key(request: Request) -> JSONResponse:
     Uses session or cookie username to determine if the user needs registration.
     This is a public endpoint — does not require authentication.
     """
-    cache_headers = {
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
-    }
+    cache_headers = {"Cache-Control": "no-store"}
 
     # Try session first (authenticated identity)
     session_token = _read_cookie(request, "rootcoz_session")
@@ -11995,7 +12000,13 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     """
     _require_admin(request)
     catalog = await _get_model_catalog()
-    stored = {row["provider"]: row for row in await storage.list_server_ai_providers()}
+    # Case-insensitive join (#347): storage matches providers ignoring case,
+    # so a key stored as "Google" must key the catalog's "google" entry —
+    # an exact-name lookup would split it into keyed + unkeyed rows.
+    stored = {
+        normalize_provider(row["provider"]): row
+        for row in await storage.list_server_ai_providers()
+    }
     selections: dict[str, dict[str, bool]] = {}
     for row in await storage.list_server_provider_models():
         selections.setdefault(row["provider"].lower(), {})[row["model"]] = True
@@ -12037,7 +12048,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
             }
             for m in models_by_provider.get(provider, [])
         ]
-        record = stored.get(provider)
+        record = stored.get(normalize_provider(provider))
         providers.append(
             {
                 "provider": provider,
@@ -12315,10 +12326,7 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -12369,6 +12377,8 @@ async def get_admin_settings(
 
     # Get DB overrides
     db_overrides = await storage.get_server_settings()
+    # Load the dotenv source once for the source calculation below.
+    dotenv = _settings_dotenv_values()
 
     # Update source and value for DB-overridden settings
     for item in metadata:
@@ -12402,7 +12412,10 @@ async def get_admin_settings(
                     item["env_var_value"] = (
                         _strip_url_userinfo(env_val) if "://" in env_val else env_val
                     )
-        elif os.environ.get(item["env_var"]) is not None:
+        elif _settings_env_value(key, dotenv) is not None:
+            # Env-sourced means resolvable from the same sources Settings
+            # merges (dotenv included) — those values are persistable, so
+            # the UI must offer Save to DB for them, not label them default.
             item["source"] = "env"
         else:
             item["source"] = "default"
@@ -12434,30 +12447,40 @@ def _log_level_error(value: object) -> str | None:
     return None
 
 
-def _settings_env_value(key: str) -> str | None:
-    """Resolve a setting's environment value the same way Settings does.
+def _settings_dotenv_values() -> dict[str, str]:
+    """The dotenv values Settings merges (DotEnvSettingsSource), by field.
 
-    os.environ first, then the configured dotenv file — the sources
-    pydantic-settings merges for ``Settings``. DB overrides are
-    deliberately excluded: when the effective value only exists in the DB
-    store there is no env value to persist, and the caller must report
-    no-env-value rather than re-persisting the DB's own value.
+    Unreadable dotenv sources resolve to an empty mapping — Settings would
+    merge nothing from them either.
     """
-    env_var = key.upper()
-    if os.environ.get(env_var) is not None:
-        return os.environ[env_var]
     from pydantic_settings import DotEnvSettingsSource
 
     try:
-        dotenv = DotEnvSettingsSource(
+        return DotEnvSettingsSource(
             Settings,
             env_file=Settings.model_config.get("env_file"),
             env_file_encoding=Settings.model_config.get("env_file_encoding"),
         )()
     except OSError:
-        logger.debug("Unable to read dotenv sources for %s", env_var, exc_info=True)
-        return None
-    return dotenv.get(key)
+        logger.debug("Unable to read dotenv sources", exc_info=True)
+        return {}
+
+
+def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str | None:
+    """Resolve a setting's environment value the same way Settings does.
+
+    os.environ first, then the configured dotenv file — the sources
+    pydantic-settings merges for ``Settings``. Pass ``dotenv`` to reuse an
+    already-loaded mapping (e.g. once per request); ``None`` loads it on
+    demand. DB overrides are deliberately excluded: when the effective
+    value only exists in the DB store there is no env value to persist, and
+    the caller must report no-env-value rather than re-persisting the DB's
+    own value.
+    """
+    env_var = key.upper()
+    if os.environ.get(env_var) is not None:
+        return os.environ[env_var]
+    return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
@@ -12671,6 +12694,14 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
     if key in _SERVER_ONLY_SETTINGS:
         raise HTTPException(
             status_code=400, detail=f"Server-only setting (env var only): {key}"
+        )
+    if key in _DERIVED_SETTINGS:
+        # The entrypoint exports the DERIVED SIDECAR_URL into the process
+        # env, so it shows as env-sourced — persisting it would pin an
+        # explicit URL that beats the port derivation (#347).
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key} is derived from sidecar_port — persist sidecar_port instead",
         )
     # Env var name per the Settings field mapping (see _get_settings_metadata)
     # — resolved through the same sources Settings reads (dotenv included);

@@ -1,19 +1,18 @@
 """Configuration settings from environment variables."""
 
-import os
 from functools import lru_cache
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
 from rootcoz.metadata_rules import load_metadata_rules
 from rootcoz.vapid import get_vapid_config
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # Defaults for the Prow artifact download limits (see ``Settings``).
 # Single source of truth — ``rootcoz.sources.prow_source`` reuses them as

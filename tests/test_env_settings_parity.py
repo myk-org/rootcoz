@@ -176,13 +176,44 @@ def test_default_user_role_validation_on_save(client):
 def test_apply_log_level_setting_levels_rootcoz_loggers():
     import logging
 
+    parent = logging.getLogger("rootcoz")
+    previous = parent.level
     update_db_settings_cache({"log_level": "ERROR"})
     try:
         main._apply_log_level_setting()
-        assert logging.getLogger("rootcoz.storage").level == logging.ERROR
+        # The parent carries the level; NOTSET children inherit it.
+        assert parent.level == logging.ERROR
+        assert logging.getLogger("rootcoz.storage").getEffectiveLevel() == logging.ERROR
+        # A module first imported after the override (lazily) creates its
+        # logger through the same helper — it inherits too. The old
+        # walk-existing-loggers approach missed exactly these.
+        from rootcoz import get_child_logger
+
+        lazy = get_child_logger("rootcoz.lazily_imported")
+        assert lazy.getEffectiveLevel() == logging.ERROR
     finally:
         clear_db_settings_cache()
-        logging.getLogger("rootcoz.storage").setLevel(logging.INFO)
+        parent.setLevel(previous)
+
+
+def test_module_loggers_inherit_parent_level():
+    """Import-time env snapshots no longer pin module logger levels (#347).
+
+    Every rootcoz module logger is NOTSET and follows the rootcoz parent,
+    so a level change on the parent reaches modules that simple_logger
+    created with their own handlers and propagate=False.
+    """
+    import logging
+
+    parent = logging.getLogger("rootcoz")
+    previous = parent.level
+    try:
+        parent.setLevel(logging.DEBUG)
+        for name in ("rootcoz.storage", "rootcoz.ai_client", "rootcoz.main"):
+            assert logging.getLogger(name).level == logging.NOTSET, name
+            assert logging.getLogger(name).getEffectiveLevel() == logging.DEBUG, name
+    finally:
+        parent.setLevel(previous)
 
 
 # --- Notifications read Settings ---
@@ -461,6 +492,71 @@ def test_persist_reports_no_env_value_when_only_db_override_exists(client):
     )
     assert response.status_code == 400
     assert "no env value" in response.json()["detail"]
+
+
+# --- Metadata source/flags contract (#347 review) ---
+
+
+def test_dotenv_sourced_setting_is_labeled_env_and_persistable(
+    client, monkeypatch, tmp_path
+):
+    """A dotenv-only value resolves like Settings does — source env, not default.
+
+    The persist endpoint can promote it (DotEnvSettingsSource), so the
+    metadata must label it env for the UI to offer Save to DB.
+    """
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    (tmp_path / ".env").write_text("SMTP_HOST=smtp.metadata.example.com\n")
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    try:
+        by_key = {
+            item["key"]: item
+            for item in client.get(
+                "/api/admin/settings", headers=_admin_headers()
+            ).json()
+        }
+        assert by_key["smtp_host"]["source"] == "env"
+        assert by_key["smtp_host"]["value"] == "smtp.metadata.example.com"
+        promoted = client.post(
+            "/api/admin/settings/smtp_host/persist", headers=_admin_headers()
+        )
+        assert promoted.status_code == 200
+    finally:
+        get_settings.cache_clear()
+
+
+def test_metadata_flags_persistability(client):
+    """server_only/derived settings are marked so the UI can hide Save to DB."""
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    # ADMIN_KEY: Settings field, but every write path rejects it.
+    assert by_key["admin_key"]["server_only"] is True
+    assert by_key["admin_key"]["persistable"] is False
+    assert by_key["admin_key"]["derived"] is False
+    # SIDECAR_URL is derived from sidecar_port — never persistable.
+    assert by_key["sidecar_url"]["derived"] is True
+    assert by_key["sidecar_url"]["persistable"] is False
+    assert by_key["sidecar_url"]["server_only"] is False
+    # Regular settings stay persistable.
+    assert by_key["smtp_host"]["persistable"] is True
+    assert by_key["smtp_host"]["server_only"] is False
+    assert by_key["smtp_host"]["derived"] is False
+
+
+def test_persist_rejects_derived_sidecar_url(client, monkeypatch):
+    """The entrypoint exports the DERIVED SIDECAR_URL — persisting it would
+    pin an explicit URL that beats the port derivation after a later
+    sidecar_port change."""
+    monkeypatch.setenv("SIDECAR_URL", "http://127.0.0.1:9200")
+    response = client.post(
+        "/api/admin/settings/sidecar_url/persist", headers=_admin_headers()
+    )
+    assert response.status_code == 400
+    assert "derived from sidecar_port" in response.json()["detail"]
+    assert "persist sidecar_port instead" in response.json()["detail"]
 
 
 # --- session_ttl_hours bounds (#347 review) ---

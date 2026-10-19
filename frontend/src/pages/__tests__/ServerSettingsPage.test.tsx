@@ -907,6 +907,29 @@ describe('ServerSettingsPage save env setting to DB', () => {
     expect(screen.getAllByRole('button', { name: 'Save to DB' })).toHaveLength(1)
   })
 
+  it('never offers Save to DB for server-only settings, even when env-sourced', async () => {
+    const settings = baseSettings()
+    const adminKey = settings.find(s => s.key === 'admin_key')!
+    adminKey.source = 'env'
+    settings.push(
+      mk('db_path', 'Server', '/var/lib/rootcoz/db.sqlite', { source: 'env' }),
+      mk('debug', 'Server', 'true', { type: 'boolean', source: 'env' }),
+    )
+    get.mockResolvedValue(settings as never)
+    renderPage()
+
+    // Server tab: db_path and debug are env-sourced but server-only
+    fireEvent.click(await screen.findByRole('tab', { name: 'Server' }))
+    await screen.findByText('DB_PATH')
+    expect(screen.getByText('DEBUG')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
+
+    // Auth & Security tab: admin_key likewise
+    fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
+    await screen.findByText('ADMIN_KEY')
+    expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
+  })
+
   it('persists the env value and refetches with source db', async () => {
     get.mockResolvedValueOnce(envSettings() as never)
     const after = envSettings()
