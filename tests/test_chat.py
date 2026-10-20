@@ -368,6 +368,232 @@ class TestBuildChatCustomTools:
         assert "my-job-42" in comments_tool["http"]["url"]
 
 
+class TestResolveChatCredentials:
+    """_resolve_chat_credentials: user-scoped, per-method Jira resolution.
+
+    Covers the OAuth completion order (cloud ID from the site URL), the
+    failed-selection sentinel (no silent switch to the user's other
+    stored credential), and ATOA secrets saved in the regular field.
+    """
+
+    @staticmethod
+    def _make_settings(**overrides):
+        """Build Settings under a cleared environment (no host leakage)."""
+        from rootcoz.config import Settings
+
+        with patch.dict(os.environ, {}, clear=True):
+            return Settings(_env_file=None, **overrides)
+
+    @pytest.fixture(autouse=True)
+    def _isolate_jira_caches(self):
+        """Cloud-ID and minted-token caches are in-process."""
+        import rootcoz.jira as jira_module
+
+        jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
+        yield
+        jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
+
+    async def _resolve(self, monkeypatch, settings, user_tokens):
+        from rootcoz import main as main_module
+
+        async def fake_get_user_tokens(username):
+            return user_tokens
+
+        monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+        monkeypatch.setattr(storage, "get_user_tokens", fake_get_user_tokens)
+        return await main_module._resolve_chat_credentials({}, "alice")
+
+    async def test_atoa_secret_in_regular_field_builds_oauth_connection(
+        self, monkeypatch
+    ):
+        """An ATOA secret saved as jira_token routes to oauth, not basic/pat."""
+        import rootcoz.jira as jira_module
+
+        settings = self._make_settings(
+            atlassian_oauth_client_id="test-client-id",
+            atlassian_oauth_cloud_id="cloud-id-1",
+        )
+        tokens = {
+            "jira_email": "user@example.com",
+            "jira_token": "ATOA-saved-secret",  # pragma: allowlist secret
+            "jira_sa_token": "",
+            "github_token": "",
+        }
+        with patch.object(
+            jira_module, "mint_atlassian_access_token", new_callable=AsyncMock
+        ) as mint:
+            mint.return_value = "minted-token"  # pragma: allowlist secret
+            _email, _token, connection, _gh, _repo = await self._resolve(
+                monkeypatch, settings, tokens
+            )
+        assert connection is not None
+        assert connection.mode == "sa"
+        assert connection.api_base.endswith("/cloud-id-1")
+        assert connection.headers["Authorization"] == "Bearer minted-token"
+        # The saved secret was minted, never used as a basic/PAT bearer
+        mint.assert_awaited_once_with("test-client-id", "ATOA-saved-secret", True)
+
+    async def test_oauth_without_cloud_id_completes_from_site_url(self, monkeypatch):
+        """OAuth + site URL + no cloud ID: completion resolves it (Finding 6)."""
+        import rootcoz.jira as jira_module
+
+        settings = self._make_settings(
+            atlassian_oauth_client_id="test-client-id",
+            atlassian_oauth_cloud_id="",
+            jira_site_url="https://myorg.atlassian.net",
+        )
+        tokens = {
+            "jira_email": "",
+            "jira_token": "",
+            "jira_sa_token": "ATOA-sa-secret",  # pragma: allowlist secret
+            "github_token": "",
+        }
+        with (
+            patch.object(
+                jira_module,
+                "resolve_jira_cloud_id",
+                new_callable=AsyncMock,
+                return_value="resolved-cloud-id",
+            ) as resolve_cloud_id,
+            patch.object(
+                jira_module,
+                "mint_atlassian_access_token",
+                new_callable=AsyncMock,
+                return_value="minted-token",  # pragma: allowlist secret
+            ),
+        ):
+            _email, _token, connection, _gh, _repo = await self._resolve(
+                monkeypatch, settings, tokens
+            )
+        resolve_cloud_id.assert_awaited_once_with("https://myorg.atlassian.net", True)
+        assert connection is not None
+        assert connection.mode == "sa"
+        assert connection.api_base.endswith("/resolved-cloud-id")
+        # The completed connection yields Jira chat tools
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_connection=connection,
+        )
+        names = [t["name"] for t in tools]
+        assert "search_jira" in names
+        assert "get_jira_issue" in names
+
+    async def test_oauth_unresolvable_cloud_id_blocks_jira_tools(self, monkeypatch):
+        """OAuth + site URL but the cloud ID stays unresolvable → no tools."""
+        import rootcoz.jira as jira_module
+
+        settings = self._make_settings(
+            atlassian_oauth_client_id="test-client-id",
+            atlassian_oauth_cloud_id="",
+            jira_site_url="https://myorg.atlassian.net",
+        )
+        tokens = {
+            "jira_email": "",
+            "jira_token": "",
+            "jira_sa_token": "ATOA-sa-secret",  # pragma: allowlist secret
+            "github_token": "",
+        }
+        with patch.object(
+            jira_module,
+            "resolve_jira_cloud_id",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            _email, _token, connection, _gh, _repo = await self._resolve(
+                monkeypatch, settings, tokens
+            )
+        # A failed selection is a sentinel (non-None, mode "none") — not None
+        assert connection is not None
+        assert connection.mode == "none"
+        assert connection.api_base == ""
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_email=tokens["jira_email"],
+            jira_token=tokens["jira_token"],
+            jira_connection=connection,
+        )
+        assert "search_jira" not in [t["name"] for t in tools]
+
+    async def test_failed_selected_oauth_does_not_fall_back_to_basic(self, monkeypatch):
+        """A failed OAuth selection must not silently switch to basic (Finding 7)."""
+        import rootcoz.jira as jira_module
+        from rootcoz.jira import JiraOAuthMintError
+
+        settings = self._make_settings(
+            atlassian_oauth_client_id="test-client-id",
+            atlassian_oauth_cloud_id="cloud-id-1",
+        )
+        # The user selected the OAuth credential, but ALSO has stored basic
+        # credentials — the basic pair must not be used after OAuth fails.
+        tokens = {
+            "jira_email": "user@example.com",
+            "jira_token": "basic-token",  # pragma: allowlist secret
+            "jira_sa_token": "ATOA-sa-secret",  # pragma: allowlist secret
+            "github_token": "",
+        }
+        with patch.object(
+            jira_module,
+            "mint_atlassian_access_token",
+            new_callable=AsyncMock,
+            side_effect=JiraOAuthMintError("mint failed"),
+        ):
+            _email, _token, connection, _gh, _repo = await self._resolve(
+                monkeypatch, settings, tokens
+            )
+        # Sentinel, not None: the selection failed, it did not vanish
+        assert connection is not None
+        assert connection.mode == "none"
+        # Chat tool building must not fall back to the stored basic pair
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_email="user@example.com",
+            jira_token="basic-token",
+            jira_connection=connection,
+        )
+        names = [t["name"] for t in tools]
+        assert "search_jira" not in names
+        assert "get_jira_issue" not in names
+
+    async def test_absent_selection_returns_none(self, monkeypatch):
+        """No stored Jira credentials at all → None (not the sentinel)."""
+        settings = self._make_settings(jira_cloud_url="https://jira.example.com")
+        tokens = {
+            "jira_email": "",
+            "jira_token": "",
+            "jira_sa_token": "",
+            "github_token": "",
+        }
+        _email, _token, connection, _gh, _repo = await self._resolve(
+            monkeypatch, settings, tokens
+        )
+        assert connection is None
+
+    async def test_selected_basic_credentials_resolve(self, monkeypatch):
+        """A working basic selection still resolves to a cloud connection."""
+        settings = self._make_settings(jira_cloud_url="https://jira.example.com")
+        tokens = {
+            "jira_email": "user@example.com",
+            "jira_token": "basic-token",  # pragma: allowlist secret
+            "jira_sa_token": "",
+            "github_token": "",
+        }
+        _email, _token, connection, _gh, _repo = await self._resolve(
+            monkeypatch, settings, tokens
+        )
+        assert connection is not None
+        assert connection.mode == "cloud"
+        assert connection.api_base == "https://jira.example.com"
+        assert connection.auth == ("user@example.com", "basic-token")
+
+
 class TestBuildAdminCustomTools:
     """Tests for build_admin_custom_tools."""
 

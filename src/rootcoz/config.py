@@ -441,25 +441,35 @@ class Settings(BaseSettings):
             def _load() -> dict[str, Any]:
                 data = source()
                 data.pop("jira_auth_mode", None)
+
+                def _alias_value(alias: str) -> str | None:
+                    # Aliases resolve from os.environ (the env source) AND
+                    # the source's own data: the dotenv source surfaces
+                    # unknown keys from the .env file in ``data`` (later
+                    # dropped by ``extra='ignore'``), so aliases present
+                    # ONLY in .env are still readable here instead of being
+                    # silently lost.
+                    env_value = os.environ.get(alias)
+                    if env_value is not None:
+                        return env_value
+                    return data.get(alias.lower()) or None
+
                 # Deprecated alias: JIRA_OAUTH_ACCESS_TOKEN feeds the renamed
                 # jira_oauth_client_secret when the canonical env var is
                 # unset. The canonical name always wins once set.
-                if "jira_oauth_client_secret" not in data and os.environ.get(
-                    "JIRA_OAUTH_ACCESS_TOKEN"
-                ):
-                    data["jira_oauth_client_secret"] = os.environ[
-                        "JIRA_OAUTH_ACCESS_TOKEN"
-                    ]
+                alias_secret = _alias_value("JIRA_OAUTH_ACCESS_TOKEN")
+                if "jira_oauth_client_secret" not in data and alias_secret:
+                    data["jira_oauth_client_secret"] = alias_secret
                 # Deprecated aliases for the removed shared settings: JIRA_URL
                 # feeds both per-method URL fields and JIRA_SSL_VERIFY all
                 # three per-method verify flags, each only when its canonical
                 # env var is unset. Canonical names always win once set.
-                alias_url = os.environ.get("JIRA_URL")
+                alias_url = _alias_value("JIRA_URL")
                 if alias_url:
                     for target in ("jira_cloud_url", "jira_server_url"):
                         if target not in data:
                             data[target] = alias_url
-                alias_ssl = os.environ.get("JIRA_SSL_VERIFY")
+                alias_ssl = _alias_value("JIRA_SSL_VERIFY")
                 if alias_ssl:
                     for target in (
                         "jira_oauth_ssl_verify",

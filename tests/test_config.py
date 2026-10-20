@@ -242,6 +242,48 @@ class TestJiraSettings:
             # Canonical JIRA_SERVER_SSL_VERIFY wins over the alias
             assert settings.jira_server_ssl_verify is True
 
+    def test_jira_url_alias_only_in_dotenv_feeds_both_url_fields(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """JIRA_URL present ONLY in .env (no canonical fields) feeds both URLs.
+
+        The dotenv source surfaces unknown keys that ``extra='ignore'``
+        later drops — the alias mapping must read them from there too,
+        not only from os.environ.
+        """
+        (tmp_path / ".env").write_text("JIRA_URL=https://jira-dotenv.example.com\n")
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert settings.jira_cloud_url == "https://jira-dotenv.example.com"
+            assert settings.jira_server_url == "https://jira-dotenv.example.com"
+
+    def test_jira_ssl_verify_alias_only_in_dotenv_feeds_all_flags(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """JIRA_SSL_VERIFY present ONLY in .env feeds all three verify flags."""
+        (tmp_path / ".env").write_text("JIRA_SSL_VERIFY=false\n")
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert settings.jira_oauth_ssl_verify is False
+            assert settings.jira_cloud_ssl_verify is False
+            assert settings.jira_server_ssl_verify is False
+
+    def test_dotenv_canonical_url_wins_over_dotenv_alias(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Canonical names win over aliases within the same .env file."""
+        (tmp_path / ".env").write_text(
+            "JIRA_URL=https://alias-dotenv.example.com\n"
+            "JIRA_CLOUD_URL=https://canonical-dotenv.example.com\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert settings.jira_cloud_url == "https://canonical-dotenv.example.com"
+            assert settings.jira_server_url == "https://alias-dotenv.example.com"
+
 
 class TestJiraAuthMode:
     """Tests for the explicit jira_auth_mode setting."""
@@ -266,6 +308,21 @@ class TestJiraAuthMode:
             assert (
                 settings.jira_oauth_client_secret.get_secret_value()
                 == "ATOA-old-secret"  # pragma: allowlist secret
+            )
+
+    def test_deprecated_oauth_alias_only_in_dotenv_feeds_secret(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """JIRA_OAUTH_ACCESS_TOKEN present ONLY in .env feeds the renamed secret."""
+        (tmp_path / ".env").write_text(
+            "JIRA_OAUTH_ACCESS_TOKEN=ATOA-dotenv-secret\n"  # pragma: allowlist secret
+        )
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert (
+                settings.jira_oauth_client_secret.get_secret_value()
+                == "ATOA-dotenv-secret"  # pragma: allowlist secret
             )
 
     def test_canonical_env_wins_over_deprecated_alias(self) -> None:

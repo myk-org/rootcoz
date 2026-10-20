@@ -883,6 +883,50 @@ class TestAiFooterNotDoubled:
                     title="SA bug", body="body", settings=mock_settings
                 )
 
+    async def test_basic_mode_without_cloud_url_error_names_jira_cloud_url(self):
+        """Basic auth with no cloud URL points at jira_cloud_url, not the SA cloud ID."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_auth_mode = "basic"
+        mock_settings.jira_cloud_url = ""
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = "test@example.com"
+        mock_settings.jira_api_token = MagicMock()
+        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
+        mock_settings.jira_pat = None
+        mock_settings.jira_oauth_client_secret = None
+        mock_settings.atlassian_oauth_client_id = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
+        mock_settings.jira_cloud_ssl_verify = True
+
+        with pytest.raises(ValueError, match="jira_cloud_url"):
+            await create_jira_bug(
+                title="basic bug", body="body", settings=mock_settings
+            )
+
+    async def test_pat_mode_without_server_url_error_names_jira_server_url(self):
+        """PAT with no server URL points at jira_server_url, not the SA cloud ID."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        mock_settings = MagicMock()
+        mock_settings.jira_auth_mode = "pat"
+        mock_settings.jira_server_url = ""
+        mock_settings.jira_project_key = "PROJ"
+        mock_settings.jira_email = None
+        mock_settings.jira_api_token = None
+        mock_settings.jira_pat = MagicMock()
+        mock_settings.jira_pat.get_secret_value.return_value = "pat-token"
+        mock_settings.jira_oauth_client_secret = None
+        mock_settings.atlassian_oauth_client_id = None
+        mock_settings.atlassian_oauth_cloud_id = None
+        mock_settings.jira_site_url = None
+        mock_settings.jira_server_ssl_verify = True
+
+        with pytest.raises(ValueError, match="jira_server_url"):
+            await create_jira_bug(title="pat bug", body="body", settings=mock_settings)
+
     async def test_sa_description_is_adf_document(self):
         """SA mode (REST v3) wraps the description in an ADF document."""
         from rootcoz.bug_creation import _text_to_adf, create_jira_bug

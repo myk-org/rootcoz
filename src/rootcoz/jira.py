@@ -295,6 +295,26 @@ def resolve_jira_connection_from_params(
     return resolve_jira_connection(settings)
 
 
+def jira_missing_api_base_error(connection: JiraConnection) -> ValueError:
+    """Mode-aware error for a connection whose API base could not resolve.
+
+    Shared by every call site that needs a controlled failure when a
+    resolved connection has an empty ``api_base`` — the message points at
+    the missing field of the connection's OWN method instead of a
+    generic (or wrong-method) configuration hint.
+    """
+    if connection.mode == "sa":
+        return ValueError(
+            "Jira service account mode could not resolve the Atlassian cloud "
+            "ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL"
+        )
+    if connection.mode == "cloud":
+        return ValueError("jira_cloud_url is not configured for the basic auth method")
+    if connection.mode == "server":
+        return ValueError("jira_server_url is not configured for the pat auth method")
+    return ValueError("No Jira auth method selected — choose one in Server Settings")
+
+
 # Cloud IDs resolved via tenant_info, cached in-process per site URL
 _cloud_id_cache: dict[str, str] = {}
 

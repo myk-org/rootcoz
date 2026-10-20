@@ -601,6 +601,12 @@ def build_chat_custom_tools(
 
     jira_conn = jira_connection
     if jira_conn is None and (jira_token or jira_email):
+        # Fallback ONLY for an absent selection (jira_connection=None): a
+        # selected-but-failed connection arrives as a mode-"none"
+        # JiraConnection sentinel (never None), which blocks this fallback
+        # so chat never silently switches to the user's OTHER stored
+        # credential (e.g. basic after the selected OAuth failed).
+        #
         # An ATOA OAuth 2.0 client secret supplied in the regular field
         # routes to oauth mode so validation and actual use agree — but
         # this sync fallback cannot mint an access token (async), so such
