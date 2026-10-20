@@ -1558,6 +1558,7 @@ async def test_preview_binds_user_for_content_and_resets(
     monkeypatch.setattr(main, "_build_report_context", lambda **kwargs: ("", ""))
     monkeypatch.setattr(main, "_resolve_github_repo_url", lambda settings: "")
     monkeypatch.setattr(main, "_jira_issue_creation_enabled", lambda settings: True)
+    monkeypatch.setattr(main, "_require_jira_method_configured", lambda settings: None)
 
     async def generate(**_kwargs):
         assert ai_client.ai_username.get() == "alice"
@@ -1566,7 +1567,7 @@ async def test_preview_binds_user_for_content_and_resets(
     monkeypatch.setattr(main, generator, generate)
     settings = SimpleNamespace(
         enable_github_issues=True,
-        jira_url="https://jira",
+        jira_server_url="https://jira",
         jira_project_key="",
         jira_api_token=None,
         jira_pat=None,

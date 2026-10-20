@@ -577,7 +577,7 @@ class TestUserTokens:
             "/api/user/tokens",
             json={
                 "jira_token": "jira_tok",
-                "jira_sa_token": "ATST-user-token",
+                "jira_sa_token": "ATOA-user-secret",
             },
             cookies=cookies,
         )
@@ -585,7 +585,7 @@ class TestUserTokens:
         resp = client.get("/api/user/tokens", cookies=cookies)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["jira_sa_token"] == "ATST-user-token"
+        assert data["jira_sa_token"] == "ATOA-user-secret"
         assert data["jira_token"] == "jira_tok"
         # Clearing the SA token leaves the regular token intact
         resp = client.put(

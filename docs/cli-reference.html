@@ -454,11 +454,11 @@
 <td>Tests repository and its token. <code>TESTS_REPO_URL</code>, <code>TESTS_REPO_TOKEN</code>.</td>
 </tr>
 <tr>
-<td><code>--jira-url</code>, <code>--jira-project-key</code></td>
-<td>Jira connection. Each has a matching <code>JIRA_*</code> env var. Jira credentials are <strong>Server Settings only</strong> — the analyze command has no <code>--jira-email</code>, <code>--jira-api-token</code>, <code>--jira-pat</code>, or <code>--jira-sa-token</code> options; configure them server-side (see <a href="configuration-reference.html">Configuration Reference</a>).</td>
+<td><code>--jira-project-key</code>, <code>--jira-site-url</code>, <code>--atlassian-oauth-cloud-id</code></td>
+<td>Jira connection. Each has a matching <code>JIRA_*</code>/<code>ATLASSIAN_*</code> env var. Jira credentials and per-method URLs (<code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_client_secret</code>, <code>jira_cloud_url</code>, <code>jira_server_url</code>, and the three <code>jira_*_ssl_verify</code> flags) are <strong>Server Settings only</strong> — the analyze command has no options for them; configure them server-side (see <a href="configuration-reference.html">Configuration Reference</a>).</td>
 </tr>
 <tr>
-<td><code>--jira-ssl-verify</code> / <code>--no-jira-ssl-verify</code>, <code>--jira-max-results</code></td>
+<td><code>--jira-max-results</code></td>
 <td>Jira search tuning.</td>
 </tr>
 <tr>
@@ -843,7 +843,7 @@
 <tr>
 <td><code>rootcoz validate-token github\|jira</code></td>
 <td><code>--token</code> (hidden prompt), <code>--email</code></td>
-<td>Check a tracker token before using it. An ATST-prefixed Jira token is validated as a service account against the scoped Atlassian gateway.</td>
+<td>Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's <code>atlassian_oauth_client_id</code>.</td>
 </tr>
 <tr>
 <td><code>rootcoz ai-models</code></td>
@@ -1120,6 +1120,31 @@
 <td><code>models free-remove</code></td>
 <td><code>--provider</code>, <code>--model</code></td>
 <td>Remove one pair from the free list.</td>
+</tr>
+<tr>
+<td><code>server-providers list</code></td>
+<td>—</td>
+<td>Server provider key state and per-model selection.</td>
+</tr>
+<tr>
+<td><code>server-providers add</code></td>
+<td><code>--provider</code>, <code>--api-key</code>, <code>--verification-model</code></td>
+<td>Add a server provider key (verified with a real sidecar turn before storing).</td>
+</tr>
+<tr>
+<td><code>server-providers rotate-key</code></td>
+<td><code>--provider</code>, <code>--api-key</code>, <code>--verification-model</code></td>
+<td>Replace a key (re-verified first).</td>
+</tr>
+<tr>
+<td><code>server-providers models</code></td>
+<td><code>--provider</code>, <code>--models</code>, <code>--free</code></td>
+<td>Set the provider's exposed models; comma-separated ids passed verbatim (real ids may end in <code>:free</code>). <code>--free</code> lists the free subset (free implies included; entries not in <code>--models</code> are auto-included). Models not listed are deselected.</td>
+</tr>
+<tr>
+<td><code>server-providers remove</code></td>
+<td><code>--provider</code></td>
+<td>Remove the key, selection, and free pairs.</td>
 </tr>
 </tbody>
 </table></div>

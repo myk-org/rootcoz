@@ -160,7 +160,7 @@ def test_chat_mcp_includes_jira_when_configured(tmp_path: Path) -> None:
         server_url="http://localhost:8000",
         auth_token="chat-token",
         job_id="job-chat",
-        jira_url="https://jira.example.com",
+        jira_server_url="https://jira.example.com",
         jira_token="jira-secret",
     )
     names = {t["name"] for t in tools}

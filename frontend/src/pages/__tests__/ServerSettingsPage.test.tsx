@@ -74,16 +74,25 @@ const baseSettings = (): TestSetting[] => [
   mk('jenkins_url', 'Jenkins', 'https://jenkins.example.com'),
   mk('jenkins_user', 'Jenkins', 'bot'),
   mk('jenkins_password', 'Jenkins', 'secret', { sensitive: true }),
-  mk('jira_url', 'Jira', 'https://jira.example.com'),
+  // Jira — jira_auth_mode (managed by the auth method selector), the five
+  // shared settings, and each method's own credential/URL/SSL fields.
   mk('jira_auth_mode', 'Jira', ''),
   mk('jira_project_key', 'Jira', 'RC'),
+  mk('jira_max_results', 'Jira', '5', { type: 'integer' }),
+  mk('jira_site_url', 'Jira', 'https://rootcoz.atlassian.net'),
+  mk('enable_jira', 'Jira', 'false', { type: 'boolean' }),
+  mk('enable_jira_issues', 'Jira', 'false', { type: 'boolean' }),
+  mk('jira_oauth_client_secret', 'Jira', '', { sensitive: true }),
+  mk('atlassian_oauth_client_id', 'Jira', ''),
+  mk('atlassian_oauth_cloud_id', 'Jira', ''),
+  mk('jira_oauth_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('jira_email', 'Jira', 'admin@example.com'),
   mk('jira_api_token', 'Jira', 'tok', { sensitive: true }),
+  mk('jira_cloud_url', 'Jira', 'https://rootcoz.atlassian.net'),
+  mk('jira_cloud_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('jira_pat', 'Jira', '', { sensitive: true }),
-  mk('jira_oauth_access_token', 'Jira', '', { sensitive: true }),
-  mk('atlassian_oauth_cloud_id', 'Jira', ''),
-  mk('atlassian_oauth_client_id', 'Jira', ''),
-  mk('enable_jira', 'Jira', 'false', { type: 'boolean' }),
+  mk('jira_server_url', 'Jira', 'https://jira.example.com'),
+  mk('jira_server_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('github_token', 'GitHub', 'gh_tok', { sensitive: true }),
   mk('reportportal_url', 'Report Portal', 'https://rp.example.com'),
   mk('prow_url', 'Prow', 'https://prow.example.com'),
@@ -128,8 +137,7 @@ describe('ServerSettingsPage tabs and search', () => {
     expect(screen.queryByText('JENKINS_URL')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
-    expect(await screen.findByText('JIRA_URL')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+    expect(await screen.findByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
     expect(screen.queryByText('PUBLIC_BASE_URL')).not.toBeInTheDocument()
 
     // Active tab persists to localStorage
@@ -145,7 +153,7 @@ describe('ServerSettingsPage tabs and search', () => {
 
     expect(screen.getByText('Search results')).toBeInTheDocument()
     expect(screen.getByText('JENKINS_URL')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_PROJECT_KEY')).not.toBeInTheDocument()
   })
 })
 
@@ -169,14 +177,14 @@ describe('ServerSettingsPage silent refetch on save', () => {
 
 // Settings whose jira_auth_mode value updates on save, so the refetched
 // state reflects what the UI persisted. `verified` is the jira_verified_method
-// the server reports on the jira_url item (defaults to the mode: tested+passed).
+// the server reports on the jira_auth_mode item (defaults to the mode: tested+passed).
 function mockJiraModeSettings(mode: string, verified: string | null = mode) {
   let current = mode
   let verifiedMethod = verified ?? ''
   get.mockImplementation(async () => {
     const settings = baseSettings()
     settings.find((s) => s.key === 'jira_auth_mode')!.value = current
-    settings.find((s) => s.key === 'jira_url')!.jira_verified_method = verifiedMethod
+    settings.find((s) => s.key === 'jira_auth_mode')!.jira_verified_method = verifiedMethod
     return settings
   })
   put.mockImplementation(async (_url: string, body?: unknown) => {
@@ -191,7 +199,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
   async function openJiraTab() {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_URL')
+    await screen.findByText('JIRA_PROJECT_KEY')
   }
 
   it('checkbox state reflects the persisted jira_auth_mode value and shows only that method\'s fields', async () => {
@@ -200,15 +208,33 @@ describe('ServerSettingsPage Jira auth method selection', () => {
 
     expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (token / cloud ID)' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' })).not.toBeChecked()
 
+    // Basic's four fields render (the SSL toggle renders as a switch)
     expect(screen.getByText('JIRA_EMAIL')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_OAUTH_ACCESS_TOKEN')).not.toBeInTheDocument()
+    expect(screen.getByText('JIRA_API_TOKEN')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_CLOUD_URL')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle JIRA_CLOUD_SSL_VERIFY' })).toBeInTheDocument()
 
-    // Common fields stay visible regardless of method
-    expect(screen.getByText('JIRA_URL')).toBeInTheDocument()
+    // Other methods' fields are hidden
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SERVER_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SERVER_SSL_VERIFY')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLOUD_ID')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).not.toBeInTheDocument()
+
+    // The shared settings stay visible regardless of method
     expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_MAX_RESULTS')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_SITE_URL')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle ENABLE_JIRA' })).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle ENABLE_JIRA_ISSUES' })).toBeInTheDocument()
+
+    // The removed legacy settings no longer exist anywhere
+    expect(screen.queryByText('JIRA_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SSL_VERIFY')).not.toBeInTheDocument()
   })
 
   it('asks for confirmation when switching away from an active method; cancel keeps the old one', async () => {
@@ -251,23 +277,32 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     // No method selected: no method credential fields render, but
     // method-independent rows do
     expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SERVER_URL')).not.toBeInTheDocument()
     expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_OAUTH_ACCESS_TOKEN')).not.toBeInTheDocument()
-    expect(screen.getByText('JIRA_URL')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_CLOUD_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLOUD_ID')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).not.toBeInTheDocument()
     expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_SITE_URL')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Atlassian OAuth (token / cloud ID)' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' }))
     expect(screen.queryByRole('alertdialog')).toBeNull()
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'oauth' } }),
     )
     await waitFor(() =>
-      expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (token / cloud ID)' })).toBeChecked(),
+      expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' })).toBeChecked(),
     )
     expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
-    expect(screen.getByText('JIRA_OAUTH_ACCESS_TOKEN')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_OAUTH_CLIENT_SECRET')).toBeInTheDocument()
+    expect(screen.getByText('ATLASSIAN_OAUTH_CLOUD_ID')).toBeInTheDocument()
+    expect(screen.getByText('ATLASSIAN_OAUTH_CLIENT_ID')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).toBeInTheDocument()
     expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
   })
 
   it('switching away from a selected-but-unverified method applies immediately without confirmation', async () => {
@@ -417,7 +452,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     // it must be dropped: final state still reflects the pat switch.
     const stale = baseSettings()
     stale.find((s) => s.key === 'jira_auth_mode')!.value = 'basic'
-    stale.find((s) => s.key === 'jira_url')!.jira_verified_method = 'basic'
+    stale.find((s) => s.key === 'jira_auth_mode')!.jira_verified_method = 'basic'
     resolveStale(stale)
     await waitFor(() => expect(get).toHaveBeenCalledTimes(3))
 
@@ -442,9 +477,9 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
     expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
     expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_OAUTH_ACCESS_TOKEN')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
     // Method-independent rows stay visible
-    expect(screen.getByText('JIRA_URL')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
   })
 
   it('unchecking a verified method asks for confirmation and disables Jira on confirm', async () => {
@@ -1060,7 +1095,7 @@ describe('ServerSettingsPage Jira field visibility', () => {
 
     // jira_pat is hidden while Email+token is the selected method
     fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
-    expect(await screen.findByText('JIRA_URL')).toBeInTheDocument()
+    expect(await screen.findByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
     expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
 
     // Search shows every matching Jira field regardless of method hiding
@@ -1074,7 +1109,7 @@ describe('ServerSettingsPage Jira field visibility', () => {
     mockJiraModeSettings('basic')
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_URL')
+    await screen.findByText('JIRA_PROJECT_KEY')
 
     // Open an edit on a basic-method field
     fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_EMAIL' }))
@@ -1097,8 +1132,8 @@ describe('ServerSettingsPage Jira field visibility', () => {
     await screen.findByText('JIRA_EMAIL')
 
     // Draft an edit on a method-independent field (visible under every method)
-    fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_URL' }))
-    fireEvent.change(screen.getByLabelText('Edit JIRA_URL'), {
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_SITE_URL' }))
+    fireEvent.change(screen.getByLabelText('Edit JIRA_SITE_URL'), {
       target: { value: 'https://draft.example.com' },
     })
 
@@ -1110,8 +1145,8 @@ describe('ServerSettingsPage Jira field visibility', () => {
     )
     await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
 
-    // jira_url stays visible under PAT: the editor survives the switch with its draft
-    expect(screen.getByLabelText('Edit JIRA_URL')).toHaveValue('https://draft.example.com')
+    // jira_site_url stays visible under PAT: the editor survives the switch with its draft
+    expect(screen.getByLabelText('Edit JIRA_SITE_URL')).toHaveValue('https://draft.example.com')
     expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
     expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
   })

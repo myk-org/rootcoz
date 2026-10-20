@@ -562,11 +562,12 @@ def validate_startup_config() -> StartupConfigResult:
                 "JENKINS_URL is not set. Jenkins-based analysis will require jenkins_url in the request body.",
             )
         )
-    if not settings.jira_url:
+    if not settings.jira_enabled:
         findings.append(
             _ConfigFinding(
                 "warning",
-                "JIRA_URL is not set. Jira enrichment will be disabled unless provided per-request.",
+                "Jira is not fully configured (no auth method selected or "
+                "method fields missing). Jira enrichment will be disabled.",
             )
         )
     if not settings.reportportal_url:

@@ -96,25 +96,38 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
-   | `JIRA_URL` | unset | string | no | no | yes |
    | `JIRA_EMAIL` | unset | string | yes | no | yes |
    | `JIRA_API_TOKEN` | unset | string | yes | no | yes |
+   | `JIRA_CLOUD_URL` | unset | string | no | no | yes |
+   | `JIRA_CLOUD_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JIRA_PAT` | unset | string | yes | no | yes |
-   | `JIRA_OAUTH_ACCESS_TOKEN` | unset | string | yes | no | yes |
+   | `JIRA_SERVER_URL` | unset | string | no | no | yes |
+   | `JIRA_SERVER_SSL_VERIFY` | `true` | boolean | no | no | yes |
+   | `JIRA_OAUTH_CLIENT_SECRET` | unset | string | yes | no | yes |
    | `ATLASSIAN_OAUTH_CLOUD_ID` | unset | string | no | no | yes |
    | `ATLASSIAN_OAUTH_CLIENT_ID` | unset | string | no | no | yes |
+   | `JIRA_OAUTH_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JIRA_SITE_URL` | unset | string | no | no | yes |
    | `JIRA_PROJECT_KEY` | unset | string | no | no | yes |
-   | `JIRA_SSL_VERIFY` | `true` | boolean | no | no | yes |
    | `JIRA_MAX_RESULTS` | `5` | integer > 0 | no | no | yes |
    | `ENABLE_JIRA` | unset | boolean | no | no | yes |
    | `ENABLE_JIRA_ISSUES` | unset | boolean | no | no | yes |
 
-   There are three connection methods — `oauth`, `basic`, and `pat` — and the **Server Settings** `jira_auth_mode` row (UI: `Jira → Auth method`) selects which one is used; there is no `JIRA_AUTH_MODE` environment variable. `JIRA_OAUTH_ACCESS_TOKEN` is the Atlassian service account method: a token (created by an admin in Atlassian Administration → Directory → Service accounts, long-lived up to 365 days) sent as a Bearer token against the scoped `https://api.atlassian.com/ex/jira/{cloud-id}` gateway using REST v3. Two configuration shapes work: point `JIRA_URL` directly at the scoped gateway URL (it already contains the cloud ID), or keep `JIRA_URL` as a regular URL and provide the cloud ID via `ATLASSIAN_OAUTH_CLOUD_ID` — or leave both unset and rootcoz resolves the cloud ID anonymously via the site's `_edge/tenant_info` endpoint on first use. `JIRA_SITE_URL` supplies `/browse` links when `JIRA_URL` is the scoped URL, since the site URL cannot be derived from it. `ATLASSIAN_OAUTH_CLIENT_ID` is an inert pass-through kept for env-shape compatibility with the established Atlassian OAuth convention; it is never used for authentication.
+   Each Jira auth method is a **fully self-contained definition** with its own URL and TLS verification — only `JIRA_PROJECT_KEY`, `JIRA_MAX_RESULTS`, `JIRA_SITE_URL`, `ENABLE_JIRA`, and `ENABLE_JIRA_ISSUES` are shared across methods:
 
-   The `jira_auth_mode` Server Setting explicitly selects the connection method: `oauth` (Bearer with `JIRA_OAUTH_ACCESS_TOKEN` — the token is sent as-is, no ATST-prefix sniffing; Atlassian rejects a wrong token type with a clear 401), `basic` (`JIRA_EMAIL` + `JIRA_API_TOKEN`), or `pat` (`JIRA_PAT` as a Server/DC Bearer token). **An auth method selection is required for the Jira integration** — only the selected method's fields are used, with no prefix sniffing, no precedence chain, and no fallback to the other methods' credentials. When no method is selected, Jira is disabled entirely: no credentials are read, `jira_enabled` is false regardless of which credentials are configured, and the connection test reports `No Jira auth method selected — choose one in Server Settings`. When the selected method's fields are missing, the connection test reports the method and the exact missing fields (for example, `Jira auth method 'basic' is selected but missing: jira_email, jira_api_token`). Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a URL, a selected auth method, or a project key logs a warning and stays off.
+   - **`basic`** (Jira Cloud email + API token): `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_CLOUD_URL`, `JIRA_CLOUD_SSL_VERIFY`
+   - **`pat`** (Jira Server/Data Center bearer PAT): `JIRA_PAT`, `JIRA_SERVER_URL`, `JIRA_SERVER_SSL_VERIFY`
+   - **`oauth`** (Atlassian OAuth 2.0 credential): `JIRA_OAUTH_CLIENT_SECRET`, `ATLASSIAN_OAUTH_CLIENT_ID`, `ATLASSIAN_OAUTH_CLOUD_ID`, `JIRA_OAUTH_SSL_VERIFY`
 
-   Jira credentials are **Server Settings only**: `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, and `JIRA_OAUTH_ACCESS_TOKEN` (and the `jira_auth_mode` selection) are read exclusively from the environment and the Server Settings DB row. Analysis requests — API bodies and CLI analyze flags alike — cannot carry or override them. Other Jira fields (`JIRA_URL`, `JIRA_PROJECT_KEY`, `JIRA_SSL_VERIFY`, `JIRA_MAX_RESULTS`, `ENABLE_JIRA`) remain request-tunable. Per-user Jira tokens saved in Profile Settings are a separate path used only for bug creation, project listing, and chat, and are unaffected.
+   There are three connection methods — `oauth`, `basic`, and `pat` — and the **Server Settings** `jira_auth_mode` row (UI: `Jira → Auth method`) selects which one is used; there is no `JIRA_AUTH_MODE` environment variable. `oauth` is the Atlassian **OAuth 2.0 credential for service accounts** method: an admin creates the credential in Atlassian Administration (it yields a client ID and a permanent ATOA-prefixed client secret), and rootcoz stores the secret in `JIRA_OAUTH_CLIENT_SECRET` with the client ID in `ATLASSIAN_OAUTH_CLIENT_ID`. The secret is never sent to Jira itself — on each connection rootcoz exchanges it for a short-lived access token (about 1 hour) via the `client_credentials` grant at `https://auth.atlassian.com/oauth/token`, caches it in-process, and sends that token as the Bearer against the scoped `https://api.atlassian.com/ex/jira/{cloud-id}` gateway using REST v3. `JIRA_OAUTH_CLIENT_SECRET`, `ATLASSIAN_OAUTH_CLIENT_ID`, and `ATLASSIAN_OAUTH_CLOUD_ID` are all required for this method — the cloud ID is the method's sole API locator. `JIRA_SITE_URL` supplies `/browse` links (the scoped gateway URL cannot yield a site URL); rootcoz warns when it is unset. Both the token mint and the gateway calls use `JIRA_OAUTH_SSL_VERIFY`. OAuth 2.0 credentials typically carry only the `read:jira-work`/`write:jira-work` scopes, so the connection test probes project visibility (`/rest/api/3/project`) rather than the current-user endpoint (which needs `read:jira-users` and fails with a scope-mismatch 401).
+
+   The `jira_auth_mode` Server Setting explicitly selects the connection method: `oauth` (client ID + client secret — an access token is minted automatically and sent as the Bearer), `basic` (`JIRA_EMAIL` + `JIRA_API_TOKEN` against `JIRA_CLOUD_URL`), or `pat` (`JIRA_PAT` as a Server/DC Bearer token against `JIRA_SERVER_URL`). **An auth method selection is required for the Jira integration** — only the selected method's fields are used, with no prefix sniffing, no precedence chain, and no fallback to the other methods' credentials. When no method is selected, Jira is disabled entirely: no credentials are read, `jira_enabled` is false regardless of which credentials are configured, and the connection test reports `No Jira auth method selected — choose one in Server Settings`. When the selected method's fields are missing (URL fields included), the connection test reports the method and the exact missing fields (for example, `Jira auth method 'oauth' is selected but missing: atlassian_oauth_client_id, atlassian_oauth_cloud_id`). Setting `ENABLE_JIRA=false` forces Jira off; setting it to `true` without a selected auth method or a project key logs a warning and stays off. A typical split setup: a local insecure Jira Server via `pat` with `JIRA_SERVER_SSL_VERIFY=false`, and Atlassian Cloud via `oauth` with `JIRA_OAUTH_SSL_VERIFY=true` — the two are configured and verified independently.
+
+   Jira credentials and per-method URLs are **Server Settings only**: `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `JIRA_CLOUD_URL`, `JIRA_SERVER_URL`, and the three `*_SSL_VERIFY` flags (and the `jira_auth_mode` selection) are read exclusively from the environment and the Server Settings DB row. Analysis requests — API bodies and CLI analyze flags alike — cannot carry or override them. Other Jira fields (`JIRA_PROJECT_KEY`, `JIRA_MAX_RESULTS`, `ATLASSIAN_OAUTH_CLOUD_ID`, `JIRA_SITE_URL`, `ENABLE_JIRA`) remain request-tunable. Per-user Jira tokens saved in Profile Settings are a separate path used only for bug creation, project listing, and chat, and are unaffected.
+
+   **Upgrade note (oauth rename):** the setting previously named `jira_oauth_access_token` (`JIRA_OAUTH_ACCESS_TOKEN`) is now `jira_oauth_client_secret` (`JIRA_OAUTH_CLIENT_SECRET`), reflecting what the value really is: the permanent client secret of an Atlassian OAuth 2.0 credential, not a bearer token. On startup a one-time DB migration copies an existing `jira_oauth_access_token` Server Settings row to the new key (the old row is left in place; the new key wins once set), and the old `JIRA_OAUTH_ACCESS_TOKEN` environment variable still works as a deprecated alias when `JIRA_OAUTH_CLIENT_SECRET` is unset. `ATLASSIAN_OAUTH_CLIENT_ID` changed from an inert pass-through to a required field of the `oauth` method.
+
+   **Upgrade note (per-method URL/SSL split):** the shared `JIRA_URL` and `JIRA_SSL_VERIFY` settings were removed — each auth method now carries its own URL and TLS verification (`jira_cloud_url`/`jira_cloud_ssl_verify` for `basic`, `jira_server_url`/`jira_server_ssl_verify` for `pat`, `jira_oauth_ssl_verify` for `oauth`; the `oauth` method's API locator is `atlassian_oauth_cloud_id`, not a URL). On startup a one-time DB migration copies an existing `jira_url` Server Settings row to both `jira_cloud_url` and `jira_server_url`, and a `jira_ssl_verify` row to all three verify flags (old rows are left in place; new keys win once set). The old `JIRA_URL` environment variable still works as a deprecated alias that feeds both URL fields when their canonical env vars (`JIRA_CLOUD_URL`, `JIRA_SERVER_URL`) are unset, and `JIRA_SSL_VERIFY` feeds all three verify flags when their canonical env vars are unset — canonical names always win. Per-request `jira_url`/`jira_ssl_verify` overrides (API bodies, CLI `--jira-url`/`--jira-ssl-verify`) were removed together with the shared settings.
 
    **Upgrade note (env selection removed):** older releases selected the auth method via the `JIRA_AUTH_MODE` environment variable (and, before that, inferred it from the configured credentials). Neither exists anymore — a `JIRA_AUTH_MODE` env var is ignored. Deployments that previously relied on it must select the method in the Server Settings UI (`Jira → Auth method`) or via `PUT /api/admin/settings`, or Jira will be disabled.
 
@@ -261,16 +274,19 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `ENABLE_FREE_MODELS` | `enable_free_models` | AI | runtime |
 | `AMBIENT_AUTH_PROVIDERS` | `ambient_auth_providers` | AI | runtime |
 | `ACTIVE_SERVER_PROVIDERS` | `active_server_providers` | AI | runtime |
-| `JIRA_URL` | `jira_url` | Jira | runtime |
 | `JIRA_EMAIL` | `jira_email` | Jira | runtime (sensitive) |
 | `JIRA_API_TOKEN` | `jira_api_token` | Jira | runtime (sensitive) |
+| `JIRA_CLOUD_URL` | `jira_cloud_url` | Jira | runtime |
+| `JIRA_CLOUD_SSL_VERIFY` | `jira_cloud_ssl_verify` | Jira | runtime |
 | `JIRA_PAT` | `jira_pat` | Jira | runtime (sensitive) |
-| `JIRA_OAUTH_ACCESS_TOKEN` | `jira_oauth_access_token` | Jira | runtime (sensitive) |
+| `JIRA_SERVER_URL` | `jira_server_url` | Jira | runtime |
+| `JIRA_SERVER_SSL_VERIFY` | `jira_server_ssl_verify` | Jira | runtime |
+| `JIRA_OAUTH_CLIENT_SECRET` | `jira_oauth_client_secret` | Jira | runtime (sensitive) |
 | `ATLASSIAN_OAUTH_CLOUD_ID` | `atlassian_oauth_cloud_id` | Jira | runtime |
 | `ATLASSIAN_OAUTH_CLIENT_ID` | `atlassian_oauth_client_id` | Jira | runtime |
+| `JIRA_OAUTH_SSL_VERIFY` | `jira_oauth_ssl_verify` | Jira | runtime |
 | `JIRA_SITE_URL` | `jira_site_url` | Jira | runtime |
 | `JIRA_PROJECT_KEY` | `jira_project_key` | Jira | runtime |
-| `JIRA_SSL_VERIFY` | `jira_ssl_verify` | Jira | runtime |
 | `JIRA_MAX_RESULTS` | `jira_max_results` | Jira | runtime |
 | `ENABLE_JIRA` | `enable_jira` | Jira | runtime |
 | `ENABLE_JIRA_ISSUES` | `enable_jira_issues` | Jira | runtime |
@@ -543,9 +559,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_ACCESS_TOKEN`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_ACCESS_TOKEN`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.  

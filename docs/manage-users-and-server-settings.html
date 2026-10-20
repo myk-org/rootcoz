@@ -540,7 +540,7 @@
 </tr>
 <tr>
 <td><code>Jira</code></td>
-<td><code>jira_url</code>, <code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_access_token</code>, <code>atlassian_oauth_cloud_id</code>, <code>atlassian_oauth_client_id</code>, <code>jira_site_url</code>, <code>jira_project_key</code>, <code>jira_ssl_verify</code>, <code>jira_max_results</code>, <code>enable_jira</code>, <code>enable_jira_issues</code></td>
+<td><code>jira_email</code>, <code>jira_api_token</code>, <code>jira_cloud_url</code>, <code>jira_cloud_ssl_verify</code>, <code>jira_pat</code>, <code>jira_server_url</code>, <code>jira_server_ssl_verify</code>, <code>jira_oauth_client_secret</code>, <code>atlassian_oauth_cloud_id</code>, <code>atlassian_oauth_client_id</code>, <code>jira_oauth_ssl_verify</code>, <code>jira_site_url</code>, <code>jira_project_key</code>, <code>jira_max_results</code>, <code>enable_jira</code>, <code>enable_jira_issues</code></td>
 </tr>
 <tr>
 <td><code>GitHub</code></td>
@@ -552,7 +552,7 @@
 </tr>
 <tr>
 <td><code>Auth &amp; Security</code></td>
-<td><code>admin_key</code>, <code>secure_cookies</code>, <code>trust_proxy_headers</code>, <code>require_approval</code>, <code>admin_wait_approve_msg</code>, <code>allowed_users</code>, <code>default_user_role</code></td>
+<td><code>admin_key</code> (displayed masked, read-only), <code>secure_cookies</code>, <code>trust_proxy_headers</code>, <code>require_approval</code>, <code>admin_wait_approve_msg</code>, <code>allowed_users</code>, <code>default_user_role</code></td>
 </tr>
 <tr>
 <td><code>Prow</code></td>
@@ -621,8 +621,8 @@
 </tr>
 </tbody>
 </table></div>
-<p>Most of those are also server-only, so the restart is not the operative constraint — the save is rejected outright. <code>vapid_private_key</code> is the only one here that this page can actually store; the rest must be set in the environment.</p>
-<p>Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: <code>PUT /api/admin/settings</code> rejects every one of them with <code>400 Server-only settings (env var only)</code>, so they must be set in the deployment environment instead. They are <code>admin_wait_approve_msg</code>, <code>allowed_users</code>, <code>auto_push_exporters</code>, <code>db_path</code>, <code>debug</code>, <code>default_user_role</code>, <code>enable_auto_review</code>, <code>enable_github_issues</code>, <code>enable_reportportal</code>, <code>log_level</code>, <code>metadata_rules_file</code>, <code>public_base_url</code>, <code>require_approval</code>, <code>rp_push_classifications</code>, <code>rp_push_rootcoz_url</code>, <code>rp_push_tracker_links</code>, <code>secure_cookies</code>, <code>trust_proxy_headers</code>, <code>vapid_claim_email</code>, and <code>vapid_public_key</code>. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.</p>
+<p>Masked settings are stored encrypted when you save them from this page. The one exception is <code>admin_key</code>: it displays masked but is read-only — it is a server-only bootstrap secret, and every write path rejects it.</p>
+<p>Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: <code>PUT /api/admin/settings</code> rejects every one of them with <code>400 Server-only settings (env var only)</code>, so they must be set in the deployment environment instead. They are <code>admin_key</code> (bootstrap secret for the <code>admin</code> superuser), <code>db_path</code>, and <code>debug</code>. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.</p>
 <blockquote>
 <p><strong>Warning:</strong> Saving an empty value is a reset, not a blank value. The database override is deleted and resolution falls back to the environment variable, then the default.</p>
 </blockquote>

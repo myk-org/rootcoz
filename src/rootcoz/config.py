@@ -1,5 +1,6 @@
 """Configuration settings from environment variables."""
 
+import os
 from functools import lru_cache
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
@@ -229,25 +230,65 @@ class Settings(BaseSettings):
     # Optional defaults (can be overridden per-request in webhook)
     tests_repo_url: str | None = None
     tests_repo_token: SecretStr | None = None  # NEW
-    # Jira integration (optional)
-    jira_url: str | None = None
+    # Jira integration (optional). Each auth method is a fully
+    # self-contained definition — its own URL and TLS verification. The
+    # ONLY settings shared across methods: jira_project_key,
+    # jira_max_results, jira_site_url, enable_jira, enable_jira_issues.
     jira_email: str | None = None
     jira_api_token: SecretStr | None = None
     jira_pat: SecretStr | None = None
     jira_project_key: str | None = None
-    jira_ssl_verify: bool = True
     jira_max_results: int = Field(default=5, gt=0)
-    # Atlassian service account (ATST) — a third, additional connection
-    # method alongside Cloud basic auth and Server/DC PAT. The token
-    # authenticates as Bearer against the scoped api.atlassian.com gateway.
-    jira_oauth_access_token: SecretStr | None = None
+    # basic method (Jira Cloud email + API token)
+    jira_cloud_url: str = Field(
+        default="",
+        description=(
+            "Jira Cloud site URL for the basic auth method (email + API token)."
+        ),
+    )
+    jira_cloud_ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for Jira Cloud basic-auth connections "
+            "(basic method). Set to False for self-signed certs."
+        ),
+    )
+    # pat method (Jira Server/DC bearer PAT)
+    jira_server_url: str = Field(
+        default="",
+        description=(
+            "Jira Server/Data Center base URL for the pat auth method "
+            "(bearer personal access token)."
+        ),
+    )
+    jira_server_ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for Jira Server/DC PAT connections "
+            "(pat method). Set to False for self-signed certs."
+        ),
+    )
+    # oauth method (Atlassian OAuth 2.0 credential)
+    jira_oauth_ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for Atlassian OAuth 2.0 connections "
+            "(oauth method: token minting and the api.atlassian.com "
+            "gateway)."
+        ),
+    )
+    # Atlassian "OAuth 2.0 credential for service accounts" — a third,
+    # additional connection method alongside Cloud basic auth and Server/DC
+    # PAT. The stored value is the credential's permanent CLIENT SECRET
+    # (ATOA-prefixed); short-lived access tokens are minted from it via
+    # client_credentials at auth.atlassian.com (see rootcoz.jira).
+    jira_oauth_client_secret: SecretStr | None = None
     atlassian_oauth_cloud_id: str | None = None
-    # Inert pass-through kept for env-shape compatibility with the
-    # established Atlassian OAuth convention; not used for authentication
-    # (service account tokens have no refresh flow).
+    # Client ID of the OAuth 2.0 credential — required together with the
+    # client secret to mint access tokens for the oauth auth method.
     atlassian_oauth_client_id: str | None = None
-    # Site URL for browse links when JIRA_URL is the scoped API URL
-    # (the site URL cannot be derived from the scoped URL).
+    # Site URL for browse links (shared across methods; the scoped
+    # api.atlassian.com gateway URL of the oauth method cannot yield one).
     jira_site_url: str | None = None
     # DB-only Jira auth method selection (Server Settings UI) — REQUIRED
     # for the Jira integration. When set, ONLY that method's fields are
@@ -400,6 +441,33 @@ class Settings(BaseSettings):
             def _load() -> dict[str, Any]:
                 data = source()
                 data.pop("jira_auth_mode", None)
+                # Deprecated alias: JIRA_OAUTH_ACCESS_TOKEN feeds the renamed
+                # jira_oauth_client_secret when the canonical env var is
+                # unset. The canonical name always wins once set.
+                if "jira_oauth_client_secret" not in data and os.environ.get(
+                    "JIRA_OAUTH_ACCESS_TOKEN"
+                ):
+                    data["jira_oauth_client_secret"] = os.environ[
+                        "JIRA_OAUTH_ACCESS_TOKEN"
+                    ]
+                # Deprecated aliases for the removed shared settings: JIRA_URL
+                # feeds both per-method URL fields and JIRA_SSL_VERIFY all
+                # three per-method verify flags, each only when its canonical
+                # env var is unset. Canonical names always win once set.
+                alias_url = os.environ.get("JIRA_URL")
+                if alias_url:
+                    for target in ("jira_cloud_url", "jira_server_url"):
+                        if target not in data:
+                            data[target] = alias_url
+                alias_ssl = os.environ.get("JIRA_SSL_VERIFY")
+                if alias_ssl:
+                    for target in (
+                        "jira_oauth_ssl_verify",
+                        "jira_cloud_ssl_verify",
+                        "jira_server_ssl_verify",
+                    ):
+                        if target not in data:
+                            data[target] = alias_ssl
                 return data
 
             return _load
@@ -721,7 +789,6 @@ class Settings(BaseSettings):
         """Strip whitespace from optional string fields; blank becomes None."""
         for field_name in (
             "tests_repo_url",
-            "jira_url",
             "jira_email",
             "jira_project_key",
             "atlassian_oauth_cloud_id",
@@ -745,6 +812,8 @@ class Settings(BaseSettings):
             "ai_model",
             "prow_url",
             "gcs_bucket",
+            "jira_cloud_url",
+            "jira_server_url",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -760,7 +829,7 @@ class Settings(BaseSettings):
             "tests_repo_token",
             "jira_api_token",
             "jira_pat",
-            "jira_oauth_access_token",
+            "jira_oauth_client_secret",
             "reportportal_api_token",
         ):
             secret = getattr(self, field_name)
@@ -806,10 +875,6 @@ class Settings(BaseSettings):
                     self.jira_auth_mode,
                     ", ".join(missing),
                 )
-            return False
-        if not self.jira_url:
-            if self.enable_jira is True:
-                logger.warning("enable_jira is True but JIRA_URL is not configured")
             return False
         if not self.jira_project_key:
             if self.enable_jira is True:
@@ -961,12 +1026,20 @@ def jira_method_missing_fields(settings: Settings) -> list[str]:
     if not mode:
         return []
     required: dict[str, list[tuple[str, Any]]] = {
-        "oauth": [("jira_oauth_access_token", settings.jira_oauth_access_token)],
+        "oauth": [
+            ("jira_oauth_client_secret", settings.jira_oauth_client_secret),
+            ("atlassian_oauth_client_id", settings.atlassian_oauth_client_id),
+            ("atlassian_oauth_cloud_id", settings.atlassian_oauth_cloud_id),
+        ],
         "basic": [
             ("jira_email", settings.jira_email),
             ("jira_api_token", settings.jira_api_token),
+            ("jira_cloud_url", settings.jira_cloud_url),
         ],
-        "pat": [("jira_pat", settings.jira_pat)],
+        "pat": [
+            ("jira_pat", settings.jira_pat),
+            ("jira_server_url", settings.jira_server_url),
+        ],
     }
     return [name for name, value in required[mode] if not value]
 

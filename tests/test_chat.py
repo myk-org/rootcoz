@@ -227,7 +227,7 @@ class TestBuildChatCustomTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.example.com",
+            jira_server_url="https://jira.example.com",
             jira_token="jira-tok",
         )
         names = [t["name"] for t in tools]
@@ -239,7 +239,7 @@ class TestBuildChatCustomTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.example.com",
+            jira_cloud_url="https://jira.example.com",
             jira_email="user@example.com",
             jira_token="jira-tok",
         )
@@ -251,25 +251,24 @@ class TestBuildChatCustomTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.example.com",
+            jira_server_url="https://jira.example.com",
             jira_token="jira-pat",
         )
         jira_tool = next(t for t in tools if t["name"] == "search_jira")
         assert jira_tool["http"]["headers"]["Authorization"] == "Bearer jira-pat"
 
-    def test_jira_atst_in_regular_field_routes_to_sa(self):
-        """An ATST token in the regular field selects SA mode, like validation."""
+    def test_jira_atoa_in_regular_field_routes_to_oauth(self):
+        """An ATOA secret in the regular field selects oauth mode, like validation."""
         tools = build_chat_custom_tools(
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://myorg.atlassian.net",
-            jira_token="ATST-tok",
+            jira_token="ATOA-tok",
         )
         names = [t["name"] for t in tools]
-        # The sync fallback cannot complete the cloud ID, so the SA
-        # connection stays pending: no Jira tool is built rather than a
-        # misrouted bearer/v2 tool. (Async callers pass a completed
+        # The sync fallback cannot mint an access token (async), so the
+        # oauth connection stays unusable: no Jira tool is built rather
+        # than a misrouted bearer/v2 tool. (Async callers pass a completed
         # connection via jira_connection.)
         assert "search_jira" not in names
         assert "get_jira_issue" not in names
@@ -280,7 +279,7 @@ class TestBuildChatCustomTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.example.com",
+            jira_server_url="https://jira.example.com",
             jira_token="jira-pat",
         )
         jira_tool = next(t for t in tools if t["name"] == "search_jira")
@@ -293,7 +292,7 @@ class TestBuildChatCustomTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.corp.example.com",
+            jira_cloud_url="https://jira.corp.example.com",
             jira_email="user@example.com",
             jira_token="jira-tok",
         )
@@ -320,7 +319,7 @@ class TestBuildChatCustomTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.example.com",
+            jira_server_url="https://jira.example.com",
             jira_token="jira-tok",
             github_token="gh-tok",
             github_repo="org/repo",
@@ -333,7 +332,7 @@ class TestBuildChatCustomTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.example.com",
+            jira_server_url="https://jira.example.com",
         )
         names = [t["name"] for t in tools]
         assert "search_jira" not in names
@@ -523,7 +522,7 @@ class TestBuildSystemPrompt:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
-            jira_url="https://jira.example.com" if jira else "",
+            jira_server_url="https://jira.example.com" if jira else "",
             jira_token="jira-tok" if jira else "",
             github_token="gh-tok" if github else "",
             github_repo="org/repo" if github else "",
@@ -1434,7 +1433,7 @@ async def test_followup_indexes_only_new_or_missing_graph(
     monkeypatch.setattr(
         main_mod,
         "_resolve_chat_credentials",
-        AsyncMock(return_value=("", "", "", None, "", "")),
+        AsyncMock(return_value=("", "", None, "", "")),
     )
     monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
     job_id = f"chat-index-{graph_state}"
@@ -1516,7 +1515,7 @@ async def test_process_chat_releases_barrier_before_ai(setup_test_db, monkeypatc
     monkeypatch.setattr(
         main_mod,
         "_resolve_chat_credentials",
-        AsyncMock(return_value=("", "", "", None, "", "")),
+        AsyncMock(return_value=("", "", None, "", "")),
     )
     monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
 
@@ -1868,7 +1867,7 @@ async def _start_chat(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", None, "", ""),
+            return_value=("", "", None, "", ""),
         ),
         patch(
             "rootcoz.main._create_ai_auth_header",
@@ -2400,7 +2399,7 @@ async def test_rotation_does_not_reactivate_older_server_chat(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", None, "", ""),
+            return_value=("", "", None, "", ""),
         ),
         patch("rootcoz.engine.chat.clone_chat_repos", new_callable=AsyncMock),
         patch(
@@ -2456,7 +2455,7 @@ async def test_init_without_session_does_not_notify(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", None, "", ""),
+            return_value=("", "", None, "", ""),
         ),
         patch("rootcoz.engine.chat.clone_chat_repos", new_callable=AsyncMock),
         patch(
@@ -2561,7 +2560,7 @@ async def test_orphan_history_can_start_without_losing_messages(
         patch(
             "rootcoz.main._resolve_chat_credentials",
             new_callable=AsyncMock,
-            return_value=("", "", "", None, "", ""),
+            return_value=("", "", None, "", ""),
         ),
         patch("rootcoz.main.notify_chat_changed") as notify,
     ):

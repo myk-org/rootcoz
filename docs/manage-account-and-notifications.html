@@ -222,7 +222,7 @@
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
 <li>A running RootCoz server. See <a href="quickstart.html">Quickstart</a> or <a href="deploy-rootcoz.html">Deploying RootCoz</a> for details.</li>
-<li>For the tracker tokens, a GitHub personal access token with the <code>repo</code> scope, or a Jira Cloud API token (plus your Atlassian account email) or a Jira Server/Data Center personal access token. Optionally, an Atlassian service account (ATST) token — an additional connection method that takes precedence over the regular Jira credentials; it is created by an admin in Atlassian Administration → Directory → Service accounts.</li>
+<li>For the tracker tokens, a GitHub personal access token with the <code>repo</code> scope, or a Jira Cloud API token (plus your Atlassian account email) or a Jira Server/Data Center personal access token. Optionally, an Atlassian OAuth 2.0 credential client secret (ATOA-prefixed) — an additional connection method that takes precedence over the regular Jira credentials; it is created by an admin in Atlassian Administration and is exchanged for short-lived access tokens automatically (the server must have the credential's client ID configured as <code>atlassian_oauth_client_id</code>).</li>
 <li>For browser push notifications, a browser that supports Web Push (Chrome, Edge, Firefox, or Safari on a supported platform) and permission to show notifications.</li>
 </ul>
 <h2 id="quick-example">Quick Example</h2>

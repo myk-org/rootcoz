@@ -49,7 +49,7 @@ def client_with_full_config(temp_db_path, _init_db):
             "ADDITIONAL_REPOS": "helpers:https://github.com/org/helpers",
             "PEER_AI_CONFIGS": "gemini:gemini-2.5-pro",
             "PEER_ANALYSIS_MAX_ROUNDS": "5",
-            "JIRA_URL": "https://jira.example.com",
+            "JIRA_CLOUD_URL": "https://jira.example.com",
             "JIRA_EMAIL": "user@example.com",
             "JIRA_API_TOKEN": "jira-token-123",  # pragma: allowlist secret
             "JIRA_PROJECT_KEY": "PROJ",
@@ -133,7 +133,8 @@ class TestDefaultServerSettingsResponse:
             "additional_repos",
             "peer_ai_configs",
             "peer_analysis_max_rounds",
-            "jira_url",
+            "jira_cloud_url",
+            "jira_server_url",
             "jira_project_key",
             "get_job_artifacts",
             "jenkins_artifacts_max_size_mb",
@@ -250,7 +251,8 @@ class TestDefaultServerSettingsResponse:
             {"ai_provider": "gemini", "ai_model": "gemini-2.5-pro"}
         ]
         assert data["peer_analysis_max_rounds"] == 5
-        assert data["jira_url"] == "https://jira.example.com"
+        assert data["jira_cloud_url"] == "https://jira.example.com"
+        assert data["jira_server_url"] == ""
         assert data["jira_project_key"] == "PROJ"
         assert data["get_job_artifacts"] is False
         assert data["jenkins_artifacts_max_size_mb"] == 200
@@ -276,7 +278,8 @@ class TestDefaultServerSettingsResponse:
         data = resp.json()
         # These are optional str fields that default to None
         assert data["tests_repo_url"] == ""
-        assert data["jira_url"] == ""
+        assert data["jira_cloud_url"] == ""
+        assert data["jira_server_url"] == ""
         assert data["jira_project_key"] == ""
 
     def test_nullable_booleans_preserved_as_null(self, client):

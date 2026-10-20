@@ -100,18 +100,18 @@ type JiraMethod = 'oauth' | 'basic' | 'pat'
 const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
   {
     id: 'oauth',
-    label: 'Atlassian OAuth (token / cloud ID)',
-    fields: ['jira_oauth_access_token', 'atlassian_oauth_cloud_id', 'atlassian_oauth_client_id'],
+    label: 'Atlassian OAuth (client secret / cloud ID)',
+    fields: ['jira_oauth_client_secret', 'atlassian_oauth_client_id', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
   },
   {
     id: 'basic',
     label: 'Email + API token',
-    fields: ['jira_email', 'jira_api_token'],
+    fields: ['jira_email', 'jira_api_token', 'jira_cloud_url', 'jira_cloud_ssl_verify'],
   },
   {
     id: 'pat',
     label: 'PAT (Bearer)',
-    fields: ['jira_pat'],
+    fields: ['jira_pat', 'jira_server_url', 'jira_server_ssl_verify'],
   },
 ]
 
@@ -824,7 +824,11 @@ export function ServerSettingsPage() {
   // The checkbox state comes ONLY from the persisted jira_auth_mode setting.
   const persistedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_auth_mode')?.value)
   // A method counts as configured only after its Test connection succeeded (#346).
-  const verifiedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_url')?.jira_verified_method)
+  // The server attaches the verified-method marker to one settings item —
+  // look it up by the marker, not by a specific key.
+  const verifiedJiraMethod = parseJiraMethod(
+    state.settings.find(s => s.jira_verified_method !== undefined)?.jira_verified_method,
+  )
   // Unset = no method chosen yet: hide every method credential field until
   // the admin picks one; only method-independent rows stay visible (#346).
   const jiraHiddenFields = persistedJiraMethod
@@ -864,7 +868,7 @@ export function ServerSettingsPage() {
     }
     cancelHiddenJiraEdit()
     // keepEditor: a switch must not discard the draft of a field that stays
-    // visible under the new method (e.g. jira_url) — only fields the new
+    // visible under the new method (e.g. jira_project_key) — only fields the new
     // method hides are cancelled above (#346).
     const error = await saveSettings({ jira_auth_mode: method ?? '' }, { keepEditor: true })
     setJiraModeError(error)

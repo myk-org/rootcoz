@@ -91,7 +91,8 @@ class TestJiraSettings:
         with patch.dict(os.environ, _build_env(), clear=True):
             settings = Settings(_env_file=None)
             assert not settings.jira_enabled
-            assert settings.jira_url is None
+            assert settings.jira_cloud_url == ""
+            assert settings.jira_server_url == ""
 
     def test_jira_enabled_with_cloud_auth(self) -> None:
         """Jira is enabled with URL + selected basic method + project key."""
@@ -166,7 +167,9 @@ class TestJiraSettings:
         """Test default values for optional Jira fields."""
         with patch.dict(os.environ, _build_env(), clear=True):
             settings = Settings(_env_file=None)
-            assert settings.jira_ssl_verify is True
+            assert settings.jira_oauth_ssl_verify is True
+            assert settings.jira_cloud_ssl_verify is True
+            assert settings.jira_server_ssl_verify is True
             assert settings.jira_max_results == 5
             assert settings.jira_project_key is None
 
@@ -186,7 +189,7 @@ class TestJiraSettings:
             assert not settings.jira_enabled
 
     def test_jira_custom_values(self) -> None:
-        """Test custom values for Jira fields."""
+        """Deprecated JIRA_URL/JIRA_SSL_VERIFY aliases feed every per-method field."""
         with patch.dict(
             os.environ,
             _build_env(
@@ -201,8 +204,43 @@ class TestJiraSettings:
         ):
             settings = Settings(_env_file=None)
             assert settings.jira_project_key == "MYPROJ"
-            assert settings.jira_ssl_verify is False
+            assert settings.jira_cloud_url == "https://jira.example.com"
+            assert settings.jira_server_url == "https://jira.example.com"
+            assert settings.jira_oauth_ssl_verify is False
+            assert settings.jira_cloud_ssl_verify is False
+            assert settings.jira_server_ssl_verify is False
             assert settings.jira_max_results == 10
+
+    def test_jira_url_alias_feeds_both_per_method_urls(self) -> None:
+        """JIRA_URL feeds both URL fields; canonical names win once set."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://alias.example.com",
+                JIRA_CLOUD_URL="https://cloud.example.com",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            # Canonical JIRA_CLOUD_URL wins; the alias fills the unset server URL
+            assert settings.jira_cloud_url == "https://cloud.example.com"
+            assert settings.jira_server_url == "https://alias.example.com"
+
+    def test_jira_ssl_verify_alias_feeds_all_three_flags(self) -> None:
+        """JIRA_SSL_VERIFY feeds all three verify flags; canonicals win."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_SSL_VERIFY="false",
+                JIRA_SERVER_SSL_VERIFY="true",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert settings.jira_oauth_ssl_verify is False
+            assert settings.jira_cloud_ssl_verify is False
+            # Canonical JIRA_SERVER_SSL_VERIFY wins over the alias
+            assert settings.jira_server_ssl_verify is True
 
 
 class TestJiraAuthMode:
@@ -214,6 +252,37 @@ class TestJiraAuthMode:
             settings = Settings(_env_file=None)
             assert settings.jira_auth_mode is None
             assert not settings.jira_enabled
+
+    def test_deprecated_env_alias_feeds_renamed_setting(self) -> None:
+        """JIRA_OAUTH_ACCESS_TOKEN (deprecated) feeds jira_oauth_client_secret."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_OAUTH_ACCESS_TOKEN="ATOA-old-secret"
+            ),  # pragma: allowlist secret
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert (
+                settings.jira_oauth_client_secret.get_secret_value()
+                == "ATOA-old-secret"  # pragma: allowlist secret
+            )
+
+    def test_canonical_env_wins_over_deprecated_alias(self) -> None:
+        """JIRA_OAUTH_CLIENT_SECRET beats the old JIRA_OAUTH_ACCESS_TOKEN."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_OAUTH_CLIENT_SECRET="ATOA-new-secret",  # pragma: allowlist secret
+                JIRA_OAUTH_ACCESS_TOKEN="ATOA-old-secret",  # pragma: allowlist secret
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert (
+                settings.jira_oauth_client_secret.get_secret_value()
+                == "ATOA-new-secret"  # pragma: allowlist secret
+            )
 
     def test_db_setting_selects_mode(self) -> None:
         """The resolver reads the selected method from the DB settings cache."""
@@ -251,7 +320,7 @@ class TestJiraAuthMode:
                 JIRA_EMAIL="user@example.com",
                 JIRA_API_TOKEN="api-token",  # pragma: allowlist secret
                 JIRA_PAT="pat-token",  # pragma: allowlist secret
-                JIRA_OAUTH_ACCESS_TOKEN="ATST-token",  # pragma: allowlist secret
+                JIRA_OAUTH_CLIENT_SECRET="ATOA-token",  # pragma: allowlist secret
                 JIRA_PROJECT_KEY="TEST",
             ),
             clear=True,
@@ -269,17 +338,41 @@ class TestJiraAuthMode:
     def test_missing_fields_per_method(self) -> None:
         """Each method names exactly its own missing fields."""
         cases = [
-            ("oauth", {}, ["jira_oauth_access_token"]),
-            ("basic", {}, ["jira_email", "jira_api_token"]),
+            (
+                "oauth",
+                {},
+                [
+                    "jira_oauth_client_secret",
+                    "atlassian_oauth_client_id",
+                    "atlassian_oauth_cloud_id",
+                ],
+            ),
+            (
+                "oauth",
+                {
+                    "jira_oauth_client_secret": SecretStr("tok")
+                },  # pragma: allowlist secret
+                ["atlassian_oauth_client_id", "atlassian_oauth_cloud_id"],
+            ),
+            (
+                "oauth",
+                {
+                    "atlassian_oauth_client_id": "cid",
+                    "atlassian_oauth_cloud_id": "cloud-id",
+                },
+                ["jira_oauth_client_secret"],
+            ),
+            ("basic", {}, ["jira_email", "jira_api_token", "jira_cloud_url"]),
             (
                 "basic",
                 {"jira_email": "user@example.com"},
-                ["jira_api_token"],
+                ["jira_api_token", "jira_cloud_url"],
             ),
-            ("pat", {}, ["jira_pat"]),
+            ("pat", {}, ["jira_pat", "jira_server_url"]),
         ]
         for mode, extra, expected in cases:
-            settings = Settings(jira_auth_mode=mode, **extra)
+            with patch.dict(os.environ, _build_env(), clear=True):
+                settings = Settings(jira_auth_mode=mode, **extra)
             assert jira_method_missing_fields(settings) == expected, mode
 
     def test_missing_fields_complete(self) -> None:
@@ -288,30 +381,35 @@ class TestJiraAuthMode:
             jira_auth_mode="basic",
             jira_email="user@example.com",
             jira_api_token=SecretStr("tok"),  # pragma: allowlist secret
+            jira_cloud_url="https://jira.example.com",
             jira_pat=SecretStr("other"),  # pragma: allowlist secret
         )
         assert jira_method_missing_fields(settings) == []
 
-    def test_explicit_oauth_uses_token_as_is(self) -> None:
-        """Explicit oauth trusts the field value — no ATST prefix sniffing."""
+    def test_explicit_oauth_requires_both_credential_halves(self) -> None:
+        """Explicit oauth needs the client secret AND the client ID."""
         settings = Settings(
-            jira_url="https://myorg.atlassian.net",
+            atlassian_oauth_cloud_id="cloud-id",
             jira_auth_mode="oauth",
-            jira_oauth_access_token=SecretStr(
-                "ATATT3xFfGF-not-a-service-account-token"
+            jira_oauth_client_secret=SecretStr(
+                "ATOA-test-secret"
             ),  # pragma: allowlist secret
+            atlassian_oauth_client_id="test-client-id",
         )
         connection = resolve_jira_connection(settings)
         assert connection.mode == "sa"
-        assert (
-            connection.headers["Authorization"]
-            == "Bearer ATATT3xFfGF-not-a-service-account-token"
-        )
+        # The secret is carried for minting, never sent as the Bearer
+        assert "Authorization" not in connection.headers
+        sa_secret = connection.sa_client_secret
+        assert sa_secret == "ATOA-test-secret"  # pragma: allowlist secret
+
+        half = settings.model_copy(update={"atlassian_oauth_client_id": None})
+        assert resolve_jira_connection(half).mode == "none"
 
     def test_explicit_basic_no_pat_fallback(self) -> None:
         """Explicit basic uses only email + api token — no PAT fallback."""
         settings = Settings(
-            jira_url="https://myorg.atlassian.net",
+            jira_cloud_url="https://myorg.atlassian.net",
             jira_auth_mode="basic",
             jira_email="user@example.com",
             jira_pat=SecretStr("pat-token"),  # pragma: allowlist secret
@@ -322,9 +420,11 @@ class TestJiraAuthMode:
     def test_explicit_pat_ignores_sa_and_api_token(self) -> None:
         """Explicit pat uses only jira_pat — SA and api tokens are ignored."""
         settings = Settings(
-            jira_url="https://jira.example.com",
+            jira_server_url="https://jira.example.com",
             jira_auth_mode="pat",
-            jira_oauth_access_token=SecretStr("ATST-token"),  # pragma: allowlist secret
+            jira_oauth_client_secret=SecretStr(
+                "ATOA-token"
+            ),  # pragma: allowlist secret
             jira_api_token=SecretStr("api-token"),  # pragma: allowlist secret
             jira_pat=SecretStr("my-pat"),  # pragma: allowlist secret
         )
