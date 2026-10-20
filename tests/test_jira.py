@@ -1,19 +1,23 @@
 """Tests for Jira integration."""
 
 import os
+import time
 from collections.abc import Generator
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
-from rootcoz.config import Settings, resolve_jira_auth
+from rootcoz.config import Settings
 from rootcoz.jira import (
+    ATLASSIAN_TOKEN_URL,
     JiraClient,
+    JiraOAuthMintError,
     _collect_product_bug_reports,
     _extract_text_from_adf,
     complete_jira_connection,
     enrich_with_jira_matches,
+    mint_atlassian_access_token,
     resolve_jira_connection,
     resolve_jira_connection_from_params,
 )
@@ -34,9 +38,31 @@ _BASE_JIRA_ENV = {
 def _jira_settings_from_env(
     extra_env: dict[str, str],
 ) -> Generator[Settings]:
-    """Yield Settings built from the shared base env merged with *extra_env*."""
-    with patch.dict(os.environ, {**_BASE_JIRA_ENV, **extra_env}, clear=True):
-        yield Settings(_env_file=None)
+    """Yield Settings built from the shared base env merged with *extra_env*.
+
+    ``JIRA_AUTH_MODE`` is not an env var anymore (Server Settings only) —
+    the helper routes it into the init kwarg instead.
+    """
+    env = {**_BASE_JIRA_ENV, **extra_env}
+    auth_mode = env.pop("JIRA_AUTH_MODE", "")
+    with patch.dict(os.environ, env, clear=True):
+        yield Settings(_env_file=None, jira_auth_mode=auth_mode or None)
+
+
+def _mint_response(
+    token: str = "minted-token", expires_in: int = 3600
+) -> httpx.Response:
+    """A canned 200 response from the Atlassian token endpoint."""
+    return httpx.Response(
+        200,
+        json={
+            "access_token": token,
+            "expires_in": expires_in,
+            "scope": "read:jira-work write:jira-work",
+            "token_type": "Bearer",
+        },
+        request=httpx.Request("POST", ATLASSIAN_TOKEN_URL),
+    )
 
 
 @pytest.fixture
@@ -45,6 +71,7 @@ def jira_settings() -> Generator[Settings]:
     yield from _jira_settings_from_env(
         {
             "JIRA_URL": "https://testorg.atlassian.net",
+            "JIRA_AUTH_MODE": "basic",
             "JIRA_EMAIL": "user@example.com",
             "JIRA_API_TOKEN": "test-token",
             "JIRA_PROJECT_KEY": "PROJ",
@@ -58,6 +85,7 @@ def jira_server_settings() -> Generator[Settings]:
     yield from _jira_settings_from_env(
         {
             "JIRA_URL": "https://jira-server.example.com",
+            "JIRA_AUTH_MODE": "pat",
             "JIRA_PAT": "server-pat-token",
         }
     )
@@ -65,15 +93,15 @@ def jira_server_settings() -> Generator[Settings]:
 
 @pytest.fixture
 def jira_cloud_pat_settings() -> Generator[Settings]:
-    """Create Settings with JIRA_PAT + JIRA_EMAIL (no JIRA_API_TOKEN).
+    """Create Settings with a PAT used against an Atlassian Cloud host.
 
-    Email present → Cloud mode.  The PAT is used as the token value
-    for Cloud Basic auth (email, pat).
+    Explicit ``pat`` mode on an atlassian.net host: Bearer auth with the
+    Cloud v3 REST paths.
     """
     yield from _jira_settings_from_env(
         {
             "JIRA_URL": "https://myorg.atlassian.net",
-            "JIRA_EMAIL": "user@example.com",
+            "JIRA_AUTH_MODE": "pat",
             "JIRA_PAT": "ATATT3xFfGF0AbM93-cloud-api-token",
         }
     )
@@ -226,6 +254,7 @@ class TestJiraClient:
             _jira_settings_from_env(
                 {
                     "JIRA_URL": "https://jira.corp.example.com",
+                    "JIRA_AUTH_MODE": "basic",
                     "JIRA_EMAIL": "user@example.com",
                     "JIRA_API_TOKEN": "test-token",
                     "JIRA_PROJECT_KEY": "PROJ",
@@ -249,6 +278,7 @@ class TestJiraClient:
                 _jira_settings_from_env(
                     {
                         "JIRA_URL": url,
+                        "JIRA_AUTH_MODE": "pat",
                         "JIRA_PAT": "server-pat",
                         "JIRA_PROJECT_KEY": "PROJ",
                     }
@@ -265,6 +295,7 @@ class TestJiraClient:
             _jira_settings_from_env(
                 {
                     "JIRA_URL": "https://myorg.atlassian.net",
+                    "JIRA_AUTH_MODE": "pat",
                     "JIRA_PAT": "cloud-pat",
                     "JIRA_PROJECT_KEY": "PROJ",
                 }
@@ -276,16 +307,15 @@ class TestJiraClient:
         assert connection.search_path == "/rest/api/3/search/jql"
 
     async def test_cloud_pat_auth_detection(self, jira_cloud_pat_settings) -> None:
-        """JIRA_PAT + JIRA_EMAIL resolves to Cloud auth (email present = Cloud)."""
+        """Explicit pat mode against a Cloud host uses Bearer + v3 paths."""
         async with JiraClient(jira_cloud_pat_settings) as client:
             assert client._api_path == "/rest/api/3"
             assert client._search_path == "/rest/api/3/search/jql"
-            # Cloud uses Basic auth (email, token) — PAT used as the token
-            assert client._auth == (
-                "user@example.com",
-                "ATATT3xFfGF0AbM93-cloud-api-token",
+            # Bearer auth — the PAT is sent as the Authorization header
+            assert client._auth is None
+            assert client._headers["Authorization"] == (
+                "Bearer ATATT3xFfGF0AbM93-cloud-api-token"
             )
-            assert "Authorization" not in (client._headers or {})
 
     async def test_list_projects_returns_projects(self, jira_settings) -> None:
         """list_projects returns project key and name."""
@@ -711,28 +741,34 @@ class TestJiraConnectionResolver:
     """Tests for the shared JiraConnection resolver (service account mode)."""
 
     @pytest.fixture(autouse=True)
-    def _clear_cloud_id_cache(self):
-        """Cloud ID lookups are cached per site URL — isolate tests from each other."""
+    def _clear_caches(self):
+        """Cloud ID and minted-token caches are in-process — isolate tests."""
         import rootcoz.jira as jira_module
 
         jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
         yield
         jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
 
     def _sa_settings(self, **extra_env: str) -> Settings:
         return next(
             _jira_settings_from_env(
                 {
-                    "JIRA_OAUTH_ACCESS_TOKEN": "ATST-test-token",
+                    "JIRA_AUTH_MODE": "oauth",
+                    "JIRA_OAUTH_CLIENT_SECRET": "ATOA-test-secret",  # pragma: allowlist secret
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "test-client-id",
                     **extra_env,
                 }
             )
         )
 
-    def test_sa_scoped_url_shape(self):
-        """Scoped JIRA_URL carries the cloud ID; site URL comes from JIRA_SITE_URL."""
+    def test_sa_cloud_id_is_sole_locator(self):
+        """api_base derives ONLY from the cloud ID; any jira_url-era value
+        (the deprecated JIRA_URL alias) is ignored in oauth mode."""
         settings = self._sa_settings(
-            JIRA_URL="https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+            JIRA_URL="https://myorg.atlassian.net",
+            ATLASSIAN_OAUTH_CLOUD_ID="2b9e35e3-6bd3-4cec-b838-f4249ee02432",
             JIRA_SITE_URL="https://myorg.atlassian.net",
             JIRA_EMAIL="user@example.com",
             JIRA_API_TOKEN="regular-token",
@@ -744,67 +780,69 @@ class TestJiraConnectionResolver:
             == "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
         )
         assert conn.browse_base == "https://myorg.atlassian.net"
+        assert conn.site_url == "https://myorg.atlassian.net"
         assert conn.auth is None
-        assert conn.headers["Authorization"] == "Bearer ATST-test-token"
+        # The Authorization header is minted asynchronously — the client
+        # secret never appears in the headers.
+        assert "Authorization" not in conn.headers
+        assert conn.sa_client_id == "test-client-id"
+        assert conn.sa_client_secret == "ATOA-test-secret"  # pragma: allowlist secret
         assert conn.api_path == "/rest/api/3"
         assert conn.search_path == "/rest/api/3/search/jql"
+        # The oauth method's own TLS flag rides on the connection
+        assert conn.ssl_verify is True
 
-    def test_sa_cloud_id_setting_shape(self):
-        """Cloud ID from ATLASSIAN_OAUTH_CLOUD_ID; site URL derived from JIRA_URL."""
+    def test_sa_oauth_ssl_verify_flag(self):
+        """oauth connections carry jira_oauth_ssl_verify."""
         settings = self._sa_settings(
-            JIRA_URL="https://myorg.atlassian.net",
             ATLASSIAN_OAUTH_CLOUD_ID="2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+            JIRA_OAUTH_SSL_VERIFY="false",
         )
         conn = resolve_jira_connection(settings)
         assert conn.mode == "sa"
-        assert (
-            conn.api_base
-            == "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
-        )
-        assert conn.site_url == "https://myorg.atlassian.net"
-        assert conn.browse_base == "https://myorg.atlassian.net"
+        assert conn.ssl_verify is False
 
     def test_sa_unresolved_cloud_id(self):
-        """Without scoped URL or cloud ID, api_base stays empty until completion."""
-        settings = self._sa_settings(JIRA_URL="https://myorg.atlassian.net")
+        """Without a cloud ID, api_base stays empty until completion."""
+        settings = self._sa_settings(JIRA_SITE_URL="https://myorg.atlassian.net")
         conn = resolve_jira_connection(settings)
         assert conn.mode == "sa"
         assert conn.api_base == ""
         assert conn.site_url == "https://myorg.atlassian.net"
 
-    def test_sa_token_wins_over_email(self):
-        """ATST prefix takes precedence over the Cloud basic-auth pair."""
+    def test_sa_mode_wins_over_email(self):
+        """Explicit oauth mode: the credential is used even with email+api token set."""
         settings = self._sa_settings(
-            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_SITE_URL="https://myorg.atlassian.net",
             JIRA_EMAIL="user@example.com",
             JIRA_API_TOKEN="regular-token",
         )
-        is_cloud, token = resolve_jira_auth(settings)
-        assert is_cloud is True
-        assert token == "ATST-test-token"
         conn = resolve_jira_connection(settings)
         assert conn.mode == "sa"
+        assert "Authorization" not in conn.headers
 
-    def test_non_atst_sa_token_ignored(self):
-        """A non-ATST value in the SA token field falls back to regular modes."""
+    def test_unset_mode_ignores_all_credentials(self):
+        """No auto-detection: unset mode resolves to none even with full creds."""
         settings = next(
             _jira_settings_from_env(
                 {
                     "JIRA_URL": "https://jira.example.com",
                     "JIRA_EMAIL": "user@example.com",
                     "JIRA_API_TOKEN": "regular-token",
-                    "JIRA_OAUTH_ACCESS_TOKEN": "not-a-service-account-token",
+                    "JIRA_OAUTH_CLIENT_SECRET": "ATOA-test-secret",  # pragma: allowlist secret
+                    "JIRA_PAT": "a-pat",
                 }
             )
         )
         conn = resolve_jira_connection(settings)
-        assert conn.mode == "cloud"
-        assert conn.auth == ("user@example.com", "regular-token")
+        assert conn.mode == "none"
+        assert conn.auth is None
+        assert conn.headers == {}
 
     @pytest.mark.asyncio
     async def test_complete_jira_connection_resolves_cloud_id(self):
         """complete_jira_connection resolves the cloud ID via tenant_info."""
-        settings = self._sa_settings(JIRA_URL="https://myorg.atlassian.net")
+        settings = self._sa_settings(JIRA_SITE_URL="https://myorg.atlassian.net")
         conn = resolve_jira_connection(settings)
         assert conn.api_base == ""
 
@@ -815,9 +853,11 @@ class TestJiraConnectionResolver:
                 "GET", "https://myorg.atlassian.net/_edge/tenant_info"
             ),
         )
+        mint_response = _mint_response("minted-token")
         with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
             mock_instance.get.return_value = tenant_response
+            mock_instance.post.return_value = mint_response
             mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
             mock_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = mock_instance
@@ -826,15 +866,21 @@ class TestJiraConnectionResolver:
             assert completed.api_base == (
                 "https://api.atlassian.com/ex/jira/resolved-cloud-id"
             )
-            # Successful lookups are cached — a second completion makes no request
+            # The minted access token — never the client secret — is the Bearer
+            assert completed.headers["Authorization"] == "Bearer minted-token"
+            assert "ATOA-test-secret" not in str(completed.headers)
+            # Successful lookups and minted tokens are cached — a second
+            # completion makes no request
             cached = await complete_jira_connection(resolve_jira_connection(settings))
             assert cached.api_base == completed.api_base
+            assert cached.headers["Authorization"] == "Bearer minted-token"
             assert mock_instance.get.await_count == 1
+            assert mock_instance.post.await_count == 1
 
     @pytest.mark.asyncio
     async def test_complete_jira_connection_failure_passes_through(self):
-        """Unresolvable cloud ID returns the connection unchanged."""
-        settings = self._sa_settings(JIRA_URL="https://myorg.atlassian.net")
+        """Unresolvable cloud ID returns the connection unchanged (no mint)."""
+        settings = self._sa_settings(JIRA_SITE_URL="https://myorg.atlassian.net")
         conn = resolve_jira_connection(settings)
         with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
             mock_instance = AsyncMock()
@@ -845,6 +891,8 @@ class TestJiraConnectionResolver:
 
             completed = await complete_jira_connection(conn)
             assert completed is conn
+            # No usable API base → no token mint attempted
+            assert mock_instance.post.await_count == 0
 
     def test_resolve_from_params_no_env_leakage(self):
         """Params-based resolution must not pull credentials from the environment."""
@@ -853,56 +901,226 @@ class TestJiraConnectionResolver:
             {"JIRA_PAT": "env-secret-pat", "JIRA_EMAIL": "env@example.com"},
         ):
             conn = resolve_jira_connection_from_params(
-                "https://jira.example.com", "user@example.com", "param-token"
+                jira_cloud_url="https://jira.example.com",
+                jira_email="user@example.com",
+                jira_token="param-token",
             )
         assert conn.mode == "cloud"
         assert conn.auth == ("user@example.com", "param-token")
         assert "env-secret-pat" not in str(conn.headers)
 
+    def test_unset_mode_resolves_to_none(self):
+        """No auto-detection: unset mode + credentials resolves to none."""
+        settings = self._sa_settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_EMAIL="user@example.com",
+            JIRA_API_TOKEN="regular-token",
+        )
+        # _sa_settings pins oauth; drop the pin to exercise the unset case
+        unpinned = settings.model_copy(update={"jira_auth_mode": None})
+        assert resolve_jira_connection(unpinned).mode == "none"
+
+
+class TestExplicitJiraAuthMode:
+    """resolve_jira_connection honors an explicitly selected auth method."""
+
+    def _settings(self, **extra_env: str) -> Settings:
+        return next(_jira_settings_from_env(extra_env))
+
+    def test_oauth_mode_without_client_id_is_none(self):
+        """Explicit oauth needs BOTH halves of the OAuth 2.0 credential.
+
+        A client secret without a client ID cannot mint an access token,
+        so the connection resolves to none (surfaced as a missing-field
+        error by jira_method_missing_fields).
+        """
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="oauth",
+            JIRA_OAUTH_CLIENT_SECRET="ATOA-test-secret",  # pragma: allowlist secret
+            JIRA_SITE_URL="https://myorg.atlassian.net",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "none"
+
+    def test_oauth_mode_missing_secret_is_none(self):
+        """Explicit oauth without a secret resolves to no connection."""
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="oauth",
+            ATLASSIAN_OAUTH_CLIENT_ID="test-client-id",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "none"
+
+    def test_basic_mode_uses_cloud_url_and_ssl(self):
+        """basic reads jira_cloud_url + jira_cloud_ssl_verify only."""
+        settings = self._settings(
+            JIRA_AUTH_MODE="basic",
+            JIRA_EMAIL="user@example.com",
+            JIRA_API_TOKEN="regular-token",
+            JIRA_CLOUD_URL="https://myorg.atlassian.net",
+            JIRA_CLOUD_SSL_VERIFY="false",
+            JIRA_SERVER_URL="https://jira-server.example.com",
+            JIRA_SERVER_SSL_VERIFY="true",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "cloud"
+        assert conn.api_base == "https://myorg.atlassian.net"
+        assert conn.browse_base == "https://myorg.atlassian.net"
+        assert conn.ssl_verify is False
+
+    def test_pat_mode_uses_server_url_and_ssl(self):
+        """pat reads jira_server_url + jira_server_ssl_verify only."""
+        settings = self._settings(
+            JIRA_AUTH_MODE="pat",
+            JIRA_PAT="server-pat-token",
+            JIRA_CLOUD_URL="https://myorg.atlassian.net",
+            JIRA_CLOUD_SSL_VERIFY="true",
+            JIRA_SERVER_URL="https://jira-server.example.com",
+            JIRA_SERVER_SSL_VERIFY="false",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "server"
+        assert conn.api_base == "https://jira-server.example.com"
+        assert conn.browse_base == "https://jira-server.example.com"
+        assert conn.ssl_verify is False
+
+    def test_basic_mode_uses_only_email_and_api_token(self):
+        """Explicit basic builds Cloud basic auth — no PAT fallback."""
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="basic",
+            JIRA_EMAIL="user@example.com",
+            JIRA_API_TOKEN="regular-token",
+            JIRA_PAT="a-pat-that-must-not-be-used",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "cloud"
+        assert conn.auth == ("user@example.com", "regular-token")
+
+    def test_basic_mode_missing_fields_is_none(self):
+        """Explicit basic with incomplete fields resolves to no connection."""
+        settings = self._settings(
+            JIRA_URL="https://myorg.atlassian.net",
+            JIRA_AUTH_MODE="basic",
+            JIRA_API_TOKEN="regular-token",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "none"
+
+    def test_pat_mode_ignores_sa_token_and_host_sniffing(self):
+        """Explicit pat uses Bearer PAT — SA secret does not hijack it."""
+        settings = self._settings(
+            JIRA_URL="https://jira-server.example.com",
+            JIRA_AUTH_MODE="pat",
+            JIRA_OAUTH_CLIENT_SECRET="ATOA-test-secret",  # pragma: allowlist secret
+            ATLASSIAN_OAUTH_CLIENT_ID="test-client-id",
+            JIRA_PAT="server-pat-token",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "server"
+        assert conn.headers["Authorization"] == "Bearer server-pat-token"
+        assert conn.api_path == "/rest/api/2"
+
+    def test_pat_mode_missing_token_is_none(self):
+        """Explicit pat without a token resolves to no connection."""
+        settings = self._settings(
+            JIRA_URL="https://jira-server.example.com",
+            JIRA_AUTH_MODE="pat",
+            JIRA_OAUTH_CLIENT_SECRET="ATOA-test-secret",  # pragma: allowlist secret
+            ATLASSIAN_OAUTH_CLIENT_ID="test-client-id",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "none"
+
 
 class TestJiraClientServiceAccount:
-    """JiraClient behavior in service account mode."""
+    """JiraClient behavior in service account (OAuth 2.0 credential) mode."""
 
     @pytest.fixture(autouse=True)
-    def _clear_cloud_id_cache(self):
+    def _clear_caches(self):
         import rootcoz.jira as jira_module
 
         jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
         yield
         jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
 
     @pytest.fixture
     def sa_settings(self) -> Generator[Settings]:
         yield from _jira_settings_from_env(
             {
-                "JIRA_URL": "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+                "ATLASSIAN_OAUTH_CLOUD_ID": "2b9e35e3-6bd3-4cec-b838-f4249ee02432",
                 "JIRA_SITE_URL": "https://myorg.atlassian.net",
-                "JIRA_OAUTH_ACCESS_TOKEN": "ATST-test-token",
+                "JIRA_AUTH_MODE": "oauth",
+                "JIRA_OAUTH_CLIENT_SECRET": "ATOA-test-secret",  # pragma: allowlist secret
+                "ATLASSIAN_OAUTH_CLIENT_ID": "test-client-id",
                 "JIRA_PROJECT_KEY": "PROJ",
             }
         )
 
     @pytest.mark.asyncio
     async def test_sa_mode_detection(self, sa_settings) -> None:
-        async with JiraClient(sa_settings) as client:
-            assert client._api_path == "/rest/api/3"
-            assert client._search_path == "/rest/api/3/search/jql"
-            assert client._auth is None
-            assert client._headers.get("Authorization") == "Bearer ATST-test-token"
-            # REST base is the scoped gateway; browse links point at the site
-            assert (
-                client._base_url
-                == "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = _mint_response("minted-tok")
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            async with JiraClient(sa_settings) as client:
+                assert client._api_path == "/rest/api/3"
+                assert client._search_path == "/rest/api/3/search/jql"
+                assert client._auth is None
+                # The minted access token — never the client secret — is
+                # installed as the Bearer on entry
+                assert client._headers.get("Authorization") == "Bearer minted-tok"
+                # REST base is the scoped gateway; browse links point at the site
+                assert (
+                    client._base_url
+                    == "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+                )
+                assert client._browse_base == "https://myorg.atlassian.net"
+
+    @pytest.mark.asyncio
+    async def test_sa_mint_failure_raises_on_enter(self) -> None:
+        """A failed token mint surfaces as a clear error on client entry."""
+        settings = next(
+            _jira_settings_from_env(
+                {
+                    "ATLASSIAN_OAUTH_CLOUD_ID": "2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+                    "JIRA_AUTH_MODE": "oauth",
+                    "JIRA_OAUTH_CLIENT_SECRET": "ATOA-test-secret",  # pragma: allowlist secret
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "test-client-id",
+                }
             )
-            assert client._browse_base == "https://myorg.atlassian.net"
+        )
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = httpx.Response(
+                401,
+                json={"error": "invalid_client"},
+                request=httpx.Request("POST", ATLASSIAN_TOKEN_URL),
+            )
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+            client = JiraClient(settings)
+            with pytest.raises(JiraOAuthMintError, match="HTTP 401"):
+                await client.__aenter__()
+            await client.close()
 
     @pytest.mark.asyncio
     async def test_sa_unresolvable_raises_on_enter(self) -> None:
         settings = next(
             _jira_settings_from_env(
                 {
-                    "JIRA_URL": "https://myorg.atlassian.net",
-                    "JIRA_OAUTH_ACCESS_TOKEN": "ATST-test-token",
+                    "JIRA_SITE_URL": "https://myorg.atlassian.net",
+                    "JIRA_AUTH_MODE": "oauth",
+                    "JIRA_OAUTH_CLIENT_SECRET": "ATOA-test-secret",  # pragma: allowlist secret
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "test-client-id",
                 }
             )
         )
@@ -915,3 +1133,162 @@ class TestJiraClientServiceAccount:
             client = JiraClient(settings)
             with pytest.raises(ValueError, match="cloud ID"):
                 await client.__aenter__()
+
+
+class TestAtlassianTokenMinting:
+    """mint_atlassian_access_token: body, cache TTL, and error handling."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_sa_token_cache(self):
+        import rootcoz.jira as jira_module
+
+        jira_module._sa_token_cache.clear()
+        yield
+        jira_module._sa_token_cache.clear()
+
+    @pytest.mark.asyncio
+    async def test_mint_sends_client_credentials_body(self) -> None:
+        """The token request carries the client_credentials grant pair."""
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = _mint_response("minted-token")
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            token = await mint_atlassian_access_token(
+                "test-client-id",
+                "ATOA-test-secret",  # pragma: allowlist secret
+            )
+        assert token == "minted-token"
+        url = mock_instance.post.call_args.args[0]
+        assert url == ATLASSIAN_TOKEN_URL
+        body = mock_instance.post.call_args.kwargs["json"]
+        assert body == {
+            "grant_type": "client_credentials",
+            "client_id": "test-client-id",
+            "client_secret": "ATOA-test-secret",  # pragma: allowlist secret
+        }
+
+    @pytest.mark.asyncio
+    async def test_cache_reused_within_ttl(self) -> None:
+        """Two completions inside the TTL mint once — one POST total."""
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = _mint_response("minted-token")
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            first = await mint_atlassian_access_token(
+                "test-client-id",
+                "ATOA-test-secret",  # pragma: allowlist secret
+            )
+            second = await mint_atlassian_access_token(
+                "test-client-id",
+                "ATOA-test-secret",  # pragma: allowlist secret
+            )
+        assert first == second == "minted-token"
+        assert mock_instance.post.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_re_mint_after_expiry(self) -> None:
+        """An expired cache entry forces a new POST."""
+        import rootcoz.jira as jira_module
+
+        jira_module._sa_token_cache[
+            ("test-client-id", "ATOA-test-secret")
+        ] = (  # pragma: allowlist secret
+            "stale-token",
+            time.monotonic() - 1,
+        )
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = _mint_response("fresh-token")
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            token = await mint_atlassian_access_token(
+                "test-client-id",
+                "ATOA-test-secret",  # pragma: allowlist secret
+            )
+        assert token == "fresh-token"
+        assert mock_instance.post.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_non_200_raises_clear_error_without_secret(self) -> None:
+        """A 401 from the token endpoint raises an error naming the status."""
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = httpx.Response(
+                401,
+                json={"error": "invalid_client"},
+                request=httpx.Request("POST", ATLASSIAN_TOKEN_URL),
+            )
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            with pytest.raises(JiraOAuthMintError, match="HTTP 401") as exc_info:
+                await mint_atlassian_access_token(
+                    "test-client-id",
+                    "ATOA-test-secret",  # pragma: allowlist secret
+                )
+        assert "check client ID and secret" in str(exc_info.value)
+        # The client secret never appears in the error message
+        assert "ATOA-test-secret" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_malformed_payload_raises(self) -> None:
+        """A 200 without an access_token raises a clear error."""
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = httpx.Response(
+                200, json={}, request=httpx.Request("POST", ATLASSIAN_TOKEN_URL)
+            )
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            with pytest.raises(JiraOAuthMintError, match="unexpected"):
+                await mint_atlassian_access_token(
+                    "test-client-id",
+                    "ATOA-test-secret",  # pragma: allowlist secret
+                )
+
+    def test_secret_not_in_connection_repr(self) -> None:
+        """The dataclass repr never exposes the secret or auth headers."""
+        settings = next(
+            _jira_settings_from_env(
+                {
+                    "JIRA_URL": "https://myorg.atlassian.net",
+                    "JIRA_AUTH_MODE": "oauth",
+                    "JIRA_OAUTH_CLIENT_SECRET": "ATOA-test-secret",  # pragma: allowlist secret
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "test-client-id",
+                }
+            )
+        )
+        conn = resolve_jira_connection(settings)
+        assert "ATOA-test-secret" not in repr(conn)
+
+    def test_resolve_from_params_secret_without_client_id(self) -> None:
+        """A per-user secret without a client ID cannot select oauth mode."""
+        conn = resolve_jira_connection_from_params(
+            "https://myorg.atlassian.net",
+            jira_oauth_client_secret="ATOA-test-secret",  # pragma: allowlist secret
+            atlassian_oauth_cloud_id="some-cloud-id",
+        )
+        assert conn.mode == "none"
+
+    def test_resolve_from_params_secret_with_client_id(self) -> None:
+        """Secret + client ID selects oauth (sa) mode."""
+        conn = resolve_jira_connection_from_params(
+            "https://myorg.atlassian.net",
+            jira_oauth_client_secret="ATOA-test-secret",  # pragma: allowlist secret
+            atlassian_oauth_client_id="test-client-id",
+            atlassian_oauth_cloud_id="some-cloud-id",
+        )
+        assert conn.mode == "sa"
+        assert "Authorization" not in conn.headers
+        assert conn.sa_client_id == "test-client-id"

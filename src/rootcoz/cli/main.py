@@ -146,46 +146,10 @@ _TestsRepoTokenOpt = Annotated[
         help="Token for cloning private tests repository.",
     ),
 ]
-_JiraUrlOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-url",
-        envvar="JIRA_URL",
-        help="Jira instance URL.",
-    ),
-]
-_JiraEmailOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-email",
-        envvar="JIRA_EMAIL",
-        help="Jira Cloud email.",
-    ),
-]
-_JiraApiTokenOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-api-token",
-        envvar="JIRA_API_TOKEN",
-        help="Jira Cloud API token.",
-    ),
-]
-_JiraPatOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-pat",
-        envvar="JIRA_PAT",
-        help="Jira Server/DC personal access token.",
-    ),
-]
-_JiraSaTokenOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-sa-token",
-        envvar="JIRA_OAUTH_ACCESS_TOKEN",
-        help="Atlassian service account (ATST) token — takes precedence over the other Jira credentials.",
-    ),
-]
+# NOTE: no per-request Jira credential or URL options here — each Jira
+# auth method's URL and credentials are Server Settings only. Per-user
+# tokens for bug creation/listing commands use their own
+# --jira-token/--jira-email/--jira-sa-token options.
 _AtlassianCloudIdOpt = Annotated[
     str,
     typer.Option(
@@ -199,7 +163,7 @@ _JiraSiteUrlOpt = Annotated[
     typer.Option(
         "--jira-site-url",
         envvar="JIRA_SITE_URL",
-        help="Atlassian site URL for browse links when JIRA_URL is the scoped API URL.",
+        help="Atlassian site URL for Jira browse links.",
     ),
 ]
 _JiraProjectKeyOpt = Annotated[
@@ -208,13 +172,6 @@ _JiraProjectKeyOpt = Annotated[
         "--jira-project-key",
         envvar="JIRA_PROJECT_KEY",
         help="Jira project key to scope searches.",
-    ),
-]
-_JiraSslVerifyOpt = Annotated[
-    bool | None,
-    typer.Option(
-        "--jira-ssl-verify/--no-jira-ssl-verify",
-        help="Jira SSL certificate verification.",
     ),
 ]
 _JiraMaxResultsOpt = Annotated[
@@ -1271,11 +1228,6 @@ def _apply_common_config_defaults(
     _cfg_str_fields: dict[str, str] = {
         "tests_repo_url": cfg.tests_repo_url,
         "tests_repo_token": cfg.tests_repo_token,
-        "jira_url": cfg.jira_url,
-        "jira_email": cfg.jira_email,
-        "jira_api_token": cfg.jira_api_token,
-        "jira_pat": cfg.jira_pat,
-        "jira_oauth_access_token": cfg.jira_oauth_access_token,
         "atlassian_oauth_cloud_id": cfg.atlassian_oauth_cloud_id,
         "jira_site_url": cfg.jira_site_url,
         "jira_project_key": cfg.jira_project_key,
@@ -1338,8 +1290,6 @@ def _apply_common_config_defaults(
         extras["force_server_credentials"] = cfg.force_server_credentials
     if cfg.enable_jira is not None:
         extras["enable_jira"] = cfg.enable_jira
-    if cfg.jira_ssl_verify is not None:
-        extras["jira_ssl_verify"] = cfg.jira_ssl_verify
     if include_jenkins:
         if cfg.jenkins_ssl_verify is not None:
             extras["jenkins_ssl_verify"] = cfg.jenkins_ssl_verify
@@ -1521,15 +1471,9 @@ def analyze(
     ),
     tests_repo_url: _TestsRepoUrlOpt = "",
     tests_repo_token: _TestsRepoTokenOpt = "",
-    jira_url: _JiraUrlOpt = "",
-    jira_email: _JiraEmailOpt = "",
-    jira_api_token: _JiraApiTokenOpt = "",
-    jira_pat: _JiraPatOpt = "",
-    jira_sa_token: _JiraSaTokenOpt = "",
     atlassian_oauth_cloud_id: _AtlassianCloudIdOpt = "",
     jira_site_url: _JiraSiteUrlOpt = "",
     jira_project_key: _JiraProjectKeyOpt = "",
-    jira_ssl_verify: _JiraSslVerifyOpt = None,
     jira_max_results: _JiraMaxResultsOpt = None,
     github_token: _GithubTokenOpt = "",
     ai_call_timeout: _AiCallTimeoutOpt = None,
@@ -1670,11 +1614,6 @@ def analyze(
             "jenkins_password": jenkins_password,
             "tests_repo_url": tests_repo_url,
             "tests_repo_token": tests_repo_token,
-            "jira_url": jira_url,
-            "jira_email": jira_email,
-            "jira_api_token": jira_api_token,
-            "jira_pat": jira_pat,
-            "jira_oauth_access_token": jira_sa_token,
             "atlassian_oauth_cloud_id": atlassian_oauth_cloud_id,
             "jira_site_url": jira_site_url,
             "jira_project_key": jira_project_key,
@@ -1692,7 +1631,6 @@ def analyze(
         },
         bool_fields={
             "jenkins_ssl_verify": jenkins_ssl_verify,
-            "jira_ssl_verify": jira_ssl_verify,
             "get_job_artifacts": get_job_artifacts,
             "force_server_credentials": force_server_credentials,
             "wait_for_completion": wait_for_completion,
@@ -2300,7 +2238,9 @@ def jira_projects_cmd(
         "", "--jira-email", help="Jira email (uses config fallback)."
     ),
     jira_sa_token: str = typer.Option(
-        "", "--jira-sa-token", help="Atlassian service account (ATST) token."
+        "",
+        "--jira-sa-token",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA).",
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -2336,7 +2276,9 @@ def jira_security_levels_cmd(
     jira_token: str = typer.Option("", "--jira-token", help="Jira token."),
     jira_email: str = typer.Option("", "--jira-email", help="Jira email."),
     jira_sa_token: str = typer.Option(
-        "", "--jira-sa-token", help="Atlassian service account (ATST) token."
+        "",
+        "--jira-sa-token",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA).",
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -2616,7 +2558,7 @@ def preview_issue(
     jira_sa_token: str = typer.Option(
         "",
         "--jira-sa-token",
-        help="Atlassian service account (ATST) token — takes precedence over --jira-token.",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA) — takes precedence over --jira-token.",
     ),
     jira_project_key: str = typer.Option(
         "",
@@ -2756,7 +2698,7 @@ def create_issue(
     jira_sa_token: str = typer.Option(
         "",
         "--jira-sa-token",
-        help="Atlassian service account (ATST) token — takes precedence over --jira-token.",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA) — takes precedence over --jira-token.",
     ),
     jira_project_key: str = typer.Option(
         "",

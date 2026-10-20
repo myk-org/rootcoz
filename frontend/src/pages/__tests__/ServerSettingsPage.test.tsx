@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '@/lib/api'
+import { useSSE } from '@/lib/useSSE'
 import { ServerSettingsPage } from '../ServerSettingsPage'
 
 vi.mock('@/lib/api', () => ({
@@ -43,7 +44,7 @@ interface TestSetting {
   updated_by: string
   updated_at: string
   options?: string[]
-  jira_auth_mode?: string
+  jira_verified_method?: string
 }
 
 function mk(key: string, category: string, value = '', extra: Partial<TestSetting> = {}): TestSetting {
@@ -73,15 +74,25 @@ const baseSettings = (): TestSetting[] => [
   mk('jenkins_url', 'Jenkins', 'https://jenkins.example.com'),
   mk('jenkins_user', 'Jenkins', 'bot'),
   mk('jenkins_password', 'Jenkins', 'secret', { sensitive: true }),
-  mk('jira_url', 'Jira', 'https://jira.example.com'),
+  // Jira — jira_auth_mode (managed by the auth method selector), the five
+  // shared settings, and each method's own credential/URL/SSL fields.
+  mk('jira_auth_mode', 'Jira', ''),
   mk('jira_project_key', 'Jira', 'RC'),
+  mk('jira_max_results', 'Jira', '5', { type: 'integer' }),
+  mk('jira_site_url', 'Jira', 'https://rootcoz.atlassian.net'),
+  mk('enable_jira', 'Jira', 'false', { type: 'boolean' }),
+  mk('enable_jira_issues', 'Jira', 'false', { type: 'boolean' }),
+  mk('jira_oauth_client_secret', 'Jira', '', { sensitive: true }),
+  mk('atlassian_oauth_client_id', 'Jira', ''),
+  mk('atlassian_oauth_cloud_id', 'Jira', ''),
+  mk('jira_oauth_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('jira_email', 'Jira', 'admin@example.com'),
   mk('jira_api_token', 'Jira', 'tok', { sensitive: true }),
+  mk('jira_cloud_url', 'Jira', 'https://rootcoz.atlassian.net'),
+  mk('jira_cloud_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('jira_pat', 'Jira', '', { sensitive: true }),
-  mk('jira_oauth_access_token', 'Jira', '', { sensitive: true }),
-  mk('atlassian_oauth_cloud_id', 'Jira', ''),
-  mk('atlassian_oauth_client_id', 'Jira', ''),
-  mk('enable_jira', 'Jira', 'false', { type: 'boolean' }),
+  mk('jira_server_url', 'Jira', 'https://jira.example.com'),
+  mk('jira_server_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('github_token', 'GitHub', 'gh_tok', { sensitive: true }),
   mk('reportportal_url', 'Report Portal', 'https://rp.example.com'),
   mk('prow_url', 'Prow', 'https://prow.example.com'),
@@ -126,8 +137,7 @@ describe('ServerSettingsPage tabs and search', () => {
     expect(screen.queryByText('JENKINS_URL')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
-    expect(await screen.findByText('JIRA_URL')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+    expect(await screen.findByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
     expect(screen.queryByText('PUBLIC_BASE_URL')).not.toBeInTheDocument()
 
     // Active tab persists to localStorage
@@ -143,7 +153,7 @@ describe('ServerSettingsPage tabs and search', () => {
 
     expect(screen.getByText('Search results')).toBeInTheDocument()
     expect(screen.getByText('JENKINS_URL')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_PROJECT_KEY')).not.toBeInTheDocument()
   })
 })
 
@@ -165,53 +175,389 @@ describe('ServerSettingsPage silent refetch on save', () => {
   })
 })
 
-describe('ServerSettingsPage Jira auth method toggle', () => {
-  it('shows only the selected method fields and reflects the active method badge', async () => {
+// Settings whose jira_auth_mode value updates on save, so the refetched
+// state reflects what the UI persisted. `verified` is the jira_verified_method
+// the server reports on the jira_auth_mode item (defaults to the mode: tested+passed).
+function mockJiraModeSettings(mode: string, verified: string | null = mode) {
+  let current = mode
+  let verifiedMethod = verified ?? ''
+  get.mockImplementation(async () => {
+    const settings = baseSettings()
+    settings.find((s) => s.key === 'jira_auth_mode')!.value = current
+    settings.find((s) => s.key === 'jira_auth_mode')!.jira_verified_method = verifiedMethod
+    return settings
+  })
+  put.mockImplementation(async (_url: string, body?: unknown) => {
+    const settings = (body as { settings?: Record<string, string> })?.settings ?? {}
+    if (settings.jira_auth_mode !== undefined) current = settings.jira_auth_mode
+    return {}
+  })
+  return { setVerified: (v: string) => { verifiedMethod = v } }
+}
+
+describe('ServerSettingsPage Jira auth method selection', () => {
+  async function openJiraTab() {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_URL')
+    await screen.findByText('JIRA_PROJECT_KEY')
+  }
 
-    // Stored email + token → active method is basic
-    expect(screen.getByText('Active: Email + API token')).toBeInTheDocument()
+  it('checkbox state reflects the persisted jira_auth_mode value and shows only that method\'s fields', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' })).not.toBeChecked()
+
+    // Basic's four fields render (the SSL toggle renders as a switch)
     expect(screen.getByText('JIRA_EMAIL')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.getByText('JIRA_API_TOKEN')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_CLOUD_URL')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle JIRA_CLOUD_SSL_VERIFY' })).toBeInTheDocument()
 
-    // Common fields stay visible regardless of method
-    expect(screen.getByText('JIRA_URL')).toBeInTheDocument()
+    // Other methods' fields are hidden
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SERVER_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SERVER_SSL_VERIFY')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLOUD_ID')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).not.toBeInTheDocument()
+
+    // The shared settings stay visible regardless of method
     expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_MAX_RESULTS')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_SITE_URL')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle ENABLE_JIRA' })).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle ENABLE_JIRA_ISSUES' })).toBeInTheDocument()
 
-    // Switch to PAT → only PAT fields shown
-    fireEvent.click(screen.getByRole('button', { name: 'PAT (Bearer)' }))
-    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_OAUTH_ACCESS_TOKEN')).not.toBeInTheDocument()
-    expect(screen.getByText('JIRA_URL')).toBeInTheDocument()
-
-    // Switch to OAuth → oauth fields shown, basic hidden
-    fireEvent.click(screen.getByRole('button', { name: 'Atlassian OAuth (token / cloud ID)' }))
-    expect(screen.getByText('JIRA_OAUTH_ACCESS_TOKEN')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    // The removed legacy settings no longer exist anywhere
+    expect(screen.queryByText('JIRA_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SSL_VERIFY')).not.toBeInTheDocument()
   })
 
-  it('warns when editing a lower-precedence method while oauth is stored', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'jira_oauth_access_token')!.value = 'oa-token'
-    get.mockResolvedValue(settings as never)
+  it('asks for confirmation when switching away from an active method; cancel keeps the old one', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
 
-    renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_URL')
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('Switch from Email + API token to PAT (Bearer)?')
+    expect(put).not.toHaveBeenCalled()
 
-    // OAuth stored → active method is oauth
-    expect(screen.getByText('Active: Atlassian OAuth (token / cloud ID)')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(put).not.toHaveBeenCalled()
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
+  })
 
-    // Editing the lower-precedence basic method shows the precedence warning
-    fireEvent.click(screen.getByRole('button', { name: 'Email + API token' }))
-    expect(
-      screen.getByText(
-        'Atlassian OAuth (token / cloud ID) credentials are stored and take precedence — clear them to use this method.',
-      ),
-    ).toBeInTheDocument()
+  it('confirm applies the switch: saves jira_auth_mode and unchecks the other method', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+  })
+
+  it('selecting a method when none is active applies without confirmation', async () => {
+    mockJiraModeSettings('')
+    await openJiraTab()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    // No method selected: no method credential fields render, but
+    // method-independent rows do
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_SERVER_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_CLOUD_URL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLOUD_ID')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).not.toBeInTheDocument()
+    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+    expect(screen.getByText('JIRA_SITE_URL')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'oauth' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' })).toBeChecked(),
+    )
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
+    expect(screen.getByText('JIRA_OAUTH_CLIENT_SECRET')).toBeInTheDocument()
+    expect(screen.getByText('ATLASSIAN_OAUTH_CLOUD_ID')).toBeInTheDocument()
+    expect(screen.getByText('ATLASSIAN_OAUTH_CLIENT_ID')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+  })
+
+  it('switching away from a selected-but-unverified method applies immediately without confirmation', async () => {
+    // basic is selected but its Test connection never passed (verified = '')
+    mockJiraModeSettings('basic', '')
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+  })
+
+  // ---- Refinement 6: the switch auto-runs the Jira test for the new method ----
+
+  it('auto-runs the Jira test after switching to a configured method and shows the success state', async () => {
+    mockJiraModeSettings('basic')
+    testIntegration.mockResolvedValue({ ok: true, message: 'Jira connection verified' } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    // The test POST fires automatically for the newly selected method
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledWith('jira'))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection successful')
+    expect(banner).toHaveTextContent('Jira connection verified')
+    // The switch is never auto-reverted on the admin's behalf
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+  })
+
+  it('auto-runs the Jira test after switching to an unconfigured method and surfaces the missing-fields error', async () => {
+    mockJiraModeSettings('basic')
+    testIntegration.mockResolvedValue({
+      ok: false,
+      message: "Jira auth method 'pat' requires jira_pat",
+    } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledWith('jira'))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection failed')
+    expect(banner).toHaveTextContent("requires jira_pat")
+    // The failed auto-test surfaces the error but keeps the selection
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+  })
+
+  it('does not run any test when switching to none (disabling Jira)', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Disable' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+    )
+    expect(testIntegration).not.toHaveBeenCalled()
+  })
+
+  it('still auto-runs the test for the target method after confirming a switch away from a verified method', async () => {
+    // basic is verified, so switching to pat goes through the confirmation dialog
+    mockJiraModeSettings('basic')
+    testIntegration.mockResolvedValue({ ok: true, message: 'ok' } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledTimes(1))
+    expect(testIntegration).toHaveBeenCalledWith('jira')
+    await screen.findByRole('status') // success banner from the auto-test
+  })
+
+  it('a successful Jira test refreshes the verified method so the next switch asks for confirmation', async () => {
+    const jira = mockJiraModeSettings('basic', '')
+    testIntegration.mockImplementation(async () => {
+      jira.setVerified('basic') // backend records the method whose test succeeded
+      return { ok: true, message: 'ok' } as never
+    })
+    await openJiraTab()
+    expect(get).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: /test connection/i }))
+    await screen.findByRole('status') // success banner
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2)) // silent metadata refetch
+
+    // Now that basic is verified, switching away is confirmed, not silent
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('Switch from Email + API token to PAT (Bearer)?')
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('a stale settings fetch resolving after a method switch does not overwrite the switch result', async () => {
+    // basic selected, unverified → the Jira test verifies it server-side.
+    const jira = mockJiraModeSettings('basic', '')
+    // The manual test verifies basic; the post-switch AUTO-test (#346) is made
+    // to fail here so it adds no success refetch that would muddy get counts.
+    testIntegration.mockImplementationOnce(async () => {
+      jira.setVerified('basic') // backend records the method whose test succeeded
+      return { ok: true, message: 'ok' } as never
+    })
+    testIntegration.mockImplementation(
+      async () => ({ ok: false, message: 'auto-test failed' } as never),
+    )
+    await openJiraTab()
+    expect(get).toHaveBeenCalledTimes(1)
+
+    // The test-triggered metadata refetch stays pending (captures OLD state)
+    let resolveStale!: (value: TestSetting[]) => void
+    get.mockImplementationOnce(
+      () => new Promise<TestSetting[]>((r) => { resolveStale = r }),
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /test connection/i }))
+    await screen.findByRole('status') // success banner
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2)) // stale fetch in flight
+
+    // Switch basic → pat while the stale fetch is pending (unverified in UI
+    // state, so no confirmation dialog). The switch's own refetch resolves first.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+
+    // The stale response (old method basic, now verified) arrives LAST —
+    // it must be dropped: final state still reflects the pat switch.
+    const stale = baseSettings()
+    stale.find((s) => s.key === 'jira_auth_mode')!.value = 'basic'
+    stale.find((s) => s.key === 'jira_auth_mode')!.jira_verified_method = 'basic'
+    resolveStale(stale)
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(3))
+
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+  })
+
+  it('unchecking a selected-but-unverified method disables Jira immediately (no method fields render while unset)', async () => {
+    mockJiraModeSettings('basic', '')
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+    )
+    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
+    // Method-independent rows stay visible
+    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+  })
+
+  it('unchecking a verified method asks for confirmation and disables Jira on confirm', async () => {
+    mockJiraModeSettings('basic') // basic selected and test-verified
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent(/disables Jira until another method is selected/)
+    expect(put).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Disable' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+    )
+    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+  })
+
+  it('cancelling the disable confirmation keeps the method selected', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(put).not.toHaveBeenCalled()
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
+  })
+
+  it('surfaces a backend save-validation error in the Jira section and keeps the selection', async () => {
+    mockJiraModeSettings('basic')
+    const err = new ApiError(400, 'Bad Request', null)
+    err.status = 400
+    err.body = { detail: "Jira auth method 'pat' requires jira_pat" }
+    put.mockRejectedValueOnce(err as never)
+
+    await openJiraTab()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+
+    const alerts = await screen.findAllByRole('alert')
+    expect(alerts.some((a) => a.textContent?.includes("requires jira_pat"))).toBe(true)
+    // The failed switch is not applied
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
+  })
+
+  it('shows the disabled hint when no method is selected', async () => {
+    mockJiraModeSettings('')
+    await openJiraTab()
+    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+    // The hint never checks a box — only the persisted setting does
+    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
+  })
+
+  it('hides the disabled hint when a method is explicitly selected', async () => {
+    mockJiraModeSettings('pat')
+    await openJiraTab()
+    expect(screen.queryByText(/No method selected/)).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+  })
+
+  it('surfaces the backend error when testing with no method selected', async () => {
+    mockJiraModeSettings('')
+    testIntegration.mockResolvedValue({
+      ok: false,
+      message: 'No Jira auth method selected — choose one in Server Settings',
+    } as never)
+    await openJiraTab()
+
+    fireEvent.click(screen.getByRole('button', { name: /test connection/i }))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection failed')
+    expect(banner).toHaveTextContent('No Jira auth method selected — choose one in Server Settings')
   })
 })
 
@@ -503,6 +849,53 @@ describe('ServerSettingsPage active server providers', () => {
       }),
     )
   })
+
+  it('does not repopulate provider checkboxes from a superseded reset refetch', async () => {
+    const settings = baseSettings()
+    const providers = settings.find((s) => s.key === 'active_server_providers')!
+    providers.value = 'gemini'
+    providers.source = 'db'
+    get.mockResolvedValueOnce(settings as never) // initial load: restricted to gemini
+    const del = vi.mocked(api.delete)
+    del.mockResolvedValue({} as never)
+
+    await openAiTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
+
+    // The reset's silent refetch stays pending; when it resolves it carries an
+    // OLDER restriction than either the pre-reset or the post-reset state.
+    let resolveStale!: (value: TestSetting[]) => void
+    get.mockImplementationOnce(() => new Promise<TestSetting[]>((r) => { resolveStale = r }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+
+    // A newer fetch (settings-changed SSE) supersedes it and resolves with the
+    // post-reset state: no restriction, all providers active.
+    get.mockResolvedValueOnce(baseSettings() as never)
+    const events = vi.mocked(useSSE).mock.calls.find(([stream]) => stream === 'settings')![1] as Record<string, () => void>
+    events['settings-changed']()
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(3))
+
+    // The stale response arrives LAST — handleReset must not repopulate the
+    // provider checkboxes from it; the editor still closes (#346).
+    const stale = baseSettings()
+    stale.find((s) => s.key === 'active_server_providers')!.value = 'openai'
+    resolveStale(stale)
+
+    // Reset finished: editor closed, row shows the fresh (post-reset) state
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument(),
+    )
+    expect(screen.getByText('All server providers are active')).toBeInTheDocument()
+
+    // Reopening seeds from the rendered fresh value — never the stale
+    // 'openai'-only restriction the superseded response carried.
+    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    for (const provider of ['gemini', 'openai', 'vertex-claude']) {
+      expect(screen.getByRole('checkbox', { name: provider })).toBeChecked()
+    }
+  })
 })
 
 describe('ServerSettingsPage save refetch gating', () => {
@@ -530,46 +923,6 @@ describe('ServerSettingsPage save refetch gating', () => {
       expect(screen.queryByRole('button', { name: /saving/i })).toBeNull(),
     )
     expect(screen.getByText('JENKINS_USER')).toBeInTheDocument()
-  })
-})
-
-describe('ServerSettingsPage Jira method resolution', () => {
-  async function openJiraTabWith(settings: TestSetting[]) {
-    get.mockResolvedValue(settings as never)
-    renderPage()
-    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_URL')
-  }
-
-  it('treats a masked oauth token as the active oauth method', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'jira_oauth_access_token')!.value = '••••••••'
-    await openJiraTabWith(settings)
-    expect(screen.getByText('Active: Atlassian OAuth (token / cloud ID)')).toBeInTheDocument()
-  })
-
-  it('resolves email paired with only a PAT as pat (basic needs email AND api token)', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'jira_api_token')!.value = ''
-    settings.find((s) => s.key === 'jira_pat')!.value = 'pat-without-prefix'
-    await openJiraTabWith(settings)
-    expect(screen.getByText('Active: PAT (Bearer)')).toBeInTheDocument()
-  })
-
-  it('shows no active method for an api token without email', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'jira_email')!.value = ''
-    await openJiraTabWith(settings)
-    expect(screen.queryByText(/^Active:/)).not.toBeInTheDocument()
-  })
-
-  it('prefers the backend-resolved jira_auth_mode over local inference', async () => {
-    // Credentials alone would infer basic (email + api token), but the
-    // backend's authoritative mode says pat — the badge must follow it.
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'jira_url')!.jira_auth_mode = 'pat'
-    await openJiraTabWith(settings)
-    expect(screen.getByText('Active: PAT (Bearer)')).toBeInTheDocument()
   })
 })
 
@@ -707,7 +1060,10 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
   })
 
   it('keeps reveals of other keys when saving an unrelated setting', async () => {
-    mockGet({ revealed: { jira_api_token: 'decrypted-jira' } })
+    // Explicit basic mode so only one sensitive Jira field (jira_api_token) renders
+    const base = baseSettings()
+    base.find((s) => s.key === 'jira_auth_mode')!.value = 'basic'
+    mockGet({ revealed: { jira_api_token: 'decrypted-jira' }, base })
     await openTab('Jira', 'JIRA_API_TOKEN')
 
     fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
@@ -733,12 +1089,13 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
 
 describe('ServerSettingsPage Jira field visibility', () => {
   it('finds auth-method-hidden Jira fields in search results', async () => {
+    mockJiraModeSettings('basic')
     renderPage()
     await screen.findByText('PUBLIC_BASE_URL')
 
     // jira_pat is hidden while Email+token is the selected method
     fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
-    expect(await screen.findByText('JIRA_URL')).toBeInTheDocument()
+    expect(await screen.findByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
     expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
 
     // Search shows every matching Jira field regardless of method hiding
@@ -749,9 +1106,10 @@ describe('ServerSettingsPage Jira field visibility', () => {
   })
 
   it('cancels an open edit on a field hidden by the newly selected method', async () => {
+    mockJiraModeSettings('basic')
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_URL')
+    await screen.findByText('JIRA_PROJECT_KEY')
 
     // Open an edit on a basic-method field
     fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_EMAIL' }))
@@ -759,11 +1117,38 @@ describe('ServerSettingsPage Jira field visibility', () => {
     expect(testButton).toBeDisabled()
 
     // Switching to PAT hides JIRA_EMAIL — the edit is canceled, not stranded
-    fireEvent.click(screen.getByRole('button', { name: 'PAT (Bearer)' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
     await waitFor(() => expect(testButton).toBeEnabled())
     expect(screen.queryByLabelText('Edit JIRA_EMAIL')).not.toBeInTheDocument()
     expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
     expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+  })
+
+  it('keeps an open editor and its draft when switching to a method that still shows the field', async () => {
+    mockJiraModeSettings('basic')
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+    await screen.findByText('JIRA_EMAIL')
+
+    // Draft an edit on a method-independent field (visible under every method)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_SITE_URL' }))
+    fireEvent.change(screen.getByLabelText('Edit JIRA_SITE_URL'), {
+      target: { value: 'https://draft.example.com' },
+    })
+
+    // Switch basic → PAT (verified method: confirmation dialog, then save)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
+    )
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+
+    // jira_site_url stays visible under PAT: the editor survives the switch with its draft
+    expect(screen.getByLabelText('Edit JIRA_SITE_URL')).toHaveValue('https://draft.example.com')
+    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
   })
 })
 

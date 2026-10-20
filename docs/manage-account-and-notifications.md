@@ -5,7 +5,7 @@ This page covers everything you control about your own RootCoz identity: registe
 ## Prerequisites
 
 - A running RootCoz server. See [Quickstart](quickstart.html) or [Deploying RootCoz](deploy-rootcoz.html) for details.
-- For the tracker tokens, a GitHub personal access token with the `repo` scope, or a Jira Cloud API token (plus your Atlassian account email) or a Jira Server/Data Center personal access token. Optionally, an Atlassian service account (ATST) token — an additional connection method that takes precedence over the regular Jira credentials; it is created by an admin in Atlassian Administration → Directory → Service accounts.
+- For the tracker tokens, a GitHub personal access token with the `repo` scope, or a Jira Cloud API token (plus your Atlassian account email) or a Jira Server/Data Center personal access token. Optionally, an Atlassian OAuth 2.0 credential client secret (ATOA-prefixed) — an additional connection method that takes precedence over the regular Jira credentials; it is created by an admin in Atlassian Administration and is exchanged for short-lived access tokens automatically (the server must have the credential's client ID configured as `atlassian_oauth_client_id`).
 - For browser push notifications, a browser that supports Web Push (Chrome, Edge, Firefox, or Safari on a supported platform) and permission to show notifications.
 
 ## Quick Example

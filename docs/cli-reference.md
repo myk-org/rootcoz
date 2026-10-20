@@ -87,9 +87,8 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--jenkins-ssl-verify` / `--no-jenkins-ssl-verify`, `--jenkins-timeout`, `--jenkins-artifacts-max-size-mb` | Jenkins transport tuning. |
 | `--get-job-artifacts` / `--no-get-job-artifacts` | Download build artifacts for AI context. |
 | `--tests-repo-url`, `--tests-repo-token` | Tests repository and its token. `TESTS_REPO_URL`, `TESTS_REPO_TOKEN`. |
-| `--jira-url`, `--jira-email`, `--jira-api-token`, `--jira-pat`, `--jira-project-key` | Jira connection. Each has a matching `JIRA_*` env var. |
-| `--jira-sa-token` | Atlassian service account (ATST) token, a third connection method that takes precedence over the regular Jira credentials. `JIRA_SA_TOKEN` in config files; server-side SA setup uses `JIRA_OAUTH_ACCESS_TOKEN` (see [Configuration Reference](configuration-reference.html)). |
-| `--jira-ssl-verify` / `--no-jira-ssl-verify`, `--jira-max-results` | Jira search tuning. |
+| `--jira-project-key`, `--jira-site-url`, `--atlassian-oauth-cloud-id` | Jira connection. Each has a matching `JIRA_*`/`ATLASSIAN_*` env var. Jira credentials and per-method URLs (`jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_cloud_url`, `jira_server_url`, and the three `jira_*_ssl_verify` flags) are **Server Settings only** — the analyze command has no options for them; configure them server-side (see [Configuration Reference](configuration-reference.html)). |
+| `--jira-max-results` | Jira search tuning. |
 | `--github-token` | GitHub API token. `GITHUB_TOKEN`. |
 | `--ai-call-timeout` | AI timeout in minutes. |
 | `--force-server-credentials` / `--no-force-server-credentials` | Use server-managed AI credentials instead of your own key. |
@@ -189,7 +188,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
 | `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
-| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATST-prefixed Jira token is validated as a service account against the scoped Atlassian gateway. |
+| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 
 12. **Push to exporters.**

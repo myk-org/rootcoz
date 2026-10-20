@@ -43,7 +43,7 @@ async def _setup_job(monkeypatch, tmp_path, gate: asyncio.Event | None = None):
     monkeypatch.setattr(
         main,
         "_resolve_chat_credentials",
-        AsyncMock(return_value=("", "", "", None, "", "")),
+        AsyncMock(return_value=("", "", None, "", "")),
     )
     monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
 

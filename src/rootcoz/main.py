@@ -100,6 +100,8 @@ from rootcoz.comment_enrichment import (
 from rootcoz.config import (
     Settings,
     get_settings,
+    jira_method_missing_fields,
+    normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -143,9 +145,11 @@ from rootcoz.jenkins import JenkinsClient
 from rootcoz.jira import (
     JiraClient,
     JiraConnection,
+    JiraOAuthMintError,
     complete_jira_connection,
     enrich_with_jira_matches,
     filter_matches_with_ai,
+    jira_method_url,
     resolve_jira_connection,
     resolve_jira_connection_from_params,
 )
@@ -297,7 +301,7 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "jenkins_user",
         "jira_api_token",
         "jira_pat",
-        "jira_oauth_access_token",
+        "jira_oauth_client_secret",
         "jira_email",
         "github_token",
         "tests_repo_token",
@@ -396,6 +400,25 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
     }
 )
 
+# Updating any of these invalidates the recorded jira_verified_method —
+# the record reflects the last successful test of the *previous* setup.
+_JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
+    {
+        "jira_auth_mode",
+        "jira_email",
+        "jira_api_token",
+        "jira_pat",
+        "jira_oauth_client_secret",
+        "atlassian_oauth_client_id",
+        "atlassian_oauth_cloud_id",
+        "jira_cloud_url",
+        "jira_server_url",
+        "jira_oauth_ssl_verify",
+        "jira_cloud_ssl_verify",
+        "jira_server_ssl_verify",
+    }
+)
+
 # Category grouping for UI display
 _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "Jenkins": [
@@ -421,16 +444,20 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "record_transcripts",
     ],
     "Jira": [
-        "jira_url",
+        "jira_auth_mode",
         "jira_email",
         "jira_api_token",
+        "jira_cloud_url",
+        "jira_cloud_ssl_verify",
         "jira_pat",
-        "jira_oauth_access_token",
+        "jira_server_url",
+        "jira_server_ssl_verify",
+        "jira_oauth_client_secret",
         "atlassian_oauth_cloud_id",
         "atlassian_oauth_client_id",
+        "jira_oauth_ssl_verify",
         "jira_site_url",
         "jira_project_key",
-        "jira_ssl_verify",
         "jira_max_results",
         "enable_jira",
         "enable_jira_issues",
@@ -569,7 +596,8 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
         result.append(
             {
                 "key": field_name,
-                "env_var": field_name.upper(),
+                # jira_auth_mode is DB-only (Server Settings) — no env var
+                "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
                 "value": display_value,
                 "default": default_str,
                 "description": description,
@@ -1193,12 +1221,7 @@ _ANALYSIS_SETTINGS_FIELDS = (
     "tests_repo_token",
     "peer_analysis_max_rounds",
     "enable_jira",
-    "jira_url",
-    "jira_email",
-    "jira_api_token",
-    "jira_pat",
     "jira_project_key",
-    "jira_ssl_verify",
     "jira_max_results",
     "github_token",
     "ai_call_timeout",
@@ -1317,10 +1340,8 @@ def _reconstruct_from_params(
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
-        "jira_url",
         "jira_email",
         "jira_project_key",
-        "jira_ssl_verify",
         "jira_max_results",
         "atlassian_oauth_cloud_id",
         "jira_site_url",
@@ -1353,11 +1374,14 @@ def _reconstruct_from_params(
         overrides["jira_pat"] = (
             SecretStr(params["jira_pat"]) if params["jira_pat"] else None
         )
-    if params.get("jira_oauth_access_token") is not None:
-        overrides["jira_oauth_access_token"] = (
-            SecretStr(params["jira_oauth_access_token"])
-            if params["jira_oauth_access_token"]
-            else None
+    # New key wins; the old jira_oauth_access_token key is accepted so
+    # request_params stored before the rename still replay exactly.
+    stored_oauth_secret = params.get(
+        "jira_oauth_client_secret", params.get("jira_oauth_access_token")
+    )
+    if stored_oauth_secret is not None:
+        overrides["jira_oauth_client_secret"] = (
+            SecretStr(stored_oauth_secret) if stored_oauth_secret else None
         )
     if params.get("github_token") is not None:
         overrides["github_token"] = (
@@ -2656,11 +2680,11 @@ async def _validate_peer_configs(
 
 
 def _resolve_enable_jira(body: BaseAnalysisRequest, settings: Settings) -> bool:
-    """Resolve enable_jira flag from request, env var, or auto-detection.
+    """Resolve enable_jira flag from request or settings.
 
     Priority order:
     1. Request body field (highest)
-    2. settings.jira_enabled property (env var + auto-detect fallback)
+    2. settings.jira_enabled property (requires a selected jira_auth_mode)
 
     Args:
         body: The analysis request.
@@ -2700,11 +2724,11 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     #   ai_provider      - resolved + validated by _resolve_ai_config()
     #   ai_model         - resolved + validated by _resolve_ai_config()
     #   additional_repos - list vs str type mismatch; resolved by resolve_additional_repos()
+    # Jira credentials (jira_email/jira_api_token/jira_pat/
+    # jira_oauth_client_secret) are intentionally absent: they are Server
+    # Settings only and can never be supplied per request.
     direct_fields = [
-        "jira_url",
-        "jira_email",
         "jira_project_key",
-        "jira_ssl_verify",
         "jira_max_results",
         "atlassian_oauth_cloud_id",
         "jira_site_url",
@@ -2726,19 +2750,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         overrides["peer_analysis_max_rounds"] = body.peer_analysis_max_rounds
 
     # SecretStr fields need wrapping
-    if body.jira_api_token is not None:
-        overrides["jira_api_token"] = SecretStr(body.jira_api_token)
-    if body.jira_pat is not None:
-        overrides["jira_pat"] = SecretStr(body.jira_pat)
-    if body.jira_oauth_access_token is not None:
-        overrides["jira_oauth_access_token"] = SecretStr(body.jira_oauth_access_token)
-    elif (body.jira_api_token and body.jira_api_token.strip()) or (
-        body.jira_pat and body.jira_pat.strip()
-    ):
-        # Request-level Jira credentials must not be silently bypassed by a
-        # server-configured ATST token (the resolver prefers SA mode).
-        # Mirrors the clearing semantics of _build_effective_jira_settings.
-        overrides["jira_oauth_access_token"] = None
     if body.github_token is not None:
         overrides["github_token"] = SecretStr(body.github_token)
     if body.tests_repo_token is not None:
@@ -3522,30 +3533,18 @@ def _apply_base_analysis_overrides(
     """
     params["force_server_credentials"] = merged.force_server_credentials
     params["enable_jira"] = _resolve_enable_jira(body, merged)
-    params["jira_url"] = (
-        body.jira_url if body.jira_url is not None else (merged.jira_url or "")
-    )
-    params["jira_email"] = (
-        body.jira_email if body.jira_email is not None else (merged.jira_email or "")
-    )
+    # Jira credentials are Server Settings only — persist the effective
+    # (server) values so stored request_params replay exactly what the
+    # analysis ran with; requests cannot supply or override them.
+    params["jira_email"] = merged.jira_email or ""
     params["jira_api_token"] = (
-        body.jira_api_token
-        if body.jira_api_token is not None
-        else (merged.jira_api_token.get_secret_value() if merged.jira_api_token else "")
+        merged.jira_api_token.get_secret_value() if merged.jira_api_token else ""
     )
-    params["jira_pat"] = (
-        body.jira_pat
-        if body.jira_pat is not None
-        else (merged.jira_pat.get_secret_value() if merged.jira_pat else "")
-    )
-    params["jira_oauth_access_token"] = (
-        body.jira_oauth_access_token
-        if body.jira_oauth_access_token is not None
-        else (
-            merged.jira_oauth_access_token.get_secret_value()
-            if merged.jira_oauth_access_token
-            else ""
-        )
+    params["jira_pat"] = merged.jira_pat.get_secret_value() if merged.jira_pat else ""
+    params["jira_oauth_client_secret"] = (
+        merged.jira_oauth_client_secret.get_secret_value()
+        if merged.jira_oauth_client_secret
+        else ""
     )
     params["atlassian_oauth_cloud_id"] = (
         body.atlassian_oauth_cloud_id
@@ -3561,11 +3560,6 @@ def _apply_base_analysis_overrides(
         body.jira_project_key
         if body.jira_project_key is not None
         else (merged.jira_project_key or "")
-    )
-    params["jira_ssl_verify"] = (
-        body.jira_ssl_verify
-        if body.jira_ssl_verify is not None
-        else merged.jira_ssl_verify
     )
     params["jira_max_results"] = (
         body.jira_max_results
@@ -6902,22 +6896,25 @@ async def enrich_comments(
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
-    # Detect Cloud vs Server/DC auth once, matching JiraClient logic:
-    # - Cloud: jira_email is set -> Basic auth with email:token
-    # - Server/DC: no email -> Bearer PAT
-    # - Service account: ATST token -> Bearer against scoped gateway
-    jira_url: str | None = settings.jira_url if settings.jira_enabled else None
-    jira_active = bool(jira_url)
+    # Jira connection resolution (single source of truth): the selected
+    # `jira_auth_mode` decides oauth (scoped gateway) / basic (Cloud) /
+    # pat (Server/DC Bearer). Unset mode → jira_enabled is False and the
+    # connection is skipped entirely.
     jira_connection: JiraConnection | None = (
-        resolve_jira_connection(settings) if jira_active else None
+        resolve_jira_connection(settings) if settings.jira_enabled else None
     )
+    if jira_connection is not None and jira_connection.mode == "none":
+        jira_connection = None
     if jira_connection is not None and jira_connection.mode == "sa":
-        # Complete the cloud ID ONCE here — otherwise every per-key status
-        # task would fire its own tenant_info lookup on a cold cache.
-        jira_connection = await complete_jira_connection(
-            jira_connection, settings.jira_ssl_verify
-        )
-        if not jira_connection.api_base:
+        # Complete the cloud ID and mint the access token ONCE here —
+        # otherwise every per-key status task would fire its own
+        # tenant_info lookup / token mint on a cold cache.
+        try:
+            jira_connection = await complete_jira_connection(jira_connection)
+        except JiraOAuthMintError as exc:
+            logger.warning("Comment enrichment: %s; skipping Jira keys", exc)
+            jira_connection = None
+        if jira_connection is not None and not jira_connection.api_base:
             logger.warning(
                 "Comment enrichment: SA cloud ID unresolvable; skipping Jira keys"
             )
@@ -6968,16 +6965,10 @@ async def enrich_comments(
                 },
             )
 
-        if jira_active and jira_connection:
+        if jira_connection:
             for key in detect_jira_keys(c["comment"]):
                 idx = len(tasks)
-                tasks.append(
-                    fetch_jira_ticket_status(
-                        jira_connection,
-                        key,
-                        ssl_verify=settings.jira_ssl_verify,
-                    )
-                )
+                tasks.append(fetch_jira_ticket_status(jira_connection, key))
                 task_map[idx] = (str(c["id"]), {"type": "jira", "key": key})
 
     enrichments: dict[str, list[dict[str, Any]]] = {}
@@ -7317,11 +7308,21 @@ async def preview_jira_bug(
             status_code=403,
             detail="Jira issue creation is disabled on this server",
         )
-    if not settings.jira_url:
-        raise HTTPException(
-            status_code=400,
-            detail="Jira URL is not configured on the server",
-        )
+    # A legacy (non-ATOA) service-account secret must be rejected, not
+    # silently dropped (which would fall back to the server credentials).
+    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
+    # Effective settings first (Finding 9): the user's credential pins the
+    # auth method, so the method-configured check must run against the
+    # EFFECTIVE settings — a user-supplied credential can satisfy a method
+    # the server's own secret cannot.
+    effective_jira_settings = _build_effective_jira_settings(
+        settings,
+        body.jira_token,
+        body.jira_email,
+        body.jira_project_key,
+        user_jira_sa_token=body.jira_sa_token,
+    )
+    _require_jira_method_configured(effective_jira_settings)
     failure, result_data, matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
@@ -7363,20 +7364,10 @@ async def preview_jira_bug(
     similar: list[dict[str, Any]] = []
     user_jira_token = (body.jira_token or "").strip()
     user_jira_sa_token = (body.jira_sa_token or "").strip()
-    if user_jira_token or user_jira_sa_token:
-        effective_jira_settings = _build_effective_jira_settings(
-            settings,
-            body.jira_token,
-            body.jira_email,
-            body.jira_project_key,
-            user_jira_sa_token=body.jira_sa_token,
-        )
-    else:
-        effective_jira_settings = None
     if (
-        effective_jira_settings
+        (user_jira_token or user_jira_sa_token)
         and _has_jira_credentials(effective_jira_settings)
-        and effective_jira_settings.jira_url
+        and jira_method_url(effective_jira_settings)
         and effective_jira_settings.jira_project_key
     ):
         try:
@@ -7442,13 +7433,41 @@ async def preview_jira_bug(
 
 
 def _has_jira_credentials(settings: Settings) -> bool:
-    """Return True if the given settings contain usable Jira credentials."""
-    sa_token = settings.jira_oauth_access_token
+    """True when an explicitly selected Jira auth method is fully configured.
+
+    Mirrors the resolver: with ``jira_auth_mode`` set, any non-empty token
+    for the selected method is usable (no value sniffing), and an unset
+    mode disables Jira entirely regardless of stored credentials.
+    """
     return bool(
-        (settings.jira_api_token and settings.jira_api_token.get_secret_value())
-        or (settings.jira_pat and settings.jira_pat.get_secret_value())
-        or (sa_token and sa_token.get_secret_value().startswith("ATST"))
+        normalize_jira_auth_mode(settings.jira_auth_mode)
+        and not jira_method_missing_fields(settings)
     )
+
+
+def _require_jira_method_configured(settings: Settings) -> None:
+    """400 unless a Jira auth method is selected with all its fields.
+
+    Replaces the old generic "Jira URL is not configured" gate: each
+    method is self-contained, so the per-method missing-fields check is
+    the only pre-check (URLs included — basic needs ``jira_cloud_url``,
+    pat needs ``jira_server_url``, oauth needs the cloud ID).
+    """
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+    if not mode:
+        raise HTTPException(
+            status_code=400,
+            detail="No Jira auth method selected — choose one in Server Settings",
+        )
+    missing = jira_method_missing_fields(settings)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Jira auth method '{mode}' is selected but missing: "
+                f"{', '.join(missing)}"
+            ),
+        )
 
 
 def _jira_issue_creation_enabled(settings: Settings) -> bool:
@@ -7497,10 +7516,8 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
             (settings.jira_api_token and settings.jira_api_token.get_secret_value())
             or (settings.jira_pat and settings.jira_pat.get_secret_value())
             or (
-                settings.jira_oauth_access_token
-                and settings.jira_oauth_access_token.get_secret_value().startswith(
-                    "ATST"
-                )
+                settings.jira_oauth_client_secret
+                and settings.jira_oauth_client_secret.get_secret_value()
             )
         ),
         "server_jira_email": bool(settings.jira_email),
@@ -7514,6 +7531,31 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _jira_auth_mode_for_credentials(
+    *,
+    oauth_token: str | None = None,
+    api_token: str | None = None,
+    pat: str | None = None,
+    email: str | None = None,
+) -> str | None:
+    """Auth mode pinned by present Jira credentials; None when none supplied.
+
+    Field-presence only — no value sniffing, no fallback chain. Shared by
+    ``_build_effective_jira_settings`` (user credentials) and
+    ``_merge_settings`` (per-request credentials) so a server-pinned
+    ``jira_auth_mode`` cannot silently override or discard them: an OAuth
+    2.0 client secret pins ``oauth``, an api token with an email pins
+    ``basic``, a bare token (no email / the pat field) pins ``pat``.
+    """
+    if oauth_token and oauth_token.strip():
+        return "oauth"
+    if api_token and api_token.strip():
+        return "basic" if email and email.strip() else "pat"
+    if pat and pat.strip():
+        return "pat"
+    return None
+
+
 def _build_effective_jira_settings(
     settings: Settings,
     user_jira_token: str,
@@ -7525,56 +7567,108 @@ def _build_effective_jira_settings(
 
     Uses ``model_copy()`` to follow the same pattern as ``_merge_settings()``.
 
-    Service account mode: a user ATST token replaces the server's SA token
-    and clears the basic-auth pair (``jira_api_token``/``jira_pat``/
-    ``jira_email``) so the effective credentials are unambiguous — the
-    resolver would pick ATST first anyway.
+    The auth mode is pinned to the user's credential choice (which field
+    they filled in the credentials UI) — no inference from values:
 
-    Regular token mode: the user token is set as ``jira_api_token`` and both
-    ``jira_pat`` and ``jira_oauth_access_token`` are cleared so the user
-    token takes precedence in all auth resolution paths
-    (``resolve_jira_auth`` prefers PAT and ATST over the API token, so
-    leaving the server values intact would bypass the user override).
+    Service account mode: a user OAuth 2.0 credential client secret
+    (ATOA-prefixed) replaces the server's secret and clears the other
+    credentials so the effective credentials are unambiguous;
+    ``jira_auth_mode`` is set to ``oauth``. The client ID stays whatever
+    the server configures (``atlassian_oauth_client_id``) — the ID and
+    secret must belong to the same Atlassian OAuth 2.0 credential.
+
+    Regular token mode: with an email, ``jira_auth_mode`` is ``basic`` and
+    the token goes to ``jira_api_token``; without an email the token is a
+    bearer PAT — mode ``pat`` with the token in ``jira_pat``. The other
+    methods' fields are cleared so the user token takes precedence in all
+    auth resolution paths.
 
     When the user provides a token but no email, ``jira_email`` is also cleared
     to prevent pairing the server's email with the user's token (which would
     incorrectly trigger Cloud Basic auth). Cloud users must explicitly provide
-    their email; without it, the non-Cloud auth path is used, which may
-    fail against Cloud-only Jira hosts.
+    their email; without it, the bearer path is used, which may fail against
+    Cloud-only Jira hosts.
 
     An optional *user_jira_project_key* overrides the server-level project key
     so that duplicate searches and bug creation target the user's chosen project.
     """
     overrides: dict[str, Any] = {}
-    if user_jira_sa_token and user_jira_sa_token.strip().startswith("ATST"):
-        # Service account override — only an ATST-prefixed value selects SA
-        # mode; anything else would be ignored by the resolver and silently
-        # disable Jira, so it falls through to the regular-token branch.
-        overrides["jira_oauth_access_token"] = SecretStr(user_jira_sa_token.strip())
+    if user_jira_sa_token and user_jira_sa_token.strip().startswith("ATOA"):
+        # OAuth 2.0 credential override — only an ATOA-prefixed client
+        # secret selects oauth mode; anything else would be ignored by the
+        # resolver and silently disable Jira, so it falls through to the
+        # regular-token branch.
+        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_sa_token.strip())
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
-    elif user_jira_token and user_jira_token.strip().startswith("ATST"):
-        # An ATST token supplied in the regular field: route it to SA mode so
-        # validation (which detects the prefix) and actual use agree.
-        overrides["jira_oauth_access_token"] = SecretStr(user_jira_token.strip())
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            oauth_token=user_jira_sa_token
+        )
+    elif user_jira_token and user_jira_token.strip().startswith("ATOA"):
+        # An ATOA client secret supplied in the regular field: route it to
+        # oauth mode so validation (which detects the prefix) and actual
+        # use agree.
+        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_token.strip())
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            oauth_token=user_jira_token
+        )
     elif user_jira_token and user_jira_token.strip():
-        overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
-        overrides["jira_pat"] = None
-        overrides["jira_oauth_access_token"] = None
-        overrides["jira_email"] = (
+        email = (
             user_jira_email.strip()
             if user_jira_email and user_jira_email.strip()
             else None
         )
+        if email:
+            overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
+            overrides["jira_pat"] = None
+        else:
+            # No email: the user token is a bearer PAT, not a basic-auth pair.
+            overrides["jira_pat"] = SecretStr(user_jira_token.strip())
+            overrides["jira_api_token"] = None
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            api_token=user_jira_token, email=email
+        )
+        overrides["jira_oauth_client_secret"] = None
+        overrides["jira_email"] = email
     if user_jira_project_key and user_jira_project_key.strip():
         overrides["jira_project_key"] = user_jira_project_key.strip()
     if not overrides:
         return settings
     return settings.model_copy(update=overrides)
+
+
+def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
+    """400 when a legacy (non-ATOA) SA secret is the only Jira credential.
+
+    A non-ATOA ``jira_sa_token`` (e.g. a legacy ATST access token) adds no
+    overrides in ``_build_effective_jira_settings`` — without this check
+    the request would silently run with the SERVER's Jira credentials
+    instead of the user's. Shared by every endpoint that consumes
+    ``jira_sa_token`` from a request body.
+
+    Raises:
+        HTTPException: 400 when the SA secret is set but not ATOA-prefixed
+            and no regular ``jira_token`` is supplied.
+    """
+    token = (jira_token or "").strip()
+    sa_token = (jira_sa_token or "").strip()
+    if sa_token and not sa_token.startswith("ATOA") and not token:
+        logger.info(
+            "Rejecting request with a legacy (non-ATOA) Jira service account "
+            "secret and no regular token"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The saved Jira service account token is not an OAuth 2.0 "
+                "client secret (Atlassian client secrets start with 'ATOA'). "
+                "Re-enter your OAuth 2.0 client secret in Profile Settings."
+            ),
+        )
 
 
 def _require_tracker_url(result: dict[str, Any], tracker_name: str) -> str:
@@ -7790,11 +7884,6 @@ async def create_jira_bug_endpoint(
             status_code=403,
             detail="Jira issue creation is disabled on this server",
         )
-    if not settings.jira_url:
-        raise HTTPException(
-            status_code=400,
-            detail="Jira URL is not configured on the server",
-        )
 
     # User must provide their own Jira token (regular or service account) —
     # fail fast before DB work
@@ -7805,6 +7894,22 @@ async def create_jira_bug_endpoint(
             status_code=400,
             detail=("Jira token is required. Set up your token in Profile Settings."),
         )
+    # A legacy (non-ATOA) service-account secret must be rejected, not
+    # silently dropped (which would file the bug under the SERVER's Jira
+    # identity).
+    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
+    # Effective settings first (Finding 9): the user's credential pins the
+    # auth method, so the method-configured check must run against the
+    # EFFECTIVE settings — a user-supplied credential can satisfy a method
+    # the server's own secret cannot.
+    effective_jira_settings = _build_effective_jira_settings(
+        settings,
+        body.jira_token,
+        body.jira_email,
+        body.jira_project_key,
+        user_jira_sa_token=body.jira_sa_token,
+    )
+    _require_jira_method_configured(effective_jira_settings)
 
     _failure, _result_data, _matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
@@ -7816,13 +7921,6 @@ async def create_jira_bug_endpoint(
         bug_body += f"\n\n----\nReported by: {username} via rootcoz"
 
     try:
-        effective_jira_settings = _build_effective_jira_settings(
-            settings,
-            body.jira_token,
-            body.jira_email,
-            body.jira_project_key,
-            user_jira_sa_token=body.jira_sa_token,
-        )
         if not effective_jira_settings.jira_project_key:
             raise HTTPException(
                 status_code=400,
@@ -7839,6 +7937,10 @@ async def create_jira_bug_endpoint(
             security_level=body.jira_security_level,
             issue_type=body.jira_issue_type,
         )
+    except JiraOAuthMintError as exc:
+        # OAuth 2.0 credential could not mint an access token — a
+        # configuration error, surfaced as a controlled 400.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         # Unresolvable SA cloud ID / missing site URL — a configuration
         # error, surfaced as a controlled 400 rather than an unhandled 500.
@@ -9591,7 +9693,8 @@ async def get_default_server_settings(
     _OPTIONAL_STRING_FIELDS = frozenset(
         {
             "tests_repo_url",
-            "jira_url",
+            "jira_cloud_url",
+            "jira_server_url",
             "jira_project_key",
             "jenkins_url",
             "prow_url",
@@ -9626,7 +9729,8 @@ class JiraProjectsRequest(BaseModel):
     jira_token: str = Field(default="", description="User's Jira token")
     jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
     jira_sa_token: str = Field(
-        default="", description="User's Atlassian service account (ATST) token"
+        default="",
+        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
     )
     query: str = Field(default="", description="Search query to filter projects")
 
@@ -9639,7 +9743,13 @@ def _jira_client_from_body(
     Returns ``(effective_settings, stripped_token)`` when the user supplied a
     non-empty token (regular or service account), or *None* when no usable
     token is present.
+
+    Raises:
+        HTTPException: 400 when a legacy (non-ATOA) service-account secret is
+            the only supplied credential — it must be rejected, not silently
+            dropped in favor of the server's credentials.
     """
+    _require_usable_jira_sa_token(jira_token, jira_sa_token)
     token = jira_token.strip() if jira_token else ""
     sa_token = jira_sa_token.strip() if jira_sa_token else ""
     if not token and not sa_token:
@@ -9660,12 +9770,16 @@ async def list_jira_projects(
     Uses the user's Jira token to list projects they can see.
     Always includes the server's configured project key.
     """
-    if not settings.jira_url:
-        return []
-
     result = _jira_client_from_body(
         settings, body.jira_token, body.jira_email, body.jira_sa_token
     )
+    # Effective settings first: the user's credential pins the auth method,
+    # so the method-URL gate must check the EFFECTIVE method's URL — the
+    # server-selected method's URL being empty must not blank the list for
+    # a user whose own method is fully configured (and vice versa).
+    effective_settings = result[0] if result is not None else settings
+    if not jira_method_url(effective_settings):
+        return []
     if result is None:
         # No user token — return just the server's configured project
         if settings.jira_project_key:
@@ -9673,8 +9787,6 @@ async def list_jira_projects(
                 {"key": settings.jira_project_key, "name": settings.jira_project_key}
             ]
         return []
-
-    effective_settings, _ = result
 
     projects: list[dict[str, Any]] = []
     try:
@@ -9696,7 +9808,8 @@ class JiraSecurityLevelsRequest(BaseModel):
     jira_token: str = Field(default="", description="User's Jira token")
     jira_email: str = Field(default="", description="User's Jira email")
     jira_sa_token: str = Field(
-        default="", description="User's Atlassian service account (ATST) token"
+        default="",
+        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
     )
     project_key: str = Field(description="Jira project key")
 
@@ -9707,7 +9820,7 @@ async def list_jira_security_levels(
     settings: Settings = _SETTINGS_DEP,
 ) -> list[dict[str, Any]]:
     """List available security levels for a Jira project."""
-    if not settings.jira_url or not body.project_key:
+    if not body.project_key:
         return []
 
     result = _jira_client_from_body(
@@ -9717,6 +9830,11 @@ async def list_jira_security_levels(
         return []
 
     effective_settings, _ = result
+    # Effective settings first: check the EFFECTIVE method's URL — the
+    # server-selected method's URL must not decide for a user whose own
+    # method is (not) configured.
+    if not jira_method_url(effective_settings):
+        return []
 
     try:
         async with JiraClient(effective_settings) as client:
@@ -9742,7 +9860,8 @@ async def validate_token(
     """Validate a GitHub or Jira token by making a lightweight API call.
 
     GitHub: GET /user (returns authenticated user info)
-    Jira: GET /rest/api/2/myself (returns authenticated user info)
+    Jira: GET /rest/api/2/myself (Cloud basic / Server Bearer), or project
+    visibility for OAuth 2.0 credential secrets (read:jira-work scope only)
     """
     token = body.token.strip()
     if not token:
@@ -9782,40 +9901,66 @@ async def validate_token(
             return _invalid("Could not reach GitHub API")
 
     elif body.token_type == "jira":
-        if not settings.jira_url:
-            return _invalid("Jira URL not configured on server")
-        # ATST-prefixed tokens authenticate as service accounts against the
-        # scoped api.atlassian.com gateway (Bearer, REST v3); other tokens
-        # follow the email → Cloud basic / no-email → Server Bearer split.
+        # ATOA-prefixed values are OAuth 2.0 credential client secrets —
+        # they authenticate (via a minted access token) against the scoped
+        # api.atlassian.com gateway (REST v3); other tokens follow the
+        # email → Cloud basic / no-email → Server Bearer split. Each method
+        # reads its own server-configured URL and TLS verification.
         email = body.email.strip()
-        is_sa_token = token.startswith("ATST")
+        is_sa_secret = token.startswith("ATOA")
         connection = resolve_jira_connection_from_params(
-            settings.jira_url or "",
-            email,
-            "" if is_sa_token else token,
-            jira_oauth_access_token=token if is_sa_token else "",
+            jira_cloud_url=settings.jira_cloud_url,
+            jira_server_url=settings.jira_server_url,
+            jira_email=email,
+            jira_token="" if is_sa_secret else token,
+            jira_oauth_client_secret=token if is_sa_secret else "",
+            atlassian_oauth_client_id=settings.atlassian_oauth_client_id or "",
             atlassian_oauth_cloud_id=settings.atlassian_oauth_cloud_id or "",
             jira_site_url=settings.jira_site_url or "",
+            jira_cloud_ssl_verify=settings.jira_cloud_ssl_verify,
+            jira_server_ssl_verify=settings.jira_server_ssl_verify,
+            jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
         )
-        if is_sa_token:
-            connection = await complete_jira_connection(
-                connection, settings.jira_ssl_verify
-            )
+        if is_sa_secret:
+            if not settings.atlassian_oauth_client_id:
+                return _invalid(
+                    "Server has no atlassian_oauth_client_id configured — "
+                    "it is required to use an OAuth 2.0 credential secret"
+                )
+            try:
+                connection = await complete_jira_connection(connection)
+            except JiraOAuthMintError as exc:
+                return _invalid(str(exc))
             if not connection.api_base:
                 return _invalid(
-                    "Could not resolve the Atlassian cloud ID for the service "
-                    "account token (set ATLASSIAN_OAUTH_CLOUD_ID or "
-                    "JIRA_SITE_URL on the server)"
+                    "Could not resolve the Atlassian cloud ID for the OAuth "
+                    "2.0 credential (set atlassian_oauth_cloud_id or "
+                    "jira_site_url on the server)"
                 )
-        myself_path = (
-            "/rest/api/3/myself" if connection.mode == "sa" else "/rest/api/2/myself"
-        )
+        elif not connection.api_base:
+            if email:
+                return _invalid(
+                    "Jira Cloud URL (jira_cloud_url) not configured on server"
+                )
+            return _invalid(
+                "Jira Server URL (jira_server_url) not configured on server"
+            )
+        # OAuth 2.0 credentials carry read:jira-work only — /myself needs
+        # read:jira-users and 401s — so SA connections probe project
+        # visibility instead of the current-user endpoint.
+        if connection.mode == "sa":
+            probe_path = "/rest/api/3/project"
+            probe_params = {"maxResults": 1}
+        else:
+            probe_path = "/rest/api/2/myself"
+            probe_params = {}
         try:
             async with httpx.AsyncClient(
-                verify=settings.jira_ssl_verify, timeout=10, auth=connection.auth
+                verify=connection.ssl_verify, timeout=10, auth=connection.auth
             ) as client:
                 resp = await client.get(
-                    f"{connection.api_base}{myself_path}",
+                    f"{connection.api_base}{probe_path}",
+                    params=probe_params,
                     headers={"Accept": "application/json", **connection.headers},
                 )
                 resp.raise_for_status()
@@ -9823,6 +9968,14 @@ async def validate_token(
                     data = resp.json()
                 except ValueError, json.JSONDecodeError:
                     return _invalid("Tracker API returned an unexpected response")
+                if connection.mode == "sa":
+                    if not isinstance(data, list):
+                        return _invalid("Tracker API returned an unexpected response")
+                    return {
+                        "valid": True,
+                        "username": "service account",
+                        "message": "OAuth 2.0 credential valid (service account)",
+                    }
                 display = data.get("displayName", data.get("name", ""))
                 return {
                     "valid": True,
@@ -11356,13 +11509,14 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
         if (
             field == "jira_sa_token"
             and kwargs[field]
-            and not kwargs[field].startswith("ATST")
+            and not kwargs[field].startswith("ATOA")
         ):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "jira_sa_token must be an ATST-prefixed Atlassian service "
-                    "account token — use jira_token for regular credentials"
+                    "jira_sa_token must be an ATOA-prefixed Atlassian OAuth "
+                    "2.0 credential client secret — use jira_token for "
+                    "regular credentials"
                 ),
             )
 
@@ -12529,18 +12683,15 @@ async def get_admin_settings(
 
             item["options"] = await server_capable_providers()
 
-    # Authoritative Jira auth mode (nonsecret) — the frontend must not infer
-    # it from possibly-masked credential values.
-    for item in metadata:
-        if item["key"] == "jira_url":
-            item["jira_auth_mode"] = {
-                "sa": "oauth",
-                "cloud": "basic",
-                "server": "pat",
-            }.get(resolve_jira_connection(get_settings()).mode, "")
-
-    # Get DB overrides
+    # Internal jira_verified_method row on the jira_auth_mode item (last
+    # method whose test SUCCEEDED, "" when never verified; recorded only
+    # for successful tests of a SELECTED method; not user-editable).
     db_overrides = await storage.get_server_settings()
+    verified_method = db_overrides.get("jira_verified_method", {}).get("value", "")
+    for item in metadata:
+        if item["key"] == "jira_auth_mode":
+            item["jira_verified_method"] = verified_method
+
     # Load the dotenv source once for the source calculation below.
     dotenv = _settings_dotenv_values()
 
@@ -12642,6 +12793,11 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     own value.
     """
     env_var = key.upper()
+    if key == "jira_auth_mode":
+        # DB-only setting (#346): no env var ever maps to it — a stray
+        # JIRA_AUTH_MODE in the environment is ignored, matching the
+        # pydantic-settings source that drops it.
+        return None
     if os.environ.get(env_var) is not None:
         return os.environ[env_var]
     return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
@@ -12678,7 +12834,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     errors = []
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket", "default_user_role"):
+    for key in ("prow_url", "gcs_bucket", "jira_auth_mode", "default_user_role"):
         if key not in settings_updates:
             continue
         value = settings_updates[key]
@@ -12798,6 +12954,17 @@ async def _save_settings_to_db(
         else:
             db_value = str_value
         await storage.set_server_setting(key, db_value, updated_by=username)
+
+    # Changed Jira credentials or auth mode invalidate the verified-method
+    # record — it reflects the last successful test of the previous setup.
+    if settings_updates.keys() & _JIRA_VERIFIED_INVALIDATING_KEYS:
+        try:
+            await storage.delete_server_setting(
+                "jira_verified_method", deleted_by=username
+            )
+            remove_from_db_settings_cache(["jira_verified_method"])
+        except Exception:
+            logger.warning("Failed to clear jira_verified_method", exc_info=True)
 
     # Update in-memory cache so get_settings() picks up changes.
     # Empty/null values are removed (fall back to env/default).
@@ -13084,37 +13251,142 @@ async def _test_jenkins_connection(settings: Settings) -> dict[str, Any]:
     return _test_result(True, message, authenticated_user=user)
 
 
+def _jira_settings_fingerprint(settings: Settings) -> str:
+    """Cheap fingerprint of the Jira settings a connection test exercises.
+
+    Covers the selected auth mode, that method's URL and TLS-verification
+    fields, and its credential fields (the same fields
+    ``jira_method_missing_fields`` checks). Values are SHA-256 hashed so
+    the fingerprint can be compared but never decoded or logged — no
+    secrets in comparisons or logs.
+    """
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+
+    def _secret(value: SecretStr | None) -> str:
+        return value.get_secret_value() if value else ""
+
+    parts = [mode]
+    if mode == "oauth":
+        parts.append(_secret(settings.jira_oauth_client_secret))
+        parts.append((settings.atlassian_oauth_client_id or "").strip())
+        parts.append((settings.atlassian_oauth_cloud_id or "").strip())
+        parts.append(str(settings.jira_oauth_ssl_verify))
+    elif mode == "basic":
+        parts.append((settings.jira_email or "").strip())
+        parts.append(_secret(settings.jira_api_token))
+        parts.append(settings.jira_cloud_url.strip())
+        parts.append(str(settings.jira_cloud_ssl_verify))
+    elif mode == "pat":
+        parts.append(_secret(settings.jira_pat))
+        parts.append(settings.jira_server_url.strip())
+        parts.append(str(settings.jira_server_ssl_verify))
+    return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
+
+
 async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     """Current-user ping against the effective Jira connection resolution."""
-    if not settings.jira_url:
-        return _test_result(False, "Jira URL is not configured")
-    connection = resolve_jira_connection(settings)
-    if connection.mode == "none":
+    if not normalize_jira_auth_mode(settings.jira_auth_mode):
         return _test_result(
             False,
-            "No Jira credentials configured (set jira_api_token, jira_pat, "
-            "or jira_oauth_access_token)",
+            "No Jira auth method selected — choose one in Server Settings",
         )
-    connection = await complete_jira_connection(connection, settings.jira_ssl_verify)
+    missing = jira_method_missing_fields(settings)
+    if missing:
+        return _test_result(
+            False,
+            f"Jira auth method '{settings.jira_auth_mode}' is selected "
+            f"but missing: {', '.join(missing)}",
+        )
+    connection = resolve_jira_connection(settings)
+    # Snapshot of the Jira settings this test exercises — compared after
+    # the network call so a mid-flight admin update cannot leave a
+    # verification record for the untested configuration.
+    tested_fingerprint = _jira_settings_fingerprint(settings)
+    try:
+        connection = await complete_jira_connection(connection)
+    except JiraOAuthMintError as exc:
+        return _test_result(False, f"Jira connection failed: {exc}")
     if not connection.api_base:
         return _test_result(
             False,
             "Jira service account mode could not resolve the Atlassian "
             "cloud ID (set atlassian_oauth_cloud_id or jira_site_url)",
         )
-    try:
-        data = await _integration_test_get_json(
-            f"{connection.api_base}{connection.api_path}/myself",
-            headers=dict(connection.headers),
-            auth=connection.auth,
-            verify=settings.jira_ssl_verify,
+    if connection.mode == "sa":
+        # OAuth 2.0 credentials carry read:jira-work only — /myself needs
+        # read:jira-users and 401s with "scope does not match" — so probe
+        # project visibility instead (any 200 proves auth + gateway access).
+        try:
+            data = await _integration_test_get_json(
+                f"{connection.api_base}{connection.api_path}/project",
+                params={"maxResults": 1},
+                headers=dict(connection.headers),
+                auth=connection.auth,
+                verify=connection.ssl_verify,
+            )
+        except _IntegrationTestError as exc:
+            return _test_result(False, f"Jira connection failed: {exc}")
+        if not isinstance(data, list):
+            return _test_result(
+                False, "Jira connection failed: unexpected /project response"
+            )
+        user = "service account"
+    else:
+        try:
+            data = await _integration_test_get_json(
+                f"{connection.api_base}{connection.api_path}/myself",
+                headers=dict(connection.headers),
+                auth=connection.auth,
+                verify=connection.ssl_verify,
+            )
+        except _IntegrationTestError as exc:
+            return _test_result(False, f"Jira connection failed: {exc}")
+        # Validate the payload before recording anything: HTTP 200 with a
+        # non-object body is a failed test, not a verified method.
+        if not isinstance(data, dict):
+            return _test_result(
+                False, "Jira connection failed: unexpected /myself response"
+            )
+        user = str(
+            data.get("displayName") or data.get("name") or data.get("accountId") or ""
         )
-    except _IntegrationTestError as exc:
-        return _test_result(False, f"Jira connection failed: {exc}")
     auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat"}[connection.mode]
-    user = str(
-        data.get("displayName") or data.get("name") or data.get("accountId") or ""
-    )
+    # A method counts as configured only once its test succeeded — record
+    # the tested (selected) method as an internal DB row. Not cleared on
+    # failure: the record reflects the last success, not the latest attempt.
+    # Written only on change so repeated tests don't flood settings history.
+    # But not when the Jira settings changed while the test was in flight:
+    # update_admin_settings already deleted the record for the previous
+    # setup, and this test proved the OLD credentials — re-writing the
+    # marker would verify the untested new configuration.
+    if _jira_settings_fingerprint(get_settings()) != tested_fingerprint:
+        logger.info(
+            "Jira settings changed during the connection test — "
+            "verified method not recorded"
+        )
+        return _test_result(
+            True,
+            "Jira connection successful",
+            auth_mode=auth_mode,
+            user=user,
+            note=(
+                "Jira settings changed during the test — verification not "
+                "recorded; re-run the test for the current settings"
+            ),
+        )
+    try:
+        existing = await storage.get_server_setting("jira_verified_method")
+        if existing is None or existing.get("value") != auth_mode:
+            await storage.set_server_setting("jira_verified_method", auth_mode)
+            logger.info("Jira verified method recorded: %s", auth_mode)
+    except Exception:
+        logger.warning("Failed to record jira_verified_method", exc_info=True)
+        # The confirmation gate must match the reported result — a marker
+        # that could not be persisted would leave the UI inconsistent.
+        return _test_result(
+            False,
+            "Jira connection succeeded but verification could not be recorded",
+        )
     return _test_result(
         True, "Jira connection successful", auth_mode=auth_mode, user=user
     )
@@ -14284,9 +14556,23 @@ async def _check_chat_session_choice(
     return active["session_id"], selected_force
 
 
+# Sentinel for "the user SELECTED a Jira credential but it is unusable"
+# (mode "none" connection). Distinct from None (= no selection at all):
+# build_chat_custom_tools treats None as permission to resolve the user's
+# other stored credentials — a failed selected connection must not fall
+# through to that fallback.
+_JIRA_CHAT_SELECTION_FAILED = JiraConnection(
+    mode="none",
+    api_base="",
+    browse_base="",
+    site_url="",
+    auth=None,
+)
+
+
 async def _resolve_chat_credentials(
     decrypted_params: dict[str, Any], username: str
-) -> tuple[str, str, str, JiraConnection | None, str, str]:
+) -> tuple[str, str, JiraConnection | None, str, str]:
     """Resolve Jira and GitHub credentials for chat.
 
     Jira uses user-scoped tokens only. GitHub uses user-scoped tokens
@@ -14294,10 +14580,16 @@ async def _resolve_chat_credentials(
     never exposed to chat sessions.
 
     Returns:
-        (jira_url, jira_email, jira_token, jira_connection, github_token,
+        (jira_email, jira_token, jira_connection, github_token,
         github_repo). ``jira_connection`` is the resolved (and, for service
-        accounts, cloud-ID-completed) connection — or None when no usable
-        Jira credentials exist.
+        accounts, cloud-ID-completed) connection — ``None`` when the user
+        selected NO Jira credential at all, or the
+        ``_JIRA_CHAT_SELECTION_FAILED`` sentinel (a mode-``"none"``
+        connection) when a selected credential exists but is unusable —
+        chat tool building must not fall back to the user's OTHER stored
+        credential after the selected one failed. Each method reads its
+        own server-level URL and TLS verification (URLs are not
+        credentials).
     """
     import re
 
@@ -14314,9 +14606,6 @@ async def _resolve_chat_credentials(
         if match:
             github_repo = match.group(1)
 
-    # Jira URL from job params or server settings (URL is not a credential)
-    jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
-
     # User-scoped credentials only — never job-stored or server deployment tokens
     jira_email = user_tokens.get("jira_email", "")
     jira_token = user_tokens.get("jira_token", "")
@@ -14324,30 +14613,57 @@ async def _resolve_chat_credentials(
     github_token = (user_tokens.get("github_token") or "").strip()
 
     jira_connection: JiraConnection | None = None
-    if jira_url and (jira_token or jira_sa_token):
-        # Cloud ID and site URL are server-level non-secrets — safe to reuse
-        # for user-scoped token resolution.
+    if jira_token or jira_sa_token:
+        # Cloud ID, site URL, per-method URLs/SSL flags, and the OAuth 2.0
+        # credential's client ID are server-level non-secrets — safe to
+        # reuse for user-scoped secret resolution (the user secret +
+        # server client ID must belong to the same Atlassian OAuth 2.0
+        # credential). The user's field choice pins the method; each
+        # method then reads its own URL. An ATOA-prefixed secret saved in
+        # the regular jira_token field is an OAuth 2.0 client secret —
+        # route it to the oauth path so chat agrees with validation and
+        # preview (which detect the prefix).
+        regular_token = jira_token.strip()
+        sa_secret = jira_sa_token.strip()
+        if not sa_secret and regular_token.startswith("ATOA"):
+            sa_secret = regular_token
+            regular_token = ""
         jira_connection = resolve_jira_connection_from_params(
-            jira_url,
-            jira_email,
-            jira_token,
-            jira_oauth_access_token=jira_sa_token,
+            jira_cloud_url=settings.jira_cloud_url,
+            jira_server_url=settings.jira_server_url,
+            jira_email=jira_email,
+            jira_token=regular_token,
+            jira_oauth_client_secret=sa_secret,
+            atlassian_oauth_client_id=str(settings.atlassian_oauth_client_id or ""),
             atlassian_oauth_cloud_id=str(settings.atlassian_oauth_cloud_id or ""),
             jira_site_url=str(settings.jira_site_url or ""),
+            jira_cloud_ssl_verify=settings.jira_cloud_ssl_verify,
+            jira_server_ssl_verify=settings.jira_server_ssl_verify,
+            jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
         )
-        if jira_connection.mode == "sa":
-            jira_connection = await complete_jira_connection(
-                jira_connection, settings.jira_ssl_verify
-            )
-            if not jira_connection.api_base:
+        if jira_connection.mode == "none":
+            # The selected fields cannot form a usable method (e.g. an
+            # OAuth secret without a server client ID) — a FAILED
+            # selection, not an absent one.
+            jira_connection = _JIRA_CHAT_SELECTION_FAILED
+        else:
+            if jira_connection.mode == "sa":
+                # Complete BEFORE treating an empty api_base as unusable:
+                # complete_jira_connection resolves the cloud ID from the
+                # site URL (tenant_info) when none is configured.
+                try:
+                    jira_connection = await complete_jira_connection(jira_connection)
+                except JiraOAuthMintError as exc:
+                    logger.warning("Chat credentials: %s; Jira tools unavailable", exc)
+                    jira_connection = _JIRA_CHAT_SELECTION_FAILED
+            if jira_connection.mode != "none" and not jira_connection.api_base:
                 logger.warning(
-                    "Chat credentials: could not resolve Atlassian cloud ID; "
-                    "Jira tools unavailable"
+                    "Chat credentials: could not resolve the selected Jira "
+                    "method's API base; Jira tools unavailable"
                 )
-                jira_connection = None
+                jira_connection = _JIRA_CHAT_SELECTION_FAILED
 
     return (
-        jira_url,
         jira_email,
         jira_token,
         jira_connection,
@@ -14495,7 +14811,6 @@ async def _init_chat_under_barrier(
     _settings = get_settings()
 
     (
-        jira_url,
         jira_email,
         jira_token,
         jira_connection,
@@ -14534,7 +14849,8 @@ async def _init_chat_under_barrier(
                 server_url=server_url,
                 auth_token=auth_header.removeprefix("Bearer ").strip(),
                 job_id=job_id,
-                jira_url=jira_url,
+                jira_cloud_url=_settings.jira_cloud_url,
+                jira_server_url=_settings.jira_server_url,
                 jira_email=jira_email,
                 jira_token=jira_token,
                 github_token=github_token,
@@ -15186,7 +15502,6 @@ async def _process_chat_message(
                                 exc_info=True,
                             )
                         (
-                            jira_url,
                             jira_email,
                             jira_token,
                             jira_connection,
@@ -15228,7 +15543,8 @@ async def _process_chat_message(
                                 server_url=server_url,
                                 auth_token=auth_header.removeprefix("Bearer ").strip(),
                                 job_id=job_id,
-                                jira_url=jira_url,
+                                jira_cloud_url=settings.jira_cloud_url,
+                                jira_server_url=settings.jira_server_url,
                                 jira_email=jira_email,
                                 jira_token=jira_token,
                                 github_token=github_token,

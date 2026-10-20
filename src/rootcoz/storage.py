@@ -1470,6 +1470,9 @@ async def init_db() -> None:
 
         await db.commit()
 
+    await _migrate_jira_oauth_secret_rename()
+    await _migrate_jira_url_per_method_split()
+
     # Run signature recomputation migration BEFORE backfill so that:
     # 1. Migration deletes old rows with pre-normalization signatures.
     # 2. Backfill repopulates with new normalized signatures.
@@ -1485,6 +1488,102 @@ async def init_db() -> None:
     await backfill_failure_history()
     await _migrate_restore_ai_classifications()
     await _migrate_backfill_pattern_axis()
+
+
+async def _migrate_jira_oauth_secret_rename() -> None:
+    """One-time migration: copy the old Jira oauth setting to its new name.
+
+    The ``oauth`` Jira method was reworked to the Atlassian "OAuth 2.0
+    credential for service accounts" client-credentials flow, renaming
+    ``jira_oauth_access_token`` to ``jira_oauth_client_secret``. When the
+    new key has no ``server_settings`` row but the old one does, the
+    stored value (still encrypted — the ciphertext is copied verbatim) is
+    copied to the new key. The old row is deliberately kept: the new key
+    wins once set, and deleting the old row would lose the value if the
+    new row were ever reset. Tracked via ``_migrations_applied`` so it
+    runs exactly once.
+    """
+    migration_key = "jira_oauth_client_secret_rename_v1"
+    async with _connect_db() as db:
+        if await _migration_applied(db, migration_key):
+            return
+        cursor = await db.execute(
+            "SELECT 1 FROM server_settings WHERE key = 'jira_oauth_client_secret'"
+        )
+        if await cursor.fetchone() is None:
+            cursor = await db.execute(
+                "SELECT value, updated_by FROM server_settings "
+                "WHERE key = 'jira_oauth_access_token'"
+            )
+            row = await cursor.fetchone()
+            if row is not None:
+                await db.execute(
+                    "INSERT OR IGNORE INTO server_settings "
+                    "(key, value, updated_by, updated_at) "
+                    "VALUES ('jira_oauth_client_secret', ?, ?, datetime('now'))",
+                    (row["value"], row["updated_by"]),
+                )
+                logger.info(
+                    "Migration: copied jira_oauth_access_token server setting "
+                    "to jira_oauth_client_secret"
+                )
+        await _mark_migration_applied(db, migration_key)
+        await db.commit()
+
+
+async def _migrate_jira_url_per_method_split() -> None:
+    """One-time migration: split the shared Jira URL/SSL settings per method.
+
+    ``jira_url`` and ``jira_ssl_verify`` were shared across all Jira auth
+    methods; each method is now self-contained — basic reads
+    ``jira_cloud_url``/``jira_cloud_ssl_verify``, pat reads
+    ``jira_server_url``/``jira_server_ssl_verify``, oauth reads
+    ``jira_oauth_ssl_verify`` (its API locator is the cloud ID, not a URL).
+    When a new key has no ``server_settings`` row but the old one does, the
+    stored value is copied to the new key (INSERT OR IGNORE — a new key
+    always wins once set). Old rows are deliberately kept. Tracked via
+    ``_migrations_applied`` so it runs exactly once.
+    """
+    migration_key = "jira_url_per_method_split_v1"
+
+    async def _copy(
+        db: aiosqlite.Connection, old_key: str, new_keys: tuple[str, ...]
+    ) -> None:
+        cursor = await db.execute(
+            "SELECT value, updated_by FROM server_settings WHERE key = ?",
+            (old_key,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+        for new_key in new_keys:
+            await db.execute(
+                "INSERT OR IGNORE INTO server_settings "
+                "(key, value, updated_by, updated_at) "
+                "VALUES (?, ?, ?, datetime('now'))",
+                (new_key, row["value"], row["updated_by"]),
+            )
+        logger.info(
+            "Migration: copied %s server setting to %s",
+            old_key,
+            ", ".join(new_keys),
+        )
+
+    async with _connect_db() as db:
+        if await _migration_applied(db, migration_key):
+            return
+        await _copy(db, "jira_url", ("jira_cloud_url", "jira_server_url"))
+        await _copy(
+            db,
+            "jira_ssl_verify",
+            (
+                "jira_oauth_ssl_verify",
+                "jira_cloud_ssl_verify",
+                "jira_server_ssl_verify",
+            ),
+        )
+        await _mark_migration_applied(db, migration_key)
+        await db.commit()
 
 
 async def _migrate_restore_ai_classifications() -> None:

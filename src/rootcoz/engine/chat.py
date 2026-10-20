@@ -479,7 +479,8 @@ def build_chat_custom_tools(
     server_url: str,
     auth_token: str,
     job_id: str,
-    jira_url: str = "",
+    jira_cloud_url: str = "",
+    jira_server_url: str = "",
     jira_email: str = "",
     jira_token: str = "",
     github_token: str = "",
@@ -599,15 +600,25 @@ def build_chat_custom_tools(
     )
 
     jira_conn = jira_connection
-    if jira_conn is None and jira_url and (jira_token or jira_email):
-        # An ATST token supplied in the regular field routes to SA mode so
-        # validation and actual use agree (validate-token detects the prefix).
-        sa_fallback = jira_token if jira_token.startswith("ATST") else ""
+    if jira_conn is None and (jira_token or jira_email):
+        # Fallback ONLY for an absent selection (jira_connection=None): a
+        # selected-but-failed connection arrives as a mode-"none"
+        # JiraConnection sentinel (never None), which blocks this fallback
+        # so chat never silently switches to the user's OTHER stored
+        # credential (e.g. basic after the selected OAuth failed).
+        #
+        # An ATOA OAuth 2.0 client secret supplied in the regular field
+        # routes to oauth mode so validation and actual use agree — but
+        # this sync fallback cannot mint an access token (async), so such
+        # connections stay unusable here; async callers pass a completed
+        # connection via jira_connection.
+        sa_fallback = jira_token if jira_token.startswith("ATOA") else ""
         jira_conn = resolve_jira_connection_from_params(
-            jira_url,
-            jira_email,
-            "" if sa_fallback else jira_token,
-            jira_oauth_access_token=sa_fallback,
+            jira_cloud_url=jira_cloud_url,
+            jira_server_url=jira_server_url,
+            jira_email=jira_email,
+            jira_token="" if sa_fallback else jira_token,
+            jira_oauth_client_secret=sa_fallback,
         )
     if jira_conn and jira_conn.api_base and jira_conn.mode != "none":
         # Basic auth (cloud) must be embedded as a header — tool HTTP

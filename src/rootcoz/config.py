@@ -1,11 +1,16 @@
 """Configuration settings from environment variables."""
 
+import os
 from functools import lru_cache
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
@@ -20,6 +25,9 @@ logger = get_child_logger(__name__)
 PROW_ARTIFACTS_MAX_SIZE_MB = 50
 PROW_ARTIFACT_MAX_FILE_SIZE_MB = 10
 PROW_ARTIFACTS_MAX_OBJECTS = 5_000
+
+# Valid values for the explicit ``jira_auth_mode`` setting.
+JIRA_AUTH_MODES = ("oauth", "basic", "pat")
 
 
 def _split_outside_brackets(raw: str) -> list[str]:
@@ -222,26 +230,79 @@ class Settings(BaseSettings):
     # Optional defaults (can be overridden per-request in webhook)
     tests_repo_url: str | None = None
     tests_repo_token: SecretStr | None = None  # NEW
-    # Jira integration (optional)
-    jira_url: str | None = None
+    # Jira integration (optional). Each auth method is a fully
+    # self-contained definition — its own URL and TLS verification. The
+    # ONLY settings shared across methods: jira_project_key,
+    # jira_max_results, jira_site_url, enable_jira, enable_jira_issues.
     jira_email: str | None = None
     jira_api_token: SecretStr | None = None
     jira_pat: SecretStr | None = None
     jira_project_key: str | None = None
-    jira_ssl_verify: bool = True
     jira_max_results: int = Field(default=5, gt=0)
-    # Atlassian service account (ATST) — a third, additional connection
-    # method alongside Cloud basic auth and Server/DC PAT. The token
-    # authenticates as Bearer against the scoped api.atlassian.com gateway.
-    jira_oauth_access_token: SecretStr | None = None
+    # basic method (Jira Cloud email + API token)
+    jira_cloud_url: str = Field(
+        default="",
+        description=(
+            "Jira Cloud site URL for the basic auth method (email + API token)."
+        ),
+    )
+    jira_cloud_ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for Jira Cloud basic-auth connections "
+            "(basic method). Set to False for self-signed certs."
+        ),
+    )
+    # pat method (Jira Server/DC bearer PAT)
+    jira_server_url: str = Field(
+        default="",
+        description=(
+            "Jira Server/Data Center base URL for the pat auth method "
+            "(bearer personal access token)."
+        ),
+    )
+    jira_server_ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for Jira Server/DC PAT connections "
+            "(pat method). Set to False for self-signed certs."
+        ),
+    )
+    # oauth method (Atlassian OAuth 2.0 credential)
+    jira_oauth_ssl_verify: bool = Field(
+        default=True,
+        description=(
+            "Verify TLS certificates for Atlassian OAuth 2.0 connections "
+            "(oauth method: token minting and the api.atlassian.com "
+            "gateway)."
+        ),
+    )
+    # Atlassian "OAuth 2.0 credential for service accounts" — a third,
+    # additional connection method alongside Cloud basic auth and Server/DC
+    # PAT. The stored value is the credential's permanent CLIENT SECRET
+    # (ATOA-prefixed); short-lived access tokens are minted from it via
+    # client_credentials at auth.atlassian.com (see rootcoz.jira).
+    jira_oauth_client_secret: SecretStr | None = None
     atlassian_oauth_cloud_id: str | None = None
-    # Inert pass-through kept for env-shape compatibility with the
-    # established Atlassian OAuth convention; not used for authentication
-    # (service account tokens have no refresh flow).
+    # Client ID of the OAuth 2.0 credential — required together with the
+    # client secret to mint access tokens for the oauth auth method.
     atlassian_oauth_client_id: str | None = None
-    # Site URL for browse links when JIRA_URL is the scoped API URL
-    # (the site URL cannot be derived from the scoped URL).
+    # Site URL for browse links (shared across methods; the scoped
+    # api.atlassian.com gateway URL of the oauth method cannot yield one).
     jira_site_url: str | None = None
+    # DB-only Jira auth method selection (Server Settings UI) — REQUIRED
+    # for the Jira integration. When set, ONLY that method's fields are
+    # used. Unset disables Jira entirely: no credentials are read, no
+    # inference. Never read from the environment (see
+    # settings_customise_sources); set via PUT /api/admin/settings.
+    jira_auth_mode: str | None = Field(
+        default=None,
+        description=(
+            "Explicit Jira auth method: 'oauth', 'basic', or 'pat' "
+            "(Server Settings only). Unset disables the Jira integration "
+            "(no auto-detection)."
+        ),
+    )
 
     # Explicit Jira toggle (optional)
     enable_jira: bool | None = None
@@ -356,6 +417,88 @@ class Settings(BaseSettings):
             "Must be 'viewer', 'reviewer', or 'operator'. Defaults to 'reviewer'."
         ),
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Drop ``jira_auth_mode`` from the env/dotenv sources.
+
+        The auth method is selected ONLY in Server Settings (DB); the
+        ``JIRA_AUTH_MODE`` environment variable is deliberately ignored.
+        Init kwargs (DB-override merge in ``get_settings()``, admin PUT
+        validation) and ``model_copy`` pinning are unaffected.
+        """
+
+        def _without_auth_mode(
+            source: PydanticBaseSettingsSource,
+        ) -> PydanticBaseSettingsSource:
+            def _load() -> dict[str, Any]:
+                data = source()
+                data.pop("jira_auth_mode", None)
+
+                def _alias_value(alias: str) -> str | None:
+                    # Aliases resolve from os.environ (the env source) AND
+                    # the source's own data: the dotenv source surfaces
+                    # unknown keys from the .env file in ``data`` (later
+                    # dropped by ``extra='ignore'``), so aliases present
+                    # ONLY in .env are still readable here instead of being
+                    # silently lost.
+                    env_value = os.environ.get(alias)
+                    if env_value is not None:
+                        return env_value
+                    return data.get(alias.lower()) or None
+
+                # Deprecated alias: JIRA_OAUTH_ACCESS_TOKEN feeds the renamed
+                # jira_oauth_client_secret when the canonical env var is
+                # unset. The canonical name always wins once set.
+                alias_secret = _alias_value("JIRA_OAUTH_ACCESS_TOKEN")
+                if "jira_oauth_client_secret" not in data and alias_secret:
+                    data["jira_oauth_client_secret"] = alias_secret
+                # Deprecated aliases for the removed shared settings: JIRA_URL
+                # feeds both per-method URL fields and JIRA_SSL_VERIFY all
+                # three per-method verify flags, each only when its canonical
+                # env var is unset. Canonical names always win once set.
+                alias_url = _alias_value("JIRA_URL")
+                if alias_url:
+                    for target in ("jira_cloud_url", "jira_server_url"):
+                        if target not in data:
+                            data[target] = alias_url
+                alias_ssl = _alias_value("JIRA_SSL_VERIFY")
+                if alias_ssl:
+                    for target in (
+                        "jira_oauth_ssl_verify",
+                        "jira_cloud_ssl_verify",
+                        "jira_server_ssl_verify",
+                    ):
+                        if target not in data:
+                            data[target] = alias_ssl
+                return data
+
+            return _load
+
+        return (
+            init_settings,
+            _without_auth_mode(env_settings),
+            _without_auth_mode(dotenv_settings),
+            file_secret_settings,
+        )
+
+    @field_validator("jira_auth_mode")
+    @classmethod
+    def _validate_jira_auth_mode(cls, value: str | None) -> str | None:
+        """Accept only the three known methods (or empty — Jira disabled)."""
+        mode = (value or "").strip().lower()
+        if mode and mode not in JIRA_AUTH_MODES:
+            raise ValueError(
+                f"jira_auth_mode must be one of 'oauth', 'basic', 'pat' (got {value!r})"
+            )
+        return mode or None
 
     @field_validator("default_user_role")
     @classmethod
@@ -656,7 +799,6 @@ class Settings(BaseSettings):
         """Strip whitespace from optional string fields; blank becomes None."""
         for field_name in (
             "tests_repo_url",
-            "jira_url",
             "jira_email",
             "jira_project_key",
             "atlassian_oauth_cloud_id",
@@ -680,6 +822,8 @@ class Settings(BaseSettings):
             "ai_model",
             "prow_url",
             "gcs_bucket",
+            "jira_cloud_url",
+            "jira_server_url",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -695,7 +839,7 @@ class Settings(BaseSettings):
             "tests_repo_token",
             "jira_api_token",
             "jira_pat",
-            "jira_oauth_access_token",
+            "jira_oauth_client_secret",
             "reportportal_api_token",
         ):
             secret = getattr(self, field_name)
@@ -725,15 +869,21 @@ class Settings(BaseSettings):
         """Check if Jira integration is enabled and configured with valid credentials."""
         if self.enable_jira is False:
             return False
-        if not self.jira_url:
-            if self.enable_jira is True:
-                logger.warning("enable_jira is True but JIRA_URL is not configured")
-            return False
-        _, token_value = resolve_jira_auth(self)
-        if not token_value:
+        if not normalize_jira_auth_mode(self.jira_auth_mode):
+            # No method selected: Jira is disabled — no credential inference.
             if self.enable_jira is True:
                 logger.warning(
-                    "enable_jira is True but no Jira credentials are configured"
+                    "enable_jira is True but no Jira auth method is selected "
+                    "(choose one in Server Settings)"
+                )
+            return False
+        missing = jira_method_missing_fields(self)
+        if missing:
+            if self.enable_jira is True:
+                logger.warning(
+                    "enable_jira is True but Jira auth method '%s' is missing: %s",
+                    self.jira_auth_mode,
+                    ", ".join(missing),
                 )
             return False
         if not self.jira_project_key:
@@ -857,61 +1007,57 @@ class Settings(BaseSettings):
         )
 
 
-def resolve_jira_auth(settings: Settings) -> tuple[bool, str]:
-    """Resolve Jira authentication mode and token value.
+def normalize_jira_auth_mode(value: str | None) -> str:
+    """Canonical ``jira_auth_mode`` value; ``""`` when unset or invalid.
 
-    Determines the connection method first, then selects the appropriate
-    credential. Three additive modes, never replacing each other:
-
-    Service account (``is_cloud=True``) is detected when
-    ``jira_oauth_access_token`` holds an ATST-prefixed token. It wins over
-    ``jira_email`` — basic auth with an ATST token is rejected by Atlassian
-    (and the failure is masked by anonymous browsing), so the prefix takes
-    precedence. A non-ATST value in that field is ignored with a warning.
-
-    Cloud mode (``is_cloud=True``) is detected when ``jira_email`` is
-    set.  The token is selected by preferring ``jira_api_token`` and
-    falling back to ``jira_pat``.
-
-    Server/DC mode (no ``jira_email``) prefers ``jira_pat`` and falls
-    back to ``jira_api_token`` only when PAT is absent.
-
-    Returns:
-        Tuple of (is_cloud, token_value).  ``token_value`` is empty when
-        no credentials are configured.
+    Lenient on purpose: ``Settings.model_copy`` (per-request overrides)
+    bypasses field validators, so resolve paths normalize instead of
+    crashing. Invalid values log a warning and disable Jira (empty mode).
     """
-    if settings.jira_oauth_access_token:
-        sa_token = settings.jira_oauth_access_token.get_secret_value()
-        if sa_token.startswith("ATST"):
-            return True, sa_token
+    mode = (value or "").strip().lower()
+    if mode and mode not in JIRA_AUTH_MODES:
         logger.warning(
-            "jira_oauth_access_token is set but not ATST-prefixed; "
-            "ignoring it for Jira auth resolution"
+            "Ignoring invalid jira_auth_mode %r (expected one of: %s)",
+            value,
+            ", ".join(JIRA_AUTH_MODES),
         )
+        return ""
+    return mode
 
-    has_api_token = bool(
-        settings.jira_api_token and settings.jira_api_token.get_secret_value()
-    )
-    has_pat = bool(settings.jira_pat and settings.jira_pat.get_secret_value())
-    has_email = bool(settings.jira_email)
 
-    # email present = Cloud; use api_token first, fall back to pat
-    if has_email:
-        if has_api_token:
-            assert settings.jira_api_token is not None  # guarded by has_api_token
-            return True, settings.jira_api_token.get_secret_value()
-        if has_pat:
-            assert settings.jira_pat is not None  # guarded by has_pat
-            return True, settings.jira_pat.get_secret_value()
-        return True, ""
+def jira_method_missing_fields(settings: Settings) -> list[str]:
+    """Missing settings field names for the explicitly selected Jira auth method.
 
-    # No email = Server/DC; prefer PAT, fall back to API token
-    if has_pat and settings.jira_pat:
-        return False, settings.jira_pat.get_secret_value()
-    if has_api_token and settings.jira_api_token:
-        return False, settings.jira_api_token.get_secret_value()
+    Returns [] when ``jira_auth_mode`` is unset (Jira is disabled then —
+    ``jira_enabled`` short-circuits before field checks) or when the
+    selected method's fields are all configured.
+    """
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+    if not mode:
+        return []
+    required: dict[str, list[tuple[str, Any]]] = {
+        "oauth": [
+            ("jira_oauth_client_secret", settings.jira_oauth_client_secret),
+            ("atlassian_oauth_client_id", settings.atlassian_oauth_client_id),
+            ("atlassian_oauth_cloud_id", settings.atlassian_oauth_cloud_id),
+        ],
+        "basic": [
+            ("jira_email", settings.jira_email),
+            ("jira_api_token", settings.jira_api_token),
+            ("jira_cloud_url", settings.jira_cloud_url),
+        ],
+        "pat": [
+            ("jira_pat", settings.jira_pat),
+            ("jira_server_url", settings.jira_server_url),
+        ],
+    }
+    return [name for name, value in required[mode] if not value]
 
-    return False, ""
+
+# Legacy auto-detection (ATST prefix sniffing, email-presence Cloud
+# detection, pat/api-token fallback chain) was removed in #346:
+# jira_auth_mode is required — unset disables Jira entirely. Each
+# selected method's token is read directly by the resolver in jira.py.
 
 
 # In-memory cache for DB settings overrides.

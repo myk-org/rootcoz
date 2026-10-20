@@ -31,8 +31,6 @@ _TEST_SERVER = "http://test-server:8000"
 
 # Fake credential constants used throughout tests.
 _FAKE_JENKINS_PASSWORD = "cfg-jenkins-pw"  # pragma: allowlist secret
-_FAKE_JIRA_API_TOKEN = "cfg-jira-tok"
-_FAKE_JIRA_PAT = "cfg-jira-pat"
 _FAKE_GITHUB_TOKEN = "ghp_cfg_token"
 _FAKE_GITHUB_CLI_TOKEN = "ghp_tok"
 _FAKE_GITHUB_CLI_OVERRIDE = "ghp_cli_override"  # pragma: allowlist secret
@@ -1460,20 +1458,6 @@ class TestAnalyzeAllOptions:
                 "tests_repo_url",
                 "https://github.com/org/tests",
             ),
-            (
-                "--jira-url",
-                "https://jira.example.com",
-                "jira_url",
-                "https://jira.example.com",
-            ),
-            ("--jira-email", "user@example.com", "jira_email", "user@example.com"),
-            (
-                "--jira-api-token",
-                _FAKE_JIRA_API_TOKEN,
-                "jira_api_token",
-                _FAKE_JIRA_API_TOKEN,
-            ),
-            ("--jira-pat", _FAKE_JIRA_PAT, "jira_pat", _FAKE_JIRA_PAT),
             ("--jira-project-key", "PROJ", "jira_project_key", "PROJ"),
             (
                 "--github-token",
@@ -1510,6 +1494,27 @@ class TestAnalyzeAllOptions:
         assert result.exit_code == 0
         kwargs = mock_client.analyze.call_args[1]
         assert kwargs[body_key] == expected_value
+
+    @pytest.mark.parametrize(
+        "removed_flag",
+        ["--jira-email", "--jira-api-token", "--jira-pat", "--jira-sa-token"],
+    )
+    def test_jira_credential_options_removed(self, mock_client, removed_flag):
+        """Jira credentials are Server Settings only — no analyze flags exist."""
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                removed_flag,
+                "some-value",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
     @pytest.mark.parametrize(
         "cli_flag,cli_value,body_key,expected_value",
@@ -1551,8 +1556,6 @@ class TestAnalyzeAllOptions:
         [
             (["--jenkins-ssl-verify"], "jenkins_ssl_verify", True),
             (["--no-jenkins-ssl-verify"], "jenkins_ssl_verify", False),
-            (["--jira-ssl-verify"], "jira_ssl_verify", True),
-            (["--no-jira-ssl-verify"], "jira_ssl_verify", False),
             (["--get-job-artifacts"], "get_job_artifacts", True),
             (["--no-get-job-artifacts"], "get_job_artifacts", False),
         ],
@@ -1689,8 +1692,6 @@ class TestAnalyzeAllOptions:
                 "gemini",
                 "--jenkins-url",
                 "https://jenkins.local",
-                "--jira-url",
-                "https://jira.local",
                 "--jira-max-results",
                 "50",
                 "--no-jenkins-ssl-verify",
@@ -1702,7 +1703,6 @@ class TestAnalyzeAllOptions:
         kwargs = mock_client.analyze.call_args[1]
         assert kwargs["ai_provider"] == "gemini"
         assert kwargs["jenkins_url"] == "https://jenkins.local"
-        assert kwargs["jira_url"] == "https://jira.local"
         assert kwargs["jira_max_results"] == 50
         assert kwargs["jenkins_ssl_verify"] is False
         assert kwargs["github_token"] == _FAKE_GITHUB_CLI_TOKEN
@@ -2567,12 +2567,10 @@ class TestAnalyzeConfigDefaults:
         ai_model="2.5-pro",
         ai_call_timeout=20,
         max_concurrent_ai_calls=5,
-        jira_url="https://jira.cfg.local",
+        # jira_email stays a valid config field (per-user fallback for bug
+        # creation) but must NOT be forwarded to the analyze payload.
         jira_email="cfg@example.com",
-        jira_api_token=_FAKE_JIRA_API_TOKEN,
-        jira_pat=_FAKE_JIRA_PAT,
         jira_project_key="CFG",
-        jira_ssl_verify=False,
         jira_max_results=40,
         enable_jira=True,
         github_token=_FAKE_GITHUB_TOKEN,
@@ -2629,12 +2627,16 @@ class TestAnalyzeConfigDefaults:
         assert kwargs["tests_repo_url"] == "https://github.com/cfg/tests"
         assert kwargs["ai_provider"] == "gemini"
         assert kwargs["ai_model"] == "2.5-pro"
-        assert kwargs["jira_url"] == "https://jira.cfg.local"
-        assert kwargs["jira_email"] == "cfg@example.com"
-        assert kwargs["jira_api_token"] == _FAKE_JIRA_API_TOKEN
-        assert kwargs["jira_pat"] == _FAKE_JIRA_PAT
         assert kwargs["jira_project_key"] == "CFG"
         assert kwargs["github_token"] == _FAKE_GITHUB_TOKEN
+        # Jira credentials are Server Settings only — never request fields.
+        for absent in (
+            "jira_email",
+            "jira_api_token",
+            "jira_pat",
+            "jira_oauth_access_token",
+        ):
+            assert absent not in kwargs
 
     def test_config_integer_fields_used_as_defaults(self):
         """Integer config fields are sent when CLI flags are absent."""
@@ -2657,7 +2659,6 @@ class TestAnalyzeConfigDefaults:
         kwargs = client.analyze.call_args[1]
         assert kwargs["enable_jira"] is True
         assert kwargs["jenkins_ssl_verify"] is False
-        assert kwargs["jira_ssl_verify"] is False
 
     def test_cli_flags_override_config_string_fields(self):
         """CLI flags take precedence over config values."""
@@ -2686,7 +2687,6 @@ class TestAnalyzeConfigDefaults:
         assert kwargs["github_token"] == _FAKE_GITHUB_CLI_OVERRIDE
         # Non-overridden fields still come from config.
         assert kwargs["jenkins_user"] == "cfg-jenkins-user"
-        assert kwargs["jira_url"] == "https://jira.cfg.local"
 
     def test_cli_flags_override_config_int_fields(self):
         """CLI int flags override config int values."""
@@ -2718,13 +2718,11 @@ class TestAnalyzeConfigDefaults:
                 "--build-number",
                 "1",
                 "--jenkins-ssl-verify",
-                "--jira-ssl-verify",
             ]
         )
         assert result.exit_code == 0
         kwargs = client.analyze.call_args[1]
         assert kwargs["jenkins_ssl_verify"] is True
-        assert kwargs["jira_ssl_verify"] is True
 
     def test_no_config_means_no_defaults(self):
         """When no config is available, analyze sends only CLI-provided fields."""
@@ -6455,7 +6453,8 @@ class TestConfigDefaults:
         ],
         "peer_analysis_max_rounds": 3,
         "enable_jira": True,
-        "jira_url": "https://jira.example.com",
+        "jira_cloud_url": "https://jira.example.com",
+        "jira_server_url": "",
         "jira_project_key": "PROJ",
         "get_job_artifacts": True,
         "jenkins_artifacts_max_size_mb": 500,
@@ -6473,7 +6472,7 @@ class TestConfigDefaults:
         assert "Server Analysis Defaults:" in result.output
         assert "ai_provider: gemini" in result.output
         assert "ai_model: gemini-2.5-pro" in result.output
-        assert "jira_url: https://jira.example.com" in result.output
+        assert "jira_cloud_url: https://jira.example.com" in result.output
 
     def test_config_defaults_json(self, mock_client):
         mock_client.get_default_server_settings.return_value = self._DEFAULTS_RESPONSE

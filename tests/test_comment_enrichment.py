@@ -266,9 +266,9 @@ class TestFetchJiraTicketStatus:
 
             status = await fetch_jira_ticket_status(
                 resolve_jira_connection_from_params(
-                    "https://myorg.atlassian.net",
-                    "user@example.com",
-                    "api-token",
+                    jira_cloud_url="https://myorg.atlassian.net",
+                    jira_email="user@example.com",
+                    jira_token="api-token",
                 ),
                 "PROJ-100",
             )
@@ -300,7 +300,8 @@ class TestFetchJiraTicketStatus:
 
             status = await fetch_jira_ticket_status(
                 resolve_jira_connection_from_params(
-                    "https://jira-server.example.com", jira_pat="pat-token"
+                    jira_server_url="https://jira-server.example.com",
+                    jira_pat="pat-token",
                 ),
                 "PROJ-200",
             )
@@ -322,7 +323,7 @@ class TestFetchJiraTicketStatus:
 
             status = await fetch_jira_ticket_status(
                 resolve_jira_connection_from_params(
-                    "https://jira.example.com", jira_pat="bad-token"
+                    jira_server_url="https://jira.example.com", jira_pat="bad-token"
                 ),
                 "PROJ-300",
             )
@@ -339,7 +340,9 @@ class TestFetchJiraTicketStatus:
             mock_client.return_value = mock_instance
 
             status = await fetch_jira_ticket_status(
-                resolve_jira_connection_from_params("https://jira.example.com"),
+                resolve_jira_connection_from_params(
+                    jira_server_url="https://jira.example.com", jira_pat="pat"
+                ),
                 "PROJ-400",
             )
             assert status is None
@@ -359,7 +362,9 @@ class TestFetchJiraTicketStatus:
             mock_client.return_value = mock_instance
 
             status = await fetch_jira_ticket_status(
-                resolve_jira_connection_from_params("https://jira.example.com"),
+                resolve_jira_connection_from_params(
+                    jira_server_url="https://jira.example.com", jira_pat="pat"
+                ),
                 "PROJ-999",
             )
             assert status is None
@@ -367,6 +372,17 @@ class TestFetchJiraTicketStatus:
     @pytest.mark.asyncio
     async def test_sa_mode_skips_v2_fallback(self):
         """Service account connections hit only v3 (the gateway has no v2)."""
+        import time
+
+        import rootcoz.jira as jira_module
+
+        jira_module._sa_token_cache.clear()
+        jira_module._sa_token_cache[
+            ("test-client-id", "ATOA-test-secret")
+        ] = (  # pragma: allowlist secret
+            "minted-test-token",
+            time.monotonic() + 3600,
+        )
         mock_response = MagicMock()
         mock_response.status_code = 410
         mock_response.json.return_value = {"issues": []}
@@ -380,8 +396,9 @@ class TestFetchJiraTicketStatus:
 
             status = await fetch_jira_ticket_status(
                 resolve_jira_connection_from_params(
-                    "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432",
-                    jira_oauth_access_token="ATST-test-token",
+                    jira_oauth_client_secret="ATOA-test-secret",  # pragma: allowlist secret
+                    atlassian_oauth_client_id="test-client-id",
+                    atlassian_oauth_cloud_id="2b9e35e3-6bd3-4cec-b838-f4249ee02432",
                     jira_site_url="https://myorg.atlassian.net",
                 ),
                 "PROJ-500",
@@ -391,6 +408,7 @@ class TestFetchJiraTicketStatus:
             assert mock_instance.get.await_count == 1
             requested_url = mock_instance.get.call_args.args[0]
             assert requested_url.endswith("/rest/api/3/search/jql")
-            # Auth headers come from the connection (Bearer ATST)
+            # Auth headers carry the MINTED token, never the client secret
             client_headers = mock_client.call_args.kwargs["headers"]
-            assert client_headers["Authorization"] == "Bearer ATST-test-token"
+            assert client_headers["Authorization"] == "Bearer minted-test-token"
+        jira_module._sa_token_cache.clear()
