@@ -63,11 +63,13 @@ def write_sidecar_env_bridge(values: dict[str, str | None]) -> None:
     """Persist DB-configured sidecar env overrides for the entrypoint (#347).
 
     Generalizes the RECORD_TRANSCRIPTS bridge: the entrypoint sources this
-    fixed path before starting the sidecar. ``None`` (or empty) means no DB
-    override — nothing is assigned for that var, so the deployment
-    environment (compose/Helm) controls the sidecar. Values are
-    shell-quoted: a value containing spaces must survive ``source`` under
-    ``set -e``.
+    fixed path before starting the sidecar. ``None`` means no DB override —
+    nothing is assigned for that var, so the deployment environment
+    (compose/Helm) controls the sidecar. An empty string is an explicit
+    empty override (#352): the var IS assigned empty, which beats the
+    deployment env (e.g. clearing ``CLI_AGENTS`` while the container env
+    still sets it). Values are shell-quoted: a value containing spaces
+    must survive ``source`` under ``set -e``.
 
     Best-effort: environments without a writable /data (local dev without a
     container) simply skip the bridge — the deployment env still controls
@@ -78,7 +80,7 @@ def write_sidecar_env_bridge(values: dict[str, str | None]) -> None:
         lines = [
             f"{var}={shlex.quote(value)}"
             for var, value in sorted(values.items())
-            if value
+            if value is not None
         ]
         ENV_BRIDGE_PATH.write_text(
             "\n".join(lines) + "\n" if lines else "# no DB overrides for the sidecar\n"

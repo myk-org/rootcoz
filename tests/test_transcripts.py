@@ -21,6 +21,7 @@ from rootcoz.transcripts import (
 )
 from rootcoz.transcripts import (
     valid_session_id,
+    write_sidecar_env_bridge,
     write_transcript_env_bridge,
 )
 
@@ -154,6 +155,31 @@ class TestEnvBridge:
         # deployment environment (compose/Helm) stays in control.
         assert "RECORD_TRANSCRIPTS=" not in content
         assert "# no DB override" in content
+
+    def test_empty_override_beats_deployment_env(self, env_bridge: Path):
+        # An explicitly-saved empty value is an override (#352): the var IS
+        # assigned empty, so a deployment env value (e.g. CLI_AGENTS=cursor)
+        # no longer governs the sidecar.
+        write_sidecar_env_bridge({"CLI_AGENTS": ""})
+        content = env_bridge.read_text()
+        assert "CLI_AGENTS=''" in content
+        result = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                f"CLI_AGENTS=cursor; . {env_bridge} && printf '%s' \"$CLI_AGENTS\"",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+
+    def test_none_override_leaves_deployment_env_in_control(self, env_bridge: Path):
+        write_sidecar_env_bridge({"CLI_AGENTS": None})
+        content = env_bridge.read_text()
+        assert "CLI_AGENTS" not in content
 
     def test_shell_sources_cleanly(self, env_bridge: Path):
         write_transcript_env_bridge(True)

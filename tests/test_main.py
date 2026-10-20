@@ -9485,8 +9485,8 @@ class TestAdminSettingsEndpoints:
         response = test_client.delete("/api/admin/settings/jenkins_url")
         assert response.status_code == 404
 
-    def test_put_empty_ai_model_resets_to_env(self, test_client, monkeypatch) -> None:
-        """Empty ai_model deletes DB override so AI_MODEL env is used."""
+    def test_put_empty_ai_model_overrides_env(self, test_client, monkeypatch) -> None:
+        """Empty ai_model is an explicit DB override that beats AI_MODEL env (#352)."""
         monkeypatch.setenv("AI_MODEL", "claude-opus-4-6-1m")
         from rootcoz.config import clear_db_settings_cache, get_settings
 
@@ -9500,7 +9500,8 @@ class TestAdminSettingsEndpoints:
                 "settings": {"ai_provider": "cursor", "ai_model": "cursor:composer-2"}
             },
         )
-        # Clear model — must fall back to env (first non-empty: request→DB→env)
+        # Clear model — the saved empty is an explicit override; only the
+        # reset endpoint (DELETE) falls back to env
         response = test_client.put(
             "/api/admin/settings",
             json={"settings": {"ai_model": ""}},
@@ -9510,14 +9511,35 @@ class TestAdminSettingsEndpoints:
         get_resp = test_client.get("/api/admin/settings")
         settings = get_resp.json()
         ai_model = next(s for s in settings if s["key"] == "ai_model")
+        assert ai_model["source"] == "db"
+        assert ai_model["value"] == ""
+        assert get_settings().ai_model == ""
+
+    def test_reset_ai_model_restores_env(self, test_client, monkeypatch) -> None:
+        """DELETE removes the override so the AI_MODEL env governs again."""
+        monkeypatch.setenv("AI_MODEL", "claude-opus-4-6-1m")
+        from rootcoz.config import clear_db_settings_cache, get_settings
+
+        clear_db_settings_cache()
+        get_settings.cache_clear()
+
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_model": "cursor:composer-2"}},
+        )
+        response = test_client.delete("/api/admin/settings/ai_model")
+        assert response.status_code == 200
+
+        get_resp = test_client.get("/api/admin/settings")
+        ai_model = next(s for s in get_resp.json() if s["key"] == "ai_model")
         assert ai_model["source"] == "env"
         assert ai_model["value"] == "claude-opus-4-6-1m"
         assert get_settings().ai_model == "claude-opus-4-6-1m"
 
-    def test_put_empty_ai_provider_resets_to_env(
+    def test_put_empty_ai_provider_overrides_env(
         self, test_client, monkeypatch
     ) -> None:
-        """Empty ai_provider deletes DB override so AI_PROVIDER env is used."""
+        """Empty ai_provider is an explicit override that beats AI_PROVIDER env."""
         monkeypatch.setenv("AI_PROVIDER", "claude")
         from rootcoz.config import clear_db_settings_cache, get_settings
 
@@ -9537,11 +9559,12 @@ class TestAdminSettingsEndpoints:
         get_resp = test_client.get("/api/admin/settings")
         settings = get_resp.json()
         ai_provider = next(s for s in settings if s["key"] == "ai_provider")
-        assert ai_provider["source"] != "db"
-        assert get_settings().ai_provider == "claude"
+        assert ai_provider["source"] == "db"
+        assert get_settings().ai_provider == ""
 
-    def test_put_empty_ai_call_timeout_still_resets(self, test_client) -> None:
-        """Empty non-clearable settings still reset to env/default (delete DB)."""
+    def test_put_empty_non_string_setting_rejected(self, test_client) -> None:
+        """Non-string settings reject empty saves — an empty bool/int override
+        would fail pydantic validation and drop the whole DB override set."""
         test_client.put(
             "/api/admin/settings",
             json={"settings": {"ai_call_timeout": "30"}},
@@ -9550,10 +9573,58 @@ class TestAdminSettingsEndpoints:
             "/api/admin/settings",
             json={"settings": {"ai_call_timeout": ""}},
         )
+        assert response.status_code == 400
+        assert "cannot be empty" in response.json()["detail"]
+
+    def test_put_empty_default_user_role_rejected(self, test_client) -> None:
+        """default_user_role is str-typed but its validator rejects "" — an
+        empty override there would poison get_settings() and silently drop
+        every DB override (Qodo r1 finding 2)."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"default_user_role": ""}},
+        )
+        assert response.status_code == 400
+        assert "cannot be empty" in response.json()["detail"]
+
+    def test_put_empty_sidecar_listener_rejected(self, test_client) -> None:
+        """sidecar_host/sidecar_port reject empty overrides — the sidecar env
+        bridge would export blank SIDECAR_HOST/SIDECAR_PORT, and pi-config's
+        nullish coalescing selects the empty string over its defaults (an
+        empty host binds an unspecified address; an empty port breaks the
+        entrypoint startup probe) (Qodo r1 findings 3+4)."""
+        for key in ("sidecar_host", "sidecar_port"):
+            response = test_client.put(
+                "/api/admin/settings",
+                json={"settings": {key: ""}},
+            )
+            assert response.status_code == 400, key
+            assert "cannot be empty" in response.json()["detail"]
+
+    def test_rejected_batch_writes_nothing(self, test_client) -> None:
+        """A PUT mixing a valid update with an invalid empty override is
+        rejected whole — the valid key must NOT be written (no partial
+        saves) (Qodo r1 finding 1)."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_user": "bot", "sidecar_port": ""}},
+        )
+        assert response.status_code == 400
+        # The valid key was not persisted: still falls through to env/default
+        get_resp = test_client.get("/api/admin/settings")
+        jenkins_user = next(s for s in get_resp.json() if s["key"] == "jenkins_user")
+        assert jenkins_user["source"] != "db"
+
+    def test_reset_non_string_setting_falls_to_default(self, test_client) -> None:
+        """DELETE still resets non-string settings to env/default."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "30"}},
+        )
+        response = test_client.delete("/api/admin/settings/ai_call_timeout")
         assert response.status_code == 200
         get_resp = test_client.get("/api/admin/settings")
-        settings = get_resp.json()
-        ai_timeout = next(s for s in settings if s["key"] == "ai_call_timeout")
+        ai_timeout = next(s for s in get_resp.json() if s["key"] == "ai_call_timeout")
         assert ai_timeout["source"] != "db"
 
     def test_active_server_providers_setting(self, test_client) -> None:

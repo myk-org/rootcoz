@@ -73,6 +73,7 @@ interface ServerSetting {
   env_var_value?: string
   options?: string[]
   jira_verified_method?: string
+  persistable?: boolean
 }
 
 interface CategoryGroup {
@@ -930,9 +931,11 @@ export function ServerSettingsPage() {
   function renderCategory(category: string, settings: ServerSetting[]) {
     const isCollapsed = state.collapsedCategories.has(category)
     // "Save to DB" affordance for env-sourced rows (null for db/default rows
-    // and for server-only settings the backend owns exclusively).
+    // and for server-only settings the backend owns exclusively). The
+    // backend's persistable flag is authoritative — derived settings like
+    // sidecar_url must not offer persistence even when env-sourced (#352).
     const saveToDbNode = (s: ServerSetting) =>
-      s.source === 'env' && !SERVER_ONLY_SETTING_KEYS.has(s.key) ? (
+      s.source === 'env' && !SERVER_ONLY_SETTING_KEYS.has(s.key) && s.persistable !== false ? (
         <SaveToDbButton saving={persistingKey === s.key} onClick={() => handlePersistEnv(s.key)} />
       ) : null
     // Search must be able to find every Jira field, so auth-method hiding
@@ -1000,6 +1003,11 @@ export function ServerSettingsPage() {
                   setPendingJiraSwitch(null)
                   if (target) void applyJiraMode(target === 'none' ? null : target)
                 }}
+              />
+            )}
+            {category === 'Jira' && persistedJiraMethod === 'oauth' && (
+              <JiraOauthUrlRow
+                cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
             )}
             {category === 'AI' && cursorAuthStatus && (
@@ -1865,7 +1873,11 @@ function SettingRow({
                   )}
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Reset to default</TooltipContent>
+              <TooltipContent>
+                {setting.has_env_var
+                  ? `Restore from OS env ${setting.env_var}`
+                  : 'Reset to default'}
+              </TooltipContent>
             </Tooltip>
           )}
         </div>
@@ -1973,6 +1985,36 @@ interface JiraAuthMethodControlProps {
   onCheck: (method: JiraMethod, checked: boolean) => void
   onCancelSwitch: () => void
   onConfirmSwitch: () => void
+}
+
+// Read-only display of the oauth method's derived API base (#352): per
+// Atlassian's docs the scoped api.atlassian.com gateway built from the
+// cloud ID is the only valid base for OAuth 2.0 credentials — there is
+// deliberately no settable URL for this method.
+const ATLASSIAN_API_GATEWAY = 'https://api.atlassian.com/ex/jira'
+
+function JiraOauthUrlRow({ cloudId }: { cloudId: string }) {
+  const derived = cloudId ? `${ATLASSIAN_API_GATEWAY}/${cloudId}` : ''
+  return (
+    <div className="mb-3 space-y-1 rounded-md border border-border-default bg-surface-elevated px-3 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-xs font-semibold text-text-primary">JIRA_OAUTH_URL</span>
+        <span className="rounded bg-surface-hover px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary">derived</span>
+      </div>
+      {derived ? (
+        <p className="break-all font-mono text-xs text-text-secondary">{derived}</p>
+      ) : (
+        <p className="text-xs text-signal-amber">
+          Cannot be derived — ATLASSIAN_OAUTH_CLOUD_ID is not set. Set the cloud ID
+          (or JIRA_SITE_URL, used to auto-discover it) to establish the API base.
+        </p>
+      )}
+      <p className="text-xs text-text-quaternary">
+        Built from ATLASSIAN_OAUTH_CLOUD_ID — the scoped Atlassian gateway is the
+        only valid base for OAuth 2.0 credentials, so it is not settable.
+      </p>
+    </div>
+  )
 }
 
 function JiraAuthMethodControl({

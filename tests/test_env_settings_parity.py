@@ -95,14 +95,27 @@ def test_save_sidecar_settings_writes_bridge_and_warns_on_non_loopback(client, b
 
 
 def test_save_loopback_sidecar_host_has_no_warning(client, bridge):
-    for host in ("127.0.0.1", ""):
-        response = client.put(
-            "/api/admin/settings",
-            headers=_admin_headers(),
-            json={"settings": {"sidecar_host": host}},
-        )
-        assert response.status_code == 200
-        assert not response.json().get("warnings")
+    response = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"sidecar_host": "127.0.0.1"}},
+    )
+    assert response.status_code == 200
+    assert not response.json().get("warnings")
+
+
+def test_empty_sidecar_host_rejected(client, bridge):
+    # An empty sidecar_host override would export SIDECAR_HOST='' — pi-config's
+    # nullish coalescing selects the empty string over its loopback default,
+    # binding an unspecified address. Empty is rejected; Reset falls back to
+    # env/default instead (Qodo r1 finding 3).
+    response = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"sidecar_host": ""}},
+    )
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"]
 
 
 def test_reset_sidecar_setting_clears_bridge_assignment(client, bridge):
@@ -444,8 +457,10 @@ def test_sidecar_port_and_host_validation_on_save(client):
         assert response.status_code == 400, bad_host
         assert "sidecar_host" in response.json()["detail"]
         assert "127.0.0.1" in response.json()["detail"]
-    # The deployment default, wildcard, and exact probe address stay saveable.
-    for host in ("", "127.0.0.1", "0.0.0.0"):
+    # The exact probe address and the wildcard stay saveable; the deployment
+    # default ("") is NOT — an empty override is rejected (see
+    # test_empty_sidecar_host_rejected); Reset falls back to the env default.
+    for host in ("127.0.0.1", "0.0.0.0"):
         response = client.put(
             "/api/admin/settings",
             headers=_admin_headers(),

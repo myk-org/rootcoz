@@ -28,7 +28,7 @@ from collections.abc import (
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 from urllib.parse import quote as _urlquote
 from urllib.parse import urlparse
 
@@ -1770,6 +1770,10 @@ def _apply_log_level_setting() -> None:
     if not db_setting_is_set("log_level"):
         return
     name = get_settings().log_level.strip().upper()
+    if not name:
+        # Explicit empty override (#352) — nothing to apply; the boot env
+        # level (or the logger default) governs.
+        return
     level = getattr(logging, name, None)
     if not isinstance(level, int):
         logger.warning("Ignoring invalid log_level setting: %r", name)
@@ -12931,23 +12935,78 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     )
 
 
+# Settings where an explicit empty override is unsafe regardless of type:
+# the sidecar env bridge would export SIDECAR_HOST=''/SIDECAR_PORT='' and
+# pi-config's nullish coalescing selects the empty string over its loopback/
+# default fallbacks — an empty host binds an unspecified address (exposure)
+# and an empty port breaks the entrypoint's startup probe (#352 Qodo r1).
+_EMPTY_OVERRIDE_FORBIDDEN: frozenset[str] = frozenset({"sidecar_host", "sidecar_port"})
+
+
+def _empty_override_error(key: str) -> str | None:
+    """User-facing error when an explicit empty override is invalid for key.
+
+    Returns None when saving an empty string is a valid override. Three
+    gates, all of which protect ``get_settings()`` from storing a value
+    that fails pydantic validation (which would silently drop the entire
+    DB override set) or that would break the sidecar bridge (#352 Qodo r1):
+    string-typed fields only (str / SecretStr), field validators must
+    accept the empty value (``default_user_role`` is str-typed but its
+    validator rejects ""), and infrastructure settings with unsafe empty
+    semantics are denied outright.
+    """
+    if key in _EMPTY_OVERRIDE_FORBIDDEN:
+        return (
+            f"Setting '{key}' cannot be empty — the sidecar bridge would "
+            "export a blank value. Use Reset to fall back to the "
+            "env/default value."
+        )
+    annotation = Settings.model_fields[key].annotation
+    types = get_args(annotation) or (annotation,)
+    if not all(t is str or t is SecretStr or t is type(None) for t in types):
+        return (
+            f"Setting '{key}' cannot be empty — its type does not accept "
+            "an empty override. Use Reset to fall back to the env/default "
+            "value."
+        )
+    try:
+        Settings.model_validate({key: ""})
+    except ValidationError:
+        return (
+            f"Setting '{key}' cannot be empty — its validator rejects an "
+            "empty value. Use Reset to fall back to the env/default value."
+        )
+    return None
+
+
 async def _save_settings_to_db(
     settings_updates: dict[str, Any], username: str
 ) -> list[str]:
     """Persist validated settings updates to the DB store and apply them.
 
     Shared save path for the PUT update and the env→DB persist endpoints.
-    Empty/null = reset: delete from DB so resolution falls through to env
-    (request → DB → env; first non-empty wins). Returns user-facing
-    warnings; values are never logged.
+    A saved value — empty or not — is an explicit DB override: the row's
+    presence beats the OS env (request → DB → env). To fall back to the
+    env/default value, use the reset endpoint (DELETE) instead of saving
+    an empty value (#352). Invalid empty overrides are rejected for ALL
+    keys before ANY key is written — a rejected save never applies a
+    partial update. Returns user-facing warnings; values are never logged.
     """
+    # Pre-flight: reject invalid empty overrides for the whole batch
+    # before the first DB write, so a 400 never leaves a partial save.
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         if not str_value:
-            await storage.delete_server_setting(key, deleted_by=username)
-            continue
-        # Non-empty: upsert to DB (encrypt sensitive values)
-        if key in _SENSITIVE_SETTINGS:
+            error = _empty_override_error(key)
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+
+    for key, value in settings_updates.items():
+        str_value = str(value) if value is not None else ""
+        # Upsert (empty allowed — an explicit empty override beats env).
+        # Sensitive values are encrypted only when non-empty; the empty
+        # override stays a plain empty string (nothing to protect).
+        if str_value and key in _SENSITIVE_SETTINGS:
             from rootcoz.encryption import encrypt_value
 
             db_value = encrypt_value(str_value)
@@ -12966,19 +13025,12 @@ async def _save_settings_to_db(
         except Exception:
             logger.warning("Failed to clear jira_verified_method", exc_info=True)
 
-    # Update in-memory cache so get_settings() picks up changes.
-    # Empty/null values are removed (fall back to env/default).
-    cache_updates: dict[str, str] = {}
-    cache_removals: list[str] = []
-    for k, v in settings_updates.items():
-        if v is None or str(v) == "":
-            cache_removals.append(k)
-        else:
-            cache_updates[k] = str(v)
-    if cache_removals:
-        remove_from_db_settings_cache(cache_removals)
-    if cache_updates:
-        update_db_settings_cache(cache_updates)
+    # Update in-memory cache so get_settings() picks up changes. Saved
+    # values — empty included — are explicit overrides that beat env;
+    # falling back to env/default is the reset endpoint's job (DELETE).
+    update_db_settings_cache(
+        {k: str(v) if v is not None else "" for k, v in settings_updates.items()}
+    )
 
     # Persist the transcript recording switch (and the other sidecar
     # settings) for the container entrypoint — the sidecar reads these from

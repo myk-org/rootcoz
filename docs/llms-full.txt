@@ -2275,7 +2275,7 @@ That creates an active operator who can submit analyses, and one server setting 
 
    Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: `PUT /api/admin/settings` rejects every one of them with `400 Server-only settings (env var only)`, so they must be set in the deployment environment instead. They are `admin_key` (bootstrap secret for the `admin` superuser), `db_path`, and `debug`. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.
 
-   > **Warning:** Saving an empty value is a reset, not a blank value. The database override is deleted and resolution falls back to the environment variable, then the default.
+   > **Note:** Saving an empty value is an explicit blank override, not a reset. The empty value is stored in the database and beats the environment variable — this is how you clear a setting the deployment environment still sets (e.g. `CLI_AGENTS`). To fall back to the environment variable or default instead, use the row's reset action (DELETE), which removes the override. Non-string settings (booleans, integers) reject empty saves with a 400 error.
 
 11. **Review and reset individual settings.**
 
@@ -2330,7 +2330,7 @@ That creates an active operator who can submit analyses, and one server setting 
   `ROOTCOZ_ENCRYPTION_KEY` changed. Sessions survive, but stored API key hashes and encrypted tokens do not — rotate keys and re-enter tokens.
 
 - Bootstrap `admin` login fails after you edited `admin_key`.
-  The login path compares the username `admin` against the current value in constant time. Confirm the value you saved, and remember that setting an empty value resets the override instead of storing a blank.
+  The login path compares the username `admin` against the current value in constant time. Confirm the value you saved, and remember that `admin_key` is server-only — it cannot be saved or reset from this page at all.
 
 ## Related Pages
 
