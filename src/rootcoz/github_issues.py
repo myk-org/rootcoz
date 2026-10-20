@@ -9,13 +9,12 @@ Mirrors the Jira integration pattern in ``jira.py``.
 """
 
 import asyncio
-import os
 from collections.abc import Sequence
 from typing import Any
 
 import httpx
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.bug_creation import parse_github_repo_url
 from rootcoz.config import Settings
 from rootcoz.issue_matching import filter_issue_matches_with_ai
@@ -26,7 +25,7 @@ from rootcoz.models import (
     SimilarIssue,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # Classifications considered "code issues" for tests repo search
 _CODE_ISSUE_CLASSIFICATIONS = frozenset({"CODE ISSUE"})

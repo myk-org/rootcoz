@@ -5,9 +5,9 @@ Converts internal/technical errors into messages suitable for end users.
 
 from __future__ import annotations
 
-from simple_logger.logger import get_logger
+from rootcoz import get_child_logger
 
-logger = get_logger(name=__name__)
+logger = get_child_logger(__name__)
 
 
 def make_user_friendly_error(error: str | Exception) -> str:

@@ -23,8 +23,8 @@ from xml.etree.ElementTree import ParseError
 
 import httpx
 from defusedxml.common import DefusedXmlException
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.config import (
     PROW_ARTIFACT_MAX_FILE_SIZE_MB,
     PROW_ARTIFACTS_MAX_OBJECTS,
@@ -44,7 +44,7 @@ from rootcoz.xml_enrichment import (
     extract_test_failures,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # Base URL for accessing GCS objects via HTTPS
 GCS_BASE_URL = "https://storage.googleapis.com"

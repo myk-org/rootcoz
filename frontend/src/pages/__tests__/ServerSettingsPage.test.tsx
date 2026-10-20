@@ -6,7 +6,11 @@ import { useSSE } from '@/lib/useSSE'
 import { ServerSettingsPage } from '../ServerSettingsPage'
 
 vi.mock('@/lib/api', () => ({
-  api: { get: vi.fn(), put: vi.fn(), delete: vi.fn(), testIntegration: vi.fn() },
+  api: { get: vi.fn(), put: vi.fn(), delete: vi.fn(), testIntegration: vi.fn(), persistSetting: vi.fn() },
+  extractApiDetail: (err: unknown) => {
+    const detail = (err as { body?: { detail?: unknown } })?.body?.detail
+    return typeof detail === 'string' ? detail : null
+  },
   ApiError: class extends Error {
     status = 0
     statusText = ''
@@ -19,7 +23,7 @@ vi.mock('@/hooks/useProviderModels', () => ({
   useProviderModels: () => ({ models: [], refresh: vi.fn(), refreshing: false }),
 }))
 vi.mock('@/lib/useProviderOptions', () => ({ useCursorAuthStatus: () => null }))
-vi.mock('@/components/shared/FreeModelsCard', () => ({ FreeModelsCard: () => null }))
+vi.mock('@/components/shared/ServerProvidersCard', () => ({ ServerProvidersCard: () => null }))
 vi.mock('@/components/shared/CursorAuthBanner', () => ({ CursorAuthBanner: () => null }))
 vi.mock('@/components/shared/ProviderSelect', () => ({ ProviderSelect: () => null }))
 vi.mock('@/components/shared/ModelCombobox', () => ({ ModelCombobox: () => null }))
@@ -90,6 +94,7 @@ const baseSettings = (): TestSetting[] => [
 const get = vi.mocked(api.get)
 const put = vi.mocked(api.put)
 const testIntegration = vi.mocked(api.testIntegration)
+const persistSetting = vi.mocked(api.persistSetting)
 
 function renderPage() {
   return render(
@@ -105,6 +110,7 @@ beforeEach(() => {
   get.mockResolvedValue(baseSettings() as never)
   put.mockResolvedValue({} as never)
   testIntegration.mockResolvedValue({ ok: true, message: 'ok' } as never)
+  persistSetting.mockResolvedValue({ key: '', source: 'db' } as never)
 })
 
 describe('ServerSettingsPage tabs and search', () => {
@@ -1108,5 +1114,200 @@ describe('ServerSettingsPage Jira field visibility', () => {
     expect(screen.getByLabelText('Edit JIRA_URL')).toHaveValue('https://draft.example.com')
     expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
     expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+  })
+})
+
+describe('ServerSettingsPage env parity (#347)', () => {
+  function paritySettings(): TestSetting[] {
+    return [
+      ...baseSettings(),
+      // Restart-tagged settings promoted from _SERVER_ONLY_SETTINGS
+      mk('default_user_role', 'Auth & Security', 'user', { restart_required: true }),
+      mk('session_ttl_hours', 'Auth & Security', '24', { type: 'integer' }),
+      // Sidecar settings (restart-required) in their own category
+      mk('sidecar_host', 'Sidecar', '127.0.0.1', { restart_required: true }),
+      mk('sidecar_port', 'Sidecar', '8087', { type: 'integer', restart_required: true }),
+      mk('sidecar_url', 'Sidecar', '', { restart_required: true }),
+      mk('acpx_agents', 'Sidecar', '', { restart_required: true }),
+      mk('cli_agents', 'Sidecar', '', { restart_required: true }),
+      mk('pi_sidecar_log_level', 'Sidecar', 'info', { restart_required: true }),
+      mk('node_binary', 'Sidecar', '', { restart_required: true }),
+      mk('pi_sidecar_transcripts_dir', 'Sidecar', '', { restart_required: true }),
+      // Promoted Notifications settings
+      mk('smtp_host', 'Notifications', 'smtp.example.com'),
+      mk('smtp_port', 'Notifications', '587', { type: 'integer' }),
+      mk('smtp_user', 'Notifications', 'bot'),
+      mk('smtp_password', 'Notifications', 'secret', { sensitive: true }),
+      mk('smtp_from', 'Notifications', 'rootcoz@example.com'),
+      mk('slack_webhook_url', 'Notifications', 'https://hooks', { sensitive: true }),
+      mk('alert_email_to', 'Notifications', ''),
+    ]
+  }
+
+  it('renders the Sidecar and Notifications categories as tabs with their rows', async () => {
+    get.mockResolvedValue(paritySettings() as never)
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    const tabs = screen.getAllByRole('tab').map((t) => t.textContent)
+    expect(tabs).toContain('Sidecar')
+    expect(tabs).toContain('Notifications')
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    expect(await screen.findByText('SIDECAR_HOST')).toBeInTheDocument()
+    expect(screen.getByText('SIDECAR_PORT')).toBeInTheDocument()
+    expect(screen.getByText('PI_SIDECAR_LOG_LEVEL')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Notifications' }))
+    expect(await screen.findByText('SMTP_HOST')).toBeInTheDocument()
+    expect(screen.getByText('ALERT_EMAIL_TO')).toBeInTheDocument()
+  })
+
+  it('shows restart badges on every restart-tagged setting row', async () => {
+    get.mockResolvedValue(paritySettings() as never)
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    // Sidecar tab: all 8 sidecar settings are restart-tagged
+    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    await screen.findByText('SIDECAR_HOST')
+    expect(screen.getAllByLabelText('Restart required')).toHaveLength(8)
+
+    // Auth & Security: default_user_role carries the badge too
+    fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
+    await screen.findByText('DEFAULT_USER_ROLE')
+    expect(screen.getAllByLabelText('Restart required')).toHaveLength(1)
+  })
+
+  it('renders sensitive Notification rows masked with a reveal affordance', async () => {
+    get.mockResolvedValue(paritySettings() as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Notifications' }))
+    await screen.findByText('SMTP_HOST')
+
+    expect(screen.getAllByText('••••••••').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getAllByRole('button', { name: 'Reveal value' }).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('saves a promoted setting row (session TTL) through the normal flow', async () => {
+    get.mockResolvedValue(paritySettings() as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit SESSION_TTL_HOURS' }))
+
+    fireEvent.change(screen.getByLabelText('Edit SESSION_TTL_HOURS'), { target: { value: '48' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { session_ttl_hours: '48' },
+      }),
+    )
+  })
+
+  it('shows the trust warning from the save response for a non-loopback sidecar host', async () => {
+    get.mockResolvedValue(paritySettings() as never)
+    put.mockResolvedValueOnce({
+      updated: ['sidecar_host'],
+      warnings: ['sidecar_host is not a loopback address — only bind a host you fully trust.'],
+    } as never)
+
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit SIDECAR_HOST' }))
+
+    fireEvent.change(screen.getByLabelText('Edit SIDECAR_HOST'), { target: { value: '0.0.0.0' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(/only bind a host you fully trust/)
+
+    // The warning clears on the next save
+    fireEvent.click(screen.getByRole('button', { name: 'Edit SIDECAR_HOST' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+  })
+
+  it('no longer renders the standalone Free AI models card in the AI tab', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    await screen.findByText('ACTIVE_SERVER_PROVIDERS')
+    expect(screen.queryByText(/Free AI models/)).not.toBeInTheDocument()
+  })
+})
+
+describe('ServerSettingsPage save env setting to DB', () => {
+  function envSettings() {
+    const settings = baseSettings()
+    // jenkins_url from env, jenkins_user from db — only the env row gets the button
+    const url = settings.find(s => s.key === 'jenkins_url')!
+    url.source = 'env'
+    settings.find(s => s.key === 'jenkins_user')!.source = 'db'
+    return settings
+  }
+
+  async function renderJenkinsRows() {
+    renderPage()
+    fireEvent.change(await screen.findByLabelText('Search settings'), { target: { value: 'jenkins_' } })
+    await screen.findByText('JENKINS_USER')
+  }
+
+  it('renders Save to DB only on env-sourced rows', async () => {
+    get.mockResolvedValue(envSettings() as never)
+    await renderJenkinsRows()
+
+    expect(screen.getByText('JENKINS_URL')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Save to DB' })).toHaveLength(1)
+  })
+
+  it('never offers Save to DB for server-only settings, even when env-sourced', async () => {
+    const settings = baseSettings()
+    const adminKey = settings.find(s => s.key === 'admin_key')!
+    adminKey.source = 'env'
+    settings.push(
+      mk('db_path', 'Server', '/var/lib/rootcoz/db.sqlite', { source: 'env' }),
+      mk('debug', 'Server', 'true', { type: 'boolean', source: 'env' }),
+    )
+    get.mockResolvedValue(settings as never)
+    renderPage()
+
+    // Server tab: db_path and debug are env-sourced but server-only
+    fireEvent.click(await screen.findByRole('tab', { name: 'Server' }))
+    await screen.findByText('DB_PATH')
+    expect(screen.getByText('DEBUG')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
+
+    // Auth & Security tab: admin_key likewise
+    fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
+    await screen.findByText('ADMIN_KEY')
+    expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
+  })
+
+  it('persists the env value and refetches with source db', async () => {
+    get.mockResolvedValueOnce(envSettings() as never)
+    const after = envSettings()
+    after.find(s => s.key === 'jenkins_url')!.source = 'db'
+    get.mockResolvedValueOnce(after as never)
+    await renderJenkinsRows()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save to DB' }))
+    await waitFor(() => expect(persistSetting).toHaveBeenCalledWith('jenkins_url'))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+
+    // Silent refetch rendered the db-sourced row: button gone, both badges now db
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save to DB' })).toBeNull())
+    expect(screen.getAllByText('db')).toHaveLength(2)
+    expect(screen.queryByText('env')).toBeNull()
+  })
+
+  it('surfaces the error banner when persist fails with 400', async () => {
+    get.mockResolvedValue(envSettings() as never)
+    const err = new ApiError(0, '', null)
+    err.status = 400
+    err.body = { detail: 'jenkins_url has no environment value to persist' }
+    persistSetting.mockRejectedValueOnce(err as never)
+    await renderJenkinsRows()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save to DB' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('jenkins_url has no environment value to persist')
+    // Row still shows the env source — no silent state flip
+    expect(screen.getByRole('button', { name: 'Save to DB' })).toBeInTheDocument()
   })
 })

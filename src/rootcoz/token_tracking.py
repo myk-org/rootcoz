@@ -4,7 +4,6 @@ Provides helpers to record AI token usage to the database
 and build token usage summaries for analysis results.
 """
 
-import os
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -13,12 +12,11 @@ from typing import Any
 from uuid import uuid4
 
 from pi_sidecar_client import AIResult
-from simple_logger.logger import get_logger
 
-from rootcoz import storage
+from rootcoz import get_child_logger, storage
 from rootcoz.models import TokenUsageEntry, TokenUsageSummary
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # v2 when present, else the anchor: the one rule for a canonical signature
 # (see rootcoz.storage). Rows on both sides of the anchor/v2 pair resolve to

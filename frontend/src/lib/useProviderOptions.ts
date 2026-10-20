@@ -12,9 +12,11 @@ type CatalogState = {
   /** @deprecated Use providerKeys. */
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>
+  /** folded provider id → exact-case catalog id. */
+  originalIds: Record<string, string>
 }
 
-const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {} }
+const EMPTY_CATALOG: CatalogState = { providerKeys: [], providers: {}, enabled: [], providerStatus: {}, originalIds: {} }
 
 /** Shared in-flight / completed catalog so concurrent hook mounts share one fetch. */
 const catalogInflight = new Map<string, Promise<CatalogState>>()
@@ -28,30 +30,40 @@ function catalogKeyFor(username: string, isAdmin: boolean, authenticated: boolea
   return `${username}:${isAdmin ? '1' : '0'}`
 }
 
-/**
- * Fold catalog record keys through normalizeProvider (lowercase).
- *
+/** Result of folding catalog record keys through normalizeProvider (lowercase). */
+type FoldedRecord<T> = {
+  folded: Record<string, T>
+  /** folded key → exact-case key from the server, for verbatim submission. */
+  originalIds: Record<string, string>
+}
+
+/*
  * Provider IDs are case-sensitive in the sidecar (a custom agent-dir
  * provider may be "EnMaaS"), but every consumer looks providers up
- * lowercased, so keys are folded once at load. Two IDs differing only in
- * case cannot be told apart downstream — the backend refuses ambiguous
- * case-insensitive matches — so colliding variants are dropped rather
- * than one silently overwriting the other.
+ * lowercased, so keys are folded once at load. The exact-case ID is kept
+ * in originalIds — the backend's supported-provider check is an exact
+ * match, so submissions must use the catalog's original casing. Two IDs
+ * differing only in case cannot be told apart downstream — the backend
+ * refuses ambiguous case-insensitive matches — so colliding variants are
+ * dropped rather than one silently overwriting the other.
  */
-function foldCatalogKeys<T>(record: Record<string, T>): Record<string, T> {
+function foldCatalogKeys<T>(record: Record<string, T>): FoldedRecord<T> {
   const seen = new Map<string, string>()
   const folded: Record<string, T> = {}
+  const originalIds: Record<string, string> = {}
   for (const [key, value] of Object.entries(record)) {
     const normalized = normalizeProvider(key)
     const original = seen.get(normalized)
     if (original === undefined) {
       seen.set(normalized, key)
       folded[normalized] = value
+      originalIds[normalized] = key
     } else if (original !== key) {
       delete folded[normalized]
+      delete originalIds[normalized]
     }
   }
-  return folded
+  return { folded, originalIds }
 }
 
 function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<CatalogState> {
@@ -63,14 +75,15 @@ function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<Ca
   const req = api
     .get<AiModelsResponse>(`/api/ai-models?force_server_credentials=${forceServer}`)
     .then((res) => {
-      const providers = foldCatalogKeys(res.providers ?? {})
-      const providerStatus = foldCatalogKeys(res.provider_status ?? {})
+      const { folded: providers, originalIds } = foldCatalogKeys(res.providers ?? {})
+      const providerStatus = foldCatalogKeys(res.provider_status ?? {}).folded
       const providerKeys = Object.keys(providers)
       const next: CatalogState = {
         providerKeys,
         providers,
         enabled: providerKeys.filter((p) => (providers[p] ?? []).length > 0),
         providerStatus,
+        originalIds,
       }
       if (generation === catalogGeneration && catalogInflight.get(cacheKey) === req) {
         catalogCache.set(cacheKey, next)
@@ -118,6 +131,8 @@ export function useProviderCatalog(forceServer = false): {
   /** @deprecated Use providerKeys. */
   enabled: string[]
   providerStatus: Record<string, ProviderStatus>
+  /** folded provider id → exact-case catalog id. */
+  originalIds: Record<string, string>
 } {
   const { username, isAdmin, authenticated } = useAuth()
   const cacheKey = `${catalogKeyFor(username, isAdmin, authenticated)}:${forceServer ? 'server' : 'default'}`

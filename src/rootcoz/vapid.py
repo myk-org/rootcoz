@@ -25,9 +25,10 @@ from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from simple_logger.logger import get_logger
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 DEFAULT_CLAIM_EMAIL = "mailto:noreply@rootcoz.local"
 

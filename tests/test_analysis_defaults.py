@@ -194,6 +194,12 @@ class TestDefaultServerSettingsResponse:
             "rp_push_tracker_links",
             "vapid_claim_email",
             "vapid_public_key",
+            # #347: admin-management settings stay hidden from the any-role
+            # defaults payload even though they are now admin-settable.
+            "session_ttl_hours",
+            "smtp_host",
+            "sidecar_host",
+            "sidecar_url",
         }
         for field in server_only_fields:
             assert field not in data, f"Server-only field '{field}' found in response"

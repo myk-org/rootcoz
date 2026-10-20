@@ -8668,12 +8668,32 @@ class TestBuildReportContextChildScope:
 class TestStaticAssetHeaders:
     """Tests for GZip compression and cache headers on static assets."""
 
+    @staticmethod
+    def _healthy_client(test_client):
+        """Context manager: /api/health with a healthy mocked sidecar.
+
+        An unreachable sidecar is unhealthy (503) since #347 r3, so tests
+        asserting 200 from /api/health must mock the sidecar check.
+        """
+
+        @contextmanager
+        def _ctx():
+            with patch(
+                "rootcoz.monitoring.check_ai_provider",
+                new_callable=AsyncMock,
+                return_value={"status": "ok", "provider": "claude", "model": "m"},
+            ):
+                yield test_client
+
+        return _ctx()
+
     def test_gzip_middleware_registered(self, test_client):
         """Verify GZipMiddleware compresses responses above minimum size."""
-        response = test_client.get(
-            "/api/health",
-            headers={"Accept-Encoding": "gzip"},
-        )
+        with self._healthy_client(test_client) as client:
+            response = client.get(
+                "/api/health",
+                headers={"Accept-Encoding": "gzip"},
+            )
         # Health endpoint returns small JSON, may not be compressed
         # Just verify the middleware doesn't break anything
         assert response.status_code == 200
@@ -8687,7 +8707,8 @@ class TestStaticAssetHeaders:
 
     def test_non_assets_no_immutable_cache(self, test_client):
         """Verify non-asset paths don't get immutable cache headers."""
-        response = test_client.get("/api/health")
+        with self._healthy_client(test_client) as client:
+            response = client.get("/api/health")
         cache_control = response.headers.get("cache-control", "")
         assert "immutable" not in cache_control
 
@@ -8863,14 +8884,36 @@ class TestAdminSettingsEndpoints:
         assert "Unknown settings" in response.json()["detail"]
 
     def test_put_settings_server_only_rejected(self, test_client) -> None:
-        """PUT rejects server-only settings (env-only toggles)."""
+        """PUT rejects bootstrap-only settings (db_path/debug — env-only forever, #347)."""
         response = test_client.put(
             "/api/admin/settings",
-            json={"settings": {"auto_push_exporters": "reportportal"}},
+            json={"settings": {"db_path": "/tmp/other.db", "debug": "true"}},
         )
         assert response.status_code == 400
-        assert "Server-only" in response.json()["detail"]
-        assert "auto_push_exporters" in response.json()["detail"]
+        assert "Unknown settings" in response.json()["detail"]
+        assert "db_path" in response.json()["detail"]
+        assert "debug" in response.json()["detail"]
+
+    def test_put_settings_previously_blocked_now_settable(self, test_client) -> None:
+        """#347: the former _SERVER_ONLY_SETTINGS are admin-settable now."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "auto_push_exporters": "reportportal",
+                    "allowed_users": "alice,bob",
+                    "require_approval": "false",
+                    "public_base_url": "https://rootcoz.example.com",
+                }
+            },
+        )
+        assert response.status_code == 200
+        assert set(response.json()["updated"]) == {
+            "auto_push_exporters",
+            "allowed_users",
+            "require_approval",
+            "public_base_url",
+        }
 
     def test_put_settings_empty_body(self, test_client) -> None:
         """PUT with no settings returns 400."""

@@ -134,14 +134,17 @@ spec:
             - secretRef:
                 name: {{ include "rootcoz.encryptionSecretName" . }}
             {{- end }}
+          # Probe the backend only: /api/health validates the sidecar via
+          # the effective (possibly DB-overridden) sidecar port, so the
+          # probe never depends on the sidecar listener port itself.
           startupProbe:
             exec:
               command:
                 - /bin/sh
                 - -c
-                - "curl -sf http://localhost:8000/health && curl -sf http://localhost:9100/health"
+                - "curl -sf http://localhost:8000/api/health"
             periodSeconds: 2
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             failureThreshold: 30
             successThreshold: 1
           readinessProbe:

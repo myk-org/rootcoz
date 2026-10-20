@@ -23,9 +23,10 @@ from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from simple_logger.logger import get_logger
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 # Fields in ``request_params`` that contain secrets and must be encrypted.
 SENSITIVE_KEYS: frozenset[str] = frozenset(
@@ -295,19 +296,28 @@ def encrypt_value(value: str) -> str:
     return f"{_ENCRYPTED_PREFIX}{token}"
 
 
+def decrypt_value_or_none(value: str) -> str | None:
+    """Decrypt a single value; ``None`` when the ciphertext is unreadable.
+
+    Unlike :func:`decrypt_value` — which returns the original ciphertext on
+    failure so callers can detect that a value was present — this never
+    hands undecrypted bytes back: callers that must not pass a ciphertext
+    downstream get an unambiguous ``None`` instead. Values without the
+    encrypted prefix are legacy plaintext and pass through unchanged.
+    """
+    if not value or not value.startswith(_ENCRYPTED_PREFIX):
+        return value or None
+    try:
+        return _get_fernet().decrypt(value[len(_ENCRYPTED_PREFIX) :].encode()).decode()
+    except InvalidToken:
+        logger.warning("Failed to decrypt value: encryption key may have changed.")
+        return None
+
+
 def decrypt_value(value: str) -> str:
     """Decrypt a single string value. Returns plaintext, or original value on failure."""
-    if not value or not value.startswith(_ENCRYPTED_PREFIX):
-        return value or ""
-    fernet = _get_fernet()
-    ciphertext = value[len(_ENCRYPTED_PREFIX) :]
-    try:
-        return fernet.decrypt(ciphertext.encode()).decode()
-    except InvalidToken:
-        logger.warning(
-            "Failed to decrypt value: encryption key may have changed. Preserving ciphertext."
-        )
-        return value  # Preserve the encrypted value instead of returning ""
+    decrypted = decrypt_value_or_none(value)
+    return value if decrypted is None else decrypted
 
 
 def decrypt_sensitive_fields(params: dict[str, Any]) -> dict[str, Any]:

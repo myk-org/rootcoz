@@ -4,13 +4,12 @@ Generates GitHub issue / Jira bug content using AI, searches for
 duplicates, and creates issues via the respective REST APIs.
 """
 
-import os
 import re
 from typing import Any
 
 import httpx
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, build_ai_attribution
 from rootcoz.config import Settings
@@ -22,7 +21,7 @@ from rootcoz.models import (
     ProductBugReport,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # AI attribution footers appended to all generated issues.
 GITHUB_AI_FOOTER = build_ai_attribution(AiProvenance(ai_used=True))

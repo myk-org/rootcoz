@@ -6,12 +6,10 @@ from attached logs, and creates the issue in myk-org/rootcoz.
 """
 
 import json
-import os
 import re
 from typing import Any
 
-from simple_logger.logger import get_logger
-
+from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once, public_provider_name
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
 from rootcoz.bug_creation import create_github_issue
@@ -22,7 +20,7 @@ from rootcoz.models import (
     FeedbackResponse,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 

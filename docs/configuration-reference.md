@@ -57,7 +57,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | Restart | Server restart required for a change to take effect |
    | After login | Whether an admin can change it in Server Settings without a restart |
 
-   Fields marked `after login: no` are server-only. `PUT /api/admin/settings` rejects them with `400 Server-only settings (env var only)`, so they must come from the environment.
+   Fields marked `after login: yes (restart)` are settable in Server Settings but only take effect after a server restart. `DB_PATH` and `DEBUG` remain env-only (`PUT /api/admin/settings` rejects them — they are process bootstrap with no Settings field). `ADMIN_KEY` is env-only too: it has a Settings field for read-only display, but every write path (`PUT`, persist, reset) rejects it — it is a server-only bootstrap secret, never settable at runtime.
 
 3. **Jenkins category.**
 
@@ -86,6 +86,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `MAX_CONCURRENT_AI_CALLS` | `3` | integer > 0 | no | no | yes |
    | `PEER_AI_CONFIGS` | empty | string | no | no | yes |
    | `PEER_ANALYSIS_MAX_ROUNDS` | `3` | integer 1–10 | no | no | yes |
+   | `RECORD_TRANSCRIPTS` | `false` | boolean | no | no | yes |
 
    `AI_PROVIDER` accepts any exact provider ID that pi-sidecar reports, provided the `provider/model` pair appears in its catalogue. `claude`, `gemini`, and `cursor` are convenience aliases that resolve through the mapping described above; they are not the only accepted values. The chart's `ai.provider` accepts the same freedom — any provider ID string, including a custom provider registered through the sidecar agent dir (the chart's install-time credential checks only apply to the three built-in aliases). Values are lowercased on load, and legacy `*-cli` names are normalised to their canonical form. To see what your sidecar actually exposes, read the provider list from `GET /api/ai-models`. `PEER_AI_CONFIGS` uses `provider:model,provider:model`; model names may contain commas inside square brackets, for example `cursor:gpt-5.4[context=272k,reasoning=medium]`.
 
@@ -124,7 +125,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `GITHUB_TOKEN` | unset | string | yes | no | yes |
    | `TESTS_REPO_URL` | unset | string | no | no | yes |
    | `TESTS_REPO_TOKEN` | unset | string | yes | no | yes |
-   | `ENABLE_GITHUB_ISSUES` | unset | boolean | no | no | **no** |
+   | `ENABLE_GITHUB_ISSUES` | unset | boolean | no | no | yes |
 
    With `ENABLE_GITHUB_ISSUES` unset, GitHub issue creation auto-enables when both `TESTS_REPO_URL` and `GITHUB_TOKEN` are configured. The user-facing feedback dialog stays available whenever the toggle is not explicitly `false`.
 
@@ -136,10 +137,10 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `REPORTPORTAL_API_TOKEN` | unset | string | yes | no | yes |
    | `REPORTPORTAL_PROJECT` | unset | string | no | no | yes |
    | `REPORTPORTAL_VERIFY_SSL` | `true` | boolean | no | no | yes |
-   | `ENABLE_REPORTPORTAL` | unset | boolean | no | no | **no** |
-   | `RP_PUSH_CLASSIFICATIONS` | `true` | boolean | no | no | **no** |
-   | `RP_PUSH_ROOTCOZ_URL` | `true` | boolean | no | no | **no** |
-   | `RP_PUSH_TRACKER_LINKS` | `true` | boolean | no | no | **no** |
+   | `ENABLE_REPORTPORTAL` | unset | boolean | no | no | yes |
+   | `RP_PUSH_CLASSIFICATIONS` | `true` | boolean | no | no | yes |
+   | `RP_PUSH_ROOTCOZ_URL` | `true` | boolean | no | no | yes |
+   | `RP_PUSH_TRACKER_LINKS` | `true` | boolean | no | no | yes |
 
    Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`).
 
@@ -147,15 +148,15 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
-   | `ADMIN_KEY` | empty | string | yes | no | yes |
-   | `SECURE_COOKIES` | `true` | boolean | no | **yes** | **no** |
-   | `TRUST_PROXY_HEADERS` | `false` | boolean | no | **yes** | **no** |
-   | `REQUIRE_APPROVAL` | `true` | boolean | no | no | **no** |
-   | `ADMIN_WAIT_APPROVE_MSG` | empty | string | no | no | **no** |
-   | `ALLOWED_USERS` | empty | string | no | no | **no** |
-   | `DEFAULT_USER_ROLE` | `reviewer` | string | no | **yes** | **no** |
+   | `SECURE_COOKIES` | `true` | boolean | no | **yes** | yes (restart) |
+   | `TRUST_PROXY_HEADERS` | `false` | boolean | no | **yes** | yes (restart) |
+   | `REQUIRE_APPROVAL` | `true` | boolean | no | no | yes |
+   | `ADMIN_WAIT_APPROVE_MSG` | empty | string | no | no | yes |
+   | `ALLOWED_USERS` | empty | string | no | no | yes |
+   | `DEFAULT_USER_ROLE` | `reviewer` | string | no | **yes** | yes (restart) |
+   | `SESSION_TTL_HOURS` | `720` | integer 1–87600 | no | no | yes |
 
-   `ADMIN_KEY` bootstraps the `admin` superuser that lives outside the database; log in as `admin` with that key. `DEFAULT_USER_ROLE` accepts only `viewer`, `reviewer`, or `operator` — any other value fails validation at startup. `ALLOWED_USERS` is a comma-separated list of usernames and is empty (open) by default. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with `403 Registration is restricted. Contact an admin.` before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets `403 User not allowed. Contact an administrator to be added to the allow list.` A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes.
+   `ADMIN_KEY` bootstraps the `admin` superuser that lives outside the database; log in as `admin` with that key. It is environment-only: Server Settings shows it masked (read-only) but rejects any attempt to set, persist, or reset it — keep the env var authoritative. `DEFAULT_USER_ROLE` accepts only `viewer`, `reviewer`, or `operator` — any other value fails validation at startup. `ALLOWED_USERS` is a comma-separated list of usernames and is empty (open) by default. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with `403 Registration is restricted. Contact an admin.` before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets `403 User not allowed. Contact an administrator to be added to the allow list.` A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes.
 
    > **Warning:** Set `SECURE_COOKIES=false` only for local HTTP development. Behind a TLS-terminating proxy, leave it `true` or sessions will not be stored by the browser.
 
@@ -174,15 +175,16 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
-    | `PUBLIC_BASE_URL` | unset | string | no | no | **no** |
+    | `PUBLIC_BASE_URL` | unset | string | no | no | yes |
     | `ADDITIONAL_REPOS` | empty | string | no | no | yes |
     | `MAX_CONCURRENT_REPO_CLONES` | `10` | integer > 0 | no | no | yes |
     | `WAIT_FOR_COMPLETION` | `true` | boolean | no | no | yes |
     | `POLL_INTERVAL_MINUTES` | `2` | integer > 0 | no | no | yes |
     | `MAX_WAIT_MINUTES` | `0` | integer ≥ 0 | no | no | yes |
-    | `METADATA_RULES_FILE` | empty | string | no | **yes** | **no** |
-    | `ENABLE_AUTO_REVIEW` | `true` | boolean | no | no | **no** |
-    | `AUTO_PUSH_EXPORTERS` | empty | string | no | no | **no** |
+    | `METADATA_RULES_FILE` | empty | string | no | **yes** | yes (restart) |
+    | `LOG_LEVEL` | empty (`INFO`) | string | no | **yes** | yes (restart) |
+    | `ENABLE_AUTO_REVIEW` | `true` | boolean | no | no | yes |
+    | `AUTO_PUSH_EXPORTERS` | empty | string | no | no | yes |
 
     `ADDITIONAL_REPOS` uses `name:url,name:url`, with an optional `:ref` and `@token` suffix per entry; names must be unique. `MAX_WAIT_MINUTES=0` means wait indefinitely. `PUBLIC_BASE_URL` is the only origin RootCoz will build absolute links from — request `Host` and `X-Forwarded-*` headers are never trusted, which is what blocks host-header injection in result and tracker links.
 
@@ -198,11 +200,151 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
-    | `VAPID_PUBLIC_KEY` | empty | string | no | **yes** | **no** |
+    | `VAPID_PUBLIC_KEY` | empty | string | no | **yes** | yes (restart) |
     | `VAPID_PRIVATE_KEY` | empty | string | yes | **yes** | yes |
-    | `VAPID_CLAIM_EMAIL` | empty | string | no | **yes** | **no** |
+    | `VAPID_CLAIM_EMAIL` | empty | string | no | **yes** | yes (restart) |
 
-    Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that the public key and claim email are environment-only, because changing them would invalidate subscriptions already registered with browsers.
+    Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that changing the public key or claim email invalidates subscriptions already registered with browsers — they are restart-required and best managed at deployment time.
+
+12. **Notifications category** (added with #347).
+
+    | Variable | Default | Type | Secret | Restart | After login |
+    | --- | --- | --- | --- | --- | --- |
+    | `SMTP_HOST` | empty | string | no | no | yes |
+    | `SMTP_PORT` | `587` | integer > 0 | no | no | yes |
+    | `SMTP_USER` | empty | string | no | no | yes |
+    | `SMTP_PASSWORD` | unset | string | yes | no | yes |
+    | `SMTP_FROM` | empty | string | no | no | yes |
+    | `ALERT_EMAIL_TO` | empty | string | no | no | yes |
+    | `SLACK_WEBHOOK_URL` | unset | string | yes | no | yes |
+
+    Email alerts need `SMTP_HOST` + `ALERT_EMAIL_TO` (from address defaults to `SMTP_USER`, then `rootcoz@<host>`); Slack alerts need `SLACK_WEBHOOK_URL`. The env var stays the deployment default — a saved setting overrides it.
+
+13. **Sidecar category** (added with #347 — restart required).
+
+    The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. An empty field means "no override": the deployment environment governs.
+
+    | Variable | Default | Type | Secret | Restart | After login |
+    | --- | --- | --- | --- | --- | --- |
+    | `SIDECAR_HOST` | empty | string | no | **yes** | yes (restart) |
+    | `SIDECAR_PORT` | empty | string | no | **yes** | yes (restart) |
+    | `SIDECAR_URL` | empty | string | no | **yes** | yes (restart) |
+    | `ACPX_AGENTS` | empty | string | no | **yes** | yes (restart) |
+    | `CLI_AGENTS` | empty | string | no | **yes** | yes (restart) |
+    | `PI_SIDECAR_LOG_LEVEL` | empty | string | no | **yes** | yes (restart) |
+    | `NODE_BINARY` | empty | string | no | **yes** | yes (restart) |
+    | `PI_SIDECAR_TRANSCRIPTS_DIR` | empty | string | no | **yes** | yes (restart) |
+
+    `SIDECAR_HOST` accepts only values the container's loopback health probe can still reach: loopback addresses, `0.0.0.0`/`::` (wildcard binds that also answer on `127.0.0.1`), or empty. A specific non-loopback address is rejected with a `400` on save — the entrypoint probes `http://127.0.0.1:$SIDECAR_PORT` before every boot and aborts when it fails, so such a value would brick every restart. `0.0.0.0` is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as `TRUST_PROXY_HEADERS` — only do it on a network you control. `SIDECAR_PORT` must be an integer between 1 and 65535. When `SIDECAR_PORT` is overridden and `SIDECAR_URL` is not set, rootcoz derives `SIDECAR_URL=http://127.0.0.1:<port>` so the Python client follows the listener; an explicit `SIDECAR_URL` always wins. Because the derived value is exported into the process environment, `SIDECAR_URL` shows as env-sourced in Server Settings, but the persist path rejects it — persisting the derived URL would pin it and silently beat the port derivation after a later `sidecar_port` change. Persist `sidecar_port` instead.
+
+### Environment variable audit (#347)
+
+Every environment variable rootcoz or the sidecar consumes, in exactly one row. "Setting key" is the Server Settings field (empty field name in the UI clears the override and falls back to the env value). "Runtime" means a saved change applies without a restart; "restart" means it applies at the next boot (sidecar rows apply through the `/data/pi-sidecar/env` bridge).
+
+| Env var | Setting key | Category | Runtime / Restart |
+| --- | --- | --- | --- |
+| `JENKINS_URL` | `jenkins_url` | Jenkins | runtime |
+| `JENKINS_USER` | `jenkins_user` | Jenkins | runtime (sensitive) |
+| `JENKINS_PASSWORD` | `jenkins_password` | Jenkins | runtime (sensitive) |
+| `JENKINS_SSL_VERIFY` | `jenkins_ssl_verify` | Jenkins | runtime |
+| `JENKINS_TIMEOUT` | `jenkins_timeout` | Jenkins | runtime |
+| `JENKINS_ARTIFACTS_MAX_SIZE_MB` | `jenkins_artifacts_max_size_mb` | Jenkins | runtime |
+| `GET_JOB_ARTIFACTS` | `get_job_artifacts` | Jenkins | runtime |
+| `AI_PROVIDER` | `ai_provider` | AI | runtime |
+| `AI_MODEL` | `ai_model` | AI | runtime |
+| `FORCE_SERVER_CREDENTIALS` | `force_server_credentials` | AI | runtime |
+| `AI_CALL_TIMEOUT` | `ai_call_timeout` | AI | runtime |
+| `MAX_CONCURRENT_AI_CALLS` | `max_concurrent_ai_calls` | AI | runtime |
+| `PEER_AI_CONFIGS` | `peer_ai_configs` | AI | runtime |
+| `PEER_ANALYSIS_MAX_ROUNDS` | `peer_analysis_max_rounds` | AI | runtime |
+| `RECORD_TRANSCRIPTS` | `record_transcripts` | AI | runtime (sidecar live toggle) |
+| `ENABLE_FREE_MODELS` | `enable_free_models` | AI | runtime |
+| `AMBIENT_AUTH_PROVIDERS` | `ambient_auth_providers` | AI | runtime |
+| `ACTIVE_SERVER_PROVIDERS` | `active_server_providers` | AI | runtime |
+| `JIRA_URL` | `jira_url` | Jira | runtime |
+| `JIRA_EMAIL` | `jira_email` | Jira | runtime (sensitive) |
+| `JIRA_API_TOKEN` | `jira_api_token` | Jira | runtime (sensitive) |
+| `JIRA_PAT` | `jira_pat` | Jira | runtime (sensitive) |
+| `JIRA_OAUTH_ACCESS_TOKEN` | `jira_oauth_access_token` | Jira | runtime (sensitive) |
+| `ATLASSIAN_OAUTH_CLOUD_ID` | `atlassian_oauth_cloud_id` | Jira | runtime |
+| `ATLASSIAN_OAUTH_CLIENT_ID` | `atlassian_oauth_client_id` | Jira | runtime |
+| `JIRA_SITE_URL` | `jira_site_url` | Jira | runtime |
+| `JIRA_PROJECT_KEY` | `jira_project_key` | Jira | runtime |
+| `JIRA_SSL_VERIFY` | `jira_ssl_verify` | Jira | runtime |
+| `JIRA_MAX_RESULTS` | `jira_max_results` | Jira | runtime |
+| `ENABLE_JIRA` | `enable_jira` | Jira | runtime |
+| `ENABLE_JIRA_ISSUES` | `enable_jira_issues` | Jira | runtime |
+| `GITHUB_TOKEN` | `github_token` | GitHub | runtime (sensitive) |
+| `TESTS_REPO_URL` | `tests_repo_url` | GitHub | runtime |
+| `TESTS_REPO_TOKEN` | `tests_repo_token` | GitHub | runtime (sensitive) |
+| `ENABLE_GITHUB_ISSUES` | `enable_github_issues` | GitHub | runtime |
+| `REPORTPORTAL_URL` | `reportportal_url` | Report Portal | runtime |
+| `REPORTPORTAL_API_TOKEN` | `reportportal_api_token` | Report Portal | runtime (sensitive) |
+| `REPORTPORTAL_PROJECT` | `reportportal_project` | Report Portal | runtime |
+| `REPORTPORTAL_VERIFY_SSL` | `reportportal_verify_ssl` | Report Portal | runtime |
+| `ENABLE_REPORTPORTAL` | `enable_reportportal` | Report Portal | runtime |
+| `RP_PUSH_CLASSIFICATIONS` | `rp_push_classifications` | Report Portal | runtime |
+| `RP_PUSH_ROOTCOZ_URL` | `rp_push_rootcoz_url` | Report Portal | runtime |
+| `RP_PUSH_TRACKER_LINKS` | `rp_push_tracker_links` | Report Portal | runtime |
+| `ADMIN_KEY` | `admin_key` | Auth & Security | env-only (read-only display) |
+| `SECURE_COOKIES` | `secure_cookies` | Auth & Security | restart |
+| `TRUST_PROXY_HEADERS` | `trust_proxy_headers` | Auth & Security | restart |
+| `REQUIRE_APPROVAL` | `require_approval` | Auth & Security | runtime |
+| `ADMIN_WAIT_APPROVE_MSG` | `admin_wait_approve_msg` | Auth & Security | runtime |
+| `ALLOWED_USERS` | `allowed_users` | Auth & Security | runtime |
+| `DEFAULT_USER_ROLE` | `default_user_role` | Auth & Security | restart |
+| `SESSION_TTL_HOURS` | `session_ttl_hours` | Auth & Security | runtime |
+| `PROW_URL` | `prow_url` | Prow | runtime |
+| `GCS_BUCKET` | `gcs_bucket` | Prow | runtime |
+| `PROW_ARTIFACTS_MAX_SIZE_MB` | `prow_artifacts_max_size_mb` | Prow | runtime |
+| `PROW_ARTIFACT_MAX_FILE_SIZE_MB` | `prow_artifact_max_file_size_mb` | Prow | runtime |
+| `PROW_ARTIFACTS_MAX_OBJECTS` | `prow_artifacts_max_objects` | Prow | runtime |
+| `PUBLIC_BASE_URL` | `public_base_url` | Server | runtime |
+| `ADDITIONAL_REPOS` | `additional_repos` | Server | runtime |
+| `MAX_CONCURRENT_REPO_CLONES` | `max_concurrent_repo_clones` | Server | runtime |
+| `WAIT_FOR_COMPLETION` | `wait_for_completion` | Server | runtime |
+| `POLL_INTERVAL_MINUTES` | `poll_interval_minutes` | Server | runtime |
+| `MAX_WAIT_MINUTES` | `max_wait_minutes` | Server | runtime |
+| `METADATA_RULES_FILE` | `metadata_rules_file` | Server | restart |
+| `LOG_LEVEL` | `log_level` | Server | restart |
+| `ENABLE_AUTO_REVIEW` | `enable_auto_review` | Server | runtime |
+| `AUTO_PUSH_EXPORTERS` | `auto_push_exporters` | Server | runtime |
+| `VAPID_PUBLIC_KEY` | `vapid_public_key` | Web Push | restart |
+| `VAPID_PRIVATE_KEY` | `vapid_private_key` | Web Push | restart (sensitive) |
+| `VAPID_CLAIM_EMAIL` | `vapid_claim_email` | Web Push | restart |
+| `SMTP_HOST` | `smtp_host` | Notifications | runtime |
+| `SMTP_PORT` | `smtp_port` | Notifications | runtime |
+| `SMTP_USER` | `smtp_user` | Notifications | runtime |
+| `SMTP_PASSWORD` | `smtp_password` | Notifications | runtime (sensitive) |
+| `SMTP_FROM` | `smtp_from` | Notifications | runtime |
+| `ALERT_EMAIL_TO` | `alert_email_to` | Notifications | runtime |
+| `SLACK_WEBHOOK_URL` | `slack_webhook_url` | Notifications | runtime (sensitive) |
+| `SIDECAR_HOST` | `sidecar_host` | Sidecar | restart (env bridge) |
+| `SIDECAR_PORT` | `sidecar_port` | Sidecar | restart (env bridge) |
+| `SIDECAR_URL` | `sidecar_url` | Sidecar | restart (env bridge; derived from `sidecar_port` when unset — not persistable) |
+| `ACPX_AGENTS` | `acpx_agents` | Sidecar | restart (env bridge) |
+| `CLI_AGENTS` | `cli_agents` | Sidecar | restart (env bridge) |
+| `PI_SIDECAR_LOG_LEVEL` | `pi_sidecar_log_level` | Sidecar | restart (env bridge) |
+| `NODE_BINARY` | `node_binary` | Sidecar | restart (env bridge) |
+| `PI_SIDECAR_TRANSCRIPTS_DIR` | `pi_sidecar_transcripts_dir` | Sidecar | restart (env bridge) |
+| `DB_PATH` | — (no setting) | excluded | env-only |
+| `ROOTCOZ_ENCRYPTION_KEY` | — (no setting) | excluded | env-only |
+| `PORT` | — (no setting) | excluded | env-only |
+| `XDG_CONFIG_HOME` / `XDG_DATA_HOME` | — (no setting) | excluded | env-only |
+| `DEV_MODE` / `DEBUG` | — (no setting) | excluded | env-only |
+| `GEMINI_API_KEY` | — (no setting) | excluded | env-only (sidecar credential) |
+| `ANTHROPIC_API_KEY` | — (no setting) | excluded | env-only (sidecar credential) |
+| `CURSOR_API_KEY` | — (no setting) | excluded | env-only (sidecar credential) |
+| `CLAUDE_CODE_USE_VERTEX` | — (no setting) | excluded | env-only (Vertex toggle) |
+| `CLOUD_ML_REGION` | — (no setting) | excluded | env-only (Vertex) |
+| `ANTHROPIC_VERTEX_PROJECT_ID` | — (no setting) | excluded | env-only (Vertex) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | — (no setting) | excluded | env-only (Vertex gcloud credential mount) |
+| `CLOUDSDK_CONFIG` | — (no setting) | excluded | env-only (Vertex gcloud config mount) |
+| `PI_SIDECAR_AGENT_DIR` | — (no setting) | excluded | env-only (sidecar agent dir) |
+| `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | — (no setting) | excluded | env-only (sidecar pruning) |
+| `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | — (no setting) | excluded | env-only (sidecar pruning) |
+
+`ADMIN_KEY` also bootstraps the `admin` superuser before any settings exist; keep the env var authoritative for bootstrap. Admin-managed server provider API keys (the `GEMINI_API_KEY` replacement for server-credential sessions) live in the encrypted `server_ai_providers` table, managed under Server Settings → AI — they are not env vars.
 
 ### Variables that never reach the Server Settings UI
 
@@ -213,7 +355,6 @@ These are read straight from the process environment and have no `Settings` fiel
 | `ROOTCOZ_ENCRYPTION_KEY` | auto-generated file key | Fernet key for at-rest encryption and the HMAC secret for API key hashes |
 | `XDG_DATA_HOME` | `~/.local/share` | Where the auto-generated `.encryption_key` file lives |
 | `XDG_CONFIG_HOME` | user default | Writable config directory the container points at `/tmp/config` |
-| `LOG_LEVEL` | `INFO` | Log verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `DEV_MODE` / `DEBUG` | unset | Set to `true` to enable uvicorn auto-reload |
 | `PORT` | `8000` | Port the ASGI server binds |
 | `ANTHROPIC_API_KEY` | unset | Claude credential for the sidecar |
@@ -222,11 +363,9 @@ These are read straight from the process environment and have no `Settings` fiel
 | `CLAUDE_CODE_USE_VERTEX` | unset | Set to `1` to authenticate Claude through Vertex AI |
 | `CLOUD_ML_REGION` | unset | Vertex region, used with `CLAUDE_CODE_USE_VERTEX` |
 | `ANTHROPIC_VERTEX_PROJECT_ID` | unset | Vertex project, used with `CLAUDE_CODE_USE_VERTEX` |
-| `ACPX_AGENTS` | unset | Comma-separated providers exposed through the Cursor ACPX bridge |
-| `CLI_AGENTS` | unset | Comma-separated providers exposed through the local CLI agents |
+| `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Vertex service-account key file the Helm chart mounts (`/gcloud-credentials/application_default_credentials.json`) |
+| `CLOUDSDK_CONFIG` | unset | gcloud config directory for the Vertex credential mount (`/gcloud-credentials` in the chart) |
 | `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
-| `RECORD_TRANSCRIPTS` | `false` | Record one redacted JSONL per AI session (pi-sidecar >= 4.12.0). Toggleable in Server Settings → AI — applies **immediately** via the sidecar runtime toggle (pi-sidecar >= 4.14.0, no restart); rootcoz also persists the value to `/data/pi-sidecar/env`, which the container entrypoint sources on boot so restarts keep it |
-| `PI_SIDECAR_TRANSCRIPTS_DIR` | `/data/pi-sidecar/transcripts` | Where transcript JSONL files land — keep it under the persistent `/data` mount so they survive container replacement |
 
 #### Transcript retention
 

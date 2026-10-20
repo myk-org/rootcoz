@@ -59,7 +59,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
-| GET | `/api/health` | Detailed health including database and AI sidecar |
+| GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
@@ -280,6 +280,11 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | PUT | `/api/admin/users/{username}/can-use-server-providers` | Grant or revoke server AI credentials |
 | GET | `/api/admin/free-models` | List admin-declared free provider+model pairs (with `version` fingerprint) |
 | PUT | `/api/admin/free-models` | Replace the free pair list (validated against the catalog); optional `expected_version` from a prior GET rejects concurrent edits with `409` |
+| GET | `/api/admin/server-providers` | Per provider: key presence, verification state, and its models with `included` + `free` flags — never the keys |
+| POST | `/api/admin/server-providers` | Add a server provider key: `provider`, `api_key`, `verification_model` — verified with a real sidecar turn before storing; `409` when a key is already stored |
+| POST | `/api/admin/server-providers/{provider}/rotate-key` | Replace the key (re-verified first); `404` when none is stored |
+| PUT | `/api/admin/server-providers/{provider}/models` | Replace the provider's model selection `{id, included, free}[]` (validated against the catalog); `free` implies `included`, and the free flags write the same `free_ai_models` pairs |
+| DELETE | `/api/admin/server-providers/{provider}` | Remove the key, selection, and free pairs; `200` with a warning payload listing the affected models |
 | GET | `/api/admin/settings` | All settings with value, source, and metadata; `reveal_key` unmasks one key or `__all__` |
 | PUT | `/api/admin/settings` | `{"settings": {"KEY": "value"}}` |
 | GET | `/api/admin/settings/history` | `key`, `limit` change history |

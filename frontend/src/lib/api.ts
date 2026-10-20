@@ -128,6 +128,13 @@ export const api = {
   put: <T>(path: string, body?: unknown) =>
     requestWithJsonBody<T>('PUT', path, body),
 
+  /** Promote a setting's current env value into the DB (POST /api/admin/settings/{key}/persist). */
+  persistSetting: (key: string) =>
+    requestWithJsonBody<{ key: string; source: string }>(
+      'POST',
+      `/api/admin/settings/${encodeURIComponent(key)}/persist`,
+    ),
+
   /** Test an integration connection with the currently saved settings. */
   testIntegration: (integration: string) =>
     requestWithJsonBody<TestIntegrationResult>(

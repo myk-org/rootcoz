@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from pi_sidecar_client import get_sidecar_client
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     call_ai,
@@ -29,7 +29,7 @@ from rootcoz.engine.http_mcp import (
 from rootcoz.jira import JiraConnection, resolve_jira_connection_from_params
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
-logger = get_logger(name=__name__)
+logger = get_child_logger(__name__)
 
 _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
 
@@ -1266,9 +1266,19 @@ async def _create_chat_session(
         if key is not None:
             create_kwargs["api_key"] = key
         else:
-            from rootcoz.ai_client import require_server_provider_grant
+            from rootcoz.ai_client import (
+                require_server_provider_grant,
+                server_provider_key,
+            )
 
             await require_server_provider_grant(sidecar_provider, sidecar_model)
+            # A stored server provider key (#347) reaches chat sessions too:
+            # pass it as the session apiKey while keeping the server
+            # credential-source classification (create_session_safely records
+            # server_api_key sessions as server-owned).
+            server_key = await server_provider_key(sidecar_provider)
+            if server_key is not None:
+                create_kwargs["server_api_key"] = server_key
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id

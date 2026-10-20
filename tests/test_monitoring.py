@@ -342,6 +342,61 @@ class TestHealthChecks:
         assert result["status"] == "unhealthy"
         assert result["checks"]["database"]["status"] == "error"
 
+    async def test_build_health_response_unhealthy_sidecar(self, temp_db_path):
+        """An unreachable sidecar is unhealthy (503), not degraded (#347 r3).
+
+        Deployment startup probes point at /api/health precisely so they
+        validate the sidecar via its effective port without depending on
+        the listener port — that only works when a dead sidecar fails the
+        endpoint.
+        """
+        import aiosqlite
+
+        async with aiosqlite.connect(str(temp_db_path)) as db:
+            await db.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)")
+
+        settings = MagicMock()
+        settings.jenkins_url = ""
+        settings.reportportal_enabled = False
+
+        ai_error = {"status": "error", "detail": "Sidecar unreachable: refused"}
+        with (
+            patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}),
+            patch(
+                "rootcoz.monitoring.check_ai_provider",
+                new_callable=AsyncMock,
+                return_value=ai_error,
+            ),
+        ):
+            result = await build_health_response(settings, str(temp_db_path))
+
+        assert result["status"] == "unhealthy"
+        assert result["checks"]["ai_provider"]["status"] == "error"
+
+    async def test_check_ai_provider_probes_effective_sidecar_url(self):
+        """The sidecar probe follows SIDECAR_URL / SIDECAR_PORT, never a hardcoded port."""
+        cases = [
+            {"SIDECAR_URL": "http://127.0.0.1:9200", "SIDECAR_PORT": "9100"},
+            {"SIDECAR_URL": "", "SIDECAR_PORT": "9200"},
+            {"SIDECAR_URL": "", "SIDECAR_PORT": ""},
+        ]
+        expected = [
+            "http://127.0.0.1:9200/health",
+            "http://127.0.0.1:9200/health",
+            "http://127.0.0.1:9100/health",
+        ]
+        for env, url in zip(cases, expected, strict=True):
+            with (
+                patch.dict(os.environ, env),
+                patch(
+                    "rootcoz.monitoring._check_http_service",
+                    new_callable=AsyncMock,
+                    return_value={"status": "ok"},
+                ) as probe,
+            ):
+                await check_ai_provider()
+            probe.assert_awaited_once_with(url, ok_below=300)
+
 
 # ---------------------------------------------------------------------------
 # Startup config validation

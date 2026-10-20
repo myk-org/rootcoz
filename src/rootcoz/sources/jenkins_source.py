@@ -9,7 +9,6 @@ orchestration function.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import time as _time
 from collections import defaultdict
@@ -21,8 +20,8 @@ from urllib.parse import quote as _urlquote
 
 import jenkins
 from pi_sidecar_client import run_parallel_with_limit
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.config import Settings
 from rootcoz.engine.core import (
     analyze_failure_group,
@@ -55,7 +54,7 @@ from rootcoz.utils import (
     is_jenkins_connectivity_error,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
