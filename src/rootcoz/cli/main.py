@@ -48,6 +48,9 @@ admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
 admin_models_app = typer.Typer(help="Manage AI models.", no_args_is_help=True)
+admin_server_providers_app = typer.Typer(
+    help="Manage server AI provider keys.", no_args_is_help=True
+)
 
 metadata_app = typer.Typer(help="Manage job metadata.", no_args_is_help=True)
 failure_app = typer.Typer(
@@ -74,6 +77,7 @@ app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
 admin_app.add_typer(admin_settings_app, name="settings")
 admin_app.add_typer(admin_models_app, name="models")
+admin_app.add_typer(admin_server_providers_app, name="server-providers")
 
 # -- Global state managed via app callback ------------------------------------
 
@@ -142,46 +146,10 @@ _TestsRepoTokenOpt = Annotated[
         help="Token for cloning private tests repository.",
     ),
 ]
-_JiraUrlOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-url",
-        envvar="JIRA_URL",
-        help="Jira instance URL.",
-    ),
-]
-_JiraEmailOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-email",
-        envvar="JIRA_EMAIL",
-        help="Jira Cloud email.",
-    ),
-]
-_JiraApiTokenOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-api-token",
-        envvar="JIRA_API_TOKEN",
-        help="Jira Cloud API token.",
-    ),
-]
-_JiraPatOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-pat",
-        envvar="JIRA_PAT",
-        help="Jira Server/DC personal access token.",
-    ),
-]
-_JiraSaTokenOpt = Annotated[
-    str,
-    typer.Option(
-        "--jira-sa-token",
-        envvar="JIRA_OAUTH_ACCESS_TOKEN",
-        help="Atlassian service account (ATST) token — takes precedence over the other Jira credentials.",
-    ),
-]
+# NOTE: no per-request Jira credential or URL options here — each Jira
+# auth method's URL and credentials are Server Settings only. Per-user
+# tokens for bug creation/listing commands use their own
+# --jira-token/--jira-email/--jira-sa-token options.
 _AtlassianCloudIdOpt = Annotated[
     str,
     typer.Option(
@@ -195,7 +163,7 @@ _JiraSiteUrlOpt = Annotated[
     typer.Option(
         "--jira-site-url",
         envvar="JIRA_SITE_URL",
-        help="Atlassian site URL for browse links when JIRA_URL is the scoped API URL.",
+        help="Atlassian site URL for Jira browse links.",
     ),
 ]
 _JiraProjectKeyOpt = Annotated[
@@ -204,13 +172,6 @@ _JiraProjectKeyOpt = Annotated[
         "--jira-project-key",
         envvar="JIRA_PROJECT_KEY",
         help="Jira project key to scope searches.",
-    ),
-]
-_JiraSslVerifyOpt = Annotated[
-    bool | None,
-    typer.Option(
-        "--jira-ssl-verify/--no-jira-ssl-verify",
-        help="Jira SSL certificate verification.",
     ),
 ]
 _JiraMaxResultsOpt = Annotated[
@@ -1267,11 +1228,6 @@ def _apply_common_config_defaults(
     _cfg_str_fields: dict[str, str] = {
         "tests_repo_url": cfg.tests_repo_url,
         "tests_repo_token": cfg.tests_repo_token,
-        "jira_url": cfg.jira_url,
-        "jira_email": cfg.jira_email,
-        "jira_api_token": cfg.jira_api_token,
-        "jira_pat": cfg.jira_pat,
-        "jira_oauth_access_token": cfg.jira_oauth_access_token,
         "atlassian_oauth_cloud_id": cfg.atlassian_oauth_cloud_id,
         "jira_site_url": cfg.jira_site_url,
         "jira_project_key": cfg.jira_project_key,
@@ -1334,8 +1290,6 @@ def _apply_common_config_defaults(
         extras["force_server_credentials"] = cfg.force_server_credentials
     if cfg.enable_jira is not None:
         extras["enable_jira"] = cfg.enable_jira
-    if cfg.jira_ssl_verify is not None:
-        extras["jira_ssl_verify"] = cfg.jira_ssl_verify
     if include_jenkins:
         if cfg.jenkins_ssl_verify is not None:
             extras["jenkins_ssl_verify"] = cfg.jenkins_ssl_verify
@@ -1517,15 +1471,9 @@ def analyze(
     ),
     tests_repo_url: _TestsRepoUrlOpt = "",
     tests_repo_token: _TestsRepoTokenOpt = "",
-    jira_url: _JiraUrlOpt = "",
-    jira_email: _JiraEmailOpt = "",
-    jira_api_token: _JiraApiTokenOpt = "",
-    jira_pat: _JiraPatOpt = "",
-    jira_sa_token: _JiraSaTokenOpt = "",
     atlassian_oauth_cloud_id: _AtlassianCloudIdOpt = "",
     jira_site_url: _JiraSiteUrlOpt = "",
     jira_project_key: _JiraProjectKeyOpt = "",
-    jira_ssl_verify: _JiraSslVerifyOpt = None,
     jira_max_results: _JiraMaxResultsOpt = None,
     github_token: _GithubTokenOpt = "",
     ai_call_timeout: _AiCallTimeoutOpt = None,
@@ -1666,11 +1614,6 @@ def analyze(
             "jenkins_password": jenkins_password,
             "tests_repo_url": tests_repo_url,
             "tests_repo_token": tests_repo_token,
-            "jira_url": jira_url,
-            "jira_email": jira_email,
-            "jira_api_token": jira_api_token,
-            "jira_pat": jira_pat,
-            "jira_oauth_access_token": jira_sa_token,
             "atlassian_oauth_cloud_id": atlassian_oauth_cloud_id,
             "jira_site_url": jira_site_url,
             "jira_project_key": jira_project_key,
@@ -1688,7 +1631,6 @@ def analyze(
         },
         bool_fields={
             "jenkins_ssl_verify": jenkins_ssl_verify,
-            "jira_ssl_verify": jira_ssl_verify,
             "get_job_artifacts": get_job_artifacts,
             "force_server_credentials": force_server_credentials,
             "wait_for_completion": wait_for_completion,
@@ -2296,7 +2238,9 @@ def jira_projects_cmd(
         "", "--jira-email", help="Jira email (uses config fallback)."
     ),
     jira_sa_token: str = typer.Option(
-        "", "--jira-sa-token", help="Atlassian service account (ATST) token."
+        "",
+        "--jira-sa-token",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA).",
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -2332,7 +2276,9 @@ def jira_security_levels_cmd(
     jira_token: str = typer.Option("", "--jira-token", help="Jira token."),
     jira_email: str = typer.Option("", "--jira-email", help="Jira email."),
     jira_sa_token: str = typer.Option(
-        "", "--jira-sa-token", help="Atlassian service account (ATST) token."
+        "",
+        "--jira-sa-token",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA).",
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -2612,7 +2558,7 @@ def preview_issue(
     jira_sa_token: str = typer.Option(
         "",
         "--jira-sa-token",
-        help="Atlassian service account (ATST) token — takes precedence over --jira-token.",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA) — takes precedence over --jira-token.",
     ),
     jira_project_key: str = typer.Option(
         "",
@@ -2752,7 +2698,7 @@ def create_issue(
     jira_sa_token: str = typer.Option(
         "",
         "--jira-sa-token",
-        help="Atlassian service account (ATST) token — takes precedence over --jira-token.",
+        help="Atlassian OAuth 2.0 credential client secret (ATOA) — takes precedence over --jira-token.",
     ),
     jira_project_key: str = typer.Option(
         "",
@@ -3573,6 +3519,24 @@ def admin_settings_reset(
         typer.echo(f"Reset: {key}")
 
 
+@admin_settings_app.command("persist")
+def admin_settings_persist(
+    key: str = typer.Argument(
+        help="Setting key whose current env value is saved to the DB store."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Persist an env-sourced setting's value to DB (source flips env -> db)."""
+    key = key.lower()
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_persist_setting(key),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Persisted to DB: {key}")
+
+
 @admin_settings_app.command("test")
 def admin_settings_test(
     integration: str = typer.Argument(
@@ -3697,6 +3661,177 @@ def admin_models_free_remove(
     )
     if not _state.get("json", False):
         typer.echo(f"Removed {provider}/{model} from the free list")
+
+
+# -- Server providers (Admin, #347) -------------------------------------------
+
+
+def _parse_server_provider_models(models: str, free: str = "") -> list[dict[str, Any]]:
+    """Parse a ``--models``/``--free`` selection into API entries.
+
+    Model IDs pass through verbatim — real IDs may genuinely end in
+    ``:free`` (OpenRouter free variants like
+    ``meta-llama/llama-3-8b-instruct:free``) or contain colons, so no
+    marker syntax is allowed; free pairs are selected with the separate
+    ``--free`` option and auto-included (free ⊆ included, matching the
+    API's normalization). Models absent from the selection are deselected.
+    """
+    included = [part.strip() for part in models.split(",") if part.strip()]
+    free_ids = {part.strip() for part in free.split(",") if part.strip()}
+    entries = [
+        {"id": model, "included": True, "free": model in free_ids} for model in included
+    ]
+    # A --free entry not repeated in --models is auto-included.
+    entries.extend(
+        {"id": model, "included": True, "free": True}
+        for model in sorted(free_ids - set(included))
+    )
+    return entries
+
+
+@admin_server_providers_app.command("list")
+def admin_server_providers_list(json_output: bool = _JSON_OPTION) -> None:
+    """List server provider key state and per-model selection."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_server_providers(),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    for provider in data.get("providers", []):
+        models = provider.get("models", [])
+        included = [m for m in models if m.get("included")]
+        free = [m for m in models if m.get("free")]
+        typer.echo(
+            f"{provider['provider']}: key={'yes' if provider.get('has_key') else 'no'}"
+            f" verified={'yes' if provider.get('verified') else 'no'}"
+            f" models={len(models)} included={len(included)} free={len(free)}"
+        )
+
+
+@admin_server_providers_app.command("add")
+def admin_server_providers_add(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    api_key: str = typer.Option(
+        ...,
+        "--api-key",
+        help=(
+            "Provider API key (verified with a real sidecar turn before "
+            "storing); prompted hidden when the flag is omitted."
+        ),
+        prompt=True,
+        hide_input=True,
+    ),
+    verification_model: str = typer.Option(
+        ..., "--verification-model", help="Model used to test the key."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Add a server provider key (rejected when verification fails)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_add_server_provider(provider, api_key, verification_model),
+        emit_output=False,
+    )
+    if data.get("ok"):
+        if not _state.get("json", False):
+            typer.echo(f"Stored verified key for {provider}")
+        return
+    # A rejected/inconclusive key check fails the command in BOTH output
+    # modes — --json still prints the payload, then exits 1.
+    if not _state.get("json", False):
+        typer.echo(f"Key NOT stored ({data.get('outcome')}): {data.get('message', '')}")
+    raise typer.Exit(code=1)
+
+
+@admin_server_providers_app.command("rotate-key")
+def admin_server_providers_rotate(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    api_key: str = typer.Option(
+        ...,
+        "--api-key",
+        help="New provider API key; prompted hidden when the flag is omitted.",
+        prompt=True,
+        hide_input=True,
+    ),
+    verification_model: str = typer.Option(
+        ..., "--verification-model", help="Model used to test the new key."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Replace a server provider key (re-verified before storing)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_rotate_server_provider_key(
+            provider, api_key, verification_model
+        ),
+        emit_output=False,
+    )
+    if data.get("ok"):
+        if not _state.get("json", False):
+            typer.echo(f"Rotated key for {provider}")
+        return
+    # A rejected/inconclusive key check fails the command in BOTH output
+    # modes — --json still prints the payload, then exits 1.
+    if not _state.get("json", False):
+        typer.echo(
+            f"Key NOT rotated ({data.get('outcome')}): {data.get('message', '')}"
+        )
+    raise typer.Exit(code=1)
+
+
+@admin_server_providers_app.command("models")
+def admin_server_providers_models(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    models: str = typer.Option(
+        ...,
+        "--models",
+        help=(
+            "Full selection: comma-separated model ids, passed verbatim. "
+            "Models not listed are deselected."
+        ),
+    ),
+    free: str = typer.Option(
+        "",
+        "--free",
+        help=(
+            "Comma-separated model ids to declare free (subset of --models; "
+            "entries not in --models are auto-included)."
+        ),
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Set which models a provider exposes on server credentials."""
+    entries = _parse_server_provider_models(models, free)
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_server_provider_models(provider, entries),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        free_count = sum(1 for e in entries if e["free"])
+        typer.echo(f"Set {len(entries)} model(s) for {provider} ({free_count} free)")
+
+
+@admin_server_providers_app.command("remove")
+def admin_server_providers_remove(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Remove a provider's key, selected models, and free pairs."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_delete_server_provider(provider),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        warnings = data.get("warnings", {})
+        typer.echo(
+            f"Removed {provider}"
+            f" (selected: {', '.join(warnings.get('selected_models', [])) or 'none'};"
+            f" free: {', '.join(warnings.get('free_models', [])) or 'none'})"
+        )
 
 
 # -- Token Usage (Admin) ------------------------------------------------------

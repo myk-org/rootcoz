@@ -59,7 +59,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
-| GET | `/api/health` | Detailed health including database and AI sidecar |
+| GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
@@ -80,8 +80,8 @@ That single authenticated GET returns the stored analysis for one job, including
 | PUT | `/api/user/ai-credentials/{provider}` | reviewer | Store a personal key. Body is `{api_key, model}` — `model` is required (`400` without it, since the key is verified against it) and the key is only persisted when the provider returns `accepted`. A `rejected` or `inconclusive` check is not an HTTP error: it returns `200` with `ok: false`, an `outcome`, and an explanatory `message`, leaving any existing credential unchanged, so clients must check `ok` rather than the status code. `{provider}` is an exact provider ID from `GET /api/user/ai-credentials` (for example `anthropic` or `google`), not the `claude`/`gemini`/`cursor` names used for analysis settings. Unknown IDs are rejected with 400 |
 | DELETE | `/api/user/ai-credentials/{provider}` | reviewer | Remove a personal provider key |
 | GET | `/api/user/tokens` | viewer | Stored Jira and GitHub tracker tokens |
-| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are `github_token`, `jira_email`, `jira_token`, and `jira_sa_token` (an Atlassian service account token, which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
-| POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving. Jira tokens are validated against the server's `JIRA_URL`; an ATST-prefixed token is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side |
+| PUT | `/api/user/tokens` | reviewer | Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, `""` or `null` clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are `github_token`, `jira_email`, `jira_token`, and `jira_sa_token` (an ATOA-prefixed Atlassian OAuth 2.0 credential client secret, which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns `saved: false`; anything other than a string or `null` is rejected with `400` |
+| POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving. Jira tokens are validated against the selected method's server URL (`jira_cloud_url` with an email, `jira_server_url` without); an ATOA-prefixed value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side and the server must have `atlassian_oauth_client_id` configured |
 | POST | `/api/jira-projects` | viewer | List Jira projects visible to the supplied credentials |
 | POST | `/api/jira-security-levels` | viewer | List Jira security levels for a project |
 
@@ -114,7 +114,7 @@ The shared body accepts the server defaults as per-request overrides:
 | `peer_ai_configs`, `peer_analysis_max_rounds` | Multi-AI debate settings |
 | `additional_repos` | Extra repositories to clone for context |
 | `tests_repo_url`, `tests_repo_token` | Tests repository used for history and context |
-| `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`, `atlassian_oauth_cloud_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira` | Jira search during analysis |
+| `atlassian_oauth_cloud_id`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira` | Jira search during analysis. Jira credentials and per-method URLs (`jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_cloud_url`, `jira_server_url`, and the three `jira_*_ssl_verify` flags) are **Server Settings only** — analysis requests cannot carry them; the server-selected `jira_auth_mode` and its credentials always apply |
 | `github_token` | GitHub access for comment enrichment |
 | `raw_prompt`, `issue_prompt` | Additive prompt instructions |
 | `labels`, plus name and tag fields | Metadata for the job |
@@ -280,6 +280,11 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | PUT | `/api/admin/users/{username}/can-use-server-providers` | Grant or revoke server AI credentials |
 | GET | `/api/admin/free-models` | List admin-declared free provider+model pairs (with `version` fingerprint) |
 | PUT | `/api/admin/free-models` | Replace the free pair list (validated against the catalog); optional `expected_version` from a prior GET rejects concurrent edits with `409` |
+| GET | `/api/admin/server-providers` | Per provider: key presence, verification state, and its models with `included` + `free` flags — never the keys |
+| POST | `/api/admin/server-providers` | Add a server provider key: `provider`, `api_key`, `verification_model` — verified with a real sidecar turn before storing; `409` when a key is already stored |
+| POST | `/api/admin/server-providers/{provider}/rotate-key` | Replace the key (re-verified first); `404` when none is stored |
+| PUT | `/api/admin/server-providers/{provider}/models` | Replace the provider's model selection `{id, included, free}[]` (validated against the catalog); `free` implies `included`, and the free flags write the same `free_ai_models` pairs |
+| DELETE | `/api/admin/server-providers/{provider}` | Remove the key, selection, and free pairs; `200` with a warning payload listing the affected models |
 | GET | `/api/admin/settings` | All settings with value, source, and metadata; `reveal_key` unmasks one key or `__all__` |
 | PUT | `/api/admin/settings` | `{"settings": {"KEY": "value"}}` |
 | GET | `/api/admin/settings/history` | `key`, `limit` change history |

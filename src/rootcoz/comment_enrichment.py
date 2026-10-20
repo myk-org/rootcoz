@@ -1,15 +1,14 @@
 """Comment enrichment: detect and fetch status for GitHub PRs and Jira tickets in comments."""
 
-import os
 import re
 from typing import Any
 
 import httpx
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.jira import JiraConnection, complete_jira_connection
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 _GITHUB_PR_PATTERN = re.compile(r"https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 
@@ -202,21 +201,20 @@ def _extract_status_from_issues(data: dict[str, Any]) -> str | None:
 async def fetch_jira_ticket_status(
     connection: JiraConnection,
     ticket_key: str,
-    ssl_verify: bool = True,
 ) -> str | None:
     """Fetch Jira ticket status by key using direct REST API with JQL key lookup.
 
     Tries the Cloud API v3 endpoint first (``/rest/api/3/search/jql``), then
     falls back to the legacy v2 endpoint (``/rest/api/2/search``) for
     Server/Data Center instances. Service account connections skip the v2
-    fallback — the scoped api.atlassian.com gateway only serves v3.
+    fallback — the scoped api.atlassian.com gateway only serves v3. All
+    requests use the connection's own TLS-verification flag.
 
     Args:
         connection: Resolved Jira connection (see ``resolve_jira_connection``).
             Service account connections lacking a cloud ID are completed via
             the anonymous tenant-info lookup before the request.
         ticket_key: Jira ticket key (e.g. 'OCPBUGS-12345').
-        ssl_verify: Whether to verify SSL certificates.
 
     Returns:
         Status string (e.g. 'Open', 'Closed') or None if fetch fails.
@@ -225,7 +223,7 @@ async def fetch_jira_ticket_status(
         f"fetch_jira_ticket_status: api_base={connection.api_base}, "
         f"ticket_key={ticket_key}, mode={connection.mode}"
     )
-    connection = await complete_jira_connection(connection, ssl_verify)
+    connection = await complete_jira_connection(connection)
     base = connection.api_base
     if not base:
         logger.warning(
@@ -248,7 +246,7 @@ async def fetch_jira_ticket_status(
 
     try:
         async with httpx.AsyncClient(
-            verify=ssl_verify,
+            verify=connection.ssl_verify,
             timeout=10,
             auth=connection.auth,
             headers=connection.headers,

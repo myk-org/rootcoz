@@ -4,15 +4,18 @@ import os
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from rootcoz.config import (
     Settings,
     get_settings,
+    jira_method_missing_fields,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
-    resolve_jira_auth,
+    update_db_settings_cache,
 )
+from rootcoz.jira import resolve_jira_connection
 from tests.conftest import build_test_env as _build_env
 
 
@@ -88,10 +91,11 @@ class TestJiraSettings:
         with patch.dict(os.environ, _build_env(), clear=True):
             settings = Settings(_env_file=None)
             assert not settings.jira_enabled
-            assert settings.jira_url is None
+            assert settings.jira_cloud_url == ""
+            assert settings.jira_server_url == ""
 
     def test_jira_enabled_with_cloud_auth(self) -> None:
-        """Jira is enabled with URL + email + API token + project key."""
+        """Jira is enabled with URL + selected basic method + project key."""
         with patch.dict(
             os.environ,
             _build_env(
@@ -102,11 +106,11 @@ class TestJiraSettings:
             ),
             clear=True,
         ):
-            settings = Settings(_env_file=None)
-            assert settings.jira_enabled
+            update_db_settings_cache({"jira_auth_mode": "basic"})
+            assert get_settings().jira_enabled
 
     def test_jira_enabled_with_server_pat(self) -> None:
-        """Jira is enabled with URL + PAT + project key."""
+        """Jira is enabled with URL + selected pat method + project key."""
         with patch.dict(
             os.environ,
             _build_env(
@@ -116,8 +120,8 @@ class TestJiraSettings:
             ),
             clear=True,
         ):
-            settings = Settings(_env_file=None)
-            assert settings.jira_enabled
+            update_db_settings_cache({"jira_auth_mode": "pat"})
+            assert get_settings().jira_enabled
 
     def test_jira_disabled_without_url(self) -> None:
         """Jira is disabled when URL is missing even with credentials."""
@@ -163,7 +167,9 @@ class TestJiraSettings:
         """Test default values for optional Jira fields."""
         with patch.dict(os.environ, _build_env(), clear=True):
             settings = Settings(_env_file=None)
-            assert settings.jira_ssl_verify is True
+            assert settings.jira_oauth_ssl_verify is True
+            assert settings.jira_cloud_ssl_verify is True
+            assert settings.jira_server_ssl_verify is True
             assert settings.jira_max_results == 5
             assert settings.jira_project_key is None
 
@@ -183,7 +189,7 @@ class TestJiraSettings:
             assert not settings.jira_enabled
 
     def test_jira_custom_values(self) -> None:
-        """Test custom values for Jira fields."""
+        """Deprecated JIRA_URL/JIRA_SSL_VERIFY aliases feed every per-method field."""
         with patch.dict(
             os.environ,
             _build_env(
@@ -198,29 +204,320 @@ class TestJiraSettings:
         ):
             settings = Settings(_env_file=None)
             assert settings.jira_project_key == "MYPROJ"
-            assert settings.jira_ssl_verify is False
+            assert settings.jira_cloud_url == "https://jira.example.com"
+            assert settings.jira_server_url == "https://jira.example.com"
+            assert settings.jira_oauth_ssl_verify is False
+            assert settings.jira_cloud_ssl_verify is False
+            assert settings.jira_server_ssl_verify is False
             assert settings.jira_max_results == 10
 
-
-class TestResolveJiraAuth:
-    """Tests for resolve_jira_auth helper."""
-
-    def test_email_plus_pat_is_cloud(self) -> None:
-        """JIRA_EMAIL + JIRA_PAT resolves to Cloud mode.
-
-        Email present = Cloud.  PAT is used as the token via Basic auth.
-        """
-        env = _build_env(
-            JIRA_URL="https://myorg.atlassian.net",
-            JIRA_EMAIL="user@example.com",
-            JIRA_PAT="pat-token-456",
-            JIRA_PROJECT_KEY="TEST",
-        )
-        with patch.dict(os.environ, env, clear=True):
+    def test_jira_url_alias_feeds_both_per_method_urls(self) -> None:
+        """JIRA_URL feeds both URL fields; canonical names win once set."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://alias.example.com",
+                JIRA_CLOUD_URL="https://cloud.example.com",
+            ),
+            clear=True,
+        ):
             settings = Settings(_env_file=None)
-            is_cloud, token = resolve_jira_auth(settings)
-            assert is_cloud, "email present must activate Cloud mode"
-            assert token == env["JIRA_PAT"]
+            # Canonical JIRA_CLOUD_URL wins; the alias fills the unset server URL
+            assert settings.jira_cloud_url == "https://cloud.example.com"
+            assert settings.jira_server_url == "https://alias.example.com"
+
+    def test_jira_ssl_verify_alias_feeds_all_three_flags(self) -> None:
+        """JIRA_SSL_VERIFY feeds all three verify flags; canonicals win."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_SSL_VERIFY="false",
+                JIRA_SERVER_SSL_VERIFY="true",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert settings.jira_oauth_ssl_verify is False
+            assert settings.jira_cloud_ssl_verify is False
+            # Canonical JIRA_SERVER_SSL_VERIFY wins over the alias
+            assert settings.jira_server_ssl_verify is True
+
+    def test_jira_url_alias_only_in_dotenv_feeds_both_url_fields(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """JIRA_URL present ONLY in .env (no canonical fields) feeds both URLs.
+
+        The dotenv source surfaces unknown keys that ``extra='ignore'``
+        later drops — the alias mapping must read them from there too,
+        not only from os.environ.
+        """
+        (tmp_path / ".env").write_text("JIRA_URL=https://jira-dotenv.example.com\n")
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert settings.jira_cloud_url == "https://jira-dotenv.example.com"
+            assert settings.jira_server_url == "https://jira-dotenv.example.com"
+
+    def test_jira_ssl_verify_alias_only_in_dotenv_feeds_all_flags(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """JIRA_SSL_VERIFY present ONLY in .env feeds all three verify flags."""
+        (tmp_path / ".env").write_text("JIRA_SSL_VERIFY=false\n")
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert settings.jira_oauth_ssl_verify is False
+            assert settings.jira_cloud_ssl_verify is False
+            assert settings.jira_server_ssl_verify is False
+
+    def test_dotenv_canonical_url_wins_over_dotenv_alias(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """Canonical names win over aliases within the same .env file."""
+        (tmp_path / ".env").write_text(
+            "JIRA_URL=https://alias-dotenv.example.com\n"
+            "JIRA_CLOUD_URL=https://canonical-dotenv.example.com\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert settings.jira_cloud_url == "https://canonical-dotenv.example.com"
+            assert settings.jira_server_url == "https://alias-dotenv.example.com"
+
+
+class TestJiraAuthMode:
+    """Tests for the explicit jira_auth_mode setting."""
+
+    def test_env_var_is_ignored(self) -> None:
+        """JIRA_AUTH_MODE env has no effect — selection is Server Settings only."""
+        with patch.dict(os.environ, _build_env(JIRA_AUTH_MODE=" Basic "), clear=True):
+            settings = Settings(_env_file=None)
+            assert settings.jira_auth_mode is None
+            assert not settings.jira_enabled
+
+    def test_deprecated_env_alias_feeds_renamed_setting(self) -> None:
+        """JIRA_OAUTH_ACCESS_TOKEN (deprecated) feeds jira_oauth_client_secret."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_OAUTH_ACCESS_TOKEN="ATOA-old-secret"
+            ),  # pragma: allowlist secret
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert (
+                settings.jira_oauth_client_secret.get_secret_value()
+                == "ATOA-old-secret"  # pragma: allowlist secret
+            )
+
+    def test_deprecated_oauth_alias_only_in_dotenv_feeds_secret(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """JIRA_OAUTH_ACCESS_TOKEN present ONLY in .env feeds the renamed secret."""
+        (tmp_path / ".env").write_text(
+            "JIRA_OAUTH_ACCESS_TOKEN=ATOA-dotenv-secret\n"  # pragma: allowlist secret
+        )
+        monkeypatch.chdir(tmp_path)
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings()
+            assert (
+                settings.jira_oauth_client_secret.get_secret_value()
+                == "ATOA-dotenv-secret"  # pragma: allowlist secret
+            )
+
+    def test_canonical_env_wins_over_deprecated_alias(self) -> None:
+        """JIRA_OAUTH_CLIENT_SECRET beats the old JIRA_OAUTH_ACCESS_TOKEN."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_OAUTH_CLIENT_SECRET="ATOA-new-secret",  # pragma: allowlist secret
+                JIRA_OAUTH_ACCESS_TOKEN="ATOA-old-secret",  # pragma: allowlist secret
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert (
+                settings.jira_oauth_client_secret.get_secret_value()
+                == "ATOA-new-secret"  # pragma: allowlist secret
+            )
+
+    def test_db_setting_selects_mode(self) -> None:
+        """The resolver reads the selected method from the DB settings cache."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira-server.example.com",
+                JIRA_PAT="pat-token",
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            update_db_settings_cache({"jira_auth_mode": "pat"})
+            settings = get_settings()
+            assert settings.jira_auth_mode == "pat"
+            assert settings.jira_enabled
+            assert resolve_jira_connection(settings).mode == "server"
+
+    def test_invalid_value_rejected(self) -> None:
+        """Invalid methods fail validation with a clear error."""
+        with pytest.raises(ValueError, match="jira_auth_mode"):
+            Settings(_env_file=None, jira_auth_mode="kerberos")
+
+    def test_unset_defaults_to_none(self) -> None:
+        """No env var means no method selected (Jira disabled)."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            assert Settings(_env_file=None).jira_auth_mode is None
+
+    def test_unset_mode_disables_jira_even_with_credentials(self) -> None:
+        """Unset mode: no auto-detection — full credentials are ignored."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://myorg.atlassian.net",
+                JIRA_EMAIL="user@example.com",
+                JIRA_API_TOKEN="api-token",  # pragma: allowlist secret
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+                JIRA_OAUTH_CLIENT_SECRET="ATOA-token",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+            assert not settings.jira_enabled
+            assert resolve_jira_connection(settings).mode == "none"
+
+    def test_missing_fields_unset_mode(self) -> None:
+        """Unset mode never reports missing fields (Jira is disabled instead)."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(_env_file=None)
+            assert jira_method_missing_fields(settings) == []
+
+    def test_missing_fields_per_method(self) -> None:
+        """Each method names exactly its own missing fields."""
+        cases = [
+            (
+                "oauth",
+                {},
+                [
+                    "jira_oauth_client_secret",
+                    "atlassian_oauth_client_id",
+                    "atlassian_oauth_cloud_id",
+                ],
+            ),
+            (
+                "oauth",
+                {
+                    "jira_oauth_client_secret": SecretStr("tok")
+                },  # pragma: allowlist secret
+                ["atlassian_oauth_client_id", "atlassian_oauth_cloud_id"],
+            ),
+            (
+                "oauth",
+                {
+                    "atlassian_oauth_client_id": "cid",
+                    "atlassian_oauth_cloud_id": "cloud-id",
+                },
+                ["jira_oauth_client_secret"],
+            ),
+            ("basic", {}, ["jira_email", "jira_api_token", "jira_cloud_url"]),
+            (
+                "basic",
+                {"jira_email": "user@example.com"},
+                ["jira_api_token", "jira_cloud_url"],
+            ),
+            ("pat", {}, ["jira_pat", "jira_server_url"]),
+        ]
+        for mode, extra, expected in cases:
+            with patch.dict(os.environ, _build_env(), clear=True):
+                settings = Settings(jira_auth_mode=mode, **extra)
+            assert jira_method_missing_fields(settings) == expected, mode
+
+    def test_missing_fields_complete(self) -> None:
+        """A fully configured method reports no missing fields."""
+        settings = Settings(
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_api_token=SecretStr("tok"),  # pragma: allowlist secret
+            jira_cloud_url="https://jira.example.com",
+            jira_pat=SecretStr("other"),  # pragma: allowlist secret
+        )
+        assert jira_method_missing_fields(settings) == []
+
+    def test_explicit_oauth_requires_both_credential_halves(self) -> None:
+        """Explicit oauth needs the client secret AND the client ID."""
+        settings = Settings(
+            atlassian_oauth_cloud_id="cloud-id",
+            jira_auth_mode="oauth",
+            jira_oauth_client_secret=SecretStr(
+                "ATOA-test-secret"
+            ),  # pragma: allowlist secret
+            atlassian_oauth_client_id="test-client-id",
+        )
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "sa"
+        # The secret is carried for minting, never sent as the Bearer
+        assert "Authorization" not in connection.headers
+        sa_secret = connection.sa_client_secret
+        assert sa_secret == "ATOA-test-secret"  # pragma: allowlist secret
+
+        half = settings.model_copy(update={"atlassian_oauth_client_id": None})
+        assert resolve_jira_connection(half).mode == "none"
+
+    def test_explicit_basic_no_pat_fallback(self) -> None:
+        """Explicit basic uses only email + api token — no PAT fallback."""
+        settings = Settings(
+            jira_cloud_url="https://myorg.atlassian.net",
+            jira_auth_mode="basic",
+            jira_email="user@example.com",
+            jira_pat=SecretStr("pat-token"),  # pragma: allowlist secret
+        )
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "none"
+
+    def test_explicit_pat_ignores_sa_and_api_token(self) -> None:
+        """Explicit pat uses only jira_pat — SA and api tokens are ignored."""
+        settings = Settings(
+            jira_server_url="https://jira.example.com",
+            jira_auth_mode="pat",
+            jira_oauth_client_secret=SecretStr(
+                "ATOA-token"
+            ),  # pragma: allowlist secret
+            jira_api_token=SecretStr("api-token"),  # pragma: allowlist secret
+            jira_pat=SecretStr("my-pat"),  # pragma: allowlist secret
+        )
+        connection = resolve_jira_connection(settings)
+        assert connection.mode == "server"
+        assert connection.headers["Authorization"] == "Bearer my-pat"
+
+    def test_jira_enabled_with_explicit_mode_missing_fields(self) -> None:
+        """jira_enabled is False when the selected method lacks fields."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira.example.com",
+                JIRA_API_TOKEN="token-123",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(
+                _env_file=None, jira_auth_mode="basic"
+            )  # missing jira_email
+            assert not settings.jira_enabled
+
+    def test_jira_enabled_with_explicit_mode_complete(self) -> None:
+        """jira_enabled is True when the selected method is complete."""
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira.example.com",
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None, jira_auth_mode="pat")
+            assert settings.jira_enabled
 
 
 class TestGitHubIssuesSettings:

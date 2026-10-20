@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.temp_paths import rootcoz_temp_base
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # Under process temp root so chat symlink cleanup (honors TMPDIR) can delete it.
 EXTRACT_BASE = rootcoz_temp_base()

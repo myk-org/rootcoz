@@ -39,7 +39,7 @@ def client_with_ai(temp_db_path, _init_db):
 @pytest.fixture
 def client_with_full_config(temp_db_path, _init_db):
     """Create a test client with many settings configured."""
-    yield from make_app_client(
+    gen = make_app_client(
         temp_db_path,
         {
             "AI_PROVIDER": "claude",
@@ -49,7 +49,7 @@ def client_with_full_config(temp_db_path, _init_db):
             "ADDITIONAL_REPOS": "helpers:https://github.com/org/helpers",
             "PEER_AI_CONFIGS": "gemini:gemini-2.5-pro",
             "PEER_ANALYSIS_MAX_ROUNDS": "5",
-            "JIRA_URL": "https://jira.example.com",
+            "JIRA_CLOUD_URL": "https://jira.example.com",
             "JIRA_EMAIL": "user@example.com",
             "JIRA_API_TOKEN": "jira-token-123",  # pragma: allowlist secret
             "JIRA_PROJECT_KEY": "PROJ",
@@ -60,6 +60,21 @@ def client_with_full_config(temp_db_path, _init_db):
             "MAX_WAIT_MINUTES": "60",
         },
     )
+    client = next(gen)
+    # The Jira auth method is a Server Settings (DB) selection — set it
+    # through the admin API like the UI does; there is no env var for it.
+    cookies = admin_login(client)
+    resp = client.put(
+        "/api/admin/settings",
+        json={"settings": {"jira_auth_mode": "basic"}},
+        cookies=cookies,
+    )
+    assert resp.status_code == 200
+    yield client
+    try:
+        next(gen)
+    except StopIteration:
+        pass
 
 
 @pytest.fixture
@@ -118,7 +133,8 @@ class TestDefaultServerSettingsResponse:
             "additional_repos",
             "peer_ai_configs",
             "peer_analysis_max_rounds",
-            "jira_url",
+            "jira_cloud_url",
+            "jira_server_url",
             "jira_project_key",
             "get_job_artifacts",
             "jenkins_artifacts_max_size_mb",
@@ -179,6 +195,12 @@ class TestDefaultServerSettingsResponse:
             "rp_push_tracker_links",
             "vapid_claim_email",
             "vapid_public_key",
+            # #347: admin-management settings stay hidden from the any-role
+            # defaults payload even though they are now admin-settable.
+            "session_ttl_hours",
+            "smtp_host",
+            "sidecar_host",
+            "sidecar_url",
         }
         for field in server_only_fields:
             assert field not in data, f"Server-only field '{field}' found in response"
@@ -229,7 +251,8 @@ class TestDefaultServerSettingsResponse:
             {"ai_provider": "gemini", "ai_model": "gemini-2.5-pro"}
         ]
         assert data["peer_analysis_max_rounds"] == 5
-        assert data["jira_url"] == "https://jira.example.com"
+        assert data["jira_cloud_url"] == "https://jira.example.com"
+        assert data["jira_server_url"] == ""
         assert data["jira_project_key"] == "PROJ"
         assert data["get_job_artifacts"] is False
         assert data["jenkins_artifacts_max_size_mb"] == 200
@@ -255,7 +278,8 @@ class TestDefaultServerSettingsResponse:
         data = resp.json()
         # These are optional str fields that default to None
         assert data["tests_repo_url"] == ""
-        assert data["jira_url"] == ""
+        assert data["jira_cloud_url"] == ""
+        assert data["jira_server_url"] == ""
         assert data["jira_project_key"] == ""
 
     def test_nullable_booleans_preserved_as_null(self, client):

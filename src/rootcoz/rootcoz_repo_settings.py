@@ -24,8 +24,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
 from rootcoz.config import Settings, parse_additional_repos, parse_peer_configs
 from rootcoz.models import (
@@ -35,7 +35,7 @@ from rootcoz.models import (
     NormalizedAiProvider,
 )
 
-logger = get_logger(name=__name__)
+logger = get_child_logger(__name__)
 
 ROOTCOZ_SETTINGS_FILENAME = "settings.json"
 ROOTCOZ_SETTINGS_SCHEMA_PATH = (

@@ -31,12 +31,10 @@ poll_interval_minutes = 2
 max_wait_minutes = 0  # 0 = no limit (wait forever)
 # Jira
 jira_url = "https://your-jira.atlassian.net"
+# Jira credentials are Server Settings only — analysis requests never
+# carry them. jira_email below is the per-user fallback for bug-creation
+# and listing commands, paired with jira_token / jira_sa_token.
 jira_email = "you@example.com"
-jira_api_token = "your-jira-token"
-jira_pat = ""
-# Atlassian service account (ATST) token — third connection method for
-# analysis requests; takes precedence over jira_api_token/jira_pat/jira_email
-jira_oauth_access_token = ""
 atlassian_oauth_cloud_id = ""
 # Accepted for configuration-shape compatibility only — ATST service account
 # tokens have no refresh flow, so no OAuth client is used

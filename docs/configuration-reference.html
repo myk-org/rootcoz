@@ -307,7 +307,7 @@ SECURE_COOKIES=false
 </tr>
 </tbody>
 </table></div>
-<p>Fields marked <code>after login: no</code> are server-only. <code>PUT /api/admin/settings</code> rejects them with <code>400 Server-only settings (env var only)</code>, so they must come from the environment.</p>
+<p>Fields marked <code>after login: yes (restart)</code> are settable in Server Settings but only take effect after a server restart. <code>DB_PATH</code> and <code>DEBUG</code> remain env-only (<code>PUT /api/admin/settings</code> rejects them — they are process bootstrap with no Settings field). <code>ADMIN_KEY</code> is env-only too: it has a Settings field for read-only display, but every write path (<code>PUT</code>, persist, reset) rejects it — it is a server-only bootstrap secret, never settable at runtime.</p>
 <ol>
 <li><strong>Jenkins category.</strong></li>
 </ol>
@@ -469,6 +469,14 @@ SECURE_COOKIES=false
 <td>no</td>
 <td>yes</td>
 </tr>
+<tr>
+<td><code>RECORD_TRANSCRIPTS</code></td>
+<td><code>false</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
 </tbody>
 </table></div>
 <p><code>AI_PROVIDER</code> accepts any exact provider ID that pi-sidecar reports, provided the <code>provider/model</code> pair appears in its catalogue. <code>claude</code>, <code>gemini</code>, and <code>cursor</code> are convenience aliases that resolve through the mapping described above; they are not the only accepted values. The chart's <code>ai.provider</code> accepts the same freedom — any provider ID string, including a custom provider registered through the sidecar agent dir (the chart's install-time credential checks only apply to the three built-in aliases). Values are lowercased on load, and legacy <code>*-cli</code> names are normalised to their canonical form. To see what your sidecar actually exposes, read the provider list from <code>GET /api/ai-models</code>. <code>PEER_AI_CONFIGS</code> uses <code>provider:model,provider:model</code>; model names may contain commas inside square brackets, for example <code>cursor:gpt-5.4[context=272k,reasoning=medium]</code>.</p>
@@ -491,14 +499,6 @@ SECURE_COOKIES=false
 </thead>
 <tbody>
 <tr>
-<td><code>JIRA_URL</code></td>
-<td>unset</td>
-<td>string</td>
-<td>no</td>
-<td>no</td>
-<td>yes</td>
-</tr>
-<tr>
 <td><code>JIRA_EMAIL</code></td>
 <td>unset</td>
 <td>string</td>
@@ -515,6 +515,22 @@ SECURE_COOKIES=false
 <td>yes</td>
 </tr>
 <tr>
+<td><code>JIRA_CLOUD_URL</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>JIRA_CLOUD_SSL_VERIFY</code></td>
+<td><code>true</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
 <td><code>JIRA_PAT</code></td>
 <td>unset</td>
 <td>string</td>
@@ -523,7 +539,23 @@ SECURE_COOKIES=false
 <td>yes</td>
 </tr>
 <tr>
-<td><code>JIRA_OAUTH_ACCESS_TOKEN</code></td>
+<td><code>JIRA_SERVER_URL</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>JIRA_SERVER_SSL_VERIFY</code></td>
+<td><code>true</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>JIRA_OAUTH_CLIENT_SECRET</code></td>
 <td>unset</td>
 <td>string</td>
 <td>yes</td>
@@ -547,6 +579,14 @@ SECURE_COOKIES=false
 <td>yes</td>
 </tr>
 <tr>
+<td><code>JIRA_OAUTH_SSL_VERIFY</code></td>
+<td><code>true</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
 <td><code>JIRA_SITE_URL</code></td>
 <td>unset</td>
 <td>string</td>
@@ -558,14 +598,6 @@ SECURE_COOKIES=false
 <td><code>JIRA_PROJECT_KEY</code></td>
 <td>unset</td>
 <td>string</td>
-<td>no</td>
-<td>no</td>
-<td>yes</td>
-</tr>
-<tr>
-<td><code>JIRA_SSL_VERIFY</code></td>
-<td><code>true</code></td>
-<td>boolean</td>
 <td>no</td>
 <td>no</td>
 <td>yes</td>
@@ -596,8 +628,18 @@ SECURE_COOKIES=false
 </tr>
 </tbody>
 </table></div>
-<p>There are three connection methods, and they are additive — a new one never replaces the others. <code>JIRA_OAUTH_ACCESS_TOKEN</code> is the Atlassian service account method: an ATST-prefixed token (created by an admin in Atlassian Administration → Directory → Service accounts, long-lived up to 365 days) sent as a Bearer token against the scoped <code>https://api.atlassian.com/ex/jira/{cloud-id}</code> gateway using REST v3. It takes precedence over the other modes, because basic auth with an ATST token is rejected by Atlassian. Two configuration shapes work: point <code>JIRA_URL</code> directly at the scoped gateway URL (it already contains the cloud ID), or keep <code>JIRA_URL</code> as a regular URL and provide the cloud ID via <code>ATLASSIAN_OAUTH_CLOUD_ID</code> — or leave both unset and rootcoz resolves the cloud ID anonymously via the site's <code>_edge/tenant_info</code> endpoint on first use. <code>JIRA_SITE_URL</code> supplies <code>/browse</code> links when <code>JIRA_URL</code> is the scoped URL, since the site URL cannot be derived from it. <code>ATLASSIAN_OAUTH_CLIENT_ID</code> is an inert pass-through kept for env-shape compatibility with the established Atlassian OAuth convention; it is never used for authentication.</p>
-<p><code>JIRA_EMAIL</code> decides the auth mode for the remaining methods. With an email, RootCoz uses Jira Cloud Basic auth and prefers <code>JIRA_API_TOKEN</code>, falling back to <code>JIRA_PAT</code>. Without an email it treats the server as Server/DC, prefers <code>JIRA_PAT</code>, and falls back to <code>JIRA_API_TOKEN</code>. Setting <code>ENABLE_JIRA=false</code> forces Jira off; setting it to <code>true</code> without a URL, credentials, or project key logs a warning and stays off.</p>
+<p>Each Jira auth method is a <strong>fully self-contained definition</strong> with its own URL and TLS verification — only <code>JIRA_PROJECT_KEY</code>, <code>JIRA_MAX_RESULTS</code>, <code>JIRA_SITE_URL</code>, <code>ENABLE_JIRA</code>, and <code>ENABLE_JIRA_ISSUES</code> are shared across methods:</p>
+<ul>
+<li><strong><code>basic</code></strong> (Jira Cloud email + API token): <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_CLOUD_URL</code>, <code>JIRA_CLOUD_SSL_VERIFY</code></li>
+<li><strong><code>pat</code></strong> (Jira Server/Data Center bearer PAT): <code>JIRA_PAT</code>, <code>JIRA_SERVER_URL</code>, <code>JIRA_SERVER_SSL_VERIFY</code></li>
+<li><strong><code>oauth</code></strong> (Atlassian OAuth 2.0 credential): <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>ATLASSIAN_OAUTH_CLIENT_ID</code>, <code>ATLASSIAN_OAUTH_CLOUD_ID</code>, <code>JIRA_OAUTH_SSL_VERIFY</code></li>
+</ul>
+<p>There are three connection methods — <code>oauth</code>, <code>basic</code>, and <code>pat</code> — and the <strong>Server Settings</strong> <code>jira_auth_mode</code> row (UI: <code>Jira → Auth method</code>) selects which one is used; there is no <code>JIRA_AUTH_MODE</code> environment variable. <code>oauth</code> is the Atlassian <strong>OAuth 2.0 credential for service accounts</strong> method: an admin creates the credential in Atlassian Administration (it yields a client ID and a permanent ATOA-prefixed client secret), and rootcoz stores the secret in <code>JIRA_OAUTH_CLIENT_SECRET</code> with the client ID in <code>ATLASSIAN_OAUTH_CLIENT_ID</code>. The secret is never sent to Jira itself — on each connection rootcoz exchanges it for a short-lived access token (about 1 hour) via the <code>client_credentials</code> grant at <code>https://auth.atlassian.com/oauth/token</code>, caches it in-process, and sends that token as the Bearer against the scoped <code>https://api.atlassian.com/ex/jira/{cloud-id}</code> gateway using REST v3. <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>ATLASSIAN_OAUTH_CLIENT_ID</code>, and <code>ATLASSIAN_OAUTH_CLOUD_ID</code> are all required for this method — the cloud ID is the method's sole API locator. <code>JIRA_SITE_URL</code> supplies <code>/browse</code> links (the scoped gateway URL cannot yield a site URL); rootcoz warns when it is unset. Both the token mint and the gateway calls use <code>JIRA_OAUTH_SSL_VERIFY</code>. OAuth 2.0 credentials typically carry only the <code>read:jira-work</code>/<code>write:jira-work</code> scopes, so the connection test probes project visibility (<code>/rest/api/3/project</code>) rather than the current-user endpoint (which needs <code>read:jira-users</code> and fails with a scope-mismatch 401).</p>
+<p>The <code>jira_auth_mode</code> Server Setting explicitly selects the connection method: <code>oauth</code> (client ID + client secret — an access token is minted automatically and sent as the Bearer), <code>basic</code> (<code>JIRA_EMAIL</code> + <code>JIRA_API_TOKEN</code> against <code>JIRA_CLOUD_URL</code>), or <code>pat</code> (<code>JIRA_PAT</code> as a Server/DC Bearer token against <code>JIRA_SERVER_URL</code>). <strong>An auth method selection is required for the Jira integration</strong> — only the selected method's fields are used, with no prefix sniffing, no precedence chain, and no fallback to the other methods' credentials. When no method is selected, Jira is disabled entirely: no credentials are read, <code>jira_enabled</code> is false regardless of which credentials are configured, and the connection test reports <code>No Jira auth method selected — choose one in Server Settings</code>. When the selected method's fields are missing (URL fields included), the connection test reports the method and the exact missing fields (for example, <code>Jira auth method 'oauth' is selected but missing: atlassian_oauth_client_id, atlassian_oauth_cloud_id</code>). Setting <code>ENABLE_JIRA=false</code> forces Jira off; setting it to <code>true</code> without a selected auth method or a project key logs a warning and stays off. A typical split setup: a local insecure Jira Server via <code>pat</code> with <code>JIRA_SERVER_SSL_VERIFY=false</code>, and Atlassian Cloud via <code>oauth</code> with <code>JIRA_OAUTH_SSL_VERIFY=true</code> — the two are configured and verified independently.</p>
+<p>Jira credentials and per-method URLs are <strong>Server Settings only</strong>: <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>JIRA_CLOUD_URL</code>, <code>JIRA_SERVER_URL</code>, and the three <code>*_SSL_VERIFY</code> flags (and the <code>jira_auth_mode</code> selection) are read exclusively from the environment and the Server Settings DB row. Analysis requests — API bodies and CLI analyze flags alike — cannot carry or override them. Other Jira fields (<code>JIRA_PROJECT_KEY</code>, <code>JIRA_MAX_RESULTS</code>, <code>ATLASSIAN_OAUTH_CLOUD_ID</code>, <code>JIRA_SITE_URL</code>, <code>ENABLE_JIRA</code>) remain request-tunable. Per-user Jira tokens saved in Profile Settings are a separate path used only for bug creation, project listing, and chat, and are unaffected.</p>
+<p><strong>Upgrade note (oauth rename):</strong> the setting previously named <code>jira_oauth_access_token</code> (<code>JIRA_OAUTH_ACCESS_TOKEN</code>) is now <code>jira_oauth_client_secret</code> (<code>JIRA_OAUTH_CLIENT_SECRET</code>), reflecting what the value really is: the permanent client secret of an Atlassian OAuth 2.0 credential, not a bearer token. On startup a one-time DB migration copies an existing <code>jira_oauth_access_token</code> Server Settings row to the new key (the old row is left in place; the new key wins once set), and the old <code>JIRA_OAUTH_ACCESS_TOKEN</code> environment variable still works as a deprecated alias when <code>JIRA_OAUTH_CLIENT_SECRET</code> is unset. <code>ATLASSIAN_OAUTH_CLIENT_ID</code> changed from an inert pass-through to a required field of the <code>oauth</code> method.</p>
+<p><strong>Upgrade note (per-method URL/SSL split):</strong> the shared <code>JIRA_URL</code> and <code>JIRA_SSL_VERIFY</code> settings were removed — each auth method now carries its own URL and TLS verification (<code>jira_cloud_url</code>/<code>jira_cloud_ssl_verify</code> for <code>basic</code>, <code>jira_server_url</code>/<code>jira_server_ssl_verify</code> for <code>pat</code>, <code>jira_oauth_ssl_verify</code> for <code>oauth</code>; the <code>oauth</code> method's API locator is <code>atlassian_oauth_cloud_id</code>, not a URL). On startup a one-time DB migration copies an existing <code>jira_url</code> Server Settings row to both <code>jira_cloud_url</code> and <code>jira_server_url</code>, and a <code>jira_ssl_verify</code> row to all three verify flags (old rows are left in place; new keys win once set). The old <code>JIRA_URL</code> environment variable still works as a deprecated alias that feeds both URL fields when their canonical env vars (<code>JIRA_CLOUD_URL</code>, <code>JIRA_SERVER_URL</code>) are unset, and <code>JIRA_SSL_VERIFY</code> feeds all three verify flags when their canonical env vars are unset — canonical names always win. Per-request <code>jira_url</code>/<code>jira_ssl_verify</code> overrides (API bodies, CLI <code>--jira-url</code>/<code>--jira-ssl-verify</code>) were removed together with the shared settings.</p>
+<p><strong>Upgrade note (env selection removed):</strong> older releases selected the auth method via the <code>JIRA_AUTH_MODE</code> environment variable (and, before that, inferred it from the configured credentials). Neither exists anymore — a <code>JIRA_AUTH_MODE</code> env var is ignored. Deployments that previously relied on it must select the method in the Server Settings UI (<code>Jira → Auth method</code>) or via <code>PUT /api/admin/settings</code>, or Jira will be disabled.</p>
 <ol>
 <li><strong>GitHub category.</strong></li>
 </ol>
@@ -643,7 +685,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 </tbody>
 </table></div>
@@ -701,7 +743,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>RP_PUSH_CLASSIFICATIONS</code></td>
@@ -709,7 +751,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>RP_PUSH_ROOTCOZ_URL</code></td>
@@ -717,7 +759,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>RP_PUSH_TRACKER_LINKS</code></td>
@@ -725,7 +767,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 </tbody>
 </table></div>
@@ -746,20 +788,12 @@ SECURE_COOKIES=false
 </thead>
 <tbody>
 <tr>
-<td><code>ADMIN_KEY</code></td>
-<td>empty</td>
-<td>string</td>
-<td>yes</td>
-<td>no</td>
-<td>yes</td>
-</tr>
-<tr>
 <td><code>SECURE_COOKIES</code></td>
 <td><code>true</code></td>
 <td>boolean</td>
 <td>no</td>
 <td><strong>yes</strong></td>
-<td><strong>no</strong></td>
+<td>yes (restart)</td>
 </tr>
 <tr>
 <td><code>TRUST_PROXY_HEADERS</code></td>
@@ -767,7 +801,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td><strong>yes</strong></td>
-<td><strong>no</strong></td>
+<td>yes (restart)</td>
 </tr>
 <tr>
 <td><code>REQUIRE_APPROVAL</code></td>
@@ -775,7 +809,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>ADMIN_WAIT_APPROVE_MSG</code></td>
@@ -783,7 +817,7 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>ALLOWED_USERS</code></td>
@@ -791,7 +825,7 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>DEFAULT_USER_ROLE</code></td>
@@ -799,11 +833,19 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td><strong>yes</strong></td>
-<td><strong>no</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>SESSION_TTL_HOURS</code></td>
+<td><code>720</code></td>
+<td>integer 1–87600</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
 </tr>
 </tbody>
 </table></div>
-<p><code>ADMIN_KEY</code> bootstraps the <code>admin</code> superuser that lives outside the database; log in as <code>admin</code> with that key. <code>DEFAULT_USER_ROLE</code> accepts only <code>viewer</code>, <code>reviewer</code>, or <code>operator</code> — any other value fails validation at startup. <code>ALLOWED_USERS</code> is a comma-separated list of usernames and is empty (open) by default. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with <code>403 Registration is restricted. Contact an admin.</code> before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets <code>403 User not allowed. Contact an administrator to be added to the allow list.</code> A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes.</p>
+<p><code>ADMIN_KEY</code> bootstraps the <code>admin</code> superuser that lives outside the database; log in as <code>admin</code> with that key. It is environment-only: Server Settings shows it masked (read-only) but rejects any attempt to set, persist, or reset it — keep the env var authoritative. <code>DEFAULT_USER_ROLE</code> accepts only <code>viewer</code>, <code>reviewer</code>, or <code>operator</code> — any other value fails validation at startup. <code>ALLOWED_USERS</code> is a comma-separated list of usernames and is empty (open) by default. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with <code>403 Registration is restricted. Contact an admin.</code> before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets <code>403 User not allowed. Contact an administrator to be added to the allow list.</code> A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes.</p>
 <blockquote>
 <p><strong>Warning:</strong> Set <code>SECURE_COOKIES=false</code> only for local HTTP development. Behind a TLS-terminating proxy, leave it <code>true</code> or sessions will not be stored by the browser.</p>
 </blockquote>
@@ -863,7 +905,7 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>ADDITIONAL_REPOS</code></td>
@@ -911,7 +953,15 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td><strong>yes</strong></td>
-<td><strong>no</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>LOG_LEVEL</code></td>
+<td>empty (<code>INFO</code>)</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
 </tr>
 <tr>
 <td><code>ENABLE_AUTO_REVIEW</code></td>
@@ -919,7 +969,7 @@ SECURE_COOKIES=false
 <td>boolean</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 <tr>
 <td><code>AUTO_PUSH_EXPORTERS</code></td>
@@ -927,7 +977,7 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td>no</td>
-<td><strong>no</strong></td>
+<td>yes</td>
 </tr>
 </tbody>
 </table></div>
@@ -959,7 +1009,7 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td><strong>yes</strong></td>
-<td><strong>no</strong></td>
+<td>yes (restart)</td>
 </tr>
 <tr>
 <td><code>VAPID_PRIVATE_KEY</code></td>
@@ -975,13 +1025,803 @@ SECURE_COOKIES=false
 <td>string</td>
 <td>no</td>
 <td><strong>yes</strong></td>
-<td><strong>no</strong></td>
+<td>yes (restart)</td>
 </tr>
 </tbody>
 </table></div>
-<p>Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does <strong>not</strong> disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through <code>get_vapid_config()</code>, which reads environment variables or the generated key file and never the database, a <code>VAPID_PRIVATE_KEY</code> saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that the public key and claim email are environment-only, because changing them would invalidate subscriptions already registered with browsers.</p>
+<p>Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does <strong>not</strong> disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through <code>get_vapid_config()</code>, which reads environment variables or the generated key file and never the database, a <code>VAPID_PRIVATE_KEY</code> saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that changing the public key or claim email invalidates subscriptions already registered with browsers — they are restart-required and best managed at deployment time.</p>
+</li>
+<li>
+<p><strong>Notifications category</strong> (added with #347).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Type</th>
+<th>Secret</th>
+<th>Restart</th>
+<th>After login</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SMTP_HOST</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>SMTP_PORT</code></td>
+<td><code>587</code></td>
+<td>integer &gt; 0</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>SMTP_USER</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>SMTP_PASSWORD</code></td>
+<td>unset</td>
+<td>string</td>
+<td>yes</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>SMTP_FROM</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>ALERT_EMAIL_TO</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>SLACK_WEBHOOK_URL</code></td>
+<td>unset</td>
+<td>string</td>
+<td>yes</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+</tbody>
+</table></div>
+<p>Email alerts need <code>SMTP_HOST</code> + <code>ALERT_EMAIL_TO</code> (from address defaults to <code>SMTP_USER</code>, then <code>rootcoz@&lt;host&gt;</code>); Slack alerts need <code>SLACK_WEBHOOK_URL</code>. The env var stays the deployment default — a saved setting overrides it.</p>
+</li>
+<li>
+<p><strong>Sidecar category</strong> (added with #347 — restart required).</p>
+<p>The pi-sidecar starts <strong>once</strong> at container boot and reads these from its process environment. A value saved here is persisted to <code>/data/pi-sidecar/env</code>, which the container entrypoint sources before starting the sidecar — the same bridge <code>RECORD_TRANSCRIPTS</code> uses. An empty field means "no override": the deployment environment governs.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Type</th>
+<th>Secret</th>
+<th>Restart</th>
+<th>After login</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SIDECAR_HOST</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>SIDECAR_PORT</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>SIDECAR_URL</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>ACPX_AGENTS</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>CLI_AGENTS</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_LOG_LEVEL</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>NODE_BINARY</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_TRANSCRIPTS_DIR</code></td>
+<td>empty</td>
+<td>string</td>
+<td>no</td>
+<td><strong>yes</strong></td>
+<td>yes (restart)</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>SIDECAR_HOST</code> accepts only values the container's loopback health probe can still reach: loopback addresses, <code>0.0.0.0</code>/<code>::</code> (wildcard binds that also answer on <code>127.0.0.1</code>), or empty. A specific non-loopback address is rejected with a <code>400</code> on save — the entrypoint probes <code>http://127.0.0.1:$SIDECAR_PORT</code> before every boot and aborts when it fails, so such a value would brick every restart. <code>0.0.0.0</code> is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as <code>TRUST_PROXY_HEADERS</code> — only do it on a network you control. <code>SIDECAR_PORT</code> must be an integer between 1 and 65535. When <code>SIDECAR_PORT</code> is overridden and <code>SIDECAR_URL</code> is not set, rootcoz derives <code>SIDECAR_URL=http://127.0.0.1:&lt;port&gt;</code> so the Python client follows the listener; an explicit <code>SIDECAR_URL</code> always wins. Because the derived value is exported into the process environment, <code>SIDECAR_URL</code> shows as env-sourced in Server Settings, but the persist path rejects it — persisting the derived URL would pin it and silently beat the port derivation after a later <code>sidecar_port</code> change. Persist <code>sidecar_port</code> instead.</p>
 </li>
 </ol>
+<h3 id="environment-variable-audit-347">Environment variable audit (#347)</h3>
+<p>Every environment variable rootcoz or the sidecar consumes, in exactly one row. "Setting key" is the Server Settings field (empty field name in the UI clears the override and falls back to the env value). "Runtime" means a saved change applies without a restart; "restart" means it applies at the next boot (sidecar rows apply through the <code>/data/pi-sidecar/env</code> bridge).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Env var</th>
+<th>Setting key</th>
+<th>Category</th>
+<th>Runtime / Restart</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>JENKINS_URL</code></td>
+<td><code>jenkins_url</code></td>
+<td>Jenkins</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JENKINS_USER</code></td>
+<td><code>jenkins_user</code></td>
+<td>Jenkins</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>JENKINS_PASSWORD</code></td>
+<td><code>jenkins_password</code></td>
+<td>Jenkins</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>JENKINS_SSL_VERIFY</code></td>
+<td><code>jenkins_ssl_verify</code></td>
+<td>Jenkins</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JENKINS_TIMEOUT</code></td>
+<td><code>jenkins_timeout</code></td>
+<td>Jenkins</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JENKINS_ARTIFACTS_MAX_SIZE_MB</code></td>
+<td><code>jenkins_artifacts_max_size_mb</code></td>
+<td>Jenkins</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>GET_JOB_ARTIFACTS</code></td>
+<td><code>get_job_artifacts</code></td>
+<td>Jenkins</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>AI_PROVIDER</code></td>
+<td><code>ai_provider</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>AI_MODEL</code></td>
+<td><code>ai_model</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>FORCE_SERVER_CREDENTIALS</code></td>
+<td><code>force_server_credentials</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>AI_CALL_TIMEOUT</code></td>
+<td><code>ai_call_timeout</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>MAX_CONCURRENT_AI_CALLS</code></td>
+<td><code>max_concurrent_ai_calls</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>PEER_AI_CONFIGS</code></td>
+<td><code>peer_ai_configs</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>PEER_ANALYSIS_MAX_ROUNDS</code></td>
+<td><code>peer_analysis_max_rounds</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>RECORD_TRANSCRIPTS</code></td>
+<td><code>record_transcripts</code></td>
+<td>AI</td>
+<td>runtime (sidecar live toggle)</td>
+</tr>
+<tr>
+<td><code>ENABLE_FREE_MODELS</code></td>
+<td><code>enable_free_models</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>AMBIENT_AUTH_PROVIDERS</code></td>
+<td><code>ambient_auth_providers</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ACTIVE_SERVER_PROVIDERS</code></td>
+<td><code>active_server_providers</code></td>
+<td>AI</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_EMAIL</code></td>
+<td><code>jira_email</code></td>
+<td>Jira</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>JIRA_API_TOKEN</code></td>
+<td><code>jira_api_token</code></td>
+<td>Jira</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>JIRA_CLOUD_URL</code></td>
+<td><code>jira_cloud_url</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_CLOUD_SSL_VERIFY</code></td>
+<td><code>jira_cloud_ssl_verify</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_PAT</code></td>
+<td><code>jira_pat</code></td>
+<td>Jira</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>JIRA_SERVER_URL</code></td>
+<td><code>jira_server_url</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_SERVER_SSL_VERIFY</code></td>
+<td><code>jira_server_ssl_verify</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_OAUTH_CLIENT_SECRET</code></td>
+<td><code>jira_oauth_client_secret</code></td>
+<td>Jira</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>ATLASSIAN_OAUTH_CLOUD_ID</code></td>
+<td><code>atlassian_oauth_cloud_id</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ATLASSIAN_OAUTH_CLIENT_ID</code></td>
+<td><code>atlassian_oauth_client_id</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_OAUTH_SSL_VERIFY</code></td>
+<td><code>jira_oauth_ssl_verify</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_SITE_URL</code></td>
+<td><code>jira_site_url</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_PROJECT_KEY</code></td>
+<td><code>jira_project_key</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>JIRA_MAX_RESULTS</code></td>
+<td><code>jira_max_results</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ENABLE_JIRA</code></td>
+<td><code>enable_jira</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ENABLE_JIRA_ISSUES</code></td>
+<td><code>enable_jira_issues</code></td>
+<td>Jira</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>GITHUB_TOKEN</code></td>
+<td><code>github_token</code></td>
+<td>GitHub</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>TESTS_REPO_URL</code></td>
+<td><code>tests_repo_url</code></td>
+<td>GitHub</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>TESTS_REPO_TOKEN</code></td>
+<td><code>tests_repo_token</code></td>
+<td>GitHub</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>ENABLE_GITHUB_ISSUES</code></td>
+<td><code>enable_github_issues</code></td>
+<td>GitHub</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>REPORTPORTAL_URL</code></td>
+<td><code>reportportal_url</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>REPORTPORTAL_API_TOKEN</code></td>
+<td><code>reportportal_api_token</code></td>
+<td>Report Portal</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>REPORTPORTAL_PROJECT</code></td>
+<td><code>reportportal_project</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>REPORTPORTAL_VERIFY_SSL</code></td>
+<td><code>reportportal_verify_ssl</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ENABLE_REPORTPORTAL</code></td>
+<td><code>enable_reportportal</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>RP_PUSH_CLASSIFICATIONS</code></td>
+<td><code>rp_push_classifications</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>RP_PUSH_ROOTCOZ_URL</code></td>
+<td><code>rp_push_rootcoz_url</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>RP_PUSH_TRACKER_LINKS</code></td>
+<td><code>rp_push_tracker_links</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ADMIN_KEY</code></td>
+<td><code>admin_key</code></td>
+<td>Auth &amp; Security</td>
+<td>env-only (read-only display)</td>
+</tr>
+<tr>
+<td><code>SECURE_COOKIES</code></td>
+<td><code>secure_cookies</code></td>
+<td>Auth &amp; Security</td>
+<td>restart</td>
+</tr>
+<tr>
+<td><code>TRUST_PROXY_HEADERS</code></td>
+<td><code>trust_proxy_headers</code></td>
+<td>Auth &amp; Security</td>
+<td>restart</td>
+</tr>
+<tr>
+<td><code>REQUIRE_APPROVAL</code></td>
+<td><code>require_approval</code></td>
+<td>Auth &amp; Security</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ADMIN_WAIT_APPROVE_MSG</code></td>
+<td><code>admin_wait_approve_msg</code></td>
+<td>Auth &amp; Security</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ALLOWED_USERS</code></td>
+<td><code>allowed_users</code></td>
+<td>Auth &amp; Security</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>DEFAULT_USER_ROLE</code></td>
+<td><code>default_user_role</code></td>
+<td>Auth &amp; Security</td>
+<td>restart</td>
+</tr>
+<tr>
+<td><code>SESSION_TTL_HOURS</code></td>
+<td><code>session_ttl_hours</code></td>
+<td>Auth &amp; Security</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>PROW_URL</code></td>
+<td><code>prow_url</code></td>
+<td>Prow</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>GCS_BUCKET</code></td>
+<td><code>gcs_bucket</code></td>
+<td>Prow</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>PROW_ARTIFACTS_MAX_SIZE_MB</code></td>
+<td><code>prow_artifacts_max_size_mb</code></td>
+<td>Prow</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>PROW_ARTIFACT_MAX_FILE_SIZE_MB</code></td>
+<td><code>prow_artifact_max_file_size_mb</code></td>
+<td>Prow</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>PROW_ARTIFACTS_MAX_OBJECTS</code></td>
+<td><code>prow_artifacts_max_objects</code></td>
+<td>Prow</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>PUBLIC_BASE_URL</code></td>
+<td><code>public_base_url</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ADDITIONAL_REPOS</code></td>
+<td><code>additional_repos</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>MAX_CONCURRENT_REPO_CLONES</code></td>
+<td><code>max_concurrent_repo_clones</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>WAIT_FOR_COMPLETION</code></td>
+<td><code>wait_for_completion</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>POLL_INTERVAL_MINUTES</code></td>
+<td><code>poll_interval_minutes</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>MAX_WAIT_MINUTES</code></td>
+<td><code>max_wait_minutes</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>METADATA_RULES_FILE</code></td>
+<td><code>metadata_rules_file</code></td>
+<td>Server</td>
+<td>restart</td>
+</tr>
+<tr>
+<td><code>LOG_LEVEL</code></td>
+<td><code>log_level</code></td>
+<td>Server</td>
+<td>restart</td>
+</tr>
+<tr>
+<td><code>ENABLE_AUTO_REVIEW</code></td>
+<td><code>enable_auto_review</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>AUTO_PUSH_EXPORTERS</code></td>
+<td><code>auto_push_exporters</code></td>
+<td>Server</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>VAPID_PUBLIC_KEY</code></td>
+<td><code>vapid_public_key</code></td>
+<td>Web Push</td>
+<td>restart</td>
+</tr>
+<tr>
+<td><code>VAPID_PRIVATE_KEY</code></td>
+<td><code>vapid_private_key</code></td>
+<td>Web Push</td>
+<td>restart (sensitive)</td>
+</tr>
+<tr>
+<td><code>VAPID_CLAIM_EMAIL</code></td>
+<td><code>vapid_claim_email</code></td>
+<td>Web Push</td>
+<td>restart</td>
+</tr>
+<tr>
+<td><code>SMTP_HOST</code></td>
+<td><code>smtp_host</code></td>
+<td>Notifications</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>SMTP_PORT</code></td>
+<td><code>smtp_port</code></td>
+<td>Notifications</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>SMTP_USER</code></td>
+<td><code>smtp_user</code></td>
+<td>Notifications</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>SMTP_PASSWORD</code></td>
+<td><code>smtp_password</code></td>
+<td>Notifications</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>SMTP_FROM</code></td>
+<td><code>smtp_from</code></td>
+<td>Notifications</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ALERT_EMAIL_TO</code></td>
+<td><code>alert_email_to</code></td>
+<td>Notifications</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>SLACK_WEBHOOK_URL</code></td>
+<td><code>slack_webhook_url</code></td>
+<td>Notifications</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>SIDECAR_HOST</code></td>
+<td><code>sidecar_host</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge)</td>
+</tr>
+<tr>
+<td><code>SIDECAR_PORT</code></td>
+<td><code>sidecar_port</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge)</td>
+</tr>
+<tr>
+<td><code>SIDECAR_URL</code></td>
+<td><code>sidecar_url</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge; derived from <code>sidecar_port</code> when unset — not persistable)</td>
+</tr>
+<tr>
+<td><code>ACPX_AGENTS</code></td>
+<td><code>acpx_agents</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge)</td>
+</tr>
+<tr>
+<td><code>CLI_AGENTS</code></td>
+<td><code>cli_agents</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_LOG_LEVEL</code></td>
+<td><code>pi_sidecar_log_level</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge)</td>
+</tr>
+<tr>
+<td><code>NODE_BINARY</code></td>
+<td><code>node_binary</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_TRANSCRIPTS_DIR</code></td>
+<td><code>pi_sidecar_transcripts_dir</code></td>
+<td>Sidecar</td>
+<td>restart (env bridge)</td>
+</tr>
+<tr>
+<td><code>DB_PATH</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only</td>
+</tr>
+<tr>
+<td><code>ROOTCOZ_ENCRYPTION_KEY</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only</td>
+</tr>
+<tr>
+<td><code>PORT</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only</td>
+</tr>
+<tr>
+<td><code>XDG_CONFIG_HOME</code> / <code>XDG_DATA_HOME</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only</td>
+</tr>
+<tr>
+<td><code>DEV_MODE</code> / <code>DEBUG</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only</td>
+</tr>
+<tr>
+<td><code>GEMINI_API_KEY</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (sidecar credential)</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (sidecar credential)</td>
+</tr>
+<tr>
+<td><code>CURSOR_API_KEY</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (sidecar credential)</td>
+</tr>
+<tr>
+<td><code>CLAUDE_CODE_USE_VERTEX</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (Vertex toggle)</td>
+</tr>
+<tr>
+<td><code>CLOUD_ML_REGION</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (Vertex)</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_VERTEX_PROJECT_ID</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (Vertex)</td>
+</tr>
+<tr>
+<td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (Vertex gcloud credential mount)</td>
+</tr>
+<tr>
+<td><code>CLOUDSDK_CONFIG</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (Vertex gcloud config mount)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_AGENT_DIR</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (sidecar agent dir)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (sidecar pruning)</td>
+</tr>
+<tr>
+<td><code>PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB</code></td>
+<td>— (no setting)</td>
+<td>excluded</td>
+<td>env-only (sidecar pruning)</td>
+</tr>
+</tbody>
+</table></div>
+<p><code>ADMIN_KEY</code> also bootstraps the <code>admin</code> superuser before any settings exist; keep the env var authoritative for bootstrap. Admin-managed server provider API keys (the <code>GEMINI_API_KEY</code> replacement for server-credential sessions) live in the encrypted <code>server_ai_providers</code> table, managed under Server Settings → AI — they are not env vars.</p>
 <h3 id="variables-that-never-reach-the-server-settings-ui">Variables that never reach the Server Settings UI</h3>
 <p>These are read straight from the process environment and have no <code>Settings</code> field, so they are bootstrap-only. Set them in <code>.env</code>, the Compose file, the Helm chart, or a ConfigMap.</p>
 <div class="table-wrap"><table>
@@ -1007,11 +1847,6 @@ SECURE_COOKIES=false
 <td><code>XDG_CONFIG_HOME</code></td>
 <td>user default</td>
 <td>Writable config directory the container points at <code>/tmp/config</code></td>
-</tr>
-<tr>
-<td><code>LOG_LEVEL</code></td>
-<td><code>INFO</code></td>
-<td>Log verbosity: <code>DEBUG</code>, <code>INFO</code>, <code>WARNING</code>, <code>ERROR</code></td>
 </tr>
 <tr>
 <td><code>DEV_MODE</code> / <code>DEBUG</code></td>
@@ -1054,29 +1889,19 @@ SECURE_COOKIES=false
 <td>Vertex project, used with <code>CLAUDE_CODE_USE_VERTEX</code></td>
 </tr>
 <tr>
-<td><code>ACPX_AGENTS</code></td>
+<td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td>
 <td>unset</td>
-<td>Comma-separated providers exposed through the Cursor ACPX bridge</td>
+<td>Path to the Vertex service-account key file the Helm chart mounts (<code>/gcloud-credentials/application_default_credentials.json</code>)</td>
 </tr>
 <tr>
-<td><code>CLI_AGENTS</code></td>
+<td><code>CLOUDSDK_CONFIG</code></td>
 <td>unset</td>
-<td>Comma-separated providers exposed through the local CLI agents</td>
+<td>gcloud config directory for the Vertex credential mount (<code>/gcloud-credentials</code> in the chart)</td>
 </tr>
 <tr>
 <td><code>PI_SIDECAR_AGENT_DIR</code></td>
 <td>unset</td>
 <td>Sidecar agent dir for custom providers and settings (see below)</td>
-</tr>
-<tr>
-<td><code>RECORD_TRANSCRIPTS</code></td>
-<td><code>false</code></td>
-<td>Record one redacted JSONL per AI session (pi-sidecar &gt;= 4.12.0). Toggleable in Server Settings → AI — applies <strong>immediately</strong> via the sidecar runtime toggle (pi-sidecar &gt;= 4.14.0, no restart); rootcoz also persists the value to <code>/data/pi-sidecar/env</code>, which the container entrypoint sources on boot so restarts keep it</td>
-</tr>
-<tr>
-<td><code>PI_SIDECAR_TRANSCRIPTS_DIR</code></td>
-<td><code>/data/pi-sidecar/transcripts</code></td>
-<td>Where transcript JSONL files land — keep it under the persistent <code>/data</code> mount so they survive container replacement</td>
 </tr>
 </tbody>
 </table></div>
@@ -1312,8 +2137,8 @@ MYGATEWAY_API_KEY=your-gateway-api-key
 <h2 id="advanced-usage">Advanced Usage</h2>
 <p>Change settings after login without touching a restart. Open Server Settings, edit the field, and save. The value is validated against the same Pydantic constraints as the environment variable, encrypted if sensitive, and applied to the running process immediately. Setting a field to an empty string deletes the override.</p>
 <p>Sensitive values are returned masked as <code>••••••••</code>. <code>GET /api/admin/settings?reveal_key=ADMIN_KEY</code> unmasks one key, and <code>reveal_key=__all__</code> unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See <a href="api-reference.html">API Endpoint Reference</a>.</p>
-<p>Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code>, <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_ACCESS_TOKEN</code>, <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>ADMIN_KEY</code>, and <code>VAPID_PRIVATE_KEY</code>. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: <code>GET /api/admin/settings</code> decrypts them and masks them by default, but returns them in full when called with <code>reveal_key</code>. Treat that response as secret-bearing.</p>
-<p>Blank strings normalise consistently: optional strings become unset, <code>AI_PROVIDER</code> is lowercased and normalised, <code>DEFAULT_USER_ROLE</code> is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_ACCESS_TOKEN</code>, and <code>REPORTPORTAL_API_TOKEN</code>. <code>ADMIN_KEY</code> and <code>VAPID_PRIVATE_KEY</code> are <strong>not</strong> trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or <code>echo</code> — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.</p>
+<p>Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code>, <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>ADMIN_KEY</code>, and <code>VAPID_PRIVATE_KEY</code>. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: <code>GET /api/admin/settings</code> decrypts them and masks them by default, but returns them in full when called with <code>reveal_key</code>. Treat that response as secret-bearing.</p>
+<p>Blank strings normalise consistently: optional strings become unset, <code>AI_PROVIDER</code> is lowercased and normalised, <code>DEFAULT_USER_ROLE</code> is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, and <code>REPORTPORTAL_API_TOKEN</code>. <code>ADMIN_KEY</code> and <code>VAPID_PRIVATE_KEY</code> are <strong>not</strong> trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or <code>echo</code> — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.</p>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
 <li>
@@ -1383,6 +2208,7 @@ MYGATEWAY_API_KEY=your-gateway-api-key
 <li><a href="#prerequisites">Prerequisites</a></li>
 <li><a href="#quick-example">Quick Example</a></li>
 <li><a href="#step-by-step">Step-by-Step</a><ul>
+<li><a href="#environment-variable-audit-347">Environment variable audit (#347)</a></li>
 <li><a href="#variables-that-never-reach-the-server-settings-ui">Variables that never reach the Server Settings UI</a></li>
 <li><a href="#sidecar-custom-providers-agent-dir">Sidecar custom providers (agent dir)</a></li>
 <li><a href="#helm-chart-coverage">Helm chart coverage</a></li>

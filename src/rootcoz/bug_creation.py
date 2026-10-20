@@ -4,17 +4,21 @@ Generates GitHub issue / Jira bug content using AI, searches for
 duplicates, and creates issues via the respective REST APIs.
 """
 
-import os
 import re
 from typing import Any
 
 import httpx
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, build_ai_attribution
 from rootcoz.config import Settings
-from rootcoz.jira import JiraClient, complete_jira_connection, resolve_jira_connection
+from rootcoz.jira import (
+    JiraClient,
+    complete_jira_connection,
+    jira_missing_api_base_error,
+    resolve_jira_connection,
+)
 from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
@@ -22,7 +26,7 @@ from rootcoz.models import (
     ProductBugReport,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # AI attribution footers appended to all generated issues.
 GITHUB_AI_FOOTER = build_ai_attribution(AiProvenance(ai_used=True))
@@ -883,19 +887,16 @@ async def create_jira_bug(
 
     Raises httpx.HTTPStatusError on failure.
     """
-    connection = await complete_jira_connection(
-        resolve_jira_connection(settings), settings.jira_ssl_verify
-    )
+    connection = await complete_jira_connection(resolve_jira_connection(settings))
     if not connection.api_base:
-        raise ValueError(
-            "Jira service account mode could not resolve the Atlassian cloud "
-            "ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL, or point "
-            "JIRA_URL at the scoped api.atlassian.com URL"
-        )
+        # Mode-aware message: basic/pat connections also have an empty base
+        # when their method URL is unset — they must not surface the SA
+        # cloud-ID error.
+        raise jira_missing_api_base_error(connection)
     if not connection.browse_base:
         raise ValueError(
             "Jira service account mode cannot build issue links: JIRA_SITE_URL "
-            "is required when JIRA_URL is the scoped api.atlassian.com URL"
+            "is required for browse links"
         )
     effective_project_key = project_key or settings.jira_project_key or ""
 
@@ -929,7 +930,7 @@ async def create_jira_bug(
         payload["fields"]["security"] = {"name": security_level}
 
     async with httpx.AsyncClient(
-        verify=settings.jira_ssl_verify, timeout=15, auth=connection.auth
+        verify=connection.ssl_verify, timeout=15, auth=connection.auth
     ) as client:
         resp = await client.post(
             f"{connection.api_base}{api_path}/issue",

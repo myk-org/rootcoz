@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import importlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -55,7 +56,7 @@ _log_file = get_log_file()
 
 logger = get_logger(
     name=__name__,
-    level=os.environ.get("LOG_LEVEL", "INFO"),
+    level=logging.NOTSET,  # level authority: the rootcoz parent logger (#347)
     **({"filename": _log_file} if _log_file else {}),
 )
 

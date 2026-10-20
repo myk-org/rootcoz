@@ -3,6 +3,7 @@ import contextlib
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import logging.handlers
@@ -27,7 +28,7 @@ from collections.abc import (
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 from urllib.parse import quote as _urlquote
 from urllib.parse import urlparse
 
@@ -99,6 +100,8 @@ from rootcoz.comment_enrichment import (
 from rootcoz.config import (
     Settings,
     get_settings,
+    jira_method_missing_fields,
+    normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -142,9 +145,11 @@ from rootcoz.jenkins import JenkinsClient
 from rootcoz.jira import (
     JiraClient,
     JiraConnection,
+    JiraOAuthMintError,
     complete_jira_connection,
     enrich_with_jira_matches,
     filter_matches_with_ai,
+    jira_method_url,
     resolve_jira_connection,
     resolve_jira_connection_from_params,
 )
@@ -183,10 +188,12 @@ from rootcoz.models import (
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
     ReportPortalPushResult,
+    ServerProviderKeyInput,
     SetCanUseServerProvidersRequest,
     SetCanViewReportsRequest,
     SetFreeAiModelsRequest,
     SetReviewedRequest,
+    SetServerProviderModelsRequest,
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
@@ -270,7 +277,7 @@ from rootcoz.token_tracking import (
 from rootcoz.transcripts import (
     transcript_path,
     transcript_summary,
-    write_transcript_env_bridge,
+    write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import redact_urls_in_text
 from rootcoz.utils import (
@@ -294,40 +301,80 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "jenkins_user",
         "jira_api_token",
         "jira_pat",
-        "jira_oauth_access_token",
+        "jira_oauth_client_secret",
         "jira_email",
         "github_token",
         "tests_repo_token",
         "reportportal_api_token",
         "admin_key",
         "vapid_private_key",
+        "smtp_password",
+        "slack_webhook_url",
     }
 )
 
 # Server-only settings that should not be exposed to API clients.
-# These are deployment/admin toggles, not analysis configuration.
+# Everything else is admin-settable via Server Settings (#347); these are
+# process/deployment bootstrap with no Settings field at all, plus
+# ADMIN_KEY — a Settings field, but a server-only bootstrap secret that
+# must never become settable or persistable at runtime (AGENTS.md).
 _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
     {
-        "default_user_role",
+        "db_path",
         "debug",
+        "admin_key",
+    }
+)
+
+# Settings whose value is derived from another setting at boot: the
+# entrypoint/startup derives SIDECAR_URL from SIDECAR_PORT and exports it
+# into the process env, so it shows as env-sourced — but persisting it
+# would pin an explicit URL that silently beats the port derivation, and a
+# later sidecar_port change would then break AI calls. Persist the source
+# setting instead.
+_DERIVED_SETTINGS: frozenset[str] = frozenset({"sidecar_url"})
+
+# Admin-management settings hidden from the any-role
+# /api/default-server-settings defaults payload: they configure the server,
+# not per-request analysis defaults, and several (allowed_users,
+# admin_wait_approve_msg) reveal information non-admins never saw before
+# #347 unblocked them for admin management.
+_DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
+    {
+        "default_user_role",
         "secure_cookies",
         "trust_proxy_headers",
         "require_approval",
-        "allowed_users",
         "admin_wait_approve_msg",
+        "allowed_users",
         "log_level",
-        "db_path",
+        "metadata_rules_file",
         "enable_github_issues",
         "enable_reportportal",
         "enable_auto_review",
         "auto_push_exporters",
-        "metadata_rules_file",
         "public_base_url",
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
         "vapid_claim_email",
         "vapid_public_key",
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "slack_webhook_url",
+        "alert_email_to",
+        "session_ttl_hours",
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     }
 )
 
@@ -338,9 +385,37 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "secure_cookies",
         "trust_proxy_headers",
         "metadata_rules_file",
+        "log_level",
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
+    }
+)
+
+# Updating any of these invalidates the recorded jira_verified_method —
+# the record reflects the last successful test of the *previous* setup.
+_JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
+    {
+        "jira_auth_mode",
+        "jira_email",
+        "jira_api_token",
+        "jira_pat",
+        "jira_oauth_client_secret",
+        "atlassian_oauth_client_id",
+        "atlassian_oauth_cloud_id",
+        "jira_cloud_url",
+        "jira_server_url",
+        "jira_oauth_ssl_verify",
+        "jira_cloud_ssl_verify",
+        "jira_server_ssl_verify",
     }
 )
 
@@ -369,16 +444,20 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "record_transcripts",
     ],
     "Jira": [
-        "jira_url",
+        "jira_auth_mode",
         "jira_email",
         "jira_api_token",
+        "jira_cloud_url",
+        "jira_cloud_ssl_verify",
         "jira_pat",
-        "jira_oauth_access_token",
+        "jira_server_url",
+        "jira_server_ssl_verify",
+        "jira_oauth_client_secret",
         "atlassian_oauth_cloud_id",
         "atlassian_oauth_client_id",
+        "jira_oauth_ssl_verify",
         "jira_site_url",
         "jira_project_key",
-        "jira_ssl_verify",
         "jira_max_results",
         "enable_jira",
         "enable_jira_issues",
@@ -407,6 +486,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "admin_wait_approve_msg",
         "allowed_users",
         "default_user_role",
+        "session_ttl_hours",
     ],
     "Prow": [
         "prow_url",
@@ -423,6 +503,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "poll_interval_minutes",
         "max_wait_minutes",
         "metadata_rules_file",
+        "log_level",
         "enable_auto_review",  # runtime toggle, no restart required
         "auto_push_exporters",  # runtime toggle, no restart required
     ],
@@ -430,6 +511,27 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
+    ],
+    "Notifications": [
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "alert_email_to",
+        "slack_webhook_url",
+    ],
+    # Restart-required: the sidecar starts once at container boot and reads
+    # these from the /data/pi-sidecar/env bridge the entrypoint sources.
+    "Sidecar": [
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     ],
 }
 
@@ -494,7 +596,8 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
         result.append(
             {
                 "key": field_name,
-                "env_var": field_name.upper(),
+                # jira_auth_mode is DB-only (Server Settings) — no env var
+                "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
                 "value": display_value,
                 "default": default_str,
                 "description": description,
@@ -503,6 +606,16 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
                 "sensitive": is_sensitive,
                 "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
                 "source": "default",  # Will be overridden by caller
+                # Persistability contract (#347): server-only settings are
+                # env bootstrap the persist/reset/PUT paths always reject,
+                # and derived settings must not be pinned (see
+                # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
+                "server_only": field_name in _SERVER_ONLY_SETTINGS,
+                "derived": field_name in _DERIVED_SETTINGS,
+                "persistable": (
+                    field_name not in _SERVER_ONLY_SETTINGS
+                    and field_name not in _DERIVED_SETTINGS
+                ),
             }
         )
 
@@ -805,7 +918,7 @@ _LOG_FILE = get_log_file()
 
 logger = get_logger(
     name=__name__,
-    level=os.environ.get("LOG_LEVEL", "INFO"),
+    level=logging.NOTSET,  # level authority: the rootcoz parent logger (#347)
     **({"filename": _LOG_FILE} if _LOG_FILE else {}),
 )
 
@@ -1108,12 +1221,7 @@ _ANALYSIS_SETTINGS_FIELDS = (
     "tests_repo_token",
     "peer_analysis_max_rounds",
     "enable_jira",
-    "jira_url",
-    "jira_email",
-    "jira_api_token",
-    "jira_pat",
     "jira_project_key",
-    "jira_ssl_verify",
     "jira_max_results",
     "github_token",
     "ai_call_timeout",
@@ -1232,10 +1340,8 @@ def _reconstruct_from_params(
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
-        "jira_url",
         "jira_email",
         "jira_project_key",
-        "jira_ssl_verify",
         "jira_max_results",
         "atlassian_oauth_cloud_id",
         "jira_site_url",
@@ -1268,11 +1374,14 @@ def _reconstruct_from_params(
         overrides["jira_pat"] = (
             SecretStr(params["jira_pat"]) if params["jira_pat"] else None
         )
-    if params.get("jira_oauth_access_token") is not None:
-        overrides["jira_oauth_access_token"] = (
-            SecretStr(params["jira_oauth_access_token"])
-            if params["jira_oauth_access_token"]
-            else None
+    # New key wins; the old jira_oauth_access_token key is accepted so
+    # request_params stored before the rename still replay exactly.
+    stored_oauth_secret = params.get(
+        "jira_oauth_client_secret", params.get("jira_oauth_access_token")
+    )
+    if stored_oauth_secret is not None:
+        overrides["jira_oauth_client_secret"] = (
+            SecretStr(stored_oauth_secret) if stored_oauth_secret else None
         )
     if params.get("github_token") is not None:
         overrides["github_token"] = (
@@ -1570,6 +1679,109 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
         logger.exception("Failed to resume waiting jobs after startup")
 
 
+# Settings whose DB overrides reach the sidecar through the
+# /data/pi-sidecar/env bridge the entrypoint sources at container start
+# (#347). The sidecar starts once per boot, so these are restart-required.
+_SIDECAR_BRIDGE_SETTINGS: tuple[str, ...] = (
+    "sidecar_host",
+    "sidecar_port",
+    "sidecar_url",
+    "acpx_agents",
+    "cli_agents",
+    "pi_sidecar_log_level",
+    "node_binary",
+    "pi_sidecar_transcripts_dir",
+)
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for loopback bind addresses (127.0.0.0/8, ::1, localhost)."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _sidecar_host_supports_loopback_probe(host: str) -> bool:
+    """True when a sidecar bind host keeps the loopback health probe working.
+
+    The container entrypoint probes ``http://127.0.0.1:$SIDECAR_PORT`` and
+    aborts startup when it fails, and the probe result persists under
+    ``/data`` — a bind address that can never answer on 127.0.0.1 would
+    brick every subsequent restart before the UI could undo it. The probe
+    is a fixed IPv4 call to 127.0.0.1, so only the deployment default
+    (empty), ``0.0.0.0`` (answers on 127.0.0.1 too), and ``127.0.0.1``
+    itself are known-safe (#347 r4): every other spelling — ``::1``,
+    ``127.0.0.2``, ``localhost``, ``::`` — can bind an address the probe
+    never reaches.
+    """
+    return host.strip() in ("", "0.0.0.0", "127.0.0.1")
+
+
+def _derive_sidecar_url_from_port() -> None:
+    """Point the sidecar client at SIDECAR_PORT when no URL is configured.
+
+    The Python client defaults to ``127.0.0.1:9100`` regardless of
+    SIDECAR_PORT, so a port override would change the listener but not
+    the client (#347). An explicitly configured SIDECAR_URL always wins;
+    the container entrypoint applies the same derivation at boot.
+    """
+    if os.environ.get("SIDECAR_URL"):
+        return
+    port = (os.environ.get("SIDECAR_PORT") or "").strip()
+    if not port or port == "9100":
+        return
+    os.environ["SIDECAR_URL"] = f"http://127.0.0.1:{port}"
+    logger.info("Derived SIDECAR_URL=http://127.0.0.1:%s from SIDECAR_PORT", port)
+
+
+def _write_sidecar_env_bridge() -> None:
+    """Write the full sidecar env bridge from the current DB overrides.
+
+    Every bridged var is written in one pass: a var with no DB override is
+    left unassigned so the deployment environment governs. Callers must
+    always write the full set — a partial write would drop the others.
+    """
+    from rootcoz.config import db_setting_is_set, get_db_setting
+
+    values: dict[str, str | None] = {"RECORD_TRANSCRIPTS": None}
+    if db_setting_is_set("record_transcripts"):
+        values["RECORD_TRANSCRIPTS"] = (
+            "true" if get_settings().record_transcripts else "false"
+        )
+    for key in _SIDECAR_BRIDGE_SETTINGS:
+        values[key.upper()] = get_db_setting(key) if db_setting_is_set(key) else None
+    write_sidecar_env_bridge(values)
+
+
+def _apply_log_level_setting() -> None:
+    """Apply a DB-configured log_level to the rootcoz logger tree (restart-required).
+
+    Every rootcoz module logger is created NOTSET and inherits from the
+    ``rootcoz`` parent logger (see rootcoz.get_child_logger), so setting
+    the parent level covers the whole tree — including modules imported
+    lazily after this ran, which the old walk-existing-loggers approach
+    missed.
+    """
+    from rootcoz.config import db_setting_is_set, get_settings
+
+    if not db_setting_is_set("log_level"):
+        return
+    name = get_settings().log_level.strip().upper()
+    if not name:
+        # Explicit empty override (#352) — nothing to apply; the boot env
+        # level (or the logger default) governs.
+        return
+    level = getattr(logging, name, None)
+    if not isinstance(level, int):
+        logger.warning("Ignoring invalid log_level setting: %r", name)
+        return
+    logging.getLogger("rootcoz").setLevel(level)
+    logger.info("Applied DB log_level=%s to the rootcoz logger tree", name)
+
+
 async def _apply_transcript_recording_setting() -> bool:
     """Persist + live-apply the record_transcripts DB state.
 
@@ -1577,6 +1789,10 @@ async def _apply_transcript_recording_setting() -> bool:
     running sidecar through its runtime toggle (pi-sidecar >= 4.14.0 — no
     restart needed). Without an override nothing is assigned and the
     deployment environment governs, both on disk and at runtime.
+
+    The bridge write carries every sidecar setting (#347), not just
+    RECORD_TRANSCRIPTS — the other sidecar vars have no runtime toggle and
+    apply at the next restart.
 
     Returns True when the runtime toggle reached the sidecar (or had nothing
     to push); False when the sidecar was unreachable/rejected it — callers
@@ -1590,7 +1806,7 @@ async def _apply_transcript_recording_setting() -> bool:
         if db_setting_is_set("record_transcripts")
         else None
     )
-    write_transcript_env_bridge(enabled)
+    _write_sidecar_env_bridge()
     return await sidecar_transcripts.sync_transcript_recording(enabled)
 
 
@@ -1599,6 +1815,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _install_job_id_filter()
     _install_sse_log_handler()
     _setup_usage_recorder()
+    _derive_sidecar_url_from_port()
 
     await init_db()
     await storage.cleanup_expired_sessions()
@@ -1609,6 +1826,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from rootcoz.config import load_db_settings
 
     await load_db_settings()
+    _apply_log_level_setting()
 
     # Keep the transcript recording state in sync everywhere: the env bridge
     # persists the DB value for the next boot, and the sidecar runtime toggle
@@ -1932,7 +2150,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             str(expires_at_str), "%Y-%m-%d %H:%M:%S"
                         ).replace(tzinfo=UTC)
                         remaining = expires_at - datetime.now(UTC)
-                        if remaining < timedelta(hours=storage.SESSION_TTL_HOURS / 2):
+                        if remaining < timedelta(
+                            hours=storage.current_session_ttl_hours() / 2
+                        ):
                             # Await renewal so cookie refresh is only set after confirmed DB update
                             try:
                                 renewed = await storage.renew_session(session_token)
@@ -2101,7 +2321,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     httponly=True,
                     samesite="lax",
                     secure=settings.secure_cookies,
-                    max_age=storage.SESSION_TTL_SECONDS,
+                    max_age=storage.current_session_ttl_seconds(),
                 )
                 # Clear legacy cookie after migration
                 response.delete_cookie(
@@ -2464,11 +2684,11 @@ async def _validate_peer_configs(
 
 
 def _resolve_enable_jira(body: BaseAnalysisRequest, settings: Settings) -> bool:
-    """Resolve enable_jira flag from request, env var, or auto-detection.
+    """Resolve enable_jira flag from request or settings.
 
     Priority order:
     1. Request body field (highest)
-    2. settings.jira_enabled property (env var + auto-detect fallback)
+    2. settings.jira_enabled property (requires a selected jira_auth_mode)
 
     Args:
         body: The analysis request.
@@ -2508,11 +2728,11 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     #   ai_provider      - resolved + validated by _resolve_ai_config()
     #   ai_model         - resolved + validated by _resolve_ai_config()
     #   additional_repos - list vs str type mismatch; resolved by resolve_additional_repos()
+    # Jira credentials (jira_email/jira_api_token/jira_pat/
+    # jira_oauth_client_secret) are intentionally absent: they are Server
+    # Settings only and can never be supplied per request.
     direct_fields = [
-        "jira_url",
-        "jira_email",
         "jira_project_key",
-        "jira_ssl_verify",
         "jira_max_results",
         "atlassian_oauth_cloud_id",
         "jira_site_url",
@@ -2534,19 +2754,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         overrides["peer_analysis_max_rounds"] = body.peer_analysis_max_rounds
 
     # SecretStr fields need wrapping
-    if body.jira_api_token is not None:
-        overrides["jira_api_token"] = SecretStr(body.jira_api_token)
-    if body.jira_pat is not None:
-        overrides["jira_pat"] = SecretStr(body.jira_pat)
-    if body.jira_oauth_access_token is not None:
-        overrides["jira_oauth_access_token"] = SecretStr(body.jira_oauth_access_token)
-    elif (body.jira_api_token and body.jira_api_token.strip()) or (
-        body.jira_pat and body.jira_pat.strip()
-    ):
-        # Request-level Jira credentials must not be silently bypassed by a
-        # server-configured ATST token (the resolver prefers SA mode).
-        # Mirrors the clearing semantics of _build_effective_jira_settings.
-        overrides["jira_oauth_access_token"] = None
     if body.github_token is not None:
         overrides["github_token"] = SecretStr(body.github_token)
     if body.tests_repo_token is not None:
@@ -3330,30 +3537,18 @@ def _apply_base_analysis_overrides(
     """
     params["force_server_credentials"] = merged.force_server_credentials
     params["enable_jira"] = _resolve_enable_jira(body, merged)
-    params["jira_url"] = (
-        body.jira_url if body.jira_url is not None else (merged.jira_url or "")
-    )
-    params["jira_email"] = (
-        body.jira_email if body.jira_email is not None else (merged.jira_email or "")
-    )
+    # Jira credentials are Server Settings only — persist the effective
+    # (server) values so stored request_params replay exactly what the
+    # analysis ran with; requests cannot supply or override them.
+    params["jira_email"] = merged.jira_email or ""
     params["jira_api_token"] = (
-        body.jira_api_token
-        if body.jira_api_token is not None
-        else (merged.jira_api_token.get_secret_value() if merged.jira_api_token else "")
+        merged.jira_api_token.get_secret_value() if merged.jira_api_token else ""
     )
-    params["jira_pat"] = (
-        body.jira_pat
-        if body.jira_pat is not None
-        else (merged.jira_pat.get_secret_value() if merged.jira_pat else "")
-    )
-    params["jira_oauth_access_token"] = (
-        body.jira_oauth_access_token
-        if body.jira_oauth_access_token is not None
-        else (
-            merged.jira_oauth_access_token.get_secret_value()
-            if merged.jira_oauth_access_token
-            else ""
-        )
+    params["jira_pat"] = merged.jira_pat.get_secret_value() if merged.jira_pat else ""
+    params["jira_oauth_client_secret"] = (
+        merged.jira_oauth_client_secret.get_secret_value()
+        if merged.jira_oauth_client_secret
+        else ""
     )
     params["atlassian_oauth_cloud_id"] = (
         body.atlassian_oauth_cloud_id
@@ -3369,11 +3564,6 @@ def _apply_base_analysis_overrides(
         body.jira_project_key
         if body.jira_project_key is not None
         else (merged.jira_project_key or "")
-    )
-    params["jira_ssl_verify"] = (
-        body.jira_ssl_verify
-        if body.jira_ssl_verify is not None
-        else merged.jira_ssl_verify
     )
     params["jira_max_results"] = (
         body.jira_max_results
@@ -6710,22 +6900,25 @@ async def enrich_comments(
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
-    # Detect Cloud vs Server/DC auth once, matching JiraClient logic:
-    # - Cloud: jira_email is set -> Basic auth with email:token
-    # - Server/DC: no email -> Bearer PAT
-    # - Service account: ATST token -> Bearer against scoped gateway
-    jira_url: str | None = settings.jira_url if settings.jira_enabled else None
-    jira_active = bool(jira_url)
+    # Jira connection resolution (single source of truth): the selected
+    # `jira_auth_mode` decides oauth (scoped gateway) / basic (Cloud) /
+    # pat (Server/DC Bearer). Unset mode → jira_enabled is False and the
+    # connection is skipped entirely.
     jira_connection: JiraConnection | None = (
-        resolve_jira_connection(settings) if jira_active else None
+        resolve_jira_connection(settings) if settings.jira_enabled else None
     )
+    if jira_connection is not None and jira_connection.mode == "none":
+        jira_connection = None
     if jira_connection is not None and jira_connection.mode == "sa":
-        # Complete the cloud ID ONCE here — otherwise every per-key status
-        # task would fire its own tenant_info lookup on a cold cache.
-        jira_connection = await complete_jira_connection(
-            jira_connection, settings.jira_ssl_verify
-        )
-        if not jira_connection.api_base:
+        # Complete the cloud ID and mint the access token ONCE here —
+        # otherwise every per-key status task would fire its own
+        # tenant_info lookup / token mint on a cold cache.
+        try:
+            jira_connection = await complete_jira_connection(jira_connection)
+        except JiraOAuthMintError as exc:
+            logger.warning("Comment enrichment: %s; skipping Jira keys", exc)
+            jira_connection = None
+        if jira_connection is not None and not jira_connection.api_base:
             logger.warning(
                 "Comment enrichment: SA cloud ID unresolvable; skipping Jira keys"
             )
@@ -6776,16 +6969,10 @@ async def enrich_comments(
                 },
             )
 
-        if jira_active and jira_connection:
+        if jira_connection:
             for key in detect_jira_keys(c["comment"]):
                 idx = len(tasks)
-                tasks.append(
-                    fetch_jira_ticket_status(
-                        jira_connection,
-                        key,
-                        ssl_verify=settings.jira_ssl_verify,
-                    )
-                )
+                tasks.append(fetch_jira_ticket_status(jira_connection, key))
                 task_map[idx] = (str(c["id"]), {"type": "jira", "key": key})
 
     enrichments: dict[str, list[dict[str, Any]]] = {}
@@ -7125,11 +7312,21 @@ async def preview_jira_bug(
             status_code=403,
             detail="Jira issue creation is disabled on this server",
         )
-    if not settings.jira_url:
-        raise HTTPException(
-            status_code=400,
-            detail="Jira URL is not configured on the server",
-        )
+    # A legacy (non-ATOA) service-account secret must be rejected, not
+    # silently dropped (which would fall back to the server credentials).
+    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
+    # Effective settings first (Finding 9): the user's credential pins the
+    # auth method, so the method-configured check must run against the
+    # EFFECTIVE settings — a user-supplied credential can satisfy a method
+    # the server's own secret cannot.
+    effective_jira_settings = _build_effective_jira_settings(
+        settings,
+        body.jira_token,
+        body.jira_email,
+        body.jira_project_key,
+        user_jira_sa_token=body.jira_sa_token,
+    )
+    _require_jira_method_configured(effective_jira_settings)
     failure, result_data, matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
@@ -7171,20 +7368,10 @@ async def preview_jira_bug(
     similar: list[dict[str, Any]] = []
     user_jira_token = (body.jira_token or "").strip()
     user_jira_sa_token = (body.jira_sa_token or "").strip()
-    if user_jira_token or user_jira_sa_token:
-        effective_jira_settings = _build_effective_jira_settings(
-            settings,
-            body.jira_token,
-            body.jira_email,
-            body.jira_project_key,
-            user_jira_sa_token=body.jira_sa_token,
-        )
-    else:
-        effective_jira_settings = None
     if (
-        effective_jira_settings
+        (user_jira_token or user_jira_sa_token)
         and _has_jira_credentials(effective_jira_settings)
-        and effective_jira_settings.jira_url
+        and jira_method_url(effective_jira_settings)
         and effective_jira_settings.jira_project_key
     ):
         try:
@@ -7250,13 +7437,41 @@ async def preview_jira_bug(
 
 
 def _has_jira_credentials(settings: Settings) -> bool:
-    """Return True if the given settings contain usable Jira credentials."""
-    sa_token = settings.jira_oauth_access_token
+    """True when an explicitly selected Jira auth method is fully configured.
+
+    Mirrors the resolver: with ``jira_auth_mode`` set, any non-empty token
+    for the selected method is usable (no value sniffing), and an unset
+    mode disables Jira entirely regardless of stored credentials.
+    """
     return bool(
-        (settings.jira_api_token and settings.jira_api_token.get_secret_value())
-        or (settings.jira_pat and settings.jira_pat.get_secret_value())
-        or (sa_token and sa_token.get_secret_value().startswith("ATST"))
+        normalize_jira_auth_mode(settings.jira_auth_mode)
+        and not jira_method_missing_fields(settings)
     )
+
+
+def _require_jira_method_configured(settings: Settings) -> None:
+    """400 unless a Jira auth method is selected with all its fields.
+
+    Replaces the old generic "Jira URL is not configured" gate: each
+    method is self-contained, so the per-method missing-fields check is
+    the only pre-check (URLs included — basic needs ``jira_cloud_url``,
+    pat needs ``jira_server_url``, oauth needs the cloud ID).
+    """
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+    if not mode:
+        raise HTTPException(
+            status_code=400,
+            detail="No Jira auth method selected — choose one in Server Settings",
+        )
+    missing = jira_method_missing_fields(settings)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Jira auth method '{mode}' is selected but missing: "
+                f"{', '.join(missing)}"
+            ),
+        )
 
 
 def _jira_issue_creation_enabled(settings: Settings) -> bool:
@@ -7305,10 +7520,8 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
             (settings.jira_api_token and settings.jira_api_token.get_secret_value())
             or (settings.jira_pat and settings.jira_pat.get_secret_value())
             or (
-                settings.jira_oauth_access_token
-                and settings.jira_oauth_access_token.get_secret_value().startswith(
-                    "ATST"
-                )
+                settings.jira_oauth_client_secret
+                and settings.jira_oauth_client_secret.get_secret_value()
             )
         ),
         "server_jira_email": bool(settings.jira_email),
@@ -7322,6 +7535,31 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
     }
 
 
+def _jira_auth_mode_for_credentials(
+    *,
+    oauth_token: str | None = None,
+    api_token: str | None = None,
+    pat: str | None = None,
+    email: str | None = None,
+) -> str | None:
+    """Auth mode pinned by present Jira credentials; None when none supplied.
+
+    Field-presence only — no value sniffing, no fallback chain. Shared by
+    ``_build_effective_jira_settings`` (user credentials) and
+    ``_merge_settings`` (per-request credentials) so a server-pinned
+    ``jira_auth_mode`` cannot silently override or discard them: an OAuth
+    2.0 client secret pins ``oauth``, an api token with an email pins
+    ``basic``, a bare token (no email / the pat field) pins ``pat``.
+    """
+    if oauth_token and oauth_token.strip():
+        return "oauth"
+    if api_token and api_token.strip():
+        return "basic" if email and email.strip() else "pat"
+    if pat and pat.strip():
+        return "pat"
+    return None
+
+
 def _build_effective_jira_settings(
     settings: Settings,
     user_jira_token: str,
@@ -7333,56 +7571,108 @@ def _build_effective_jira_settings(
 
     Uses ``model_copy()`` to follow the same pattern as ``_merge_settings()``.
 
-    Service account mode: a user ATST token replaces the server's SA token
-    and clears the basic-auth pair (``jira_api_token``/``jira_pat``/
-    ``jira_email``) so the effective credentials are unambiguous — the
-    resolver would pick ATST first anyway.
+    The auth mode is pinned to the user's credential choice (which field
+    they filled in the credentials UI) — no inference from values:
 
-    Regular token mode: the user token is set as ``jira_api_token`` and both
-    ``jira_pat`` and ``jira_oauth_access_token`` are cleared so the user
-    token takes precedence in all auth resolution paths
-    (``resolve_jira_auth`` prefers PAT and ATST over the API token, so
-    leaving the server values intact would bypass the user override).
+    Service account mode: a user OAuth 2.0 credential client secret
+    (ATOA-prefixed) replaces the server's secret and clears the other
+    credentials so the effective credentials are unambiguous;
+    ``jira_auth_mode`` is set to ``oauth``. The client ID stays whatever
+    the server configures (``atlassian_oauth_client_id``) — the ID and
+    secret must belong to the same Atlassian OAuth 2.0 credential.
+
+    Regular token mode: with an email, ``jira_auth_mode`` is ``basic`` and
+    the token goes to ``jira_api_token``; without an email the token is a
+    bearer PAT — mode ``pat`` with the token in ``jira_pat``. The other
+    methods' fields are cleared so the user token takes precedence in all
+    auth resolution paths.
 
     When the user provides a token but no email, ``jira_email`` is also cleared
     to prevent pairing the server's email with the user's token (which would
     incorrectly trigger Cloud Basic auth). Cloud users must explicitly provide
-    their email; without it, the non-Cloud auth path is used, which may
-    fail against Cloud-only Jira hosts.
+    their email; without it, the bearer path is used, which may fail against
+    Cloud-only Jira hosts.
 
     An optional *user_jira_project_key* overrides the server-level project key
     so that duplicate searches and bug creation target the user's chosen project.
     """
     overrides: dict[str, Any] = {}
-    if user_jira_sa_token and user_jira_sa_token.strip().startswith("ATST"):
-        # Service account override — only an ATST-prefixed value selects SA
-        # mode; anything else would be ignored by the resolver and silently
-        # disable Jira, so it falls through to the regular-token branch.
-        overrides["jira_oauth_access_token"] = SecretStr(user_jira_sa_token.strip())
+    if user_jira_sa_token and user_jira_sa_token.strip().startswith("ATOA"):
+        # OAuth 2.0 credential override — only an ATOA-prefixed client
+        # secret selects oauth mode; anything else would be ignored by the
+        # resolver and silently disable Jira, so it falls through to the
+        # regular-token branch.
+        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_sa_token.strip())
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
-    elif user_jira_token and user_jira_token.strip().startswith("ATST"):
-        # An ATST token supplied in the regular field: route it to SA mode so
-        # validation (which detects the prefix) and actual use agree.
-        overrides["jira_oauth_access_token"] = SecretStr(user_jira_token.strip())
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            oauth_token=user_jira_sa_token
+        )
+    elif user_jira_token and user_jira_token.strip().startswith("ATOA"):
+        # An ATOA client secret supplied in the regular field: route it to
+        # oauth mode so validation (which detects the prefix) and actual
+        # use agree.
+        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_token.strip())
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            oauth_token=user_jira_token
+        )
     elif user_jira_token and user_jira_token.strip():
-        overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
-        overrides["jira_pat"] = None
-        overrides["jira_oauth_access_token"] = None
-        overrides["jira_email"] = (
+        email = (
             user_jira_email.strip()
             if user_jira_email and user_jira_email.strip()
             else None
         )
+        if email:
+            overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
+            overrides["jira_pat"] = None
+        else:
+            # No email: the user token is a bearer PAT, not a basic-auth pair.
+            overrides["jira_pat"] = SecretStr(user_jira_token.strip())
+            overrides["jira_api_token"] = None
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
+            api_token=user_jira_token, email=email
+        )
+        overrides["jira_oauth_client_secret"] = None
+        overrides["jira_email"] = email
     if user_jira_project_key and user_jira_project_key.strip():
         overrides["jira_project_key"] = user_jira_project_key.strip()
     if not overrides:
         return settings
     return settings.model_copy(update=overrides)
+
+
+def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
+    """400 when a legacy (non-ATOA) SA secret is the only Jira credential.
+
+    A non-ATOA ``jira_sa_token`` (e.g. a legacy ATST access token) adds no
+    overrides in ``_build_effective_jira_settings`` — without this check
+    the request would silently run with the SERVER's Jira credentials
+    instead of the user's. Shared by every endpoint that consumes
+    ``jira_sa_token`` from a request body.
+
+    Raises:
+        HTTPException: 400 when the SA secret is set but not ATOA-prefixed
+            and no regular ``jira_token`` is supplied.
+    """
+    token = (jira_token or "").strip()
+    sa_token = (jira_sa_token or "").strip()
+    if sa_token and not sa_token.startswith("ATOA") and not token:
+        logger.info(
+            "Rejecting request with a legacy (non-ATOA) Jira service account "
+            "secret and no regular token"
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The saved Jira service account token is not an OAuth 2.0 "
+                "client secret (Atlassian client secrets start with 'ATOA'). "
+                "Re-enter your OAuth 2.0 client secret in Profile Settings."
+            ),
+        )
 
 
 def _require_tracker_url(result: dict[str, Any], tracker_name: str) -> str:
@@ -7598,11 +7888,6 @@ async def create_jira_bug_endpoint(
             status_code=403,
             detail="Jira issue creation is disabled on this server",
         )
-    if not settings.jira_url:
-        raise HTTPException(
-            status_code=400,
-            detail="Jira URL is not configured on the server",
-        )
 
     # User must provide their own Jira token (regular or service account) —
     # fail fast before DB work
@@ -7613,6 +7898,22 @@ async def create_jira_bug_endpoint(
             status_code=400,
             detail=("Jira token is required. Set up your token in Profile Settings."),
         )
+    # A legacy (non-ATOA) service-account secret must be rejected, not
+    # silently dropped (which would file the bug under the SERVER's Jira
+    # identity).
+    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
+    # Effective settings first (Finding 9): the user's credential pins the
+    # auth method, so the method-configured check must run against the
+    # EFFECTIVE settings — a user-supplied credential can satisfy a method
+    # the server's own secret cannot.
+    effective_jira_settings = _build_effective_jira_settings(
+        settings,
+        body.jira_token,
+        body.jira_email,
+        body.jira_project_key,
+        user_jira_sa_token=body.jira_sa_token,
+    )
+    _require_jira_method_configured(effective_jira_settings)
 
     _failure, _result_data, _matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
@@ -7624,13 +7925,6 @@ async def create_jira_bug_endpoint(
         bug_body += f"\n\n----\nReported by: {username} via rootcoz"
 
     try:
-        effective_jira_settings = _build_effective_jira_settings(
-            settings,
-            body.jira_token,
-            body.jira_email,
-            body.jira_project_key,
-            user_jira_sa_token=body.jira_sa_token,
-        )
         if not effective_jira_settings.jira_project_key:
             raise HTTPException(
                 status_code=400,
@@ -7647,6 +7941,10 @@ async def create_jira_bug_endpoint(
             security_level=body.jira_security_level,
             issue_type=body.jira_issue_type,
         )
+    except JiraOAuthMintError as exc:
+        # OAuth 2.0 credential could not mint an access token — a
+        # configuration error, surfaced as a controlled 400.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         # Unresolvable SA cloud ID / missing site URL — a configuration
         # error, surfaced as a controlled 400 rather than an unhandled 500.
@@ -9346,7 +9644,7 @@ async def get_default_server_settings(
 
     result: dict[str, Any] = {}
     for field_name in type(settings).model_fields:
-        if field_name in _SENSITIVE_SETTINGS or field_name in _SERVER_ONLY_SETTINGS:
+        if field_name in _SENSITIVE_SETTINGS or field_name in _DEFAULTS_HIDDEN_SETTINGS:
             continue
         value = getattr(settings, field_name)
         # Skip SecretStr fields (defensive — all should be in _SENSITIVE_SETTINGS)
@@ -9399,7 +9697,8 @@ async def get_default_server_settings(
     _OPTIONAL_STRING_FIELDS = frozenset(
         {
             "tests_repo_url",
-            "jira_url",
+            "jira_cloud_url",
+            "jira_server_url",
             "jira_project_key",
             "jenkins_url",
             "prow_url",
@@ -9434,7 +9733,8 @@ class JiraProjectsRequest(BaseModel):
     jira_token: str = Field(default="", description="User's Jira token")
     jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
     jira_sa_token: str = Field(
-        default="", description="User's Atlassian service account (ATST) token"
+        default="",
+        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
     )
     query: str = Field(default="", description="Search query to filter projects")
 
@@ -9447,7 +9747,13 @@ def _jira_client_from_body(
     Returns ``(effective_settings, stripped_token)`` when the user supplied a
     non-empty token (regular or service account), or *None* when no usable
     token is present.
+
+    Raises:
+        HTTPException: 400 when a legacy (non-ATOA) service-account secret is
+            the only supplied credential — it must be rejected, not silently
+            dropped in favor of the server's credentials.
     """
+    _require_usable_jira_sa_token(jira_token, jira_sa_token)
     token = jira_token.strip() if jira_token else ""
     sa_token = jira_sa_token.strip() if jira_sa_token else ""
     if not token and not sa_token:
@@ -9468,12 +9774,16 @@ async def list_jira_projects(
     Uses the user's Jira token to list projects they can see.
     Always includes the server's configured project key.
     """
-    if not settings.jira_url:
-        return []
-
     result = _jira_client_from_body(
         settings, body.jira_token, body.jira_email, body.jira_sa_token
     )
+    # Effective settings first: the user's credential pins the auth method,
+    # so the method-URL gate must check the EFFECTIVE method's URL — the
+    # server-selected method's URL being empty must not blank the list for
+    # a user whose own method is fully configured (and vice versa).
+    effective_settings = result[0] if result is not None else settings
+    if not jira_method_url(effective_settings):
+        return []
     if result is None:
         # No user token — return just the server's configured project
         if settings.jira_project_key:
@@ -9481,8 +9791,6 @@ async def list_jira_projects(
                 {"key": settings.jira_project_key, "name": settings.jira_project_key}
             ]
         return []
-
-    effective_settings, _ = result
 
     projects: list[dict[str, Any]] = []
     try:
@@ -9504,7 +9812,8 @@ class JiraSecurityLevelsRequest(BaseModel):
     jira_token: str = Field(default="", description="User's Jira token")
     jira_email: str = Field(default="", description="User's Jira email")
     jira_sa_token: str = Field(
-        default="", description="User's Atlassian service account (ATST) token"
+        default="",
+        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
     )
     project_key: str = Field(description="Jira project key")
 
@@ -9515,7 +9824,7 @@ async def list_jira_security_levels(
     settings: Settings = _SETTINGS_DEP,
 ) -> list[dict[str, Any]]:
     """List available security levels for a Jira project."""
-    if not settings.jira_url or not body.project_key:
+    if not body.project_key:
         return []
 
     result = _jira_client_from_body(
@@ -9525,6 +9834,11 @@ async def list_jira_security_levels(
         return []
 
     effective_settings, _ = result
+    # Effective settings first: check the EFFECTIVE method's URL — the
+    # server-selected method's URL must not decide for a user whose own
+    # method is (not) configured.
+    if not jira_method_url(effective_settings):
+        return []
 
     try:
         async with JiraClient(effective_settings) as client:
@@ -9550,7 +9864,8 @@ async def validate_token(
     """Validate a GitHub or Jira token by making a lightweight API call.
 
     GitHub: GET /user (returns authenticated user info)
-    Jira: GET /rest/api/2/myself (returns authenticated user info)
+    Jira: GET /rest/api/2/myself (Cloud basic / Server Bearer), or project
+    visibility for OAuth 2.0 credential secrets (read:jira-work scope only)
     """
     token = body.token.strip()
     if not token:
@@ -9590,40 +9905,66 @@ async def validate_token(
             return _invalid("Could not reach GitHub API")
 
     elif body.token_type == "jira":
-        if not settings.jira_url:
-            return _invalid("Jira URL not configured on server")
-        # ATST-prefixed tokens authenticate as service accounts against the
-        # scoped api.atlassian.com gateway (Bearer, REST v3); other tokens
-        # follow the email → Cloud basic / no-email → Server Bearer split.
+        # ATOA-prefixed values are OAuth 2.0 credential client secrets —
+        # they authenticate (via a minted access token) against the scoped
+        # api.atlassian.com gateway (REST v3); other tokens follow the
+        # email → Cloud basic / no-email → Server Bearer split. Each method
+        # reads its own server-configured URL and TLS verification.
         email = body.email.strip()
-        is_sa_token = token.startswith("ATST")
+        is_sa_secret = token.startswith("ATOA")
         connection = resolve_jira_connection_from_params(
-            settings.jira_url or "",
-            email,
-            "" if is_sa_token else token,
-            jira_oauth_access_token=token if is_sa_token else "",
+            jira_cloud_url=settings.jira_cloud_url,
+            jira_server_url=settings.jira_server_url,
+            jira_email=email,
+            jira_token="" if is_sa_secret else token,
+            jira_oauth_client_secret=token if is_sa_secret else "",
+            atlassian_oauth_client_id=settings.atlassian_oauth_client_id or "",
             atlassian_oauth_cloud_id=settings.atlassian_oauth_cloud_id or "",
             jira_site_url=settings.jira_site_url or "",
+            jira_cloud_ssl_verify=settings.jira_cloud_ssl_verify,
+            jira_server_ssl_verify=settings.jira_server_ssl_verify,
+            jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
         )
-        if is_sa_token:
-            connection = await complete_jira_connection(
-                connection, settings.jira_ssl_verify
-            )
+        if is_sa_secret:
+            if not settings.atlassian_oauth_client_id:
+                return _invalid(
+                    "Server has no atlassian_oauth_client_id configured — "
+                    "it is required to use an OAuth 2.0 credential secret"
+                )
+            try:
+                connection = await complete_jira_connection(connection)
+            except JiraOAuthMintError as exc:
+                return _invalid(str(exc))
             if not connection.api_base:
                 return _invalid(
-                    "Could not resolve the Atlassian cloud ID for the service "
-                    "account token (set ATLASSIAN_OAUTH_CLOUD_ID or "
-                    "JIRA_SITE_URL on the server)"
+                    "Could not resolve the Atlassian cloud ID for the OAuth "
+                    "2.0 credential (set atlassian_oauth_cloud_id or "
+                    "jira_site_url on the server)"
                 )
-        myself_path = (
-            "/rest/api/3/myself" if connection.mode == "sa" else "/rest/api/2/myself"
-        )
+        elif not connection.api_base:
+            if email:
+                return _invalid(
+                    "Jira Cloud URL (jira_cloud_url) not configured on server"
+                )
+            return _invalid(
+                "Jira Server URL (jira_server_url) not configured on server"
+            )
+        # OAuth 2.0 credentials carry read:jira-work only — /myself needs
+        # read:jira-users and 401s — so SA connections probe project
+        # visibility instead of the current-user endpoint.
+        if connection.mode == "sa":
+            probe_path = "/rest/api/3/project"
+            probe_params = {"maxResults": 1}
+        else:
+            probe_path = "/rest/api/2/myself"
+            probe_params = {}
         try:
             async with httpx.AsyncClient(
-                verify=settings.jira_ssl_verify, timeout=10, auth=connection.auth
+                verify=connection.ssl_verify, timeout=10, auth=connection.auth
             ) as client:
                 resp = await client.get(
-                    f"{connection.api_base}{myself_path}",
+                    f"{connection.api_base}{probe_path}",
+                    params=probe_params,
                     headers={"Accept": "application/json", **connection.headers},
                 )
                 resp.raise_for_status()
@@ -9631,6 +9972,14 @@ async def validate_token(
                     data = resp.json()
                 except ValueError, json.JSONDecodeError:
                     return _invalid("Tracker API returned an unexpected response")
+                if connection.mode == "sa":
+                    if not isinstance(data, list):
+                        return _invalid("Tracker API returned an unexpected response")
+                    return {
+                        "valid": True,
+                        "username": "service account",
+                        "message": "OAuth 2.0 credential valid (service account)",
+                    }
                 display = data.get("displayName", data.get("name", ""))
                 return {
                     "valid": True,
@@ -10582,7 +10931,7 @@ async def login(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
     # Clear legacy cookie after migration
     response.delete_cookie(
@@ -10681,10 +11030,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
 
     response = JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
     response.set_cookie(
         "rootcoz_session",
@@ -10692,7 +11038,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
 
     logger.info(f"[AUDIT] User '{username}' rotated their own API key")
@@ -10766,10 +11112,7 @@ async def register_user(request: Request) -> JSONResponse:
 
     response = JSONResponse(
         content=content,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
     response.set_cookie(
         "rootcoz_session",
@@ -10777,7 +11120,7 @@ async def register_user(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
     # Clear legacy session cookie after migration
     response.delete_cookie(
@@ -10806,10 +11149,7 @@ async def check_needs_key(request: Request) -> JSONResponse:
     Uses session or cookie username to determine if the user needs registration.
     This is a public endpoint — does not require authentication.
     """
-    cache_headers = {
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
-    }
+    cache_headers = {"Cache-Control": "no-store"}
 
     # Try session first (authenticated identity)
     session_token = _read_cookie(request, "rootcoz_session")
@@ -10876,24 +11216,47 @@ async def _credential_user(request: Request) -> str:
 async def get_user_ai_credentials(request: Request) -> JSONResponse:
     """List supported provider IDs and configured flags; never return keys."""
     username = await _credential_user(request)
+    # Advertise the sidecar's exact-case provider ids; a key stored under
+    # any case spelling folds into the catalog entry it belongs to (the
+    # write path canonicalizes, but older rows and cross-case duplicates
+    # must not split one provider into two rows).
     supported = await supported_key_providers()
     try:
         configured = await storage.get_user_ai_credentials(username)
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    supported_set = set(supported)
+
+    # A legacy row stored under a non-canonical spelling folds into the
+    # exact-case catalog entry when one exists; only providers that left
+    # the catalog entirely keep their stored spelling (configured, no
+    # longer key-supported) so the UI can still render and clear them.
+    def _fold(provider: str) -> str:
+        # Exact registered spelling wins — two case-differing registered
+        # providers must never fold into each other.
+        if provider in supported_set:
+            return provider
+        return next(
+            (s for s in supported_set if s.lower() == provider.lower()), provider
+        )
+
+    # Drifted legacy spellings (stored under a case variant that is no
+    # longer registered) belong to the catalog entry; a stored spelling
+    # that is itself registered belongs to that entry alone — the user
+    # credential store keeps case-distinct registered providers as
+    # separate credentials, so one must never mark the other configured.
+    drifted_lower = {p.lower() for p in configured if p not in supported_set}
+
+    providers: list[dict[str, Any]] = [
+        {
+            "provider": p,
+            "configured": p in configured or p.lower() in drifted_lower,
+            "supports_user_keys": p in supported_set,
+        }
+        for p in sorted(supported_set | {_fold(p) for p in configured})
+    ]
     return JSONResponse(
-        content=strip_sensitive_from_response(
-            {
-                "providers": [
-                    {
-                        "provider": p,
-                        "configured": p in configured,
-                        "supports_user_keys": p in supported,
-                    }
-                    for p in sorted(set(supported) | configured.keys())
-                ]
-            }
-        ),
+        content=strip_sensitive_from_response({"providers": providers}),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -10956,19 +11319,12 @@ class AiCredentialInput(BaseModel):
     model: str
 
 
-@app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
-async def set_user_ai_credential(
-    provider: str, body: AiCredentialInput, request: Request
-) -> JSONResponse:
-    """Encrypt and save a key for a sidecar-confirmed provider."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    username = await _credential_user(request)
-    if provider not in await supported_key_providers():
-        raise HTTPException(
-            status_code=400, detail="Provider does not support session API keys"
-        )
-    key = body.api_key.get_secret_value()
+def _validate_submitted_api_key(key: str) -> str | None:
+    """Rejection detail for a submitted provider key, or None when valid.
+
+    Shared by the user and admin (server provider) credential flows: strip
+    Unicode whitespace (including the BOM), cap at 1024 UTF-16 code units.
+    """
     try:
         valid = (
             bool(
@@ -10982,8 +11338,56 @@ async def set_user_ai_credential(
         valid = False
     if valid and len(key) < 8:
         valid = False
-    if not valid:
-        raise HTTPException(status_code=400, detail="API key must be 8-1024 characters")
+    return None if valid else "API key must be 8-1024 characters"
+
+
+async def _canonical_key_provider_id(provider: str) -> str | None:
+    """The sidecar's exact-case id for a provider.
+
+    The sidecar's catalog — and its ``/sessions`` endpoint — is
+    case-sensitive: it reports mixed-case IDs like ``EnMaaS`` and rejects
+    a lowercase spelling, so a caller posting ``enmaas`` passes the
+    support gate yet fails sidecar verification as "inconclusive" (#347).
+    Verification and storage must therefore use the canonical id this
+    returns. ``None`` means the catalog does not list the provider;
+    callers gate on that.
+
+    Exact match wins: when the catalog registers two providers that
+    differ only by case (``Foo`` and ``foo``), a request for ``foo`` must
+    target ``foo`` — case-insensitive fallback only when the submitted
+    spelling is not itself registered.
+    """
+    supported = await supported_key_providers()
+    if provider in supported:
+        return provider
+    lowered = provider.lower()
+    for candidate in supported:
+        if candidate.lower() == lowered:
+            return candidate
+    return None
+
+
+@app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
+async def set_user_ai_credential(
+    provider: str, body: AiCredentialInput, request: Request
+) -> JSONResponse:
+    """Encrypt and save a key for a sidecar-confirmed provider."""
+    _require_reviewer(request)
+    _check_allow_list(request)
+    username = await _credential_user(request)
+    # Resolve to the sidecar's exact-case id: the gate below accepts any
+    # caller spelling (#347), but verification and storage must use the
+    # canonical id or the sidecar rejects the session and the stored row
+    # drifts from the catalog's spelling.
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    provider = canonical
+    key = body.api_key.get_secret_value()
+    if error := _validate_submitted_api_key(key):
+        raise HTTPException(status_code=400, detail=error)
     from rootcoz.ai_client import verify_ai_key
 
     model = body.model.strip()
@@ -11109,13 +11513,14 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
         if (
             field == "jira_sa_token"
             and kwargs[field]
-            and not kwargs[field].startswith("ATST")
+            and not kwargs[field].startswith("ATOA")
         ):
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "jira_sa_token must be an ATST-prefixed Atlassian service "
-                    "account token — use jira_token for regular credentials"
+                    "jira_sa_token must be an ATOA-prefixed Atlassian OAuth "
+                    "2.0 credential client secret — use jira_token for "
+                    "regular credentials"
                 ),
             )
 
@@ -11673,6 +12078,11 @@ async def set_free_ai_models_endpoint(
     since they were saved, and a stale survivor must not block unrelated
     edits — the CLI and Users page resubmit the existing list for every
     add/remove. Stale pairs are ignored gracefully at runtime.
+
+    ``free ⊆ included`` is normalized here: a free pair on a managed
+    provider (stored key or selection) is auto-included in that
+    provider's selection, mirroring the server-providers PUT — otherwise
+    scoped_models would filter it out of the restricted catalog.
     """
     _require_admin(request)
     existing = {
@@ -11721,10 +12131,410 @@ async def set_free_ai_models_endpoint(
         request.state.username,
         len(stored),
     )
+    # free ⊆ included (#347): a managed provider (stored key or selection)
+    # only exposes its selection, so a free pair outside it would vanish
+    # from the restricted catalog. Auto-include it — the same normalization
+    # the server-providers PUT applies.
+    auto_included = await storage.auto_include_free_pairs(
+        [(entry.provider, entry.model) for entry in body.models],
+        request.state.username or "admin",
+    )
+    if auto_included:
+        logger.info(
+            "[AUDIT] Admin '%s' auto-included %d free pair(s) into managed "
+            "provider selections",
+            request.state.username,
+            len(auto_included),
+        )
     return {
         "models": stored,
         "version": storage.free_models_version(stored),
     }
+
+
+# --- Admin server provider credentials (#347) ---
+
+
+async def _seed_server_provider_selection(provider: str, updated_by: str) -> None:
+    """Seed a full-catalog selection for a newly-keyed provider (#347 r4).
+
+    A stored key makes a provider *managed* (see
+    ``ai_client._load_server_pool_selection``), and a managed provider with
+    no selection rows exposes nothing — so adding a verified key to a
+    provider that served its whole catalog via deployment credentials
+    would silently withdraw every model from discovery and
+    ``require_selected_server_pair``. Seeding one row per current catalog
+    model (free flags preserved) keeps the exposure exactly as it was.
+    An existing admin selection stays authoritative — a restriction must
+    survive a key add — and the rotate path never reseeds for the same
+    reason.
+    """
+    if any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_server_provider_models()
+    ):
+        return
+    free_models = {
+        row["model"]
+        for row in await storage.list_free_ai_models()
+        if row["provider"].lower() == provider.lower()
+    }
+    catalog_models = [
+        entry["id"]
+        for entry in await _get_model_catalog()
+        if isinstance(entry.get("provider"), str)
+        and entry["provider"].lower() == provider.lower()
+        and isinstance(entry.get("id"), str)
+        and entry["id"]
+    ]
+    entries = [{"id": model, "free": model in free_models} for model in catalog_models]
+    # Free pairs whose model left the catalog survive the seeding (stale
+    # pairs are ignored at runtime) so a key add never rewrites unrelated
+    # free-model state.
+    entries.extend(
+        {"id": model, "free": True}
+        for model in sorted(free_models - set(catalog_models))
+    )
+    if entries:
+        await storage.set_server_provider_models(provider, entries, updated_by)
+        logger.info(
+            "[AUDIT] Seeded full-catalog model selection for newly-keyed "
+            "provider '%s' (%d models)",
+            provider,
+            len(entries),
+        )
+
+
+async def _verify_and_store_server_provider_key(
+    provider: str,
+    body: ServerProviderKeyInput,
+    request: Request,
+    *,
+    replacing: bool,
+) -> JSONResponse:
+    """Shared add/rotate path: verify the key with a real turn, then store."""
+    # Resolve to the sidecar's exact-case id up front (#347): verification,
+    # the duplicate check, and storage all see the canonical spelling, so
+    # a lowercase add behaves identically to the catalog's ``EnMaaS`` and
+    # cannot create a mixed-case duplicate row.
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    provider = canonical
+    key = body.api_key.get_secret_value()
+    if error := _validate_submitted_api_key(key):
+        raise HTTPException(status_code=400, detail=error)
+    from rootcoz.ai_client import verify_ai_key
+
+    model = body.verification_model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Select a model to verify the key")
+    outcome = await verify_ai_key(provider, model, key)
+    if outcome != "accepted":
+        # Mirror the user flow: report the outcome, never store an untested key.
+        message = {
+            "rejected": "Check the key and selected model; existing credential unchanged.",
+            "inconclusive": "Try again when the provider is available; existing credential unchanged.",
+        }.get(outcome)
+        return JSONResponse(
+            content=strip_sensitive_from_response(
+                {
+                    "outcome": outcome,
+                    "ok": False,
+                    **({"message": message} if message else {}),
+                }
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+    # Re-check the credential AFTER verification and BEFORE the write: the
+    # sidecar round-trip above can take seconds, and a concurrent add during
+    # it must not be silently overwritten by this one, nor a concurrent
+    # removal resurrected without its model selections.
+    exists = provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }
+    if exists and not replacing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    if replacing and not exists:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    await storage.set_server_ai_credential(
+        provider, key, request.state.username or "admin"
+    )
+    if not replacing:
+        await _seed_server_provider_selection(
+            provider, request.state.username or "admin"
+        )
+    logger.info(
+        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified)",
+        request.state.username,
+        provider,
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/admin/server-providers", operation_id="listServerProvidersEndpoint")
+async def list_server_providers_endpoint(request: Request) -> JSONResponse:
+    """List server provider key state and per-model selection (admin only).
+
+    Never returns keys. One entry per catalog provider (plus stored
+    providers that left the catalog), each with key presence, verification
+    state, a ``managed`` flag, and its models with ``included`` + ``free``
+    flags — unmanaged providers (no stored key, no selection rows) report
+    their whole catalog as included, matching what the server pool
+    actually exposes for them.
+    """
+    _require_admin(request)
+    catalog = await _get_model_catalog()
+    # Case-insensitive join (#347): storage matches providers ignoring case,
+    # so a key stored as "Google" must key the catalog's "google" entry —
+    # an exact-name lookup would split it into keyed + unkeyed rows.
+    stored = {
+        normalize_provider(row["provider"]): row
+        for row in await storage.list_server_ai_providers()
+    }
+    selections: dict[str, dict[str, bool]] = {}
+    for row in await storage.list_server_provider_models():
+        selections.setdefault(row["provider"].lower(), {})[row["model"]] = True
+    free_by_provider: dict[str, set[str]] = {}
+    for row in await storage.list_free_ai_models():
+        free_by_provider.setdefault(row["provider"].lower(), set()).add(row["model"])
+    supported = {p.lower() for p in await supported_key_providers()}
+
+    models_by_provider: dict[str, list[dict[str, Any]]] = {}
+    for entry in catalog:
+        provider = entry.get("provider")
+        model = entry.get("id")
+        if not isinstance(provider, str) or not isinstance(model, str) or not model:
+            continue
+        models_by_provider.setdefault(provider, []).append(
+            {"id": model, "name": entry.get("name") or model}
+        )
+    # Stored selections whose model left the catalog stay visible so the UI
+    # can render and clear them (stale pairs are ignored at runtime).
+    for provider_lower, selected in selections.items():
+        provider = next(
+            (p for p in models_by_provider if p.lower() == provider_lower),
+            provider_lower,
+        )
+        known = {m["id"] for m in models_by_provider.get(provider, [])}
+        for model in selected:
+            if model not in known:
+                models_by_provider.setdefault(provider, []).append({"id": model})
+
+    providers = []
+    # Case-insensitive union (#347): the stored map is keyed by the
+    # normalized (lowercase) spelling, so its keys must fold into the
+    # catalog's mixed-case entry (e.g. ``EnMaaS``) instead of splitting
+    # the listing into a second lowercase row.
+    listed_ids = {p.lower(): p for p in models_by_provider}
+    for stored_id in stored:
+        listed_ids.setdefault(stored_id.lower(), stored_id)
+    for provider in sorted(listed_ids.values()):
+        provider_lower = provider.lower()
+        # Managed = stored selection rows or a stored key — the same rule
+        # ``ai_client._load_server_pool_selection`` scopes the server pool
+        # with. An unmanaged provider exposes its whole catalog, so the
+        # listing must report every catalog model included: reporting them
+        # unchecked would let one Free-pill click PUT a draft with a single
+        # model and silently withdraw the rest of the catalog (#347 r4).
+        managed = provider_lower in selections or normalize_provider(provider) in stored
+        selected = selections.get(provider_lower, {})
+        models = [
+            {
+                "id": m["id"],
+                "name": m.get("name") or m["id"],
+                "included": (m["id"] in selected) if managed else True,
+                "free": m["id"] in free_by_provider.get(provider_lower, set()),
+            }
+            for m in models_by_provider.get(provider, [])
+        ]
+        record = stored.get(normalize_provider(provider))
+        providers.append(
+            {
+                "provider": provider,
+                "managed": managed,
+                "has_key": record is not None,
+                "verified": record is not None,
+                "verified_at": record.get("verified_at", "") if record else "",
+                "supports_key": provider.lower() in supported,
+                "models": models,
+            }
+        )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"providers": providers}),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/admin/server-providers", operation_id="addServerProvider")
+async def add_server_provider(
+    request: Request, body: ServerProviderKeyInput
+) -> JSONResponse:
+    """Add a server provider key (admin only) — verified before storing."""
+    _require_admin(request)
+    provider = body.provider.strip()
+    if provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    return await _verify_and_store_server_provider_key(
+        provider, body, request, replacing=False
+    )
+
+
+@app.post(
+    "/api/admin/server-providers/{provider:path}/rotate-key",
+    operation_id="rotateServerProviderKey",
+)
+async def rotate_server_provider_key(
+    provider: str, request: Request, body: ServerProviderKeyInput
+) -> JSONResponse:
+    """Replace a server provider key (admin only) — re-verified before storing."""
+    _require_admin(request)
+    if provider.lower() not in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    # The rotate body carries the provider again; the path is authoritative.
+    return await _verify_and_store_server_provider_key(
+        provider, body, request, replacing=True
+    )
+
+
+@app.put(
+    "/api/admin/server-providers/{provider:path}/models",
+    operation_id="setServerProviderModelsEndpoint",
+)
+async def set_server_provider_models_endpoint(
+    provider: str, request: Request, body: SetServerProviderModelsRequest
+) -> JSONResponse:
+    """Replace one provider's selected models and free pairs (admin only).
+
+    ``free ⊆ included`` is normalized here: marking a model free auto-includes
+    it, unchecking include clears the free flag. New pairs are validated
+    against the current sidecar catalog (provider case-insensitively, model
+    id exactly) like the standalone free-models save; stored selections and
+    free pairs pass through unvalidated so stale survivors never block an
+    unrelated edit.
+    """
+    _require_admin(request)
+    # Last entry per model id wins; flags are normalized after the merge.
+    merged: dict[str, dict[str, bool]] = {}
+    for entry in body.models:
+        merged[entry.id] = {"included": entry.included, "free": entry.free}
+    entries = [
+        {
+            "id": model_id,
+            "included": flags["included"] or flags["free"],
+            "free": flags["free"] and (flags["included"] or flags["free"]),
+        }
+        for model_id, flags in merged.items()
+    ]
+
+    existing = {
+        row["model"]
+        for row in await storage.list_server_provider_models()
+        if row["provider"].lower() == provider.lower()
+    } | {
+        row["model"]
+        for row in await storage.list_free_ai_models()
+        if row["provider"].lower() == provider.lower()
+    }
+    catalog_pairs = {
+        (
+            str(entry.get("provider") or "").lower(),
+            str(entry.get("id") or ""),
+        )
+        for entry in await _get_model_catalog()
+    }
+    unknown = [
+        {"provider": provider, "model": e["id"]}
+        for e in entries
+        if e["id"] not in existing and (provider.lower(), e["id"]) not in catalog_pairs
+    ]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Unknown models in server provider selection",
+                "unknown": unknown,
+            },
+        )
+    await storage.set_server_provider_models(
+        provider, entries, request.state.username or "admin"
+    )
+    logger.info(
+        "[AUDIT] Admin '%s' set server provider models for '%s': %d included, %d free",
+        request.state.username,
+        provider,
+        sum(1 for e in entries if e["included"]),
+        sum(1 for e in entries if e["free"]),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response(
+            {"provider": provider, "models": entries}
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete(
+    "/api/admin/server-providers/{provider:path}",
+    operation_id="deleteServerProviderEndpoint",
+)
+async def delete_server_provider_endpoint(
+    provider: str, request: Request
+) -> JSONResponse:
+    """Remove a server provider's key, selection, and free pairs (admin only).
+
+    Returns 200 with a warning payload listing the affected selected/free
+    models — the frontend renders the pre-delete confirm from the GET list,
+    and the response records what the deletion actually removed.
+    """
+    _require_admin(request)
+    has_key = provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }
+    current = await storage.list_server_provider_models()
+    has_selection = any(row["provider"].lower() == provider.lower() for row in current)
+    # Free pairs alone configure a provider too (#347 r4): deletion removes
+    # them, so the existence check must see them or a free-pairs-only
+    # provider 404s while its free pairs survive untouched.
+    has_free = any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_free_ai_models()
+    )
+    if not has_key and not has_selection and not has_free:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' is not configured"
+        )
+    affected = await storage.delete_server_ai_provider(provider)
+    logger.info(
+        "[AUDIT] Admin '%s' deleted server provider '%s' (selected=%d, free=%d)",
+        request.state.username,
+        provider,
+        len(affected["selected_models"]),
+        len(affected["free_models"]),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"ok": True, "warnings": affected}),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
@@ -11838,10 +12648,7 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -11880,18 +12687,17 @@ async def get_admin_settings(
 
             item["options"] = await server_capable_providers()
 
-    # Authoritative Jira auth mode (nonsecret) — the frontend must not infer
-    # it from possibly-masked credential values.
-    for item in metadata:
-        if item["key"] == "jira_url":
-            item["jira_auth_mode"] = {
-                "sa": "oauth",
-                "cloud": "basic",
-                "server": "pat",
-            }.get(resolve_jira_connection(get_settings()).mode, "")
-
-    # Get DB overrides
+    # Internal jira_verified_method row on the jira_auth_mode item (last
+    # method whose test SUCCEEDED, "" when never verified; recorded only
+    # for successful tests of a SELECTED method; not user-editable).
     db_overrides = await storage.get_server_settings()
+    verified_method = db_overrides.get("jira_verified_method", {}).get("value", "")
+    for item in metadata:
+        if item["key"] == "jira_auth_mode":
+            item["jira_verified_method"] = verified_method
+
+    # Load the dotenv source once for the source calculation below.
+    dotenv = _settings_dotenv_values()
 
     # Update source and value for DB-overridden settings
     for item in metadata:
@@ -11925,7 +12731,10 @@ async def get_admin_settings(
                     item["env_var_value"] = (
                         _strip_url_userinfo(env_val) if "://" in env_val else env_val
                     )
-        elif os.environ.get(item["env_var"]) is not None:
+        elif _settings_env_value(key, dotenv) is not None:
+            # Env-sourced means resolvable from the same sources Settings
+            # merges (dotenv included) — those values are persistable, so
+            # the UI must offer Save to DB for them, not label them default.
             item["source"] = "env"
         else:
             item["source"] = "default"
@@ -11942,6 +12751,60 @@ async def get_admin_settings(
             item["value"] = "••••••••"
 
     return JSONResponse(content=metadata)
+
+
+# Valid log levels shared by the PUT allowlist and the env-persist path
+# (#347): Settings.log_level itself is unconstrained, so both write paths
+# must enforce the same set.
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _log_level_error(value: object) -> str | None:
+    """Validate a log level; return the error message, or None when valid."""
+    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
+        return "log_level: must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    return None
+
+
+def _settings_dotenv_values() -> dict[str, str]:
+    """The dotenv values Settings merges (DotEnvSettingsSource), by field.
+
+    Unreadable dotenv sources resolve to an empty mapping — Settings would
+    merge nothing from them either.
+    """
+    from pydantic_settings import DotEnvSettingsSource
+
+    try:
+        return DotEnvSettingsSource(
+            Settings,
+            env_file=Settings.model_config.get("env_file"),
+            env_file_encoding=Settings.model_config.get("env_file_encoding"),
+        )()
+    except OSError:
+        logger.debug("Unable to read dotenv sources", exc_info=True)
+        return {}
+
+
+def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str | None:
+    """Resolve a setting's environment value the same way Settings does.
+
+    os.environ first, then the configured dotenv file — the sources
+    pydantic-settings merges for ``Settings``. Pass ``dotenv`` to reuse an
+    already-loaded mapping (e.g. once per request); ``None`` loads it on
+    demand. DB overrides are deliberately excluded: when the effective
+    value only exists in the DB store there is no env value to persist, and
+    the caller must report no-env-value rather than re-persisting the DB's
+    own value.
+    """
+    env_var = key.upper()
+    if key == "jira_auth_mode":
+        # DB-only setting (#346): no env var ever maps to it — a stray
+        # JIRA_AUTH_MODE in the environment is ignored, matching the
+        # pydantic-settings source that drops it.
+        return None
+    if os.environ.get(env_var) is not None:
+        return os.environ[env_var]
+    return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
@@ -11975,7 +12838,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     errors = []
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket"):
+    for key in ("prow_url", "gcs_bucket", "jira_auth_mode", "default_user_role"):
         if key not in settings_updates:
             continue
         value = settings_updates[key]
@@ -11994,8 +12857,29 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key in ("prow_url", "gcs_bucket"):
+        if key == "log_level" and (message := _log_level_error(value)):
+            errors.append(message)
+        if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
+        # Sidecar listener overrides persist under /data and every restart
+        # re-probes them — reject values that would brick container boot
+        # (#347): a non-numeric/out-of-range port, or a bind address the
+        # loopback health probe can never reach.
+        if key == "sidecar_port":
+            try:
+                port = int(str(value).strip())
+            except ValueError, TypeError:
+                port = 0
+            if not 1 <= port <= 65535:
+                errors.append("sidecar_port: must be an integer between 1 and 65535")
+        if key == "sidecar_host":
+            host = str(value).strip()
+            if host and not _sidecar_host_supports_loopback_probe(host):
+                errors.append(
+                    f"sidecar_host: '{host}' would break the container loopback "
+                    "health probe (startup would fail on every restart) — use "
+                    "127.0.0.1, 0.0.0.0, or leave it empty"
+                )
         # Check integer fields
         annotation = field_info.annotation
         is_int = annotation is int or (
@@ -12034,52 +12918,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         )
 
     username = request.state.username or "admin"
-
-    # Save each setting to DB and apply to running process.
-    # Empty/null = reset: delete from DB so resolution falls through to env
-    # (request → DB → env; first non-empty wins).
-    for key, value in settings_updates.items():
-        str_value = str(value) if value is not None else ""
-        if not str_value:
-            await storage.delete_server_setting(key, deleted_by=username)
-            continue
-        # Non-empty: upsert to DB (encrypt sensitive values)
-        if key in _SENSITIVE_SETTINGS:
-            from rootcoz.encryption import encrypt_value
-
-            db_value = encrypt_value(str_value)
-        else:
-            db_value = str_value
-        await storage.set_server_setting(key, db_value, updated_by=username)
-
-    # Update in-memory cache so get_settings() picks up changes.
-    # Empty/null values are removed (fall back to env/default).
-    cache_updates: dict[str, str] = {}
-    cache_removals: list[str] = []
-    for k, v in settings_updates.items():
-        if v is None or str(v) == "":
-            cache_removals.append(k)
-        else:
-            cache_updates[k] = str(v)
-    if cache_removals:
-        remove_from_db_settings_cache(cache_removals)
-    if cache_updates:
-        update_db_settings_cache(cache_updates)
-
-    # Persist the transcript recording switch for the container entrypoint —
-    # the sidecar reads RECORD_TRANSCRIPTS from its process env at start, so
-    # the bridge file is how a DB toggle reaches it after a restart.
-    warnings: list[str] = []
-    if "record_transcripts" in settings_updates:
-        synced = await _apply_transcript_recording_setting()
-        if not synced:
-            warnings.append(
-                "record_transcripts was saved, but the running sidecar could "
-                "not be updated — it applies after a restart or a later "
-                "successful sync"
-            )
-
-    _broadcast_settings_change()
+    warnings = await _save_settings_to_db(settings_updates, username)
 
     logger.info(
         "Admin settings updated: keys=%s, by=%s",
@@ -12094,6 +12933,189 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         content=content,
         status_code=200,
     )
+
+
+# Settings where an explicit empty override is unsafe regardless of type:
+# the sidecar env bridge would export SIDECAR_HOST=''/SIDECAR_PORT='' and
+# pi-config's nullish coalescing selects the empty string over its loopback/
+# default fallbacks — an empty host binds an unspecified address (exposure)
+# and an empty port breaks the entrypoint's startup probe (#352 Qodo r1).
+_EMPTY_OVERRIDE_FORBIDDEN: frozenset[str] = frozenset({"sidecar_host", "sidecar_port"})
+
+
+def _empty_override_error(key: str) -> str | None:
+    """User-facing error when an explicit empty override is invalid for key.
+
+    Returns None when saving an empty string is a valid override. Three
+    gates, all of which protect ``get_settings()`` from storing a value
+    that fails pydantic validation (which would silently drop the entire
+    DB override set) or that would break the sidecar bridge (#352 Qodo r1):
+    string-typed fields only (str / SecretStr), field validators must
+    accept the empty value (``default_user_role`` is str-typed but its
+    validator rejects ""), and infrastructure settings with unsafe empty
+    semantics are denied outright.
+    """
+    if key in _EMPTY_OVERRIDE_FORBIDDEN:
+        return (
+            f"Setting '{key}' cannot be empty — the sidecar bridge would "
+            "export a blank value. Use Reset to fall back to the "
+            "env/default value."
+        )
+    annotation = Settings.model_fields[key].annotation
+    types = get_args(annotation) or (annotation,)
+    if not all(t is str or t is SecretStr or t is type(None) for t in types):
+        return (
+            f"Setting '{key}' cannot be empty — its type does not accept "
+            "an empty override. Use Reset to fall back to the env/default "
+            "value."
+        )
+    try:
+        Settings.model_validate({key: ""})
+    except ValidationError:
+        return (
+            f"Setting '{key}' cannot be empty — its validator rejects an "
+            "empty value. Use Reset to fall back to the env/default value."
+        )
+    return None
+
+
+async def _save_settings_to_db(
+    settings_updates: dict[str, Any], username: str
+) -> list[str]:
+    """Persist validated settings updates to the DB store and apply them.
+
+    Shared save path for the PUT update and the env→DB persist endpoints.
+    A saved value — empty or not — is an explicit DB override: the row's
+    presence beats the OS env (request → DB → env). To fall back to the
+    env/default value, use the reset endpoint (DELETE) instead of saving
+    an empty value (#352). Invalid empty overrides are rejected for ALL
+    keys before ANY key is written — a rejected save never applies a
+    partial update. Returns user-facing warnings; values are never logged.
+    """
+    # Pre-flight: reject invalid empty overrides for the whole batch
+    # before the first DB write, so a 400 never leaves a partial save.
+    for key, value in settings_updates.items():
+        str_value = str(value) if value is not None else ""
+        if not str_value:
+            error = _empty_override_error(key)
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+
+    for key, value in settings_updates.items():
+        str_value = str(value) if value is not None else ""
+        # Upsert (empty allowed — an explicit empty override beats env).
+        # Sensitive values are encrypted only when non-empty; the empty
+        # override stays a plain empty string (nothing to protect).
+        if str_value and key in _SENSITIVE_SETTINGS:
+            from rootcoz.encryption import encrypt_value
+
+            db_value = encrypt_value(str_value)
+        else:
+            db_value = str_value
+        await storage.set_server_setting(key, db_value, updated_by=username)
+
+    # Changed Jira credentials or auth mode invalidate the verified-method
+    # record — it reflects the last successful test of the previous setup.
+    if settings_updates.keys() & _JIRA_VERIFIED_INVALIDATING_KEYS:
+        try:
+            await storage.delete_server_setting(
+                "jira_verified_method", deleted_by=username
+            )
+            remove_from_db_settings_cache(["jira_verified_method"])
+        except Exception:
+            logger.warning("Failed to clear jira_verified_method", exc_info=True)
+
+    # Update in-memory cache so get_settings() picks up changes. Saved
+    # values — empty included — are explicit overrides that beat env;
+    # falling back to env/default is the reset endpoint's job (DELETE).
+    update_db_settings_cache(
+        {k: str(v) if v is not None else "" for k, v in settings_updates.items()}
+    )
+
+    # Persist the transcript recording switch (and the other sidecar
+    # settings) for the container entrypoint — the sidecar reads these from
+    # its process env at start, so the bridge file is how a DB toggle
+    # reaches it after a restart.
+    warnings: list[str] = []
+    if "record_transcripts" in settings_updates or any(
+        key in settings_updates for key in _SIDECAR_BRIDGE_SETTINGS
+    ):
+        synced = await _apply_transcript_recording_setting()
+        if not synced and "record_transcripts" in settings_updates:
+            warnings.append(
+                "record_transcripts was saved, but the running sidecar could "
+                "not be updated — it applies after a restart or a later "
+                "successful sync"
+            )
+    # A non-loopback sidecar bind is exposed to the network — same trust
+    # class as trust_proxy_headers: only safe behind a trusted network.
+    if "sidecar_host" in settings_updates:
+        host = str(settings_updates.get("sidecar_host") or "").strip()
+        if host and not _is_loopback_host(host):
+            warnings.append(
+                f"sidecar_host '{host}' is not a loopback address — the sidecar "
+                "will listen on an external interface. Only do this on a "
+                "trusted network (same trust class as trust_proxy_headers)."
+            )
+
+    _broadcast_settings_change()
+    return warnings
+
+
+@app.post("/api/admin/settings/{key}/persist", operation_id="persistAdminSetting")
+async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
+    """Persist an env-sourced setting's current value to the DB store.
+
+    The migration path for env ↔ Server Settings parity (#347): deployments
+    save their current env values once, then drop the envs — the setting no
+    longer reverts to its default on restart. Runs server-side because the
+    UI never sees decrypted sensitive env values.
+    """
+    _require_admin(request)
+    if key not in Settings.model_fields:
+        raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
+    if key in _SERVER_ONLY_SETTINGS:
+        raise HTTPException(
+            status_code=400, detail=f"Server-only setting (env var only): {key}"
+        )
+    if key in _DERIVED_SETTINGS:
+        # The entrypoint exports the DERIVED SIDECAR_URL into the process
+        # env, so it shows as env-sourced — persisting it would pin an
+        # explicit URL that beats the port derivation (#347).
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key} is derived from sidecar_port — persist sidecar_port instead",
+        )
+    # Env var name per the Settings field mapping (see _get_settings_metadata)
+    # — resolved through the same sources Settings reads (dotenv included);
+    # a DB-only value correctly reports no env value.
+    env_value = _settings_env_value(key)
+    if not env_value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Setting '{key}' has no env value set",
+        )
+    # log_level has no Settings constraint — apply the shared PUT allowlist
+    # so an invalid level cannot survive the persist path either.
+    if key == "log_level" and (message := _log_level_error(env_value)) is not None:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}': {message}"
+        )
+    # Same validation the PUT path applies to admin-typed values
+    try:
+        Settings.model_validate({key: env_value})
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}'"
+        ) from exc
+
+    username = request.state.username or "admin"
+    await _save_settings_to_db({key: env_value}, username)
+
+    logger.info(
+        "[AUDIT] Admin setting persisted from env: key=%s, by=%s", key, username
+    )
+    return JSONResponse(content={"key": key, "source": "db"})
 
 
 @app.get("/api/admin/settings/history", operation_id="getSettingsHistory")
@@ -12121,6 +13143,10 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     _require_admin(request)
     if key not in Settings.model_fields:
         raise HTTPException(status_code=404, detail=f"Unknown setting: {key}")
+    if key in _SERVER_ONLY_SETTINGS:
+        raise HTTPException(
+            status_code=400, detail=f"Server-only setting (env var only): {key}"
+        )
 
     deleted = await storage.delete_server_setting(
         key, deleted_by=request.state.username or "admin"
@@ -12138,9 +13164,9 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     # environment controls the sidecar again, and the runtime override is
     # dropped so the boot env governs immediately.
     content: dict[str, Any] = {"reset": key}
-    if key == "record_transcripts":
+    if key == "record_transcripts" or key in _SIDECAR_BRIDGE_SETTINGS:
         synced = await _apply_transcript_recording_setting()
-        if not synced:
+        if not synced and key == "record_transcripts":
             content["warnings"] = [
                 (
                     "record_transcripts was reset, but the running sidecar could "
@@ -12277,37 +13303,142 @@ async def _test_jenkins_connection(settings: Settings) -> dict[str, Any]:
     return _test_result(True, message, authenticated_user=user)
 
 
+def _jira_settings_fingerprint(settings: Settings) -> str:
+    """Cheap fingerprint of the Jira settings a connection test exercises.
+
+    Covers the selected auth mode, that method's URL and TLS-verification
+    fields, and its credential fields (the same fields
+    ``jira_method_missing_fields`` checks). Values are SHA-256 hashed so
+    the fingerprint can be compared but never decoded or logged — no
+    secrets in comparisons or logs.
+    """
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+
+    def _secret(value: SecretStr | None) -> str:
+        return value.get_secret_value() if value else ""
+
+    parts = [mode]
+    if mode == "oauth":
+        parts.append(_secret(settings.jira_oauth_client_secret))
+        parts.append((settings.atlassian_oauth_client_id or "").strip())
+        parts.append((settings.atlassian_oauth_cloud_id or "").strip())
+        parts.append(str(settings.jira_oauth_ssl_verify))
+    elif mode == "basic":
+        parts.append((settings.jira_email or "").strip())
+        parts.append(_secret(settings.jira_api_token))
+        parts.append(settings.jira_cloud_url.strip())
+        parts.append(str(settings.jira_cloud_ssl_verify))
+    elif mode == "pat":
+        parts.append(_secret(settings.jira_pat))
+        parts.append(settings.jira_server_url.strip())
+        parts.append(str(settings.jira_server_ssl_verify))
+    return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
+
+
 async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     """Current-user ping against the effective Jira connection resolution."""
-    if not settings.jira_url:
-        return _test_result(False, "Jira URL is not configured")
-    connection = resolve_jira_connection(settings)
-    if connection.mode == "none":
+    if not normalize_jira_auth_mode(settings.jira_auth_mode):
         return _test_result(
             False,
-            "No Jira credentials configured (set jira_api_token, jira_pat, "
-            "or jira_oauth_access_token)",
+            "No Jira auth method selected — choose one in Server Settings",
         )
-    connection = await complete_jira_connection(connection, settings.jira_ssl_verify)
+    missing = jira_method_missing_fields(settings)
+    if missing:
+        return _test_result(
+            False,
+            f"Jira auth method '{settings.jira_auth_mode}' is selected "
+            f"but missing: {', '.join(missing)}",
+        )
+    connection = resolve_jira_connection(settings)
+    # Snapshot of the Jira settings this test exercises — compared after
+    # the network call so a mid-flight admin update cannot leave a
+    # verification record for the untested configuration.
+    tested_fingerprint = _jira_settings_fingerprint(settings)
+    try:
+        connection = await complete_jira_connection(connection)
+    except JiraOAuthMintError as exc:
+        return _test_result(False, f"Jira connection failed: {exc}")
     if not connection.api_base:
         return _test_result(
             False,
             "Jira service account mode could not resolve the Atlassian "
             "cloud ID (set atlassian_oauth_cloud_id or jira_site_url)",
         )
-    try:
-        data = await _integration_test_get_json(
-            f"{connection.api_base}{connection.api_path}/myself",
-            headers=dict(connection.headers),
-            auth=connection.auth,
-            verify=settings.jira_ssl_verify,
+    if connection.mode == "sa":
+        # OAuth 2.0 credentials carry read:jira-work only — /myself needs
+        # read:jira-users and 401s with "scope does not match" — so probe
+        # project visibility instead (any 200 proves auth + gateway access).
+        try:
+            data = await _integration_test_get_json(
+                f"{connection.api_base}{connection.api_path}/project",
+                params={"maxResults": 1},
+                headers=dict(connection.headers),
+                auth=connection.auth,
+                verify=connection.ssl_verify,
+            )
+        except _IntegrationTestError as exc:
+            return _test_result(False, f"Jira connection failed: {exc}")
+        if not isinstance(data, list):
+            return _test_result(
+                False, "Jira connection failed: unexpected /project response"
+            )
+        user = "service account"
+    else:
+        try:
+            data = await _integration_test_get_json(
+                f"{connection.api_base}{connection.api_path}/myself",
+                headers=dict(connection.headers),
+                auth=connection.auth,
+                verify=connection.ssl_verify,
+            )
+        except _IntegrationTestError as exc:
+            return _test_result(False, f"Jira connection failed: {exc}")
+        # Validate the payload before recording anything: HTTP 200 with a
+        # non-object body is a failed test, not a verified method.
+        if not isinstance(data, dict):
+            return _test_result(
+                False, "Jira connection failed: unexpected /myself response"
+            )
+        user = str(
+            data.get("displayName") or data.get("name") or data.get("accountId") or ""
         )
-    except _IntegrationTestError as exc:
-        return _test_result(False, f"Jira connection failed: {exc}")
     auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat"}[connection.mode]
-    user = str(
-        data.get("displayName") or data.get("name") or data.get("accountId") or ""
-    )
+    # A method counts as configured only once its test succeeded — record
+    # the tested (selected) method as an internal DB row. Not cleared on
+    # failure: the record reflects the last success, not the latest attempt.
+    # Written only on change so repeated tests don't flood settings history.
+    # But not when the Jira settings changed while the test was in flight:
+    # update_admin_settings already deleted the record for the previous
+    # setup, and this test proved the OLD credentials — re-writing the
+    # marker would verify the untested new configuration.
+    if _jira_settings_fingerprint(get_settings()) != tested_fingerprint:
+        logger.info(
+            "Jira settings changed during the connection test — "
+            "verified method not recorded"
+        )
+        return _test_result(
+            True,
+            "Jira connection successful",
+            auth_mode=auth_mode,
+            user=user,
+            note=(
+                "Jira settings changed during the test — verification not "
+                "recorded; re-run the test for the current settings"
+            ),
+        )
+    try:
+        existing = await storage.get_server_setting("jira_verified_method")
+        if existing is None or existing.get("value") != auth_mode:
+            await storage.set_server_setting("jira_verified_method", auth_mode)
+            logger.info("Jira verified method recorded: %s", auth_mode)
+    except Exception:
+        logger.warning("Failed to record jira_verified_method", exc_info=True)
+        # The confirmation gate must match the reported result — a marker
+        # that could not be persisted would leave the UI inconsistent.
+        return _test_result(
+            False,
+            "Jira connection succeeded but verification could not be recorded",
+        )
     return _test_result(
         True, "Jira connection successful", auth_mode=auth_mode, user=user
     )
@@ -13477,9 +14608,23 @@ async def _check_chat_session_choice(
     return active["session_id"], selected_force
 
 
+# Sentinel for "the user SELECTED a Jira credential but it is unusable"
+# (mode "none" connection). Distinct from None (= no selection at all):
+# build_chat_custom_tools treats None as permission to resolve the user's
+# other stored credentials — a failed selected connection must not fall
+# through to that fallback.
+_JIRA_CHAT_SELECTION_FAILED = JiraConnection(
+    mode="none",
+    api_base="",
+    browse_base="",
+    site_url="",
+    auth=None,
+)
+
+
 async def _resolve_chat_credentials(
     decrypted_params: dict[str, Any], username: str
-) -> tuple[str, str, str, JiraConnection | None, str, str]:
+) -> tuple[str, str, JiraConnection | None, str, str]:
     """Resolve Jira and GitHub credentials for chat.
 
     Jira uses user-scoped tokens only. GitHub uses user-scoped tokens
@@ -13487,10 +14632,16 @@ async def _resolve_chat_credentials(
     never exposed to chat sessions.
 
     Returns:
-        (jira_url, jira_email, jira_token, jira_connection, github_token,
+        (jira_email, jira_token, jira_connection, github_token,
         github_repo). ``jira_connection`` is the resolved (and, for service
-        accounts, cloud-ID-completed) connection — or None when no usable
-        Jira credentials exist.
+        accounts, cloud-ID-completed) connection — ``None`` when the user
+        selected NO Jira credential at all, or the
+        ``_JIRA_CHAT_SELECTION_FAILED`` sentinel (a mode-``"none"``
+        connection) when a selected credential exists but is unusable —
+        chat tool building must not fall back to the user's OTHER stored
+        credential after the selected one failed. Each method reads its
+        own server-level URL and TLS verification (URLs are not
+        credentials).
     """
     import re
 
@@ -13507,9 +14658,6 @@ async def _resolve_chat_credentials(
         if match:
             github_repo = match.group(1)
 
-    # Jira URL from job params or server settings (URL is not a credential)
-    jira_url = decrypted_params.get("jira_url", "") or str(settings.jira_url or "")
-
     # User-scoped credentials only — never job-stored or server deployment tokens
     jira_email = user_tokens.get("jira_email", "")
     jira_token = user_tokens.get("jira_token", "")
@@ -13517,30 +14665,57 @@ async def _resolve_chat_credentials(
     github_token = (user_tokens.get("github_token") or "").strip()
 
     jira_connection: JiraConnection | None = None
-    if jira_url and (jira_token or jira_sa_token):
-        # Cloud ID and site URL are server-level non-secrets — safe to reuse
-        # for user-scoped token resolution.
+    if jira_token or jira_sa_token:
+        # Cloud ID, site URL, per-method URLs/SSL flags, and the OAuth 2.0
+        # credential's client ID are server-level non-secrets — safe to
+        # reuse for user-scoped secret resolution (the user secret +
+        # server client ID must belong to the same Atlassian OAuth 2.0
+        # credential). The user's field choice pins the method; each
+        # method then reads its own URL. An ATOA-prefixed secret saved in
+        # the regular jira_token field is an OAuth 2.0 client secret —
+        # route it to the oauth path so chat agrees with validation and
+        # preview (which detect the prefix).
+        regular_token = jira_token.strip()
+        sa_secret = jira_sa_token.strip()
+        if not sa_secret and regular_token.startswith("ATOA"):
+            sa_secret = regular_token
+            regular_token = ""
         jira_connection = resolve_jira_connection_from_params(
-            jira_url,
-            jira_email,
-            jira_token,
-            jira_oauth_access_token=jira_sa_token,
+            jira_cloud_url=settings.jira_cloud_url,
+            jira_server_url=settings.jira_server_url,
+            jira_email=jira_email,
+            jira_token=regular_token,
+            jira_oauth_client_secret=sa_secret,
+            atlassian_oauth_client_id=str(settings.atlassian_oauth_client_id or ""),
             atlassian_oauth_cloud_id=str(settings.atlassian_oauth_cloud_id or ""),
             jira_site_url=str(settings.jira_site_url or ""),
+            jira_cloud_ssl_verify=settings.jira_cloud_ssl_verify,
+            jira_server_ssl_verify=settings.jira_server_ssl_verify,
+            jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
         )
-        if jira_connection.mode == "sa":
-            jira_connection = await complete_jira_connection(
-                jira_connection, settings.jira_ssl_verify
-            )
-            if not jira_connection.api_base:
+        if jira_connection.mode == "none":
+            # The selected fields cannot form a usable method (e.g. an
+            # OAuth secret without a server client ID) — a FAILED
+            # selection, not an absent one.
+            jira_connection = _JIRA_CHAT_SELECTION_FAILED
+        else:
+            if jira_connection.mode == "sa":
+                # Complete BEFORE treating an empty api_base as unusable:
+                # complete_jira_connection resolves the cloud ID from the
+                # site URL (tenant_info) when none is configured.
+                try:
+                    jira_connection = await complete_jira_connection(jira_connection)
+                except JiraOAuthMintError as exc:
+                    logger.warning("Chat credentials: %s; Jira tools unavailable", exc)
+                    jira_connection = _JIRA_CHAT_SELECTION_FAILED
+            if jira_connection.mode != "none" and not jira_connection.api_base:
                 logger.warning(
-                    "Chat credentials: could not resolve Atlassian cloud ID; "
-                    "Jira tools unavailable"
+                    "Chat credentials: could not resolve the selected Jira "
+                    "method's API base; Jira tools unavailable"
                 )
-                jira_connection = None
+                jira_connection = _JIRA_CHAT_SELECTION_FAILED
 
     return (
-        jira_url,
         jira_email,
         jira_token,
         jira_connection,
@@ -13688,7 +14863,6 @@ async def _init_chat_under_barrier(
     _settings = get_settings()
 
     (
-        jira_url,
         jira_email,
         jira_token,
         jira_connection,
@@ -13727,7 +14901,8 @@ async def _init_chat_under_barrier(
                 server_url=server_url,
                 auth_token=auth_header.removeprefix("Bearer ").strip(),
                 job_id=job_id,
-                jira_url=jira_url,
+                jira_cloud_url=_settings.jira_cloud_url,
+                jira_server_url=_settings.jira_server_url,
                 jira_email=jira_email,
                 jira_token=jira_token,
                 github_token=github_token,
@@ -14379,7 +15554,6 @@ async def _process_chat_message(
                                 exc_info=True,
                             )
                         (
-                            jira_url,
                             jira_email,
                             jira_token,
                             jira_connection,
@@ -14421,7 +15595,8 @@ async def _process_chat_message(
                                 server_url=server_url,
                                 auth_token=auth_header.removeprefix("Bearer ").strip(),
                                 job_id=job_id,
-                                jira_url=jira_url,
+                                jira_cloud_url=settings.jira_cloud_url,
+                                jira_server_url=settings.jira_server_url,
                                 jira_email=jira_email,
                                 jira_token=jira_token,
                                 github_token=github_token,

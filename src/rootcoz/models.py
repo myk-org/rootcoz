@@ -9,6 +9,7 @@ from pydantic import (
     BeforeValidator,
     Field,
     HttpUrl,
+    SecretStr,
     Strict,
     StringConstraints,
     field_validator,
@@ -198,44 +199,17 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="Max concurrent AI calls (overrides MAX_CONCURRENT_AI_CALLS env var)",
     )
-    jira_url: str | None = Field(
-        default=None,
-        description="Jira instance URL (overrides JIRA_URL env var)",
-    )
-    jira_email: str | None = Field(
-        default=None,
-        description="Jira Cloud email (overrides JIRA_EMAIL env var)",
-    )
-    jira_api_token: str | None = Field(
-        default=None,
-        description="Jira Cloud API token (overrides JIRA_API_TOKEN env var)",
-        json_schema_extra={"format": "password"},
-    )
-    jira_pat: str | None = Field(
-        default=None,
-        description="Jira Server/DC personal access token (overrides JIRA_PAT env var)",
-        json_schema_extra={"format": "password"},
-    )
-    jira_oauth_access_token: str | None = Field(
-        default=None,
-        description="Atlassian service account (ATST) token (overrides JIRA_OAUTH_ACCESS_TOKEN env var)",
-        json_schema_extra={"format": "password"},
-    )
     atlassian_oauth_cloud_id: str | None = Field(
         default=None,
         description="Atlassian cloud ID for the service account connection (overrides ATLASSIAN_OAUTH_CLOUD_ID env var)",
     )
     jira_site_url: str | None = Field(
         default=None,
-        description="Atlassian site URL for browse links when JIRA_URL is scoped (overrides JIRA_SITE_URL env var)",
+        description="Atlassian site URL for Jira browse links (overrides JIRA_SITE_URL env var)",
     )
     jira_project_key: str | None = Field(
         default=None,
         description="Jira project key to scope searches (overrides JIRA_PROJECT_KEY env var)",
-    )
-    jira_ssl_verify: bool | None = Field(
-        default=None,
-        description="Jira SSL verification (overrides JIRA_SSL_VERIFY env var)",
     )
     jira_max_results: Annotated[int, Field(gt=0)] | None = Field(
         default=None,
@@ -1084,8 +1058,8 @@ class _TrackerCredentialsMixin(BaseModel):
     jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
     jira_sa_token: str = Field(
         default="",
-        description="User's Atlassian service account (ATST) token — takes "
-        "precedence over jira_token/jira_email",
+        description="User's Atlassian OAuth 2.0 credential client secret "
+        "(ATOA) — takes precedence over jira_token/jira_email",
     )
     jira_project_key: str = Field(
         default="", description="Override Jira project key for bug creation"
@@ -1101,9 +1075,10 @@ class _TrackerCredentialsMixin(BaseModel):
 
 
 # NOTE: Preview/create request models intentionally do NOT inherit
-# BaseAnalysisRequest. Target repositories (TESTS_REPO_URL, JIRA_URL) are
-# configured at the server level, but users may provide their own tracker
-# tokens (github_token, jira_token, jira_email) to create issues under
+# BaseAnalysisRequest. Target repositories (TESTS_REPO_URL) and Jira
+# per-method URLs are configured at the server level, but users may
+# provide their own tracker tokens (github_token, jira_token,
+# jira_email) to create issues under
 # their own identity. When user tokens are absent, the server falls back
 # to its deployment credentials. Analysis overrides remain out of scope.
 class PreviewIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
@@ -1283,7 +1258,6 @@ class ReAnalyzeFailureRequest(BaseModel):
     peer_analysis_max_rounds: int | None = None
     tests_repo_url: str | None = None
     enable_jira: bool | None = None
-    jira_url: str | None = None
     jira_project_key: str | None = None
     additional_repos: list[dict[str, Any]] | None = None
 
@@ -1594,6 +1568,28 @@ class SetFreeAiModelsRequest(BaseModel):
     # instead of silently erasing a concurrent admin's change. Omitted
     # keeps last-write-wins for callers that did not read first.
     expected_version: str | None = None
+
+
+class ServerProviderKeyInput(BaseModel):
+    """Admin server-provider add/rotate body — the key is verified before storing."""
+
+    provider: Annotated[str, Strict(), StringConstraints(min_length=1)]
+    api_key: SecretStr
+    verification_model: Annotated[str, Strict(), StringConstraints(min_length=1)]
+
+
+class ServerProviderModelEntry(BaseModel):
+    """One model in a per-provider server model selection (#347)."""
+
+    id: Annotated[str, Strict(), StringConstraints(min_length=1)]
+    included: Annotated[bool, Strict()] = False
+    free: Annotated[bool, Strict()] = False
+
+
+class SetServerProviderModelsRequest(BaseModel):
+    """Admin PUT /api/admin/server-providers/{provider}/models body."""
+
+    models: list[ServerProviderModelEntry]
 
 
 class SetCanViewReportsRequest(BaseModel):

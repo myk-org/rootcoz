@@ -50,9 +50,11 @@ services:
     restart: unless-stopped
 
     # Health check configuration
-    # Verifies the service is responding on /health endpoint
+    # Probes the backend's /api/health, which validates the sidecar via the
+    # effective (possibly DB-overridden) sidecar port — the healthcheck
+    # itself never depends on the sidecar listener port.
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health && curl -f http://localhost:${SIDECAR_PORT:-9100}/health"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

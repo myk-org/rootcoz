@@ -82,9 +82,7 @@ class TestUserRegistration:
         assert data["api_key"].startswith("rootcoz_")
         assert "message" in data
         assert "rootcoz_session" in resp.cookies
-        assert (
-            resp.headers.get("cache-control") == "no-store, no-cache, must-revalidate"
-        )
+        assert resp.headers.get("cache-control") == "no-store"
 
     def test_register_returns_session_cookie(self, client):
         resp = client.post("/api/auth/register", json={"username": "sessionuser"})
@@ -416,10 +414,7 @@ class TestSelfServiceKeyRotation:
         assert data["username"] == "rotateself"
         # Should get a new session cookie
         assert "rootcoz_session" in rotate_resp.cookies
-        assert (
-            rotate_resp.headers.get("cache-control")
-            == "no-store, no-cache, must-revalidate"
-        )
+        assert rotate_resp.headers.get("cache-control") == "no-store"
 
     def test_rotate_key_unauthenticated(self, client):
         """Unauthenticated request gets 401."""

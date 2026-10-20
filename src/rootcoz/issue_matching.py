@@ -5,14 +5,12 @@ issues from any tracker match a given bug/failure description.
 """
 
 import json
-import os
 from typing import Any
 
-from simple_logger.logger import get_logger
-
+from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 
 async def filter_issue_matches_with_ai(

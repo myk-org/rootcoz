@@ -2524,3 +2524,176 @@ class TestMigrationsAppliedSchema:
                 columns = {row[1] for row in await cursor.fetchall()}
             assert "key" in columns
             assert "applied_at" in columns
+
+
+class TestJiraOauthSecretRenameMigration:
+    """One-time copy of jira_oauth_access_token → jira_oauth_client_secret."""
+
+    @staticmethod
+    async def _insert_setting(db_path: Path, key: str, value: str) -> None:
+        """Seed a server_settings row before init_db runs its migrations."""
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS server_settings ("
+                "key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+                "updated_by TEXT NOT NULL DEFAULT '', "
+                "updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            )
+            await db.execute(
+                "INSERT INTO server_settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            await db.commit()
+
+    async def test_old_key_row_copied_to_new_key(self, temp_db_path: Path) -> None:
+        """An old-key row is copied to the new key; the old row is kept."""
+        await self._insert_setting(
+            temp_db_path, "jira_oauth_access_token", "enc:old-value"
+        )
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            new = await storage.get_server_setting("jira_oauth_client_secret")
+            old = await storage.get_server_setting("jira_oauth_access_token")
+        assert new is not None
+        assert new["value"] == "enc:old-value"
+        # The old row is deliberately NOT deleted — the new key wins once set
+        assert old is not None
+        assert old["value"] == "enc:old-value"
+
+    async def test_new_key_set_old_row_ignored(self, temp_db_path: Path) -> None:
+        """When the new key already has a row, the old row is not copied over it."""
+        await self._insert_setting(
+            temp_db_path, "jira_oauth_access_token", "enc:old-value"
+        )
+        await self._insert_setting(
+            temp_db_path, "jira_oauth_client_secret", "enc:new-value"
+        )
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            new = await storage.get_server_setting("jira_oauth_client_secret")
+        assert new is not None
+        assert new["value"] == "enc:new-value"
+
+    async def test_migration_runs_only_once(self, temp_db_path: Path) -> None:
+        """After the one-time migration, a deleted new-key row stays deleted."""
+        await self._insert_setting(
+            temp_db_path, "jira_oauth_access_token", "enc:old-value"
+        )
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.delete_server_setting("jira_oauth_client_secret")
+            # A later boot must not resurrect the new key from the old row
+            await storage.init_db()
+            resurrected = await storage.get_server_setting("jira_oauth_client_secret")
+        assert resurrected is None
+
+    async def test_no_old_row_no_new_row(self, temp_db_path: Path) -> None:
+        """Without an old-key row, nothing is created under the new key."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            new = await storage.get_server_setting("jira_oauth_client_secret")
+        assert new is None
+
+
+class TestJiraUrlPerMethodSplitMigration:
+    """One-time split of the shared jira_url/jira_ssl_verify settings per method."""
+
+    @staticmethod
+    async def _insert_setting(db_path: Path, key: str, value: str) -> None:
+        """Seed a server_settings row before init_db runs its migrations."""
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS server_settings ("
+                "key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+                "updated_by TEXT NOT NULL DEFAULT '', "
+                "updated_at TEXT NOT NULL DEFAULT (datetime('now')))"
+            )
+            await db.execute(
+                "INSERT INTO server_settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            await db.commit()
+
+    async def test_jira_url_copied_to_both_per_method_urls(
+        self, temp_db_path: Path
+    ) -> None:
+        """A jira_url row is copied to jira_cloud_url AND jira_server_url."""
+        await self._insert_setting(temp_db_path, "jira_url", "https://jira.example.com")
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            cloud = await storage.get_server_setting("jira_cloud_url")
+            server = await storage.get_server_setting("jira_server_url")
+            old = await storage.get_server_setting("jira_url")
+        assert cloud is not None and cloud["value"] == "https://jira.example.com"
+        assert server is not None and server["value"] == "https://jira.example.com"
+        # The old row is deliberately NOT deleted — new keys win once set
+        assert old is not None and old["value"] == "https://jira.example.com"
+
+    async def test_jira_ssl_verify_copied_to_all_three_flags(
+        self, temp_db_path: Path
+    ) -> None:
+        """A jira_ssl_verify row is copied to all three per-method flags."""
+        await self._insert_setting(temp_db_path, "jira_ssl_verify", "false")
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            flags = [
+                await storage.get_server_setting(key)
+                for key in (
+                    "jira_oauth_ssl_verify",
+                    "jira_cloud_ssl_verify",
+                    "jira_server_ssl_verify",
+                )
+            ]
+            old = await storage.get_server_setting("jira_ssl_verify")
+        assert all(f is not None and f["value"] == "false" for f in flags)
+        assert old is not None and old["value"] == "false"
+
+    async def test_new_keys_win_over_old_rows(self, temp_db_path: Path) -> None:
+        """Existing per-method rows are never overwritten by the old shared rows."""
+        await self._insert_setting(
+            temp_db_path, "jira_url", "https://shared.example.com"
+        )
+        await self._insert_setting(
+            temp_db_path, "jira_cloud_url", "https://cloud.example.com"
+        )
+        await self._insert_setting(
+            temp_db_path, "jira_server_url", "https://server.example.com"
+        )
+        await self._insert_setting(temp_db_path, "jira_ssl_verify", "true")
+        await self._insert_setting(temp_db_path, "jira_server_ssl_verify", "false")
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            cloud = await storage.get_server_setting("jira_cloud_url")
+            server = await storage.get_server_setting("jira_server_url")
+            oauth_flag = await storage.get_server_setting("jira_oauth_ssl_verify")
+            server_flag = await storage.get_server_setting("jira_server_ssl_verify")
+        assert cloud is not None and cloud["value"] == "https://cloud.example.com"
+        assert server is not None and server["value"] == "https://server.example.com"
+        # jira_ssl_verify=true still fills the unset oauth/cloud flags…
+        assert oauth_flag is not None and oauth_flag["value"] == "true"
+        # …but never an existing per-method row
+        assert server_flag is not None and server_flag["value"] == "false"
+
+    async def test_migration_runs_only_once(self, temp_db_path: Path) -> None:
+        """After the one-time migration, a deleted new-key row stays deleted."""
+        await self._insert_setting(temp_db_path, "jira_url", "https://jira.example.com")
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.delete_server_setting("jira_cloud_url")
+            # A later boot must not resurrect the new key from the old row
+            await storage.init_db()
+            resurrected = await storage.get_server_setting("jira_cloud_url")
+        assert resurrected is None
+
+    async def test_no_old_rows_no_new_rows(self, temp_db_path: Path) -> None:
+        """Without old shared rows, nothing is created under the new keys."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            for key in (
+                "jira_cloud_url",
+                "jira_server_url",
+                "jira_oauth_ssl_verify",
+                "jira_cloud_ssl_verify",
+                "jira_server_ssl_verify",
+            ):
+                assert await storage.get_server_setting(key) is None

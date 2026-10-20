@@ -373,7 +373,7 @@
 <ol>
 <li><strong>Turn on Jira search for duplicate bugs.</strong></li>
 </ol>
-<p>Enable <code>Enable Jira search</code> in the <code>Jira Integration</code> section and supply <code>Jira URL</code> and <code>Project Key</code>. While analyzing, RootCoz asks the model for three to five short <code>jira_search_keywords</code> for each <code>PRODUCT BUG</code> instead of generic words, and uses them to find existing bugs before creating a new one. The same pattern produces <code>tests_repo_search_keywords</code> for matching GitHub issues.</p>
+<p>Enable <code>Enable Jira search</code> in the <code>Jira Integration</code> section, select an auth method in Server Settings, and supply <code>Project Key</code>. While analyzing, RootCoz asks the model for three to five short <code>jira_search_keywords</code> for each <code>PRODUCT BUG</code> instead of generic words, and uses them to find existing bugs before creating a new one. The same pattern produces <code>tests_repo_search_keywords</code> for matching GitHub issues.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -387,8 +387,16 @@
 <td>Whether the search runs</td>
 </tr>
 <tr>
-<td><code>jira_url</code></td>
-<td>Base URL of the Jira instance</td>
+<td><code>jira_cloud_url</code></td>
+<td>Jira Cloud site URL for the <code>basic</code> (email + API token) method</td>
+</tr>
+<tr>
+<td><code>jira_server_url</code></td>
+<td>Jira Server/DC base URL for the <code>pat</code> method</td>
+</tr>
+<tr>
+<td><code>atlassian_oauth_cloud_id</code></td>
+<td>Cloud ID locating the <code>oauth</code> method's scoped gateway</td>
 </tr>
 <tr>
 <td><code>jira_project_key</code></td>

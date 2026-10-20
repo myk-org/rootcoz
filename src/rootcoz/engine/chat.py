@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from pi_sidecar_client import get_sidecar_client
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     call_ai,
@@ -29,7 +29,7 @@ from rootcoz.engine.http_mcp import (
 from rootcoz.jira import JiraConnection, resolve_jira_connection_from_params
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
-logger = get_logger(name=__name__)
+logger = get_child_logger(__name__)
 
 _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
 
@@ -479,7 +479,8 @@ def build_chat_custom_tools(
     server_url: str,
     auth_token: str,
     job_id: str,
-    jira_url: str = "",
+    jira_cloud_url: str = "",
+    jira_server_url: str = "",
     jira_email: str = "",
     jira_token: str = "",
     github_token: str = "",
@@ -599,15 +600,25 @@ def build_chat_custom_tools(
     )
 
     jira_conn = jira_connection
-    if jira_conn is None and jira_url and (jira_token or jira_email):
-        # An ATST token supplied in the regular field routes to SA mode so
-        # validation and actual use agree (validate-token detects the prefix).
-        sa_fallback = jira_token if jira_token.startswith("ATST") else ""
+    if jira_conn is None and (jira_token or jira_email):
+        # Fallback ONLY for an absent selection (jira_connection=None): a
+        # selected-but-failed connection arrives as a mode-"none"
+        # JiraConnection sentinel (never None), which blocks this fallback
+        # so chat never silently switches to the user's OTHER stored
+        # credential (e.g. basic after the selected OAuth failed).
+        #
+        # An ATOA OAuth 2.0 client secret supplied in the regular field
+        # routes to oauth mode so validation and actual use agree — but
+        # this sync fallback cannot mint an access token (async), so such
+        # connections stay unusable here; async callers pass a completed
+        # connection via jira_connection.
+        sa_fallback = jira_token if jira_token.startswith("ATOA") else ""
         jira_conn = resolve_jira_connection_from_params(
-            jira_url,
-            jira_email,
-            "" if sa_fallback else jira_token,
-            jira_oauth_access_token=sa_fallback,
+            jira_cloud_url=jira_cloud_url,
+            jira_server_url=jira_server_url,
+            jira_email=jira_email,
+            jira_token="" if sa_fallback else jira_token,
+            jira_oauth_client_secret=sa_fallback,
         )
     if jira_conn and jira_conn.api_base and jira_conn.mode != "none":
         # Basic auth (cloud) must be embedded as a header — tool HTTP
@@ -1266,9 +1277,19 @@ async def _create_chat_session(
         if key is not None:
             create_kwargs["api_key"] = key
         else:
-            from rootcoz.ai_client import require_server_provider_grant
+            from rootcoz.ai_client import (
+                require_server_provider_grant,
+                server_provider_key,
+            )
 
             await require_server_provider_grant(sidecar_provider, sidecar_model)
+            # A stored server provider key (#347) reaches chat sessions too:
+            # pass it as the session apiKey while keeping the server
+            # credential-source classification (create_session_safely records
+            # server_api_key sessions as server-owned).
+            server_key = await server_provider_key(sidecar_provider)
+            if server_key is not None:
+                create_kwargs["server_api_key"] = server_key
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id

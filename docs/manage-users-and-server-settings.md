@@ -119,10 +119,10 @@ That creates an active operator who can submit analyses, and one server setting 
    | --- | --- |
    | `Jenkins` | `jenkins_url`, `jenkins_user`, `jenkins_password`, `jenkins_ssl_verify`, `jenkins_timeout`, `jenkins_artifacts_max_size_mb`, `get_job_artifacts` |
    | `AI` | `ai_provider`, `ai_model`, `force_server_credentials`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds` |
-   | `Jira` | `jira_url`, `jira_email`, `jira_api_token`, `jira_pat`, `jira_oauth_access_token`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_site_url`, `jira_project_key`, `jira_ssl_verify`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
+   | `Jira` | `jira_email`, `jira_api_token`, `jira_cloud_url`, `jira_cloud_ssl_verify`, `jira_pat`, `jira_server_url`, `jira_server_ssl_verify`, `jira_oauth_client_secret`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_oauth_ssl_verify`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
-   | `Auth & Security` | `admin_key`, `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
+   | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
    | `Prow` | `prow_url`, `gcs_bucket` |
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
    | `Web Push` | `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
@@ -146,11 +146,11 @@ That creates an active operator who can submit analyses, and one server setting 
    | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
    | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
 
-   Most of those are also server-only, so the restart is not the operative constraint — the save is rejected outright. `vapid_private_key` is the only one here that this page can actually store; the rest must be set in the environment.
+   Masked settings are stored encrypted when you save them from this page. The one exception is `admin_key`: it displays masked but is read-only — it is a server-only bootstrap secret, and every write path rejects it.
 
-   Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: `PUT /api/admin/settings` rejects every one of them with `400 Server-only settings (env var only)`, so they must be set in the deployment environment instead. They are `admin_wait_approve_msg`, `allowed_users`, `auto_push_exporters`, `db_path`, `debug`, `default_user_role`, `enable_auto_review`, `enable_github_issues`, `enable_reportportal`, `log_level`, `metadata_rules_file`, `public_base_url`, `require_approval`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links`, `secure_cookies`, `trust_proxy_headers`, `vapid_claim_email`, and `vapid_public_key`. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.
+   Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: `PUT /api/admin/settings` rejects every one of them with `400 Server-only settings (env var only)`, so they must be set in the deployment environment instead. They are `admin_key` (bootstrap secret for the `admin` superuser), `db_path`, and `debug`. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.
 
-   > **Warning:** Saving an empty value is a reset, not a blank value. The database override is deleted and resolution falls back to the environment variable, then the default.
+   > **Note:** Saving an empty value is an explicit blank override, not a reset. The empty value is stored in the database and beats the environment variable — this is how you clear a setting the deployment environment still sets (e.g. `CLI_AGENTS`). To fall back to the environment variable or default instead, use the row's reset action (DELETE), which removes the override. Non-string settings (booleans, integers) reject empty saves with a 400 error.
 
 11. **Review and reset individual settings.**
 
@@ -205,7 +205,7 @@ That creates an active operator who can submit analyses, and one server setting 
   `ROOTCOZ_ENCRYPTION_KEY` changed. Sessions survive, but stored API key hashes and encrypted tokens do not — rotate keys and re-enter tokens.
 
 - Bootstrap `admin` login fails after you edited `admin_key`.  
-  The login path compares the username `admin` against the current value in constant time. Confirm the value you saved, and remember that setting an empty value resets the override instead of storing a blank.
+  The login path compares the username `admin` against the current value in constant time. Confirm the value you saved, and remember that `admin_key` is server-only — it cannot be saved or reset from this page at all.
 
 ## Related Pages
 

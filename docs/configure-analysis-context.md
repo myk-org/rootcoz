@@ -79,12 +79,14 @@ This clones the tests repository plus both extra repositories into the analysis 
 
 5. **Turn on Jira search for duplicate bugs.**
 
-   Enable `Enable Jira search` in the `Jira Integration` section and supply `Jira URL` and `Project Key`. While analyzing, RootCoz asks the model for three to five short `jira_search_keywords` for each `PRODUCT BUG` instead of generic words, and uses them to find existing bugs before creating a new one. The same pattern produces `tests_repo_search_keywords` for matching GitHub issues.
+   Enable `Enable Jira search` in the `Jira Integration` section, select an auth method in Server Settings, and supply `Project Key`. While analyzing, RootCoz asks the model for three to five short `jira_search_keywords` for each `PRODUCT BUG` instead of generic words, and uses them to find existing bugs before creating a new one. The same pattern produces `tests_repo_search_keywords` for matching GitHub issues.
 
    | Server setting | What it controls |
    | --- | --- |
    | `enable_jira` | Whether the search runs |
-   | `jira_url` | Base URL of the Jira instance |
+   | `jira_cloud_url` | Jira Cloud site URL for the `basic` (email + API token) method |
+   | `jira_server_url` | Jira Server/DC base URL for the `pat` method |
+   | `atlassian_oauth_cloud_id` | Cloud ID locating the `oauth` method's scoped gateway |
    | `jira_project_key` | Project to search in |
    | `jira_max_results` | Maximum matches returned per search; default 5 |
    | `enable_jira_issues` | Whether new Jira bugs can be created, independently of search |
