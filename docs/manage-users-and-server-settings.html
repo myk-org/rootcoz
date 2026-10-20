@@ -624,7 +624,7 @@
 <p>Masked settings are stored encrypted when you save them from this page. The one exception is <code>admin_key</code>: it displays masked but is read-only — it is a server-only bootstrap secret, and every write path rejects it.</p>
 <p>Everything else applies to the running server as soon as you save. The exceptions are the server-only settings, which this page cannot save at all: <code>PUT /api/admin/settings</code> rejects every one of them with <code>400 Server-only settings (env var only)</code>, so they must be set in the deployment environment instead. They are <code>admin_key</code> (bootstrap secret for the <code>admin</code> superuser), <code>db_path</code>, and <code>debug</code>. A setting described elsewhere on this page as editable, or as needing only a restart, is still rejected here if it appears in that list — the restart-required distinction only applies to settings that can be saved at all.</p>
 <blockquote>
-<p><strong>Warning:</strong> Saving an empty value is a reset, not a blank value. The database override is deleted and resolution falls back to the environment variable, then the default.</p>
+<p><strong>Note:</strong> Saving an empty value is an explicit blank override, not a reset. The empty value is stored in the database and beats the environment variable — this is how you clear a setting the deployment environment still sets (e.g. <code>CLI_AGENTS</code>). To fall back to the environment variable or default instead, use the row's reset action (DELETE), which removes the override. Non-string settings (booleans, integers) reject empty saves with a 400 error.</p>
 </blockquote>
 <ol>
 <li><strong>Review and reset individual settings.</strong></li>
@@ -702,7 +702,7 @@
 </li>
 <li>
 <p>Bootstrap <code>admin</code> login fails after you edited <code>admin_key</code>.<br>
-  The login path compares the username <code>admin</code> against the current value in constant time. Confirm the value you saved, and remember that setting an empty value resets the override instead of storing a blank.</p>
+  The login path compares the username <code>admin</code> against the current value in constant time. Confirm the value you saved, and remember that <code>admin_key</code> is server-only — it cannot be saved or reset from this page at all.</p>
 </li>
 </ul>
 <h2 id="related-pages">Related Pages</h2>

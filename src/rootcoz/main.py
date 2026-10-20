@@ -28,7 +28,7 @@ from collections.abc import (
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 from urllib.parse import quote as _urlquote
 from urllib.parse import urlparse
 
@@ -1770,6 +1770,10 @@ def _apply_log_level_setting() -> None:
     if not db_setting_is_set("log_level"):
         return
     name = get_settings().log_level.strip().upper()
+    if not name:
+        # Explicit empty override (#352) — nothing to apply; the boot env
+        # level (or the logger default) governs.
+        return
     level = getattr(logging, name, None)
     if not isinstance(level, int):
         logger.warning("Ignoring invalid log_level setting: %r", name)
@@ -12931,23 +12935,46 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     )
 
 
+def _setting_accepts_empty_override(key: str) -> bool:
+    """True when an explicitly-saved empty string is a valid override for key.
+
+    Only string-typed Settings fields (str / SecretStr, optional or not) can
+    hold an explicit empty override — an empty bool/int value would fail
+    pydantic validation in ``get_settings()`` and silently drop the entire
+    DB override set (#352).
+    """
+    annotation = Settings.model_fields[key].annotation
+    types = get_args(annotation) or (annotation,)
+    return all(t is str or t is SecretStr or t is type(None) for t in types)
+
+
 async def _save_settings_to_db(
     settings_updates: dict[str, Any], username: str
 ) -> list[str]:
     """Persist validated settings updates to the DB store and apply them.
 
     Shared save path for the PUT update and the env→DB persist endpoints.
-    Empty/null = reset: delete from DB so resolution falls through to env
-    (request → DB → env; first non-empty wins). Returns user-facing
-    warnings; values are never logged.
+    A saved value — empty or not — is an explicit DB override: the row's
+    presence beats the OS env (request → DB → env). To fall back to the
+    env/default value, use the reset endpoint (DELETE) instead of saving
+    an empty value (#352). Non-string fields reject empty saves. Returns
+    user-facing warnings; values are never logged.
     """
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
-        if not str_value:
-            await storage.delete_server_setting(key, deleted_by=username)
-            continue
-        # Non-empty: upsert to DB (encrypt sensitive values)
-        if key in _SENSITIVE_SETTINGS:
+        if not str_value and not _setting_accepts_empty_override(key):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Setting '{key}' cannot be empty — its type does not "
+                    "accept an empty override. Use Reset to fall back to "
+                    "the env/default value."
+                ),
+            )
+        # Upsert (empty allowed — an explicit empty override beats env).
+        # Sensitive values are encrypted only when non-empty; the empty
+        # override stays a plain empty string (nothing to protect).
+        if str_value and key in _SENSITIVE_SETTINGS:
             from rootcoz.encryption import encrypt_value
 
             db_value = encrypt_value(str_value)
@@ -12966,19 +12993,12 @@ async def _save_settings_to_db(
         except Exception:
             logger.warning("Failed to clear jira_verified_method", exc_info=True)
 
-    # Update in-memory cache so get_settings() picks up changes.
-    # Empty/null values are removed (fall back to env/default).
-    cache_updates: dict[str, str] = {}
-    cache_removals: list[str] = []
-    for k, v in settings_updates.items():
-        if v is None or str(v) == "":
-            cache_removals.append(k)
-        else:
-            cache_updates[k] = str(v)
-    if cache_removals:
-        remove_from_db_settings_cache(cache_removals)
-    if cache_updates:
-        update_db_settings_cache(cache_updates)
+    # Update in-memory cache so get_settings() picks up changes. Saved
+    # values — empty included — are explicit overrides that beat env;
+    # falling back to env/default is the reset endpoint's job (DELETE).
+    update_db_settings_cache(
+        {k: str(v) if v is not None else "" for k, v in settings_updates.items()}
+    )
 
     # Persist the transcript recording switch (and the other sidecar
     # settings) for the container entrypoint — the sidecar reads these from

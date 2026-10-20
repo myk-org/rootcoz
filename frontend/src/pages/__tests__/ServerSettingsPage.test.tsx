@@ -45,6 +45,8 @@ interface TestSetting {
   updated_at: string
   options?: string[]
   jira_verified_method?: string
+  persistable?: boolean
+  derived?: boolean
 }
 
 function mk(key: string, category: string, value = '', extra: Partial<TestSetting> = {}): TestSetting {
@@ -201,6 +203,44 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
     await screen.findByText('JIRA_PROJECT_KEY')
   }
+
+  it('shows the derived oauth API base under the oauth method (#352)', async () => {
+    mockJiraModeSettings('oauth')
+    get.mockImplementation(async () => {
+      const settings = baseSettings()
+      settings.find(s => s.key === 'jira_auth_mode')!.value = 'oauth'
+      settings.find(s => s.key === 'jira_auth_mode')!.jira_verified_method = 'oauth'
+      settings.find(s => s.key === 'atlassian_oauth_cloud_id')!.value = 'test-cloud-id-1234'
+      return settings
+    })
+    await openJiraTab()
+
+    // Read-only derived row: the scoped gateway built from the cloud ID
+    expect(screen.getByText('JIRA_OAUTH_URL')).toBeInTheDocument()
+    expect(
+      screen.getByText('https://api.atlassian.com/ex/jira/test-cloud-id-1234')
+    ).toBeInTheDocument()
+  })
+
+  it('warns when the oauth cloud ID is missing so the URL cannot be derived', async () => {
+    mockJiraModeSettings('oauth')
+    await openJiraTab()
+
+    expect(screen.getByText('JIRA_OAUTH_URL')).toBeInTheDocument()
+    expect(
+      screen.getByText(/ATLASSIAN_OAUTH_CLOUD_ID is not set/)
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText(/api\.atlassian\.com\/ex\/jira\//)
+    ).not.toBeInTheDocument()
+  })
+
+  it('hides the derived oauth URL row under non-oauth methods', async () => {
+    mockJiraModeSettings('basic')
+    await openJiraTab()
+
+    expect(screen.queryByText('JIRA_OAUTH_URL')).not.toBeInTheDocument()
+  })
 
   it('checkbox state reflects the persisted jira_auth_mode value and shows only that method\'s fields', async () => {
     mockJiraModeSettings('basic')
@@ -1312,6 +1352,23 @@ describe('ServerSettingsPage save env setting to DB', () => {
     // Auth & Security tab: admin_key likewise
     fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
     await screen.findByText('ADMIN_KEY')
+    expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
+  })
+
+  it('never offers Save to DB for derived settings (persistable: false), even when env-sourced', async () => {
+    const settings = baseSettings()
+    settings.push(
+      mk('sidecar_url', 'Sidecar', 'http://127.0.0.1:9100', {
+        source: 'env',
+        persistable: false,
+        derived: true,
+      }),
+    )
+    get.mockResolvedValue(settings as never)
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+    await screen.findByText('SIDECAR_URL')
     expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
   })
 
