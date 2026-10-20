@@ -9576,6 +9576,45 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 400
         assert "cannot be empty" in response.json()["detail"]
 
+    def test_put_empty_default_user_role_rejected(self, test_client) -> None:
+        """default_user_role is str-typed but its validator rejects "" — an
+        empty override there would poison get_settings() and silently drop
+        every DB override (Qodo r1 finding 2)."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"default_user_role": ""}},
+        )
+        assert response.status_code == 400
+        assert "cannot be empty" in response.json()["detail"]
+
+    def test_put_empty_sidecar_listener_rejected(self, test_client) -> None:
+        """sidecar_host/sidecar_port reject empty overrides — the sidecar env
+        bridge would export blank SIDECAR_HOST/SIDECAR_PORT, and pi-config's
+        nullish coalescing selects the empty string over its defaults (an
+        empty host binds an unspecified address; an empty port breaks the
+        entrypoint startup probe) (Qodo r1 findings 3+4)."""
+        for key in ("sidecar_host", "sidecar_port"):
+            response = test_client.put(
+                "/api/admin/settings",
+                json={"settings": {key: ""}},
+            )
+            assert response.status_code == 400, key
+            assert "cannot be empty" in response.json()["detail"]
+
+    def test_rejected_batch_writes_nothing(self, test_client) -> None:
+        """A PUT mixing a valid update with an invalid empty override is
+        rejected whole — the valid key must NOT be written (no partial
+        saves) (Qodo r1 finding 1)."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_user": "bot", "sidecar_port": ""}},
+        )
+        assert response.status_code == 400
+        # The valid key was not persisted: still falls through to env/default
+        get_resp = test_client.get("/api/admin/settings")
+        jenkins_user = next(s for s in get_resp.json() if s["key"] == "jenkins_user")
+        assert jenkins_user["source"] != "db"
+
     def test_reset_non_string_setting_falls_to_default(self, test_client) -> None:
         """DELETE still resets non-string settings to env/default."""
         test_client.put(

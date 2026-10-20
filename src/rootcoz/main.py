@@ -12935,17 +12935,48 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     )
 
 
-def _setting_accepts_empty_override(key: str) -> bool:
-    """True when an explicitly-saved empty string is a valid override for key.
+# Settings where an explicit empty override is unsafe regardless of type:
+# the sidecar env bridge would export SIDECAR_HOST=''/SIDECAR_PORT='' and
+# pi-config's nullish coalescing selects the empty string over its loopback/
+# default fallbacks — an empty host binds an unspecified address (exposure)
+# and an empty port breaks the entrypoint's startup probe (#352 Qodo r1).
+_EMPTY_OVERRIDE_FORBIDDEN: frozenset[str] = frozenset({"sidecar_host", "sidecar_port"})
 
-    Only string-typed Settings fields (str / SecretStr, optional or not) can
-    hold an explicit empty override — an empty bool/int value would fail
-    pydantic validation in ``get_settings()`` and silently drop the entire
-    DB override set (#352).
+
+def _empty_override_error(key: str) -> str | None:
+    """User-facing error when an explicit empty override is invalid for key.
+
+    Returns None when saving an empty string is a valid override. Three
+    gates, all of which protect ``get_settings()`` from storing a value
+    that fails pydantic validation (which would silently drop the entire
+    DB override set) or that would break the sidecar bridge (#352 Qodo r1):
+    string-typed fields only (str / SecretStr), field validators must
+    accept the empty value (``default_user_role`` is str-typed but its
+    validator rejects ""), and infrastructure settings with unsafe empty
+    semantics are denied outright.
     """
+    if key in _EMPTY_OVERRIDE_FORBIDDEN:
+        return (
+            f"Setting '{key}' cannot be empty — the sidecar bridge would "
+            "export a blank value. Use Reset to fall back to the "
+            "env/default value."
+        )
     annotation = Settings.model_fields[key].annotation
     types = get_args(annotation) or (annotation,)
-    return all(t is str or t is SecretStr or t is type(None) for t in types)
+    if not all(t is str or t is SecretStr or t is type(None) for t in types):
+        return (
+            f"Setting '{key}' cannot be empty — its type does not accept "
+            "an empty override. Use Reset to fall back to the env/default "
+            "value."
+        )
+    try:
+        Settings.model_validate({key: ""})
+    except ValidationError:
+        return (
+            f"Setting '{key}' cannot be empty — its validator rejects an "
+            "empty value. Use Reset to fall back to the env/default value."
+        )
+    return None
 
 
 async def _save_settings_to_db(
@@ -12957,20 +12988,21 @@ async def _save_settings_to_db(
     A saved value — empty or not — is an explicit DB override: the row's
     presence beats the OS env (request → DB → env). To fall back to the
     env/default value, use the reset endpoint (DELETE) instead of saving
-    an empty value (#352). Non-string fields reject empty saves. Returns
-    user-facing warnings; values are never logged.
+    an empty value (#352). Invalid empty overrides are rejected for ALL
+    keys before ANY key is written — a rejected save never applies a
+    partial update. Returns user-facing warnings; values are never logged.
     """
+    # Pre-flight: reject invalid empty overrides for the whole batch
+    # before the first DB write, so a 400 never leaves a partial save.
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
-        if not str_value and not _setting_accepts_empty_override(key):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Setting '{key}' cannot be empty — its type does not "
-                    "accept an empty override. Use Reset to fall back to "
-                    "the env/default value."
-                ),
-            )
+        if not str_value:
+            error = _empty_override_error(key)
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+
+    for key, value in settings_updates.items():
+        str_value = str(value) if value is not None else ""
         # Upsert (empty allowed — an explicit empty override beats env).
         # Sensitive values are encrypted only when non-empty; the empty
         # override stays a plain empty string (nothing to protect).

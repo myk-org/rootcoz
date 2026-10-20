@@ -1361,7 +1361,6 @@ describe('ServerSettingsPage save env setting to DB', () => {
       mk('sidecar_url', 'Sidecar', 'http://127.0.0.1:9100', {
         source: 'env',
         persistable: false,
-        derived: true,
       }),
     )
     get.mockResolvedValue(settings as never)

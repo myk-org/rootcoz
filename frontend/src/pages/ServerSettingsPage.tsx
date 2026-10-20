@@ -74,7 +74,6 @@ interface ServerSetting {
   options?: string[]
   jira_verified_method?: string
   persistable?: boolean
-  derived?: boolean
 }
 
 interface CategoryGroup {
