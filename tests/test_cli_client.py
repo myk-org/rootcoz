@@ -2034,6 +2034,68 @@ class TestRootCozClientAdminUsers:
             "models": [{"provider": "EnMaaS", "model": "glm-5-3"}]
         }
 
+    def test_admin_server_providers_crud(self):
+        CLI_TEST_KEY = "test-key-not-real"  # pragma: allowlist secret
+        state = {"seen": {}}
+
+        def handler(request):
+            path = request.url.path
+            state["seen"][request.method] = (path, json.loads(request.content or "{}"))
+            if request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "providers": [
+                            {
+                                "provider": "google",
+                                "has_key": True,
+                                "verified": True,
+                                "verified_at": "",
+                                "supports_key": True,
+                                "models": [],
+                            }
+                        ]
+                    },
+                )
+            if request.method == "DELETE":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "warnings": {"selected_models": [], "free_models": []},
+                    },
+                )
+            return httpx.Response(200, json={"outcome": "accepted", "ok": True})
+
+        client = _make_client(handler)
+        listing = client.admin_list_server_providers()
+        assert listing["providers"][0]["provider"] == "google"
+        client.admin_add_server_provider("google", CLI_TEST_KEY, "gemini-2.5-pro")
+        assert state["seen"]["POST"] == (
+            "/api/admin/server-providers",
+            {
+                "provider": "google",
+                "api_key": CLI_TEST_KEY,
+                "verification_model": "gemini-2.5-pro",
+            },
+        )
+        client.admin_rotate_server_provider_key(
+            "google", CLI_TEST_KEY, "gemini-2.5-pro"
+        )
+        assert (
+            state["seen"]["POST"][0] == "/api/admin/server-providers/google/rotate-key"
+        )
+        client.admin_set_server_provider_models(
+            "google", [{"id": "gemini-2.5-pro", "included": True, "free": False}]
+        )
+        assert state["seen"]["PUT"] == (
+            "/api/admin/server-providers/google/models",
+            {"models": [{"id": "gemini-2.5-pro", "included": True, "free": False}]},
+        )
+        removed = client.admin_delete_server_provider("google")
+        assert removed["ok"] is True
+        assert state["seen"]["DELETE"][0] == "/api/admin/server-providers/google"
+
     def test_admin_delete_user(self):
         def handler(request):
             assert request.method == "DELETE"
@@ -2135,6 +2197,16 @@ class TestAdminSettings:
         client = _make_client(handler)
         result = client.admin_reset_setting("jenkins_url")
         assert result["reset"] == "jenkins_url"
+
+    def test_admin_persist_setting(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/admin/settings/jenkins_url/persist"
+            return httpx.Response(200, json={"key": "jenkins_url", "source": "db"})
+
+        client = _make_client(handler)
+        result = client.admin_persist_setting("jenkins_url")
+        assert result == {"key": "jenkins_url", "source": "db"}
 
     def test_test_integration(self):
         def handler(request):

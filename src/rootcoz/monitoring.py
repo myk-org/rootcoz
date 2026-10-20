@@ -26,9 +26,10 @@ from typing import Any
 
 import aiosqlite
 import httpx
-from simple_logger.logger import get_logger
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 _APP_STARTED_AT = time.monotonic()
 
@@ -247,9 +248,15 @@ async def check_ai_provider() -> dict[str, str]:
     if not model:
         config_issues.append("AI_MODEL not set")
 
-    # Check sidecar health using shared helper
-    sidecar_port = os.getenv("SIDECAR_PORT", "9100")
-    sidecar_url = f"http://127.0.0.1:{sidecar_port}/health"
+    # Check sidecar health using shared helper. The probe URL follows the
+    # effective listener: SIDECAR_URL when configured (the entrypoint and
+    # _derive_sidecar_url_from_port keep it in sync with a DB sidecar_port
+    # override), else SIDECAR_PORT — never a hardcoded port.
+    sidecar_port = os.getenv("SIDECAR_PORT", "").strip() or "9100"
+    sidecar_base = os.getenv("SIDECAR_URL", "").strip() or (
+        f"http://127.0.0.1:{sidecar_port}"
+    )
+    sidecar_url = f"{sidecar_base.rstrip('/')}/health"
     sidecar_result = await _check_http_service(sidecar_url, ok_below=300)
     if sidecar_result["status"] == "error":
         error_issues.append(f"Sidecar unreachable: {sidecar_result.get('detail', '')}")
@@ -408,9 +415,16 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     checks["ai_provider"] = _safe(ai_check)
     checks["reportportal"] = _safe(rp_check)
 
-    # Determine overall status
+    # Determine overall status. The sidecar is a hard dependency — every AI
+    # feature routes through it and the container entrypoint tears the
+    # whole container down when it dies — so an unreachable sidecar is
+    # unhealthy (503), not degraded: deployment startup probes rely on
+    # /api/health failing while the sidecar is down, without depending on
+    # the sidecar's (possibly overridden) listener port.
     statuses = [c["status"] for c in checks.values()]
-    if checks["database"]["status"] == "error":
+    if checks["database"]["status"] == "error" or (
+        checks["ai_provider"]["status"] == "error"
+    ):
         overall = "unhealthy"
     elif any(s == "error" for s in statuses) or any(s == "degraded" for s in statuses):
         overall = "degraded"
@@ -508,7 +522,11 @@ def validate_startup_config() -> StartupConfigResult:
         )
 
     # Slack webhook (optional integration)
-    slack_url = os.getenv("SLACK_WEBHOOK_URL", "")
+    slack_url = (
+        settings.slack_webhook_url.get_secret_value()
+        if settings.slack_webhook_url
+        else ""
+    )
     if slack_url and not slack_url.startswith("https://"):
         findings.append(
             _ConfigFinding(
@@ -519,8 +537,8 @@ def validate_startup_config() -> StartupConfigResult:
         )
 
     # SMTP config partial check (optional integration)
-    smtp_host = os.getenv("SMTP_HOST", "")
-    alert_email_to = os.getenv("ALERT_EMAIL_TO", "")
+    smtp_host = settings.smtp_host
+    alert_email_to = settings.alert_email_to
     if smtp_host and not alert_email_to:
         findings.append(
             _ConfigFinding(
@@ -628,13 +646,19 @@ async def send_slack_alert(message: str, webhook_url: str | None = None) -> bool
 
     Args:
         message: Text message to send.
-        webhook_url: Slack webhook URL. Falls back to SLACK_WEBHOOK_URL env var.
+        webhook_url: Slack webhook URL. Falls back to the slack_webhook_url
+            Server Setting (DB override over the SLACK_WEBHOOK_URL env default).
 
     Returns:
         True if sent successfully, False otherwise.
         Never raises — alerting failures are swallowed.
     """
-    url = webhook_url or os.getenv("SLACK_WEBHOOK_URL", "")
+    url = webhook_url
+    if not url:
+        from rootcoz.config import get_settings
+
+        stored = get_settings().slack_webhook_url
+        url = stored.get_secret_value() if stored else ""
     if not url:
         return False
     try:
@@ -668,23 +692,29 @@ def send_email_alert(
 ) -> bool:
     """Send an email alert via SMTP.
 
-    All parameters fall back to environment variables when not provided.
+    All parameters fall back to the SMTP Server Settings (DB override over
+    the SMTP_* env defaults) when not provided.
     Never raises — alerting failures are swallowed.
 
     Returns:
         True if sent successfully, False otherwise.
     """
-    host = smtp_host or os.getenv("SMTP_HOST", "")
-    if not host:
-        return False
-    to_addr = alert_email_to or os.getenv("ALERT_EMAIL_TO", "")
-    if not to_addr:
-        return False
     try:
-        port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
-        user = smtp_user or os.getenv("SMTP_USER", "")
-        password = smtp_password or os.getenv("SMTP_PASSWORD", "")
-        from_addr = smtp_from or os.getenv("SMTP_FROM", user or f"rootcoz@{host}")
+        from rootcoz.config import get_settings
+
+        settings = get_settings()
+        host = smtp_host or settings.smtp_host
+        if not host:
+            return False
+        to_addr = alert_email_to or settings.alert_email_to
+        if not to_addr:
+            return False
+        port = smtp_port or settings.smtp_port
+        user = smtp_user or settings.smtp_user
+        password = smtp_password or (
+            settings.smtp_password.get_secret_value() if settings.smtp_password else ""
+        )
+        from_addr = smtp_from or settings.smtp_from or user or f"rootcoz@{host}"
         msg = EmailMessage()
         msg["Subject"] = subject
         msg["From"] = from_addr

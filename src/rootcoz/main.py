@@ -3,6 +3,7 @@ import contextlib
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import logging.handlers
@@ -183,10 +184,12 @@ from rootcoz.models import (
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
     ReportPortalPushResult,
+    ServerProviderKeyInput,
     SetCanUseServerProvidersRequest,
     SetCanViewReportsRequest,
     SetFreeAiModelsRequest,
     SetReviewedRequest,
+    SetServerProviderModelsRequest,
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
@@ -270,7 +273,7 @@ from rootcoz.token_tracking import (
 from rootcoz.transcripts import (
     transcript_path,
     transcript_summary,
-    write_transcript_env_bridge,
+    write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import redact_urls_in_text
 from rootcoz.utils import (
@@ -301,33 +304,73 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "reportportal_api_token",
         "admin_key",
         "vapid_private_key",
+        "smtp_password",
+        "slack_webhook_url",
     }
 )
 
 # Server-only settings that should not be exposed to API clients.
-# These are deployment/admin toggles, not analysis configuration.
+# Everything else is admin-settable via Server Settings (#347); these are
+# process/deployment bootstrap with no Settings field at all, plus
+# ADMIN_KEY — a Settings field, but a server-only bootstrap secret that
+# must never become settable or persistable at runtime (AGENTS.md).
 _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
     {
-        "default_user_role",
+        "db_path",
         "debug",
+        "admin_key",
+    }
+)
+
+# Settings whose value is derived from another setting at boot: the
+# entrypoint/startup derives SIDECAR_URL from SIDECAR_PORT and exports it
+# into the process env, so it shows as env-sourced — but persisting it
+# would pin an explicit URL that silently beats the port derivation, and a
+# later sidecar_port change would then break AI calls. Persist the source
+# setting instead.
+_DERIVED_SETTINGS: frozenset[str] = frozenset({"sidecar_url"})
+
+# Admin-management settings hidden from the any-role
+# /api/default-server-settings defaults payload: they configure the server,
+# not per-request analysis defaults, and several (allowed_users,
+# admin_wait_approve_msg) reveal information non-admins never saw before
+# #347 unblocked them for admin management.
+_DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
+    {
+        "default_user_role",
         "secure_cookies",
         "trust_proxy_headers",
         "require_approval",
-        "allowed_users",
         "admin_wait_approve_msg",
+        "allowed_users",
         "log_level",
-        "db_path",
+        "metadata_rules_file",
         "enable_github_issues",
         "enable_reportportal",
         "enable_auto_review",
         "auto_push_exporters",
-        "metadata_rules_file",
         "public_base_url",
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
         "vapid_claim_email",
         "vapid_public_key",
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "slack_webhook_url",
+        "alert_email_to",
+        "session_ttl_hours",
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     }
 )
 
@@ -338,9 +381,18 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "secure_cookies",
         "trust_proxy_headers",
         "metadata_rules_file",
+        "log_level",
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     }
 )
 
@@ -407,6 +459,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "admin_wait_approve_msg",
         "allowed_users",
         "default_user_role",
+        "session_ttl_hours",
     ],
     "Prow": [
         "prow_url",
@@ -423,6 +476,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "poll_interval_minutes",
         "max_wait_minutes",
         "metadata_rules_file",
+        "log_level",
         "enable_auto_review",  # runtime toggle, no restart required
         "auto_push_exporters",  # runtime toggle, no restart required
     ],
@@ -430,6 +484,27 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "vapid_public_key",
         "vapid_private_key",
         "vapid_claim_email",
+    ],
+    "Notifications": [
+        "smtp_host",
+        "smtp_port",
+        "smtp_user",
+        "smtp_password",
+        "smtp_from",
+        "alert_email_to",
+        "slack_webhook_url",
+    ],
+    # Restart-required: the sidecar starts once at container boot and reads
+    # these from the /data/pi-sidecar/env bridge the entrypoint sources.
+    "Sidecar": [
+        "sidecar_host",
+        "sidecar_port",
+        "sidecar_url",
+        "acpx_agents",
+        "cli_agents",
+        "pi_sidecar_log_level",
+        "node_binary",
+        "pi_sidecar_transcripts_dir",
     ],
 }
 
@@ -503,6 +578,16 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
                 "sensitive": is_sensitive,
                 "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
                 "source": "default",  # Will be overridden by caller
+                # Persistability contract (#347): server-only settings are
+                # env bootstrap the persist/reset/PUT paths always reject,
+                # and derived settings must not be pinned (see
+                # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
+                "server_only": field_name in _SERVER_ONLY_SETTINGS,
+                "derived": field_name in _DERIVED_SETTINGS,
+                "persistable": (
+                    field_name not in _SERVER_ONLY_SETTINGS
+                    and field_name not in _DERIVED_SETTINGS
+                ),
             }
         )
 
@@ -805,7 +890,7 @@ _LOG_FILE = get_log_file()
 
 logger = get_logger(
     name=__name__,
-    level=os.environ.get("LOG_LEVEL", "INFO"),
+    level=logging.NOTSET,  # level authority: the rootcoz parent logger (#347)
     **({"filename": _LOG_FILE} if _LOG_FILE else {}),
 )
 
@@ -1570,6 +1655,105 @@ async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> N
         logger.exception("Failed to resume waiting jobs after startup")
 
 
+# Settings whose DB overrides reach the sidecar through the
+# /data/pi-sidecar/env bridge the entrypoint sources at container start
+# (#347). The sidecar starts once per boot, so these are restart-required.
+_SIDECAR_BRIDGE_SETTINGS: tuple[str, ...] = (
+    "sidecar_host",
+    "sidecar_port",
+    "sidecar_url",
+    "acpx_agents",
+    "cli_agents",
+    "pi_sidecar_log_level",
+    "node_binary",
+    "pi_sidecar_transcripts_dir",
+)
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for loopback bind addresses (127.0.0.0/8, ::1, localhost)."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _sidecar_host_supports_loopback_probe(host: str) -> bool:
+    """True when a sidecar bind host keeps the loopback health probe working.
+
+    The container entrypoint probes ``http://127.0.0.1:$SIDECAR_PORT`` and
+    aborts startup when it fails, and the probe result persists under
+    ``/data`` — a bind address that can never answer on 127.0.0.1 would
+    brick every subsequent restart before the UI could undo it. The probe
+    is a fixed IPv4 call to 127.0.0.1, so only the deployment default
+    (empty), ``0.0.0.0`` (answers on 127.0.0.1 too), and ``127.0.0.1``
+    itself are known-safe (#347 r4): every other spelling — ``::1``,
+    ``127.0.0.2``, ``localhost``, ``::`` — can bind an address the probe
+    never reaches.
+    """
+    return host.strip() in ("", "0.0.0.0", "127.0.0.1")
+
+
+def _derive_sidecar_url_from_port() -> None:
+    """Point the sidecar client at SIDECAR_PORT when no URL is configured.
+
+    The Python client defaults to ``127.0.0.1:9100`` regardless of
+    SIDECAR_PORT, so a port override would change the listener but not
+    the client (#347). An explicitly configured SIDECAR_URL always wins;
+    the container entrypoint applies the same derivation at boot.
+    """
+    if os.environ.get("SIDECAR_URL"):
+        return
+    port = (os.environ.get("SIDECAR_PORT") or "").strip()
+    if not port or port == "9100":
+        return
+    os.environ["SIDECAR_URL"] = f"http://127.0.0.1:{port}"
+    logger.info("Derived SIDECAR_URL=http://127.0.0.1:%s from SIDECAR_PORT", port)
+
+
+def _write_sidecar_env_bridge() -> None:
+    """Write the full sidecar env bridge from the current DB overrides.
+
+    Every bridged var is written in one pass: a var with no DB override is
+    left unassigned so the deployment environment governs. Callers must
+    always write the full set — a partial write would drop the others.
+    """
+    from rootcoz.config import db_setting_is_set, get_db_setting
+
+    values: dict[str, str | None] = {"RECORD_TRANSCRIPTS": None}
+    if db_setting_is_set("record_transcripts"):
+        values["RECORD_TRANSCRIPTS"] = (
+            "true" if get_settings().record_transcripts else "false"
+        )
+    for key in _SIDECAR_BRIDGE_SETTINGS:
+        values[key.upper()] = get_db_setting(key) if db_setting_is_set(key) else None
+    write_sidecar_env_bridge(values)
+
+
+def _apply_log_level_setting() -> None:
+    """Apply a DB-configured log_level to the rootcoz logger tree (restart-required).
+
+    Every rootcoz module logger is created NOTSET and inherits from the
+    ``rootcoz`` parent logger (see rootcoz.get_child_logger), so setting
+    the parent level covers the whole tree — including modules imported
+    lazily after this ran, which the old walk-existing-loggers approach
+    missed.
+    """
+    from rootcoz.config import db_setting_is_set, get_settings
+
+    if not db_setting_is_set("log_level"):
+        return
+    name = get_settings().log_level.strip().upper()
+    level = getattr(logging, name, None)
+    if not isinstance(level, int):
+        logger.warning("Ignoring invalid log_level setting: %r", name)
+        return
+    logging.getLogger("rootcoz").setLevel(level)
+    logger.info("Applied DB log_level=%s to the rootcoz logger tree", name)
+
+
 async def _apply_transcript_recording_setting() -> bool:
     """Persist + live-apply the record_transcripts DB state.
 
@@ -1577,6 +1761,10 @@ async def _apply_transcript_recording_setting() -> bool:
     running sidecar through its runtime toggle (pi-sidecar >= 4.14.0 — no
     restart needed). Without an override nothing is assigned and the
     deployment environment governs, both on disk and at runtime.
+
+    The bridge write carries every sidecar setting (#347), not just
+    RECORD_TRANSCRIPTS — the other sidecar vars have no runtime toggle and
+    apply at the next restart.
 
     Returns True when the runtime toggle reached the sidecar (or had nothing
     to push); False when the sidecar was unreachable/rejected it — callers
@@ -1590,7 +1778,7 @@ async def _apply_transcript_recording_setting() -> bool:
         if db_setting_is_set("record_transcripts")
         else None
     )
-    write_transcript_env_bridge(enabled)
+    _write_sidecar_env_bridge()
     return await sidecar_transcripts.sync_transcript_recording(enabled)
 
 
@@ -1599,6 +1787,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _install_job_id_filter()
     _install_sse_log_handler()
     _setup_usage_recorder()
+    _derive_sidecar_url_from_port()
 
     await init_db()
     await storage.cleanup_expired_sessions()
@@ -1609,6 +1798,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from rootcoz.config import load_db_settings
 
     await load_db_settings()
+    _apply_log_level_setting()
 
     # Keep the transcript recording state in sync everywhere: the env bridge
     # persists the DB value for the next boot, and the sidecar runtime toggle
@@ -1932,7 +2122,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             str(expires_at_str), "%Y-%m-%d %H:%M:%S"
                         ).replace(tzinfo=UTC)
                         remaining = expires_at - datetime.now(UTC)
-                        if remaining < timedelta(hours=storage.SESSION_TTL_HOURS / 2):
+                        if remaining < timedelta(
+                            hours=storage.current_session_ttl_hours() / 2
+                        ):
                             # Await renewal so cookie refresh is only set after confirmed DB update
                             try:
                                 renewed = await storage.renew_session(session_token)
@@ -2101,7 +2293,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     httponly=True,
                     samesite="lax",
                     secure=settings.secure_cookies,
-                    max_age=storage.SESSION_TTL_SECONDS,
+                    max_age=storage.current_session_ttl_seconds(),
                 )
                 # Clear legacy cookie after migration
                 response.delete_cookie(
@@ -9346,7 +9538,7 @@ async def get_default_server_settings(
 
     result: dict[str, Any] = {}
     for field_name in type(settings).model_fields:
-        if field_name in _SENSITIVE_SETTINGS or field_name in _SERVER_ONLY_SETTINGS:
+        if field_name in _SENSITIVE_SETTINGS or field_name in _DEFAULTS_HIDDEN_SETTINGS:
             continue
         value = getattr(settings, field_name)
         # Skip SecretStr fields (defensive — all should be in _SENSITIVE_SETTINGS)
@@ -10582,7 +10774,7 @@ async def login(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
     # Clear legacy cookie after migration
     response.delete_cookie(
@@ -10681,10 +10873,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
 
     response = JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
     response.set_cookie(
         "rootcoz_session",
@@ -10692,7 +10881,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
 
     logger.info(f"[AUDIT] User '{username}' rotated their own API key")
@@ -10766,10 +10955,7 @@ async def register_user(request: Request) -> JSONResponse:
 
     response = JSONResponse(
         content=content,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
     response.set_cookie(
         "rootcoz_session",
@@ -10777,7 +10963,7 @@ async def register_user(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
-        max_age=storage.SESSION_TTL_SECONDS,
+        max_age=storage.current_session_ttl_seconds(),
     )
     # Clear legacy session cookie after migration
     response.delete_cookie(
@@ -10806,10 +10992,7 @@ async def check_needs_key(request: Request) -> JSONResponse:
     Uses session or cookie username to determine if the user needs registration.
     This is a public endpoint — does not require authentication.
     """
-    cache_headers = {
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
-    }
+    cache_headers = {"Cache-Control": "no-store"}
 
     # Try session first (authenticated identity)
     session_token = _read_cookie(request, "rootcoz_session")
@@ -10876,24 +11059,47 @@ async def _credential_user(request: Request) -> str:
 async def get_user_ai_credentials(request: Request) -> JSONResponse:
     """List supported provider IDs and configured flags; never return keys."""
     username = await _credential_user(request)
+    # Advertise the sidecar's exact-case provider ids; a key stored under
+    # any case spelling folds into the catalog entry it belongs to (the
+    # write path canonicalizes, but older rows and cross-case duplicates
+    # must not split one provider into two rows).
     supported = await supported_key_providers()
     try:
         configured = await storage.get_user_ai_credentials(username)
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    supported_set = set(supported)
+
+    # A legacy row stored under a non-canonical spelling folds into the
+    # exact-case catalog entry when one exists; only providers that left
+    # the catalog entirely keep their stored spelling (configured, no
+    # longer key-supported) so the UI can still render and clear them.
+    def _fold(provider: str) -> str:
+        # Exact registered spelling wins — two case-differing registered
+        # providers must never fold into each other.
+        if provider in supported_set:
+            return provider
+        return next(
+            (s for s in supported_set if s.lower() == provider.lower()), provider
+        )
+
+    # Drifted legacy spellings (stored under a case variant that is no
+    # longer registered) belong to the catalog entry; a stored spelling
+    # that is itself registered belongs to that entry alone — the user
+    # credential store keeps case-distinct registered providers as
+    # separate credentials, so one must never mark the other configured.
+    drifted_lower = {p.lower() for p in configured if p not in supported_set}
+
+    providers: list[dict[str, Any]] = [
+        {
+            "provider": p,
+            "configured": p in configured or p.lower() in drifted_lower,
+            "supports_user_keys": p in supported_set,
+        }
+        for p in sorted(supported_set | {_fold(p) for p in configured})
+    ]
     return JSONResponse(
-        content=strip_sensitive_from_response(
-            {
-                "providers": [
-                    {
-                        "provider": p,
-                        "configured": p in configured,
-                        "supports_user_keys": p in supported,
-                    }
-                    for p in sorted(set(supported) | configured.keys())
-                ]
-            }
-        ),
+        content=strip_sensitive_from_response({"providers": providers}),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -10956,19 +11162,12 @@ class AiCredentialInput(BaseModel):
     model: str
 
 
-@app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
-async def set_user_ai_credential(
-    provider: str, body: AiCredentialInput, request: Request
-) -> JSONResponse:
-    """Encrypt and save a key for a sidecar-confirmed provider."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    username = await _credential_user(request)
-    if provider not in await supported_key_providers():
-        raise HTTPException(
-            status_code=400, detail="Provider does not support session API keys"
-        )
-    key = body.api_key.get_secret_value()
+def _validate_submitted_api_key(key: str) -> str | None:
+    """Rejection detail for a submitted provider key, or None when valid.
+
+    Shared by the user and admin (server provider) credential flows: strip
+    Unicode whitespace (including the BOM), cap at 1024 UTF-16 code units.
+    """
     try:
         valid = (
             bool(
@@ -10982,8 +11181,56 @@ async def set_user_ai_credential(
         valid = False
     if valid and len(key) < 8:
         valid = False
-    if not valid:
-        raise HTTPException(status_code=400, detail="API key must be 8-1024 characters")
+    return None if valid else "API key must be 8-1024 characters"
+
+
+async def _canonical_key_provider_id(provider: str) -> str | None:
+    """The sidecar's exact-case id for a provider.
+
+    The sidecar's catalog — and its ``/sessions`` endpoint — is
+    case-sensitive: it reports mixed-case IDs like ``EnMaaS`` and rejects
+    a lowercase spelling, so a caller posting ``enmaas`` passes the
+    support gate yet fails sidecar verification as "inconclusive" (#347).
+    Verification and storage must therefore use the canonical id this
+    returns. ``None`` means the catalog does not list the provider;
+    callers gate on that.
+
+    Exact match wins: when the catalog registers two providers that
+    differ only by case (``Foo`` and ``foo``), a request for ``foo`` must
+    target ``foo`` — case-insensitive fallback only when the submitted
+    spelling is not itself registered.
+    """
+    supported = await supported_key_providers()
+    if provider in supported:
+        return provider
+    lowered = provider.lower()
+    for candidate in supported:
+        if candidate.lower() == lowered:
+            return candidate
+    return None
+
+
+@app.put("/api/user/ai-credentials/{provider:path}", operation_id="setUserAiCredential")
+async def set_user_ai_credential(
+    provider: str, body: AiCredentialInput, request: Request
+) -> JSONResponse:
+    """Encrypt and save a key for a sidecar-confirmed provider."""
+    _require_reviewer(request)
+    _check_allow_list(request)
+    username = await _credential_user(request)
+    # Resolve to the sidecar's exact-case id: the gate below accepts any
+    # caller spelling (#347), but verification and storage must use the
+    # canonical id or the sidecar rejects the session and the stored row
+    # drifts from the catalog's spelling.
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    provider = canonical
+    key = body.api_key.get_secret_value()
+    if error := _validate_submitted_api_key(key):
+        raise HTTPException(status_code=400, detail=error)
     from rootcoz.ai_client import verify_ai_key
 
     model = body.model.strip()
@@ -11673,6 +11920,11 @@ async def set_free_ai_models_endpoint(
     since they were saved, and a stale survivor must not block unrelated
     edits — the CLI and Users page resubmit the existing list for every
     add/remove. Stale pairs are ignored gracefully at runtime.
+
+    ``free ⊆ included`` is normalized here: a free pair on a managed
+    provider (stored key or selection) is auto-included in that
+    provider's selection, mirroring the server-providers PUT — otherwise
+    scoped_models would filter it out of the restricted catalog.
     """
     _require_admin(request)
     existing = {
@@ -11721,10 +11973,410 @@ async def set_free_ai_models_endpoint(
         request.state.username,
         len(stored),
     )
+    # free ⊆ included (#347): a managed provider (stored key or selection)
+    # only exposes its selection, so a free pair outside it would vanish
+    # from the restricted catalog. Auto-include it — the same normalization
+    # the server-providers PUT applies.
+    auto_included = await storage.auto_include_free_pairs(
+        [(entry.provider, entry.model) for entry in body.models],
+        request.state.username or "admin",
+    )
+    if auto_included:
+        logger.info(
+            "[AUDIT] Admin '%s' auto-included %d free pair(s) into managed "
+            "provider selections",
+            request.state.username,
+            len(auto_included),
+        )
     return {
         "models": stored,
         "version": storage.free_models_version(stored),
     }
+
+
+# --- Admin server provider credentials (#347) ---
+
+
+async def _seed_server_provider_selection(provider: str, updated_by: str) -> None:
+    """Seed a full-catalog selection for a newly-keyed provider (#347 r4).
+
+    A stored key makes a provider *managed* (see
+    ``ai_client._load_server_pool_selection``), and a managed provider with
+    no selection rows exposes nothing — so adding a verified key to a
+    provider that served its whole catalog via deployment credentials
+    would silently withdraw every model from discovery and
+    ``require_selected_server_pair``. Seeding one row per current catalog
+    model (free flags preserved) keeps the exposure exactly as it was.
+    An existing admin selection stays authoritative — a restriction must
+    survive a key add — and the rotate path never reseeds for the same
+    reason.
+    """
+    if any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_server_provider_models()
+    ):
+        return
+    free_models = {
+        row["model"]
+        for row in await storage.list_free_ai_models()
+        if row["provider"].lower() == provider.lower()
+    }
+    catalog_models = [
+        entry["id"]
+        for entry in await _get_model_catalog()
+        if isinstance(entry.get("provider"), str)
+        and entry["provider"].lower() == provider.lower()
+        and isinstance(entry.get("id"), str)
+        and entry["id"]
+    ]
+    entries = [{"id": model, "free": model in free_models} for model in catalog_models]
+    # Free pairs whose model left the catalog survive the seeding (stale
+    # pairs are ignored at runtime) so a key add never rewrites unrelated
+    # free-model state.
+    entries.extend(
+        {"id": model, "free": True}
+        for model in sorted(free_models - set(catalog_models))
+    )
+    if entries:
+        await storage.set_server_provider_models(provider, entries, updated_by)
+        logger.info(
+            "[AUDIT] Seeded full-catalog model selection for newly-keyed "
+            "provider '%s' (%d models)",
+            provider,
+            len(entries),
+        )
+
+
+async def _verify_and_store_server_provider_key(
+    provider: str,
+    body: ServerProviderKeyInput,
+    request: Request,
+    *,
+    replacing: bool,
+) -> JSONResponse:
+    """Shared add/rotate path: verify the key with a real turn, then store."""
+    # Resolve to the sidecar's exact-case id up front (#347): verification,
+    # the duplicate check, and storage all see the canonical spelling, so
+    # a lowercase add behaves identically to the catalog's ``EnMaaS`` and
+    # cannot create a mixed-case duplicate row.
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    provider = canonical
+    key = body.api_key.get_secret_value()
+    if error := _validate_submitted_api_key(key):
+        raise HTTPException(status_code=400, detail=error)
+    from rootcoz.ai_client import verify_ai_key
+
+    model = body.verification_model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Select a model to verify the key")
+    outcome = await verify_ai_key(provider, model, key)
+    if outcome != "accepted":
+        # Mirror the user flow: report the outcome, never store an untested key.
+        message = {
+            "rejected": "Check the key and selected model; existing credential unchanged.",
+            "inconclusive": "Try again when the provider is available; existing credential unchanged.",
+        }.get(outcome)
+        return JSONResponse(
+            content=strip_sensitive_from_response(
+                {
+                    "outcome": outcome,
+                    "ok": False,
+                    **({"message": message} if message else {}),
+                }
+            ),
+            headers={"Cache-Control": "no-store"},
+        )
+    # Re-check the credential AFTER verification and BEFORE the write: the
+    # sidecar round-trip above can take seconds, and a concurrent add during
+    # it must not be silently overwritten by this one, nor a concurrent
+    # removal resurrected without its model selections.
+    exists = provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }
+    if exists and not replacing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    if replacing and not exists:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    await storage.set_server_ai_credential(
+        provider, key, request.state.username or "admin"
+    )
+    if not replacing:
+        await _seed_server_provider_selection(
+            provider, request.state.username or "admin"
+        )
+    logger.info(
+        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified)",
+        request.state.username,
+        provider,
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/admin/server-providers", operation_id="listServerProvidersEndpoint")
+async def list_server_providers_endpoint(request: Request) -> JSONResponse:
+    """List server provider key state and per-model selection (admin only).
+
+    Never returns keys. One entry per catalog provider (plus stored
+    providers that left the catalog), each with key presence, verification
+    state, a ``managed`` flag, and its models with ``included`` + ``free``
+    flags — unmanaged providers (no stored key, no selection rows) report
+    their whole catalog as included, matching what the server pool
+    actually exposes for them.
+    """
+    _require_admin(request)
+    catalog = await _get_model_catalog()
+    # Case-insensitive join (#347): storage matches providers ignoring case,
+    # so a key stored as "Google" must key the catalog's "google" entry —
+    # an exact-name lookup would split it into keyed + unkeyed rows.
+    stored = {
+        normalize_provider(row["provider"]): row
+        for row in await storage.list_server_ai_providers()
+    }
+    selections: dict[str, dict[str, bool]] = {}
+    for row in await storage.list_server_provider_models():
+        selections.setdefault(row["provider"].lower(), {})[row["model"]] = True
+    free_by_provider: dict[str, set[str]] = {}
+    for row in await storage.list_free_ai_models():
+        free_by_provider.setdefault(row["provider"].lower(), set()).add(row["model"])
+    supported = {p.lower() for p in await supported_key_providers()}
+
+    models_by_provider: dict[str, list[dict[str, Any]]] = {}
+    for entry in catalog:
+        provider = entry.get("provider")
+        model = entry.get("id")
+        if not isinstance(provider, str) or not isinstance(model, str) or not model:
+            continue
+        models_by_provider.setdefault(provider, []).append(
+            {"id": model, "name": entry.get("name") or model}
+        )
+    # Stored selections whose model left the catalog stay visible so the UI
+    # can render and clear them (stale pairs are ignored at runtime).
+    for provider_lower, selected in selections.items():
+        provider = next(
+            (p for p in models_by_provider if p.lower() == provider_lower),
+            provider_lower,
+        )
+        known = {m["id"] for m in models_by_provider.get(provider, [])}
+        for model in selected:
+            if model not in known:
+                models_by_provider.setdefault(provider, []).append({"id": model})
+
+    providers = []
+    # Case-insensitive union (#347): the stored map is keyed by the
+    # normalized (lowercase) spelling, so its keys must fold into the
+    # catalog's mixed-case entry (e.g. ``EnMaaS``) instead of splitting
+    # the listing into a second lowercase row.
+    listed_ids = {p.lower(): p for p in models_by_provider}
+    for stored_id in stored:
+        listed_ids.setdefault(stored_id.lower(), stored_id)
+    for provider in sorted(listed_ids.values()):
+        provider_lower = provider.lower()
+        # Managed = stored selection rows or a stored key — the same rule
+        # ``ai_client._load_server_pool_selection`` scopes the server pool
+        # with. An unmanaged provider exposes its whole catalog, so the
+        # listing must report every catalog model included: reporting them
+        # unchecked would let one Free-pill click PUT a draft with a single
+        # model and silently withdraw the rest of the catalog (#347 r4).
+        managed = provider_lower in selections or normalize_provider(provider) in stored
+        selected = selections.get(provider_lower, {})
+        models = [
+            {
+                "id": m["id"],
+                "name": m.get("name") or m["id"],
+                "included": (m["id"] in selected) if managed else True,
+                "free": m["id"] in free_by_provider.get(provider_lower, set()),
+            }
+            for m in models_by_provider.get(provider, [])
+        ]
+        record = stored.get(normalize_provider(provider))
+        providers.append(
+            {
+                "provider": provider,
+                "managed": managed,
+                "has_key": record is not None,
+                "verified": record is not None,
+                "verified_at": record.get("verified_at", "") if record else "",
+                "supports_key": provider.lower() in supported,
+                "models": models,
+            }
+        )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"providers": providers}),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/admin/server-providers", operation_id="addServerProvider")
+async def add_server_provider(
+    request: Request, body: ServerProviderKeyInput
+) -> JSONResponse:
+    """Add a server provider key (admin only) — verified before storing."""
+    _require_admin(request)
+    provider = body.provider.strip()
+    if provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    return await _verify_and_store_server_provider_key(
+        provider, body, request, replacing=False
+    )
+
+
+@app.post(
+    "/api/admin/server-providers/{provider:path}/rotate-key",
+    operation_id="rotateServerProviderKey",
+)
+async def rotate_server_provider_key(
+    provider: str, request: Request, body: ServerProviderKeyInput
+) -> JSONResponse:
+    """Replace a server provider key (admin only) — re-verified before storing."""
+    _require_admin(request)
+    if provider.lower() not in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    # The rotate body carries the provider again; the path is authoritative.
+    return await _verify_and_store_server_provider_key(
+        provider, body, request, replacing=True
+    )
+
+
+@app.put(
+    "/api/admin/server-providers/{provider:path}/models",
+    operation_id="setServerProviderModelsEndpoint",
+)
+async def set_server_provider_models_endpoint(
+    provider: str, request: Request, body: SetServerProviderModelsRequest
+) -> JSONResponse:
+    """Replace one provider's selected models and free pairs (admin only).
+
+    ``free ⊆ included`` is normalized here: marking a model free auto-includes
+    it, unchecking include clears the free flag. New pairs are validated
+    against the current sidecar catalog (provider case-insensitively, model
+    id exactly) like the standalone free-models save; stored selections and
+    free pairs pass through unvalidated so stale survivors never block an
+    unrelated edit.
+    """
+    _require_admin(request)
+    # Last entry per model id wins; flags are normalized after the merge.
+    merged: dict[str, dict[str, bool]] = {}
+    for entry in body.models:
+        merged[entry.id] = {"included": entry.included, "free": entry.free}
+    entries = [
+        {
+            "id": model_id,
+            "included": flags["included"] or flags["free"],
+            "free": flags["free"] and (flags["included"] or flags["free"]),
+        }
+        for model_id, flags in merged.items()
+    ]
+
+    existing = {
+        row["model"]
+        for row in await storage.list_server_provider_models()
+        if row["provider"].lower() == provider.lower()
+    } | {
+        row["model"]
+        for row in await storage.list_free_ai_models()
+        if row["provider"].lower() == provider.lower()
+    }
+    catalog_pairs = {
+        (
+            str(entry.get("provider") or "").lower(),
+            str(entry.get("id") or ""),
+        )
+        for entry in await _get_model_catalog()
+    }
+    unknown = [
+        {"provider": provider, "model": e["id"]}
+        for e in entries
+        if e["id"] not in existing and (provider.lower(), e["id"]) not in catalog_pairs
+    ]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Unknown models in server provider selection",
+                "unknown": unknown,
+            },
+        )
+    await storage.set_server_provider_models(
+        provider, entries, request.state.username or "admin"
+    )
+    logger.info(
+        "[AUDIT] Admin '%s' set server provider models for '%s': %d included, %d free",
+        request.state.username,
+        provider,
+        sum(1 for e in entries if e["included"]),
+        sum(1 for e in entries if e["free"]),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response(
+            {"provider": provider, "models": entries}
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete(
+    "/api/admin/server-providers/{provider:path}",
+    operation_id="deleteServerProviderEndpoint",
+)
+async def delete_server_provider_endpoint(
+    provider: str, request: Request
+) -> JSONResponse:
+    """Remove a server provider's key, selection, and free pairs (admin only).
+
+    Returns 200 with a warning payload listing the affected selected/free
+    models — the frontend renders the pre-delete confirm from the GET list,
+    and the response records what the deletion actually removed.
+    """
+    _require_admin(request)
+    has_key = provider.lower() in {
+        row["provider"].lower() for row in await storage.list_server_ai_providers()
+    }
+    current = await storage.list_server_provider_models()
+    has_selection = any(row["provider"].lower() == provider.lower() for row in current)
+    # Free pairs alone configure a provider too (#347 r4): deletion removes
+    # them, so the existence check must see them or a free-pairs-only
+    # provider 404s while its free pairs survive untouched.
+    has_free = any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_free_ai_models()
+    )
+    if not has_key and not has_selection and not has_free:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' is not configured"
+        )
+    affected = await storage.delete_server_ai_provider(provider)
+    logger.info(
+        "[AUDIT] Admin '%s' deleted server provider '%s' (selected=%d, free=%d)",
+        request.state.username,
+        provider,
+        len(affected["selected_models"]),
+        len(affected["free_models"]),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response({"ok": True, "warnings": affected}),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
@@ -11838,10 +12490,7 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-        },
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -11892,6 +12541,8 @@ async def get_admin_settings(
 
     # Get DB overrides
     db_overrides = await storage.get_server_settings()
+    # Load the dotenv source once for the source calculation below.
+    dotenv = _settings_dotenv_values()
 
     # Update source and value for DB-overridden settings
     for item in metadata:
@@ -11925,7 +12576,10 @@ async def get_admin_settings(
                     item["env_var_value"] = (
                         _strip_url_userinfo(env_val) if "://" in env_val else env_val
                     )
-        elif os.environ.get(item["env_var"]) is not None:
+        elif _settings_env_value(key, dotenv) is not None:
+            # Env-sourced means resolvable from the same sources Settings
+            # merges (dotenv included) — those values are persistable, so
+            # the UI must offer Save to DB for them, not label them default.
             item["source"] = "env"
         else:
             item["source"] = "default"
@@ -11942,6 +12596,55 @@ async def get_admin_settings(
             item["value"] = "••••••••"
 
     return JSONResponse(content=metadata)
+
+
+# Valid log levels shared by the PUT allowlist and the env-persist path
+# (#347): Settings.log_level itself is unconstrained, so both write paths
+# must enforce the same set.
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _log_level_error(value: object) -> str | None:
+    """Validate a log level; return the error message, or None when valid."""
+    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
+        return "log_level: must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    return None
+
+
+def _settings_dotenv_values() -> dict[str, str]:
+    """The dotenv values Settings merges (DotEnvSettingsSource), by field.
+
+    Unreadable dotenv sources resolve to an empty mapping — Settings would
+    merge nothing from them either.
+    """
+    from pydantic_settings import DotEnvSettingsSource
+
+    try:
+        return DotEnvSettingsSource(
+            Settings,
+            env_file=Settings.model_config.get("env_file"),
+            env_file_encoding=Settings.model_config.get("env_file_encoding"),
+        )()
+    except OSError:
+        logger.debug("Unable to read dotenv sources", exc_info=True)
+        return {}
+
+
+def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str | None:
+    """Resolve a setting's environment value the same way Settings does.
+
+    os.environ first, then the configured dotenv file — the sources
+    pydantic-settings merges for ``Settings``. Pass ``dotenv`` to reuse an
+    already-loaded mapping (e.g. once per request); ``None`` loads it on
+    demand. DB overrides are deliberately excluded: when the effective
+    value only exists in the DB store there is no env value to persist, and
+    the caller must report no-env-value rather than re-persisting the DB's
+    own value.
+    """
+    env_var = key.upper()
+    if os.environ.get(env_var) is not None:
+        return os.environ[env_var]
+    return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
 @app.put("/api/admin/settings", operation_id="updateAdminSettings")
@@ -11975,7 +12678,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     errors = []
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket"):
+    for key in ("prow_url", "gcs_bucket", "default_user_role"):
         if key not in settings_updates:
             continue
         value = settings_updates[key]
@@ -11994,8 +12697,29 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key in ("prow_url", "gcs_bucket"):
+        if key == "log_level" and (message := _log_level_error(value)):
+            errors.append(message)
+        if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
+        # Sidecar listener overrides persist under /data and every restart
+        # re-probes them — reject values that would brick container boot
+        # (#347): a non-numeric/out-of-range port, or a bind address the
+        # loopback health probe can never reach.
+        if key == "sidecar_port":
+            try:
+                port = int(str(value).strip())
+            except ValueError, TypeError:
+                port = 0
+            if not 1 <= port <= 65535:
+                errors.append("sidecar_port: must be an integer between 1 and 65535")
+        if key == "sidecar_host":
+            host = str(value).strip()
+            if host and not _sidecar_host_supports_loopback_probe(host):
+                errors.append(
+                    f"sidecar_host: '{host}' would break the container loopback "
+                    "health probe (startup would fail on every restart) — use "
+                    "127.0.0.1, 0.0.0.0, or leave it empty"
+                )
         # Check integer fields
         annotation = field_info.annotation
         is_int = annotation is int or (
@@ -12034,10 +12758,33 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         )
 
     username = request.state.username or "admin"
+    warnings = await _save_settings_to_db(settings_updates, username)
 
-    # Save each setting to DB and apply to running process.
-    # Empty/null = reset: delete from DB so resolution falls through to env
-    # (request → DB → env; first non-empty wins).
+    logger.info(
+        "Admin settings updated: keys=%s, by=%s",
+        list(settings_updates.keys()),
+        username,
+    )
+
+    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
+    if warnings:
+        content["warnings"] = warnings
+    return JSONResponse(
+        content=content,
+        status_code=200,
+    )
+
+
+async def _save_settings_to_db(
+    settings_updates: dict[str, Any], username: str
+) -> list[str]:
+    """Persist validated settings updates to the DB store and apply them.
+
+    Shared save path for the PUT update and the env→DB persist endpoints.
+    Empty/null = reset: delete from DB so resolution falls through to env
+    (request → DB → env; first non-empty wins). Returns user-facing
+    warnings; values are never logged.
+    """
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         if not str_value:
@@ -12066,34 +12813,90 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     if cache_updates:
         update_db_settings_cache(cache_updates)
 
-    # Persist the transcript recording switch for the container entrypoint —
-    # the sidecar reads RECORD_TRANSCRIPTS from its process env at start, so
-    # the bridge file is how a DB toggle reaches it after a restart.
+    # Persist the transcript recording switch (and the other sidecar
+    # settings) for the container entrypoint — the sidecar reads these from
+    # its process env at start, so the bridge file is how a DB toggle
+    # reaches it after a restart.
     warnings: list[str] = []
-    if "record_transcripts" in settings_updates:
+    if "record_transcripts" in settings_updates or any(
+        key in settings_updates for key in _SIDECAR_BRIDGE_SETTINGS
+    ):
         synced = await _apply_transcript_recording_setting()
-        if not synced:
+        if not synced and "record_transcripts" in settings_updates:
             warnings.append(
                 "record_transcripts was saved, but the running sidecar could "
                 "not be updated — it applies after a restart or a later "
                 "successful sync"
             )
+    # A non-loopback sidecar bind is exposed to the network — same trust
+    # class as trust_proxy_headers: only safe behind a trusted network.
+    if "sidecar_host" in settings_updates:
+        host = str(settings_updates.get("sidecar_host") or "").strip()
+        if host and not _is_loopback_host(host):
+            warnings.append(
+                f"sidecar_host '{host}' is not a loopback address — the sidecar "
+                "will listen on an external interface. Only do this on a "
+                "trusted network (same trust class as trust_proxy_headers)."
+            )
 
     _broadcast_settings_change()
+    return warnings
+
+
+@app.post("/api/admin/settings/{key}/persist", operation_id="persistAdminSetting")
+async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
+    """Persist an env-sourced setting's current value to the DB store.
+
+    The migration path for env ↔ Server Settings parity (#347): deployments
+    save their current env values once, then drop the envs — the setting no
+    longer reverts to its default on restart. Runs server-side because the
+    UI never sees decrypted sensitive env values.
+    """
+    _require_admin(request)
+    if key not in Settings.model_fields:
+        raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
+    if key in _SERVER_ONLY_SETTINGS:
+        raise HTTPException(
+            status_code=400, detail=f"Server-only setting (env var only): {key}"
+        )
+    if key in _DERIVED_SETTINGS:
+        # The entrypoint exports the DERIVED SIDECAR_URL into the process
+        # env, so it shows as env-sourced — persisting it would pin an
+        # explicit URL that beats the port derivation (#347).
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key} is derived from sidecar_port — persist sidecar_port instead",
+        )
+    # Env var name per the Settings field mapping (see _get_settings_metadata)
+    # — resolved through the same sources Settings reads (dotenv included);
+    # a DB-only value correctly reports no env value.
+    env_value = _settings_env_value(key)
+    if not env_value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Setting '{key}' has no env value set",
+        )
+    # log_level has no Settings constraint — apply the shared PUT allowlist
+    # so an invalid level cannot survive the persist path either.
+    if key == "log_level" and (message := _log_level_error(env_value)) is not None:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}': {message}"
+        )
+    # Same validation the PUT path applies to admin-typed values
+    try:
+        Settings.model_validate({key: env_value})
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}'"
+        ) from exc
+
+    username = request.state.username or "admin"
+    await _save_settings_to_db({key: env_value}, username)
 
     logger.info(
-        "Admin settings updated: keys=%s, by=%s",
-        list(settings_updates.keys()),
-        username,
+        "[AUDIT] Admin setting persisted from env: key=%s, by=%s", key, username
     )
-
-    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
-    if warnings:
-        content["warnings"] = warnings
-    return JSONResponse(
-        content=content,
-        status_code=200,
-    )
+    return JSONResponse(content={"key": key, "source": "db"})
 
 
 @app.get("/api/admin/settings/history", operation_id="getSettingsHistory")
@@ -12121,6 +12924,10 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     _require_admin(request)
     if key not in Settings.model_fields:
         raise HTTPException(status_code=404, detail=f"Unknown setting: {key}")
+    if key in _SERVER_ONLY_SETTINGS:
+        raise HTTPException(
+            status_code=400, detail=f"Server-only setting (env var only): {key}"
+        )
 
     deleted = await storage.delete_server_setting(
         key, deleted_by=request.state.username or "admin"
@@ -12138,9 +12945,9 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     # environment controls the sidecar again, and the runtime override is
     # dropped so the boot env governs immediately.
     content: dict[str, Any] = {"reset": key}
-    if key == "record_transcripts":
+    if key == "record_transcripts" or key in _SIDECAR_BRIDGE_SETTINGS:
         synced = await _apply_transcript_recording_setting()
-        if not synced:
+        if not synced and key == "record_transcripts":
             content["warnings"] = [
                 (
                     "record_transcripts was reset, but the running sidecar could "

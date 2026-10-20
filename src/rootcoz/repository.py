@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import subprocess
@@ -14,14 +13,14 @@ from urllib.parse import quote, urlparse, urlunparse
 from git import Repo
 from git.exc import GitCommandError
 from pydantic import HttpUrl
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.temp_paths import rootcoz_temp_base
 
 if TYPE_CHECKING:
     from rootcoz.models import AdditionalRepo
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 RESERVED_REPO_NAMES = frozenset({"build-artifacts"})
 

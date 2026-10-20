@@ -48,6 +48,9 @@ admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
 admin_models_app = typer.Typer(help="Manage AI models.", no_args_is_help=True)
+admin_server_providers_app = typer.Typer(
+    help="Manage server AI provider keys.", no_args_is_help=True
+)
 
 metadata_app = typer.Typer(help="Manage job metadata.", no_args_is_help=True)
 failure_app = typer.Typer(
@@ -74,6 +77,7 @@ app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
 admin_app.add_typer(admin_settings_app, name="settings")
 admin_app.add_typer(admin_models_app, name="models")
+admin_app.add_typer(admin_server_providers_app, name="server-providers")
 
 # -- Global state managed via app callback ------------------------------------
 
@@ -3573,6 +3577,24 @@ def admin_settings_reset(
         typer.echo(f"Reset: {key}")
 
 
+@admin_settings_app.command("persist")
+def admin_settings_persist(
+    key: str = typer.Argument(
+        help="Setting key whose current env value is saved to the DB store."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Persist an env-sourced setting's value to DB (source flips env -> db)."""
+    key = key.lower()
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_persist_setting(key),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Persisted to DB: {key}")
+
+
 @admin_settings_app.command("test")
 def admin_settings_test(
     integration: str = typer.Argument(
@@ -3697,6 +3719,177 @@ def admin_models_free_remove(
     )
     if not _state.get("json", False):
         typer.echo(f"Removed {provider}/{model} from the free list")
+
+
+# -- Server providers (Admin, #347) -------------------------------------------
+
+
+def _parse_server_provider_models(models: str, free: str = "") -> list[dict[str, Any]]:
+    """Parse a ``--models``/``--free`` selection into API entries.
+
+    Model IDs pass through verbatim — real IDs may genuinely end in
+    ``:free`` (OpenRouter free variants like
+    ``meta-llama/llama-3-8b-instruct:free``) or contain colons, so no
+    marker syntax is allowed; free pairs are selected with the separate
+    ``--free`` option and auto-included (free ⊆ included, matching the
+    API's normalization). Models absent from the selection are deselected.
+    """
+    included = [part.strip() for part in models.split(",") if part.strip()]
+    free_ids = {part.strip() for part in free.split(",") if part.strip()}
+    entries = [
+        {"id": model, "included": True, "free": model in free_ids} for model in included
+    ]
+    # A --free entry not repeated in --models is auto-included.
+    entries.extend(
+        {"id": model, "included": True, "free": True}
+        for model in sorted(free_ids - set(included))
+    )
+    return entries
+
+
+@admin_server_providers_app.command("list")
+def admin_server_providers_list(json_output: bool = _JSON_OPTION) -> None:
+    """List server provider key state and per-model selection."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_server_providers(),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    for provider in data.get("providers", []):
+        models = provider.get("models", [])
+        included = [m for m in models if m.get("included")]
+        free = [m for m in models if m.get("free")]
+        typer.echo(
+            f"{provider['provider']}: key={'yes' if provider.get('has_key') else 'no'}"
+            f" verified={'yes' if provider.get('verified') else 'no'}"
+            f" models={len(models)} included={len(included)} free={len(free)}"
+        )
+
+
+@admin_server_providers_app.command("add")
+def admin_server_providers_add(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    api_key: str = typer.Option(
+        ...,
+        "--api-key",
+        help=(
+            "Provider API key (verified with a real sidecar turn before "
+            "storing); prompted hidden when the flag is omitted."
+        ),
+        prompt=True,
+        hide_input=True,
+    ),
+    verification_model: str = typer.Option(
+        ..., "--verification-model", help="Model used to test the key."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Add a server provider key (rejected when verification fails)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_add_server_provider(provider, api_key, verification_model),
+        emit_output=False,
+    )
+    if data.get("ok"):
+        if not _state.get("json", False):
+            typer.echo(f"Stored verified key for {provider}")
+        return
+    # A rejected/inconclusive key check fails the command in BOTH output
+    # modes — --json still prints the payload, then exits 1.
+    if not _state.get("json", False):
+        typer.echo(f"Key NOT stored ({data.get('outcome')}): {data.get('message', '')}")
+    raise typer.Exit(code=1)
+
+
+@admin_server_providers_app.command("rotate-key")
+def admin_server_providers_rotate(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    api_key: str = typer.Option(
+        ...,
+        "--api-key",
+        help="New provider API key; prompted hidden when the flag is omitted.",
+        prompt=True,
+        hide_input=True,
+    ),
+    verification_model: str = typer.Option(
+        ..., "--verification-model", help="Model used to test the new key."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Replace a server provider key (re-verified before storing)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_rotate_server_provider_key(
+            provider, api_key, verification_model
+        ),
+        emit_output=False,
+    )
+    if data.get("ok"):
+        if not _state.get("json", False):
+            typer.echo(f"Rotated key for {provider}")
+        return
+    # A rejected/inconclusive key check fails the command in BOTH output
+    # modes — --json still prints the payload, then exits 1.
+    if not _state.get("json", False):
+        typer.echo(
+            f"Key NOT rotated ({data.get('outcome')}): {data.get('message', '')}"
+        )
+    raise typer.Exit(code=1)
+
+
+@admin_server_providers_app.command("models")
+def admin_server_providers_models(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    models: str = typer.Option(
+        ...,
+        "--models",
+        help=(
+            "Full selection: comma-separated model ids, passed verbatim. "
+            "Models not listed are deselected."
+        ),
+    ),
+    free: str = typer.Option(
+        "",
+        "--free",
+        help=(
+            "Comma-separated model ids to declare free (subset of --models; "
+            "entries not in --models are auto-included)."
+        ),
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Set which models a provider exposes on server credentials."""
+    entries = _parse_server_provider_models(models, free)
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_set_server_provider_models(provider, entries),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        free_count = sum(1 for e in entries if e["free"])
+        typer.echo(f"Set {len(entries)} model(s) for {provider} ({free_count} free)")
+
+
+@admin_server_providers_app.command("remove")
+def admin_server_providers_remove(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Remove a provider's key, selected models, and free pairs."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_delete_server_provider(provider),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        warnings = data.get("warnings", {})
+        typer.echo(
+            f"Removed {provider}"
+            f" (selected: {', '.join(warnings.get('selected_models', [])) or 'none'};"
+            f" free: {', '.join(warnings.get('free_models', [])) or 'none'})"
+        )
 
 
 # -- Token Usage (Admin) ------------------------------------------------------

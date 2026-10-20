@@ -5,7 +5,6 @@ Loop until all agree or max rounds hit. No one has veto power — it's a convers
 """
 
 import json
-import os
 import re
 from collections import Counter
 from collections.abc import Coroutine
@@ -16,8 +15,8 @@ from pi_sidecar_client import (
     get_sidecar_client,
     run_parallel_with_limit,
 )
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import ANALYSIS_BUILTIN_TOOLS, AIResult, call_ai, call_ai_once
 from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.core import (
@@ -48,7 +47,7 @@ from rootcoz.models import (
     TokenUsageEntry,
 )
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 
 def _round_usage(

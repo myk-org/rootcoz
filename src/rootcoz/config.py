@@ -1,19 +1,18 @@
 """Configuration settings from environment variables."""
 
-import os
 from functools import lru_cache
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
 from rootcoz.metadata_rules import load_metadata_rules
 from rootcoz.vapid import get_vapid_config
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 # Defaults for the Prow artifact download limits (see ``Settings``).
 # Single source of truth — ``rootcoz.sources.prow_source`` reuses them as
@@ -500,6 +499,140 @@ class Settings(BaseSettings):
         default="",
         description="Path to a YAML/JSON file defining name-based metadata rules for auto-assignment",
     )
+
+    # Log level for rootcoz loggers (restart-required: applied at startup).
+    # Empty = LOG_LEVEL env / library default.
+    log_level: str = Field(
+        default="",
+        description=(
+            "Logging level for rootcoz loggers (DEBUG, INFO, WARNING, ERROR, "
+            "CRITICAL). Applied at server startup — restart required."
+        ),
+    )
+
+    # --- Sidecar settings (#347) ---
+    # The sidecar starts once at container boot; these DB overrides reach it
+    # through the /data/pi-sidecar/env bridge the entrypoint sources. Empty
+    # string = no override: the deployment environment (compose/Helm) governs.
+    # Restart required — the running processes keep their boot values.
+    sidecar_host: str = Field(
+        default="",
+        description=(
+            "Bind host for the pi-sidecar server (SIDECAR_HOST). Non-loopback "
+            "values are warned about on save — same trust class as "
+            "trust_proxy_headers. Restart required."
+        ),
+    )
+    sidecar_port: str = Field(
+        default="",
+        description="Port for the pi-sidecar server (SIDECAR_PORT). Restart required.",
+    )
+    sidecar_url: str = Field(
+        default="",
+        description="Base URL rootcoz uses to reach the sidecar (SIDECAR_URL). Restart required.",
+    )
+    acpx_agents: str = Field(
+        default="",
+        description="ACPX agent spec for the sidecar (ACPX_AGENTS). Restart required.",
+    )
+    cli_agents: str = Field(
+        default="",
+        description="CLI agent spec for the sidecar (CLI_AGENTS). Restart required.",
+    )
+    pi_sidecar_log_level: str = Field(
+        default="",
+        description="Log level for the pi-sidecar server (PI_SIDECAR_LOG_LEVEL). Restart required.",
+    )
+    node_binary: str = Field(
+        default="",
+        description=(
+            "Node binary used to launch the pi-sidecar process (NODE_BINARY). "
+            "Restart required. Controls the sidecar process only — nested "
+            "processes spawned inside pi-config follow the sidecar's own "
+            "binary (upstream behavior) and cannot be retargeted separately."
+        ),
+    )
+    pi_sidecar_transcripts_dir: str = Field(
+        default="",
+        description=(
+            "Directory for pi-sidecar session transcripts "
+            "(PI_SIDECAR_TRANSCRIPTS_DIR). Restart required."
+        ),
+    )
+
+    # --- Notifications (#347) ---
+    smtp_host: str = Field(default="", description="SMTP server host for email alerts.")
+    smtp_port: int = Field(default=587, gt=0, description="SMTP server port.")
+    smtp_user: str = Field(default="", description="SMTP username.")
+    smtp_password: SecretStr | None = Field(
+        default=None, description="SMTP password.", repr=False
+    )
+    smtp_from: str = Field(
+        default="", description="From address for email alerts. Defaults to smtp_user."
+    )
+
+    @field_validator("smtp_port", mode="before")
+    @classmethod
+    def _coerce_smtp_port(cls, v: object) -> int:
+        """Tolerate a malformed SMTP_PORT env instead of failing Settings().
+
+        Mirrors ``_coerce_session_ttl``: a typo in the deployment env must
+        not brick app-wide settings; fall back to 587 with a warning and
+        let the (strict) field constraint reject bad admin-typed values.
+        """
+        if isinstance(v, bool):
+            port: int | None = None
+        elif isinstance(v, int):
+            port = v
+        elif isinstance(v, str):
+            try:
+                port = int(v)
+            except ValueError:
+                port = None
+        else:
+            port = None
+        if port is None or port <= 0:
+            logger.warning("Ignoring invalid SMTP_PORT value %r; using default 587", v)
+            return 587
+        return port
+
+    slack_webhook_url: SecretStr | None = Field(
+        default=None, description="Slack webhook URL for alerts.", repr=False
+    )
+    alert_email_to: str = Field(
+        default="", description="Recipient address for email alerts."
+    )
+
+    # --- Auth (#347) ---
+    # Upper bound keeps datetime arithmetic in create_session/renew_session
+    # well inside datetime.max even for the longest-lived deployment
+    # (10 years); without it an out-of-range value could brick every login.
+    session_ttl_hours: int = Field(
+        default=720,
+        ge=1,
+        le=87600,
+        description="Login session lifetime in hours (SESSION_TTL_HOURS).",
+    )
+
+    @field_validator("session_ttl_hours", mode="before")
+    @classmethod
+    def _coerce_session_ttl(cls, v: object) -> int:
+        """Tolerate bad values like the env parser always did (boot default).
+
+        Env/DB values are clamped into the 1–87600 range so ``Settings()``
+        never fails app-wide; the PUT path enforces the same bound with a
+        400 via the field constraints.
+        """
+        if isinstance(v, bool):
+            return 720
+        if isinstance(v, int):
+            return min(max(v, 1), 87600)
+        if isinstance(v, str):
+            try:
+                return min(max(int(v), 1), 87600)
+            except ValueError:
+                return 720
+        return 720
 
     # Admin approval for new user registrations
     require_approval: bool = Field(

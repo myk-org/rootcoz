@@ -1,15 +1,14 @@
 """Comment enrichment: detect and fetch status for GitHub PRs and Jira tickets in comments."""
 
-import os
 import re
 from typing import Any
 
 import httpx
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.jira import JiraConnection, complete_jira_connection
 
-logger = get_logger(name=__name__, level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = get_child_logger(__name__)
 
 _GITHUB_PR_PATTERN = re.compile(r"https?://github\.com/([^/]+)/([^/]+)/pull/(\d+)")
 

@@ -61,11 +61,19 @@ if [ -f /app/sidecar-helper/dist/server.js ]; then
     fi
     # Transcripts must survive container replacement — keep them under /data.
     export PI_SIDECAR_TRANSCRIPTS_DIR="${PI_SIDECAR_TRANSCRIPTS_DIR:-/data/pi-sidecar/transcripts}"
+    # A port override must not strand the Python client on the default 9100:
+    # pi_sidecar_client reads SIDECAR_URL (default http://127.0.0.1:9100)
+    # regardless of SIDECAR_PORT, so derive the URL from the effective port
+    # unless the deployment (or the DB bridge above) set one explicitly.
+    export SIDECAR_URL="${SIDECAR_URL:-http://127.0.0.1:${SIDECAR_PORT}}"
     mkdir -p "$PI_SIDECAR_TRANSCRIPTS_DIR" 2>/dev/null || echo "[sidecar] WARN: cannot create transcripts dir" >&2
     # Subagent extension falls back to spawning `pi` when argv[1] is unset;
     # keep the CLI on PATH so that path works in the container.
     export PATH="/app/sidecar-helper/node_modules/.bin:${PATH}"
-    node /app/sidecar-helper/dist/server.js &
+    # NODE_BINARY comes from the DB bridge sourced above (node_binary
+    # setting) or the deployment env — launching with it here is what makes
+    # the saved setting take effect on restart.
+    "${NODE_BINARY:-node}" /app/sidecar-helper/dist/server.js &
     SIDECAR_PID=$!
     SIDECAR_RUNNING=true
     echo "[sidecar] Started Pi SDK sidecar (PID $SIDECAR_PID) on port $SIDECAR_PORT"

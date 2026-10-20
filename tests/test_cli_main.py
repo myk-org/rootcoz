@@ -4739,6 +4739,140 @@ def test_admin_models_free_list(mock_client):
     mock_client.admin_list_free_models.assert_called_once()
 
 
+# --- Server provider model spec parsing keeps colons in IDs (#347 review) ---
+
+
+def test_admin_server_providers_models_keeps_colons_in_ids(mock_client):
+    """Model IDs like llama3:8b keep their colons — ids pass through verbatim."""
+    mock_client.admin_set_server_provider_models.return_value = {
+        "models": [{"id": "llama3:8b", "included": True, "free": False}]
+    }
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "ollama",
+            "--models",
+            "llama3:8b",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "ollama", [{"id": "llama3:8b", "included": True, "free": False}]
+    )
+
+
+def test_admin_server_providers_models_free_option_marks_pairs(mock_client):
+    """--free selects the free subset; ids never carry marker syntax."""
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "ollama",
+            "--models",
+            "llama3:8b,model,llama3:70b",
+            "--free",
+            "llama3:8b,llama3:70b",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "ollama",
+        [
+            {"id": "llama3:8b", "included": True, "free": True},
+            {"id": "model", "included": True, "free": False},
+            {"id": "llama3:70b", "included": True, "free": True},
+        ],
+    )
+
+
+def test_admin_server_providers_models_free_entry_auto_included(mock_client):
+    """A --free entry missing from --models is auto-included (free ⊆ included)."""
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "google",
+            "--models",
+            "gemini-2.5-pro",
+            "--free",
+            "gemini-2.5-flash",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "google",
+        [
+            {"id": "gemini-2.5-pro", "included": True, "free": False},
+            {"id": "gemini-2.5-flash", "included": True, "free": True},
+        ],
+    )
+
+
+def test_admin_server_providers_models_openrouter_free_id_verbatim(mock_client):
+    """Real ':free'-suffixed OpenRouter ids pass through verbatim (#347 r3).
+
+    The trailing-:free marker syntax was removed exactly because it would
+    mangle these ids into the paid base id; free selection is --free only.
+    """
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "openrouter",
+            "--models",
+            "meta-llama/llama-3-8b-instruct:free",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "openrouter",
+        [
+            {
+                "id": "meta-llama/llama-3-8b-instruct:free",
+                "included": True,
+                "free": False,
+            }
+        ],
+    )
+
+
+def test_admin_server_providers_models_plain_id(mock_client):
+    """A plain model id without colons parses unchanged and not free."""
+    mock_client.admin_set_server_provider_models.return_value = {"models": []}
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "server-providers",
+            "models",
+            "--provider",
+            "openai",
+            "--models",
+            "gpt-5.6-luna",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_set_server_provider_models.assert_called_once_with(
+        "openai", [{"id": "gpt-5.6-luna", "included": True, "free": False}]
+    )
+
+
 def test_admin_models_free_add(mock_client):
     mock_client.admin_list_free_models.return_value = {
         "models": [],
@@ -6687,3 +6821,353 @@ class TestReleaseCommand:
         parsed = json.loads(result.output)
         assert parsed["version"] == "4.7.0"
         assert parsed["update_available"] is True
+
+
+class TestAdminSettingsPersistCommand:
+    def test_admin_settings_persist(self, mock_client):
+        mock_client.admin_persist_setting.return_value = {
+            "key": "smtp_host",
+            "source": "db",
+        }
+        result = runner.invoke(app, ["admin", "settings", "persist", "SMTP_HOST"])
+        assert result.exit_code == 0
+        assert "Persisted to DB: smtp_host" in result.output
+        mock_client.admin_persist_setting.assert_called_once_with("smtp_host")
+
+    def test_admin_settings_persist_json(self, mock_client):
+        mock_client.admin_persist_setting.return_value = {
+            "key": "smtp_host",
+            "source": "db",
+        }
+        result = runner.invoke(
+            app, ["--json", "admin", "settings", "persist", "smtp_host"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed == {"key": "smtp_host", "source": "db"}
+
+    def test_admin_settings_persist_error(self, mock_client):
+        mock_client.admin_persist_setting.side_effect = RootCozError(
+            status_code=400, detail="Setting 'smtp_host' has no env value set"
+        )
+        result = runner.invoke(app, ["admin", "settings", "persist", "smtp_host"])
+        assert result.exit_code == 1
+        assert "no env value" in result.output
+
+
+class TestAdminServerProvidersCommands:
+    def test_server_providers_list(self, mock_client):
+        mock_client.admin_list_server_providers.return_value = {
+            "providers": [
+                {
+                    "provider": "google",
+                    "has_key": True,
+                    "verified": True,
+                    "models": [
+                        {"id": "gemini-2.5-pro", "included": True, "free": True},
+                        {"id": "gemini-2.5-flash", "included": False, "free": False},
+                    ],
+                },
+                {"provider": "openai", "has_key": False, "verified": False},
+            ]
+        }
+        result = runner.invoke(app, ["admin", "server-providers", "list"])
+        assert result.exit_code == 0
+        assert "google: key=yes verified=yes models=2 included=1 free=1" in (
+            result.output
+        )
+        assert "openai: key=no verified=no models=0 included=0 free=0" in result.output
+        mock_client.admin_list_server_providers.assert_called_once()
+
+    def test_server_providers_list_json(self, mock_client):
+        mock_client.admin_list_server_providers.return_value = {"providers": []}
+        result = runner.invoke(app, ["--json", "admin", "server-providers", "list"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == {"providers": []}
+
+    def test_server_providers_add(self, mock_client):
+        mock_client.admin_add_server_provider.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "add",
+                "--provider",
+                "google",
+                "--api-key",
+                "g-key-1",  # pragma: allowlist secret
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Stored verified key for google" in result.output
+        mock_client.admin_add_server_provider.assert_called_once_with(
+            "google",
+            "g-key-1",
+            "gemini-2.5-pro",  # pragma: allowlist secret
+        )
+
+    def test_server_providers_add_prompts_hidden_when_flag_omitted(self, mock_client):
+        """--api-key omitted falls back to a hidden prompt (#347 r4).
+
+        A required plain option lands the key in shell history and ps
+        output; the prompt path keeps it out of both.
+        """
+        mock_client.admin_add_server_provider.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "add",
+                "--provider",
+                "google",
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+            input="g-key-6\n",  # pragma: allowlist secret
+        )
+        assert result.exit_code == 0
+        assert "Stored verified key for google" in result.output
+        # The hidden prompt never echoes the key back.
+        assert "g-key-6" not in result.output  # pragma: allowlist secret
+        mock_client.admin_add_server_provider.assert_called_once_with(
+            "google",
+            "g-key-6",  # pragma: allowlist secret
+            "gemini-2.5-pro",
+        )
+
+    def test_server_providers_add_rejected_key_exits_nonzero(self, mock_client):
+        mock_client.admin_add_server_provider.return_value = {
+            "outcome": "rejected",
+            "ok": False,
+            "message": "Check the key and selected model; existing credential unchanged.",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "add",
+                "--provider",
+                "google",
+                "--api-key",
+                "g-key-2",  # pragma: allowlist secret
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Key NOT stored (rejected)" in result.output
+
+    def test_server_providers_add_rejected_key_json_exits_nonzero(self, mock_client):
+        """--json prints the payload but still exits 1 on ok:false (#347 r3)."""
+        mock_client.admin_add_server_provider.return_value = {
+            "outcome": "rejected",
+            "ok": False,
+            "message": "Check the key and selected model; existing credential unchanged.",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "admin",
+                "server-providers",
+                "add",
+                "--provider",
+                "google",
+                "--api-key",
+                "g-key-4",  # pragma: allowlist secret
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["outcome"] == "rejected"
+
+    def test_server_providers_rotate_key(self, mock_client):
+        mock_client.admin_rotate_server_provider_key.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "rotate-key",
+                "--provider",
+                "google",
+                "--api-key",
+                "g-key-3",  # pragma: allowlist secret
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Rotated key for google" in result.output
+        mock_client.admin_rotate_server_provider_key.assert_called_once_with(
+            "google",
+            "g-key-3",
+            "gemini-2.5-pro",  # pragma: allowlist secret
+        )
+
+    def test_server_providers_rotate_key_prompts_hidden_when_flag_omitted(
+        self, mock_client
+    ):
+        """rotate-key --api-key omitted falls back to a hidden prompt (#347 r4)."""
+        mock_client.admin_rotate_server_provider_key.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "rotate-key",
+                "--provider",
+                "google",
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+            input="g-key-7\n",  # pragma: allowlist secret
+        )
+        assert result.exit_code == 0
+        assert "Rotated key for google" in result.output
+        assert "g-key-7" not in result.output  # pragma: allowlist secret
+        mock_client.admin_rotate_server_provider_key.assert_called_once_with(
+            "google",
+            "g-key-7",  # pragma: allowlist secret
+            "gemini-2.5-pro",
+        )
+
+    def test_server_providers_rotate_key_rejected_json_exits_nonzero(self, mock_client):
+        """--json prints the payload but still exits 1 on ok:false (#347 r3)."""
+        mock_client.admin_rotate_server_provider_key.return_value = {
+            "outcome": "inconclusive",
+            "ok": False,
+            "message": "Try again when the provider is available; existing credential unchanged.",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "admin",
+                "server-providers",
+                "rotate-key",
+                "--provider",
+                "google",
+                "--api-key",
+                "g-key-5",  # pragma: allowlist secret
+                "--verification-model",
+                "gemini-2.5-pro",
+            ],
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["ok"] is False
+        assert payload["outcome"] == "inconclusive"
+
+    def test_server_providers_models_free_option(self, mock_client):
+        mock_client.admin_set_server_provider_models.return_value = {
+            "provider": "google",
+            "models": [],
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "models",
+                "--provider",
+                "google",
+                "--models",
+                "gemini-2.5-pro,gemini-2.5-flash",
+                "--free",
+                "gemini-2.5-flash",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Set 2 model(s) for google (1 free)" in result.output
+        mock_client.admin_set_server_provider_models.assert_called_once_with(
+            "google",
+            [
+                {"id": "gemini-2.5-pro", "included": True, "free": False},
+                {"id": "gemini-2.5-flash", "included": True, "free": True},
+            ],
+        )
+
+    def test_server_providers_models_json(self, mock_client):
+        mock_client.admin_set_server_provider_models.return_value = {
+            "provider": "google",
+            "models": [{"id": "m", "included": True, "free": False}],
+        }
+        result = runner.invoke(
+            app,
+            [
+                "--json",
+                "admin",
+                "server-providers",
+                "models",
+                "--provider",
+                "google",
+                "--models",
+                "m",
+            ],
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["provider"] == "google"
+
+    def test_server_providers_remove(self, mock_client):
+        mock_client.admin_delete_server_provider.return_value = {
+            "ok": True,
+            "warnings": {
+                "selected_models": ["gemini-2.5-pro"],
+                "free_models": ["gemini-2.5-pro"],
+            },
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "remove", "--provider", "google"],
+        )
+        assert result.exit_code == 0
+        assert "Removed google" in result.output
+        assert "selected: gemini-2.5-pro" in result.output
+        assert "free: gemini-2.5-pro" in result.output
+        mock_client.admin_delete_server_provider.assert_called_once_with("google")
+
+    def test_server_providers_remove_empty_warning_payload(self, mock_client):
+        mock_client.admin_delete_server_provider.return_value = {
+            "ok": True,
+            "warnings": {"selected_models": [], "free_models": []},
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "remove", "--provider", "openai"],
+        )
+        assert result.exit_code == 0
+        assert "Removed openai" in result.output
+        assert "selected: none" in result.output
+        assert "free: none" in result.output
+
+    def test_server_providers_remove_error(self, mock_client):
+        mock_client.admin_delete_server_provider.side_effect = RootCozError(
+            status_code=404, detail="Provider 'openai' is not configured"
+        )
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "remove", "--provider", "openai"],
+        )
+        assert result.exit_code == 1
+        assert "not configured" in result.output
