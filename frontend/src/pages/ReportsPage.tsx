@@ -639,6 +639,11 @@ export function ReportsPage() {
   }, [searchParams]) // eslint-disable-line react-hooks/exhaustive-deps -- compare against state inside
 
   // ─── State → URL sync ──────────────────────────────────────────
+  // Write only when the serialized state differs from the current URL —
+  // together with the guarded URL → state effect above this makes an
+  // alternation between the two effects impossible: every write strictly
+  // reduces the difference to zero (sidebar preset clicks navigate to a
+  // same-route query string without remounting this page).
   useEffect(() => {
     const params = new URLSearchParams()
     if (activeTab !== 'totals') params.set('report', TAB_URL_KEY[activeTab])
@@ -652,8 +657,10 @@ export function ReportsPage() {
     for (const l of labels) params.append('label', l)
     for (const l of excludeLabels) params.append('exclude_label', l)
     if (search) params.set('search', search)
-    setSearchParams(params, { replace: true })
-  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search, setSearchParams])
+    if (params.toString() !== searchParams.toString()) {
+      setSearchParams(params, { replace: true })
+    }
+  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search, setSearchParams]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams read from closure; adding it to deps would clobber external navigations
 
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)

@@ -1,10 +1,12 @@
 """Pydantic request and response models."""
 
+import json
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     Field,
@@ -1601,20 +1603,62 @@ class SetCanViewReportsRequest(BaseModel):
 # ─── Filter presets (#179) ─────────────────────────────────────────
 
 
+# Bounds for stored preset payloads: presets are returned on every list
+# call and server presets to every user, so values must stay small.
+MAX_FILTER_PRESET_VALUE_LENGTH = 200
+MAX_FILTER_PRESET_LIST_LENGTH = 100
+MAX_FILTER_PRESET_JSON_LENGTH = 10_000
+
+
+def _validate_filter_preset_values(
+    filters: dict[str, str | list[str]],
+) -> dict[str, str | list[str]]:
+    """Bound stored preset filters: per-value length, list length, total JSON."""
+    if len(json.dumps(filters)) > MAX_FILTER_PRESET_JSON_LENGTH:
+        raise ValueError(
+            f"filters must serialize to at most {MAX_FILTER_PRESET_JSON_LENGTH} characters"
+        )
+    for key, value in filters.items():
+        if isinstance(value, str):
+            if len(value) > MAX_FILTER_PRESET_VALUE_LENGTH:
+                raise ValueError(
+                    f"filter value for '{key}' exceeds"
+                    f" {MAX_FILTER_PRESET_VALUE_LENGTH} characters"
+                )
+        else:
+            if len(value) > MAX_FILTER_PRESET_LIST_LENGTH:
+                raise ValueError(
+                    f"filter '{key}' exceeds {MAX_FILTER_PRESET_LIST_LENGTH} values"
+                )
+            if any(len(item) > MAX_FILTER_PRESET_VALUE_LENGTH for item in value):
+                raise ValueError(
+                    f"filter value in '{key}' exceeds"
+                    f" {MAX_FILTER_PRESET_VALUE_LENGTH} characters"
+                )
+    return filters
+
+
+FilterPresetFilters = Annotated[
+    dict[str, str | list[str]],
+    Field(max_length=50),
+    AfterValidator(_validate_filter_preset_values),
+]
+
+
 class CreateFilterPresetRequest(BaseModel):
     """POST /api/user/filter-presets body — save the current filter combination."""
 
     name: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     page: Literal["dashboard", "reports"]
     scope: Literal["user", "server"] = "user"
-    filters: dict[str, str | list[str]] = Field(max_length=50)
+    filters: FilterPresetFilters
 
 
 class UpdateFilterPresetRequest(BaseModel):
     """PUT /api/user/filter-presets/{id} body — rename and/or replace filters."""
 
     name: Annotated[str, StringConstraints(min_length=1, max_length=100)] | None = None
-    filters: dict[str, str | list[str]] | None = Field(default=None, max_length=50)
+    filters: FilterPresetFilters | None = None
 
 
 class FilterPresetResponse(BaseModel):

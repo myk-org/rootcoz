@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FilterPresetsMenu } from '../FilterPresetsMenu'
+import {
+  PRESET_APPLIED_EVENT,
+  resetLastAppliedPresetForTests,
+} from '@/lib/filterPresets'
 
 // ─── Mocks ──────────────────────────────────────────────────────────
 
@@ -79,6 +83,7 @@ describe('FilterPresetsMenu', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockAuth.isOperator = false
+    resetLastAppliedPresetForTests()
     apiGet.mockResolvedValue([PERSONAL_PRESET, SERVER_PRESET])
   })
 
@@ -107,7 +112,7 @@ describe('FilterPresetsMenu', () => {
     const { onApply } = renderMenu()
     await waitFor(() => expect(apiGet).toHaveBeenCalled())
     await openMenu()
-    await user.click(screen.getByText('Storage unreviewed'))
+    await user.click(screen.getByTestId('filter-preset-1'))
     expect(onApply).toHaveBeenCalledWith(PERSONAL_PRESET.filters)
   })
 
@@ -118,7 +123,7 @@ describe('FilterPresetsMenu', () => {
     )
     await waitFor(() => expect(apiGet).toHaveBeenCalled())
     await openMenu()
-    await user.click(screen.getByText('Storage unreviewed'))
+    await user.click(screen.getByTestId('filter-preset-1'))
     // Trigger now shows the preset name
     expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Storage unreviewed')
     // Filters diverge (tier added) → modified dot + Update button
@@ -142,7 +147,7 @@ describe('FilterPresetsMenu', () => {
     renderMenu(params({ team: ['storage'], review_status: 'unreviewed' }))
     await waitFor(() => expect(apiGet).toHaveBeenCalled())
     await openMenu()
-    await user.click(screen.getByText('Storage unreviewed'))
+    await user.click(screen.getByTestId('filter-preset-1'))
     expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Storage unreviewed')
     await user.click(screen.getByTestId('filter-preset-unload'))
     expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Presets')
@@ -154,7 +159,7 @@ describe('FilterPresetsMenu', () => {
     renderMenu(params(filters))
     await waitFor(() => expect(apiGet).toHaveBeenCalled())
     await openMenu()
-    await user.click(screen.getByText('Storage unreviewed'))
+    await user.click(screen.getByTestId('filter-preset-1'))
     await user.click(screen.getByTestId('filter-preset-update'))
     await waitFor(() =>
       expect(apiPut).toHaveBeenCalledWith('/api/user/filter-presets/1', { filters }),
@@ -262,5 +267,71 @@ describe('FilterPresetsMenu', () => {
     await user.click(screen.getByLabelText('Delete Storage unreviewed'))
     await user.click(screen.getByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/user/filter-presets/1'))
+  })
+
+  it('hides the Update button for a modified server preset when not operator', async () => {
+    // Server preset active, URL diverges (tier=3) — viewer cannot manage it
+    renderMenu(params({ tier: ['3'] }))
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await openMenu()
+    await user.click(screen.getByTestId('filter-preset-2'))
+    expect(screen.getByTestId('filter-preset-modified-dot')).toBeDefined()
+    expect(screen.queryByTestId('filter-preset-update')).toBeNull()
+  })
+
+  it('shows the Update button for a modified server preset when operator', async () => {
+    mockAuth.isOperator = true
+    renderMenu(params({ tier: ['3'] }))
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await openMenu()
+    await user.click(screen.getByTestId('filter-preset-2'))
+    expect(screen.getByTestId('filter-preset-update')).toBeDefined()
+  })
+
+  it('shows an error when updating the active preset fails', async () => {
+    apiPut.mockRejectedValue(new Error('Preset not found'))
+    renderMenu(params({ team: ['storage'], review_status: 'unreviewed', tier: ['2'] }))
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await openMenu()
+    await user.click(screen.getByTestId('filter-preset-1'))
+    await user.click(screen.getByTestId('filter-preset-update'))
+    expect(await screen.findByTestId('filter-preset-action-error')).toBeDefined()
+    expect(screen.getByTestId('filter-preset-action-error').textContent).toContain('Preset not found')
+  })
+
+  it('shows an error in the delete dialog when deleting fails', async () => {
+    apiDelete.mockRejectedValue(new Error('Preset not found'))
+    renderMenu()
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await openMenu()
+    await user.click(screen.getByLabelText('Delete Storage unreviewed'))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(await screen.findByRole('alert')).toBeDefined()
+    expect(screen.getByRole('alert').textContent).toContain('Preset not found')
+  })
+
+  it('follows a preset applied elsewhere (sidebar click) instead of the stale selection', async () => {
+    renderMenu(params({ tier: ['2'] }))
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await openMenu()
+    // PERSONAL_PRESET (id 1) becomes active via its own dropdown
+    await user.click(screen.getByTestId('filter-preset-1'))
+    expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Storage unreviewed')
+    // A sidebar click applies SERVER_PRESET (id 2) — the menu must follow
+    window.dispatchEvent(
+      new CustomEvent(PRESET_APPLIED_EVENT, { detail: { id: 2, page: 'dashboard' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Team view'),
+    )
+  })
+
+  it('ignores applied presets for the other page', async () => {
+    renderMenu(params({ tier: ['2'] }))
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    window.dispatchEvent(
+      new CustomEvent(PRESET_APPLIED_EVENT, { detail: { id: 3, page: 'reports' } }),
+    )
+    expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Presets')
   })
 })

@@ -5104,11 +5104,16 @@ def filter_presets_update(
 @filter_presets_app.command("delete")
 def filter_presets_delete(
     preset_id: int = typer.Argument(..., help="Preset ID."),
+    json_output: bool = _JSON_OPTION,
 ) -> None:
     """Delete a preset you own (personal) or any server preset (operator+)."""
+    _set_json(json_output)
     _run_client_command(
         False,
         lambda c: c.delete_filter_preset(preset_id),
         quiet=True,
     )
-    typer.echo(f"Preset {preset_id} deleted.")
+    if _state.get("json", False):
+        print_output({"deleted": preset_id}, columns=[], as_json=True)
+    else:
+        typer.echo(f"Preset {preset_id} deleted.")

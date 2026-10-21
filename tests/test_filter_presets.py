@@ -364,3 +364,120 @@ class TestFilterPresetStorage:
             "/api/user/filter-presets?page=dashboard", cookies=cookies
         ).json()
         assert [p["name"] for p in listed] == ["New", "Middle", "Old"]
+
+
+class TestFilterPresetHardening:
+    """Fixes from the PR #355 review cycle."""
+
+    def test_oversized_filter_value_422(self, client):
+        cookies = _register(client, "alice")
+        resp = _create(client, cookies, name="Big value", filters={"team": ["x" * 201]})
+        assert resp.status_code == 422, resp.text
+        resp = _create(client, cookies, name="Big value", filters={"team": "x" * 201})
+        assert resp.status_code == 422, resp.text
+
+    def test_oversized_filter_list_422(self, client):
+        cookies = _register(client, "alice")
+        resp = _create(
+            client,
+            cookies,
+            name="Big list",
+            filters={"team": [f"t{i}" for i in range(101)]},
+        )
+        assert resp.status_code == 422, resp.text
+
+    def test_oversized_total_json_422(self, client):
+        cookies = _register(client, "alice")
+        # 50 keys of 200-char values stays under the per-value cap but
+        # exceeds the 10k serialized budget.
+        filters = {f"k{i:02d}": "x" * 200 for i in range(50)}
+        resp = _create(client, cookies, name="Big blob", filters=filters)
+        assert resp.status_code == 422, resp.text
+
+    def test_update_oversized_filters_422(self, client):
+        cookies = _register(client, "alice")
+        preset_id = _create(client, cookies, name="Base").json()["id"]
+        resp = client.put(
+            f"/api/user/filter-presets/{preset_id}",
+            json={"filters": {"team": "x" * 201}},
+            cookies=cookies,
+        )
+        assert resp.status_code == 422, resp.text
+
+    def test_out_of_range_preset_id_404_not_500(self, client):
+        cookies = _register(client, "alice")
+        huge = 2**63  # above SQLite's signed 64-bit range
+        assert (
+            client.put(
+                f"/api/user/filter-presets/{huge}",
+                json={"name": "X"},
+                cookies=cookies,
+            ).status_code
+            == 404
+        )
+        assert (
+            client.delete(
+                f"/api/user/filter-presets/{huge}", cookies=cookies
+            ).status_code
+            == 404
+        )
+        assert (
+            client.put(
+                "/api/user/filter-presets/0", json={"name": "X"}, cookies=cookies
+            ).status_code
+            == 404
+        )
+
+    def test_probing_other_users_preset_with_invalid_body_404(self, client):
+        # Invalid update body must NOT reveal whether another user's
+        # personal preset id exists (404 for both, never 422).
+        alice = _register(client, "alice")
+        bob = _register(client, "bob")
+        preset_id = _create(client, alice, name="Alice only").json()["id"]
+        assert (
+            client.put(
+                f"/api/user/filter-presets/{preset_id}",
+                json={"filters": {"nonsense_key": "x"}},
+                cookies=bob,
+            ).status_code
+            == 404
+        )
+
+    def test_dashboard_analysis_state_key_accepted(self, client):
+        cookies = _register(client, "alice")
+        resp = _create(
+            client,
+            cookies,
+            name="Analyzed only",
+            filters={"analysis_state": "analyzed"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["filters"] == {"analysis_state": "analyzed"}
+
+    def test_response_schema_and_headers(self, client):
+        cookies = _register(client, "alice")
+        resp = _create(client, cookies, name="Schema")
+        assert resp.status_code == 201
+        body = resp.json()
+        assert set(body) == {
+            "id",
+            "name",
+            "page",
+            "scope",
+            "filters",
+            "created_at",
+            "updated_at",
+        }
+        listed = client.get("/api/user/filter-presets?page=dashboard", cookies=cookies)
+        assert listed.headers.get("cache-control") == "no-store"
+        assert listed.json()[0]["name"] == "Schema"
+
+    def test_openapi_operation_ids_match_handlers(self, client):
+        schema = client.get("/openapi.json").json()
+        paths = schema["paths"]
+        assert "updateFilterPresetEndpoint" == str(
+            paths["/api/user/filter-presets/{preset_id}"]["put"]["operationId"]
+        )
+        assert "deleteFilterPresetEndpoint" == str(
+            paths["/api/user/filter-presets/{preset_id}"]["delete"]["operationId"]
+        )

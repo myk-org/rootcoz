@@ -7289,6 +7289,16 @@ class TestConfigFilterPresets:
         assert "deleted" in result.output
         mock_client.delete_filter_preset.assert_called_once_with(3)
 
+    def test_delete_json_output(self, mock_client):
+        mock_client.delete_filter_preset.return_value = None
+        result = runner.invoke(
+            app, ["config", "filter-presets", "delete", "3", "--json"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed == {"deleted": 3}
+        mock_client.delete_filter_preset.assert_called_once_with(3)
+
     def test_delete_error(self, mock_client):
         mock_client.delete_filter_preset.side_effect = RootCozError(
             status_code=404, detail="Preset not found"

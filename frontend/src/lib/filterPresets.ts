@@ -22,12 +22,43 @@ export type FilterValues = Record<string, string | string[]>
 export const FILTER_PRESET_KEYS: Record<FilterPresetPage, readonly string[]> = {
   dashboard: [
     'team', 'tier', 'version', 'label', 'exclude_label',
-    'status', 'review_status', 'date_from', 'date_to',
+    'status', 'review_status', 'analysis_state', 'date_from', 'date_to',
   ],
   reports: [
     'team', 'tier', 'version', 'label', 'exclude_label',
     'status', 'review_status', 'from', 'to',
   ],
+}
+
+// ─── Cross-component notifications ─────────────────────────────────
+// The sidebar lists presets read-only while the filter-bar menus mutate
+// them; these window events keep every view in sync without global state.
+
+export const PRESETS_CHANGED_EVENT = 'rootcoz:presets-changed'
+export const PRESET_APPLIED_EVENT = 'rootcoz:preset-applied'
+
+/** Broadcast that the preset list changed (created/updated/renamed/deleted). */
+export function notifyPresetsChanged(): void {
+  window.dispatchEvent(new CustomEvent(PRESETS_CHANGED_EVENT))
+}
+
+let lastAppliedPreset: { id: number; page: FilterPresetPage } | null = null
+
+/** Record + broadcast a preset application (e.g. sidebar click), so the
+ * target page's menu can mark it active even though it mounts afterwards. */
+export function notifyPresetApplied(id: number, page: FilterPresetPage): void {
+  lastAppliedPreset = { id, page }
+  window.dispatchEvent(new CustomEvent(PRESET_APPLIED_EVENT, { detail: lastAppliedPreset }))
+}
+
+/** The most recently applied preset (survives page navigation). */
+export function getLastAppliedPreset(): { id: number; page: FilterPresetPage } | null {
+  return lastAppliedPreset
+}
+
+/** Reset the applied-preset tracking (test isolation only). */
+export function resetLastAppliedPresetForTests(): void {
+  lastAppliedPreset = null
 }
 
 // ─── API ────────────────────────────────────────────────────────────

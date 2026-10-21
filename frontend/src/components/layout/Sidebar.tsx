@@ -229,7 +229,9 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-2 py-3">
       {userItems.map(renderItem)}
 
-      {!loading && authenticated && <SavedFiltersSection collapsed={collapsed} />}
+      {!loading && authenticated && (
+        <SavedFiltersSection collapsed={collapsed} onNavigate={onMobileClose} />
+      )}
 
       {!loading && (canViewReports || isAdmin) && (
         <>

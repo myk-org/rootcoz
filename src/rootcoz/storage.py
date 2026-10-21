@@ -9307,6 +9307,21 @@ async def _fetch_filter_preset(db: aiosqlite.Connection, preset_id: int) -> Any:
     return await cursor.fetchone()
 
 
+async def _fetch_manageable_filter_preset(
+    db: aiosqlite.Connection, preset_id: int, username: str
+) -> Any:
+    """Fetch a preset the user may manage: their own personal or any server
+    preset (role enforcement for server presets lives in the API layer).
+    Ownership is part of the retrieval query, so another user's personal
+    preset is indistinguishable from a missing one."""
+    cursor = await db.execute(
+        "SELECT id, username, scope, page, name, filters, created_at, updated_at"
+        " FROM filter_presets WHERE id = ? AND (scope = 'server' OR username = ?)",
+        (preset_id, username),
+    )
+    return await cursor.fetchone()
+
+
 async def _filter_preset_name_taken(
     db: aiosqlite.Connection,
     *,
@@ -9386,10 +9401,13 @@ async def create_filter_preset(
     return _filter_preset_row(row)
 
 
-async def get_filter_preset(preset_id: int) -> dict[str, Any] | None:
-    """Fetch one preset by id (no ownership check) for role gating."""
+async def get_manageable_filter_preset(
+    preset_id: int, username: str
+) -> dict[str, Any] | None:
+    """Fetch one preset the user may manage (own personal or any server
+    preset) for role gating. Ownership is enforced in the retrieval query."""
     async with _connect_db() as db:
-        row = await _fetch_filter_preset(db, preset_id)
+        row = await _fetch_manageable_filter_preset(db, preset_id, username)
     return _filter_preset_row(row) if row else None
 
 
@@ -9408,9 +9426,10 @@ async def update_filter_preset(
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
-        # Recon read for the uniqueness check; the UPDATE WHERE is the gate.
-        row = await _fetch_filter_preset(db, preset_id)
-        if row is None or (row["scope"] == "user" and row["username"] != username):
+        # Recon read for the uniqueness check; ownership is part of the
+        # retrieval query, and the UPDATE WHERE re-asserts it.
+        row = await _fetch_manageable_filter_preset(db, preset_id, username)
+        if row is None:
             raise FilterPresetNotFound("Preset not found")
         if (
             name is not None

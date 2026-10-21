@@ -3,9 +3,12 @@ import { useNavigate } from 'react-router-dom'
 import { Building2, Star } from 'lucide-react'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { useAuth } from '@/lib/auth'
 import {
   fetchFilterPresets,
   filtersToQueryString,
+  notifyPresetApplied,
+  PRESETS_CHANGED_EVENT,
   type FilterPreset,
   type FilterPresetPage,
 } from '@/lib/filterPresets'
@@ -15,6 +18,9 @@ import {
 interface SavedFiltersSectionProps {
   /** Expanded sidebar shows names; collapsed shows icon-only tooltips. */
   collapsed: boolean
+  /** Called after navigating so the mobile sidebar closes (the layout only
+   * closes on pathname changes, not same-page query changes). */
+  onNavigate?: () => void
 }
 
 interface PresetEntry {
@@ -31,36 +37,54 @@ const PAGE_ROUTES: Record<FilterPresetPage, string> = {
  * Lists the user's personal presets plus server presets (both pages) in the
  * sidebar. Clicking an entry navigates to the preset's page with its filters
  * applied as URL query params. Read-only — managing presets happens in the
- * filter-bar dropdown on the respective page.
+ * filter-bar dropdown on the respective page. Reports presets are only
+ * listed for users who can open the reports page.
  */
-export function SavedFiltersSection({ collapsed }: SavedFiltersSectionProps) {
+export function SavedFiltersSection({ collapsed, onNavigate }: SavedFiltersSectionProps) {
   const navigate = useNavigate()
+  const { canViewReports } = useAuth()
   const [entries, setEntries] = useState<PresetEntry[] | null>(null)
 
+  // Load presets, refresh on cross-component mutations, and follow the
+  // user's reports access. The loader lives inside the effect with a
+  // cancellation guard so stale responses never overwrite newer state.
   useEffect(() => {
-    let ignore = false
+    let cancelled = false
+
     async function load() {
-      try {
-        const [dashboard, reports] = await Promise.all([
-          fetchFilterPresets('dashboard'),
-          fetchFilterPresets('reports'),
-        ])
-        if (ignore) return
-        const toEntries = (page: FilterPresetPage, presets: FilterPreset[]): PresetEntry[] =>
-          presets.map((preset) => {
-            const qs = filtersToQueryString(preset.filters)
-            return { preset, to: `${PAGE_ROUTES[page]}${qs ? `?${qs}` : ''}` }
-          })
-        setEntries([...toEntries('dashboard', dashboard), ...toEntries('reports', reports)])
-      } catch {
-        if (!ignore) setEntries([])
-      }
+      const pages: FilterPresetPage[] = [
+        'dashboard',
+        ...(canViewReports ? (['reports'] as FilterPresetPage[]) : []),
+      ]
+      // One failed fetch must not discard the other page's presets.
+      const results = await Promise.allSettled(
+        pages.map((page) => fetchFilterPresets(page)),
+      )
+      if (cancelled) return
+      const next: PresetEntry[] = []
+      results.forEach((result, index) => {
+        // Guard against malformed responses — one bad page must not break
+        // the sidebar.
+        if (result.status !== 'fulfilled' || !Array.isArray(result.value)) return
+        const page = pages[index]
+        for (const preset of result.value) {
+          const qs = filtersToQueryString(preset.filters)
+          next.push({ preset, to: `${PAGE_ROUTES[page]}${qs ? `?${qs}` : ''}` })
+        }
+      })
+      setEntries(next)
     }
-    load()
+
+    void load()
+    // Refresh when any filter-bar menu creates/updates/renames/deletes a
+    // preset — the sidebar stays mounted, so mount-only fetching goes stale.
+    const handler = () => void load()
+    window.addEventListener(PRESETS_CHANGED_EVENT, handler)
     return () => {
-      ignore = true
+      cancelled = true
+      window.removeEventListener(PRESETS_CHANGED_EVENT, handler)
     }
-  }, [])
+  }, [canViewReports])
 
   const { mine, server } = useMemo(() => {
     const lists = { mine: [] as PresetEntry[], server: [] as PresetEntry[] }
@@ -80,7 +104,12 @@ export function SavedFiltersSection({ collapsed }: SavedFiltersSectionProps) {
       <button
         type="button"
         data-testid={`sidebar-filter-preset-${preset.id}`}
-        onClick={() => navigate(entry.to)}
+        onClick={() => {
+          // Tell the target page's presets menu which preset is now active.
+          notifyPresetApplied(preset.id, preset.page)
+          navigate(entry.to)
+          onNavigate?.()
+        }}
         className={cn(
           'flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary',
           collapsed && 'justify-center px-0 py-2',

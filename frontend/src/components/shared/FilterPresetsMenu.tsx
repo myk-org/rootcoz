@@ -37,6 +37,10 @@ import {
   fetchFilterPresets,
   filtersEqual,
   FILTER_PRESET_KEYS,
+  getLastAppliedPreset,
+  notifyPresetApplied,
+  notifyPresetsChanged,
+  PRESET_APPLIED_EVENT,
   searchParamsToFilters,
   updateFilterPreset,
   type FilterPreset,
@@ -82,8 +86,10 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
 
   const [deleteTarget, setDeleteTarget] = useState<FilterPreset | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -100,6 +106,21 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
     refresh()
   }, [refresh])
 
+  // Follow externally applied presets (sidebar clicks, cross-page loads):
+  // the active preset must track the URL's target instead of staying stuck
+  // on the previous selection, or Update would overwrite the wrong preset.
+  useEffect(() => {
+    const syncActive = (applied?: { id: number; page: FilterPresetPage } | null) => {
+      const target = applied ?? getLastAppliedPreset()
+      if (target && target.page === page) setActiveId(target.id)
+    }
+    syncActive()
+    const handler = (event: Event) =>
+      syncActive((event as CustomEvent<{ id: number; page: FilterPresetPage }>).detail)
+    window.addEventListener(PRESET_APPLIED_EVENT, handler)
+    return () => window.removeEventListener(PRESET_APPLIED_EVENT, handler)
+  }, [page])
+
   const currentFilters = useMemo(
     () => searchParamsToFilters(searchParams, keys),
     [searchParams, keys],
@@ -111,6 +132,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
   // ─── Actions ───────────────────────────────────────────────────
 
   const applyPreset = (preset: FilterPreset) => {
+    notifyPresetApplied(preset.id, preset.page)
     setActiveId(preset.id)
     onApply(preset.filters)
   }
@@ -132,6 +154,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
       setSaveOpen(false)
       setActiveId(preset.id)
       await refresh()
+      notifyPresetsChanged()
     } catch (err) {
       setSaveError(extractApiDetail(err) ?? 'Failed to save preset')
     } finally {
@@ -142,12 +165,14 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
   const updateActive = async () => {
     if (!activePreset) return
     setBusy(true)
+    setActionError(null)
     try {
       const preset = await updateFilterPreset(activePreset.id, { filters: currentFilters })
       setActiveId(preset.id)
       await refresh()
+      notifyPresetsChanged()
     } catch (err) {
-      console.warn('Failed to update preset:', extractApiDetail(err) ?? err)
+      setActionError(extractApiDetail(err) ?? 'Failed to update preset')
     } finally {
       setBusy(false)
     }
@@ -169,6 +194,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
       await updateFilterPreset(renameTarget.id, { name })
       setRenameTarget(null)
       await refresh()
+      notifyPresetsChanged()
     } catch (err) {
       setRenameError(extractApiDetail(err) ?? 'Failed to rename preset')
     } finally {
@@ -179,12 +205,14 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
   const remove = async () => {
     if (!deleteTarget) return
     setDeleting(true)
+    setDeleteError(null)
     try {
       await deleteFilterPreset(deleteTarget.id)
       setDeleteTarget(null)
       await refresh()
+      notifyPresetsChanged()
     } catch (err) {
-      console.warn('Failed to delete preset:', extractApiDetail(err) ?? err)
+      setDeleteError(extractApiDetail(err) ?? 'Failed to delete preset')
     } finally {
       setDeleting(false)
     }
@@ -255,11 +283,11 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
                 <Star className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
               )}
               <span className="min-w-0 flex-1 truncate">{preset.name}</span>
-              <span className="hidden shrink-0 text-xs text-text-tertiary group-hover:hidden">
+              <span className="flex shrink-0 text-xs text-text-tertiary group-hover:hidden group-focus-within:hidden [@media(hover:none)]:hidden">
                 {presetFilterCount(preset)} filter{presetFilterCount(preset) === 1 ? '' : 's'}
               </span>
               {canManage(preset) && (
-                <span className="hidden shrink-0 items-center gap-1 group-hover:flex">
+                <span className="hidden shrink-0 items-center gap-1 group-hover:flex group-focus-within:flex [@media(hover:none)]:flex">
                   <button
                     type="button"
                     aria-label={`Rename ${preset.name}`}
@@ -301,7 +329,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
         </DropdownMenuContent>
       </DropdownMenu>
 
-      {modified && (
+      {modified && activePreset && canManage(activePreset) && (
         <Button
           type="button"
           variant="secondary"
@@ -310,10 +338,21 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
           className="h-7 rounded-full px-3 text-xs"
           disabled={busy}
           onClick={updateActive}
-          title={`Overwrite "${activePreset?.name}" with the current filters`}
+          title={`Overwrite "${activePreset.name}" with the current filters`}
         >
           Update
         </Button>
+      )}
+
+      {actionError && (
+        <span
+          role="alert"
+          data-testid="filter-preset-action-error"
+          className="max-w-48 truncate text-xs text-signal-red"
+          title={actionError}
+        >
+          {actionError}
+        </span>
       )}
 
       {activePreset && (
@@ -443,6 +482,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
         variant="destructive"
         onConfirm={remove}
         loading={deleting}
+        error={deleteError}
       />
     </div>
   )

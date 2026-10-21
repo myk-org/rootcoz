@@ -3,8 +3,17 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { SavedFiltersSection } from '../SavedFiltersSection'
+import { PRESETS_CHANGED_EVENT, resetLastAppliedPresetForTests } from '@/lib/filterPresets'
 
 // ─── Mocks ──────────────────────────────────────────────────────────
+
+const mockAuth = {
+  canViewReports: true,
+}
+
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => mockAuth,
+}))
 
 const apiGet = vi.fn()
 
@@ -20,7 +29,7 @@ function LocationProbe() {
   return <div data-testid="location-probe">{location.pathname}{location.search}</div>
 }
 
-function renderSection(collapsed = false) {
+function renderSection(collapsed = false, onNavigate?: () => void) {
   return render(
     <TooltipProvider>
       <MemoryRouter initialEntries={['/history']}>
@@ -29,7 +38,7 @@ function renderSection(collapsed = false) {
             path="/history"
             element={
               <>
-                <SavedFiltersSection collapsed={collapsed} />
+                <SavedFiltersSection collapsed={collapsed} onNavigate={onNavigate} />
                 <LocationProbe />
               </>
             }
@@ -78,6 +87,8 @@ const SERVER_REPORTS = {
 describe('SavedFiltersSection', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockAuth.canViewReports = true
+    resetLastAppliedPresetForTests()
   })
 
   it('renders nothing before presets load or when the list is empty', () => {
@@ -141,5 +152,54 @@ describe('SavedFiltersSection', () => {
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
     expect(screen.queryByText('Saved filters')).toBeNull()
     expect(screen.queryByText('Storage unreviewed')).toBeNull()
+  })
+
+  it('hides reports presets when the user cannot view reports', async () => {
+    mockAuth.canViewReports = false
+    apiGet.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('page=dashboard') ? [PERSONAL] : [SERVER_REPORTS]),
+    )
+    renderSection()
+    expect(await screen.findByText('Storage unreviewed')).toBeDefined()
+    // Only the dashboard page is fetched; reports presets never render.
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(1))
+    expect(apiGet.mock.calls.every((call) => String(call[0]).includes('page=dashboard'))).toBe(true)
+    expect(screen.queryByText('Upgrade reports')).toBeNull()
+  })
+
+  it('keeps presets from the page whose fetch succeeded when the other fails', async () => {
+    apiGet.mockImplementation((path: string) =>
+      path.includes('page=dashboard')
+        ? Promise.reject(new Error('boom'))
+        : Promise.resolve([SERVER_REPORTS]),
+    )
+    renderSection()
+    expect(await screen.findByText('Upgrade reports')).toBeDefined()
+  })
+
+  it('refreshes the list when presets change elsewhere', async () => {
+    apiGet.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('page=dashboard') ? [] : []),
+    )
+    const { container } = renderSection()
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
+    expect(container.querySelector('[data-testid="sidebar-saved-filters"]')).toBeNull()
+
+    apiGet.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('page=dashboard') ? [PERSONAL] : []),
+    )
+    window.dispatchEvent(new CustomEvent(PRESETS_CHANGED_EVENT))
+    expect(await screen.findByText('Storage unreviewed')).toBeDefined()
+  })
+
+  it('requests the mobile sidebar to close after navigating', async () => {
+    apiGet.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('page=dashboard') ? [PERSONAL] : []),
+    )
+    const onNavigate = vi.fn()
+    renderSection(false, onNavigate)
+    fireEvent.click(await screen.findByTestId('sidebar-filter-preset-1'))
+    await screen.findByTestId('location-probe')
+    expect(onNavigate).toHaveBeenCalledTimes(1)
   })
 })
