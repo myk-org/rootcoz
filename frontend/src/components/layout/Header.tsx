@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom'
 import { BookOpen, Menu, MessageSquarePlus, Plus, X } from 'lucide-react'
 import { UserBadge } from './UserBadge'
 import { FeedbackDialog } from '@/components/shared/FeedbackDialog'
+import { ThemeToggle } from '@/components/shared/ThemeToggle'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
@@ -83,6 +84,7 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
               <TooltipContent>Send feedback</TooltipContent>
             </Tooltip>
           </TooltipProvider>
+          <ThemeToggle />
           <UserBadge />
           <FeedbackDialog open={feedbackOpen} onOpenChange={setFeedbackOpen} />
         </div>
