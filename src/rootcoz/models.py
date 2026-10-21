@@ -1613,7 +1613,18 @@ MAX_FILTER_PRESET_JSON_LENGTH = 10_000
 def _validate_filter_preset_values(
     filters: dict[str, str | list[str]],
 ) -> dict[str, str | list[str]]:
-    """Bound stored preset filters: per-value length, list length, total JSON."""
+    """Bound stored preset filters: per-value length, list length, total JSON.
+
+    Also rejects presets that apply nothing: an empty filter set is
+    indistinguishable from a clean URL, which breaks the menu's
+    selection-follows-URL behavior (a clean page would show the preset
+    as selected, and applying it would drop the selection entirely).
+    """
+    if not any(
+        (value if isinstance(value, str) else [v for v in value if v])
+        for value in filters.values()
+    ):
+        raise ValueError("filters must contain at least one filter with a value")
     if len(json.dumps(filters)) > MAX_FILTER_PRESET_JSON_LENGTH:
         raise ValueError(
             f"filters must serialize to at most {MAX_FILTER_PRESET_JSON_LENGTH} characters"

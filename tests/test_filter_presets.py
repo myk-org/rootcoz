@@ -282,7 +282,7 @@ class TestFilterPresetRoles:
                 "name": "Admin view",
                 "page": "dashboard",
                 "scope": "server",
-                "filters": {},
+                "filters": {"tier": ["2"]},
             },
             headers=_ADMIN_HEADERS,
         )
@@ -368,6 +368,29 @@ class TestFilterPresetStorage:
 
 class TestFilterPresetHardening:
     """Fixes from the PR #355 review cycle."""
+
+    def test_empty_filters_422(self, client):
+        """A preset that applies nothing is indistinguishable from a clean
+        URL and breaks selection-follows-URL — reject it."""
+        cookies = _register(client, "alice")
+        resp = _create(client, cookies, name="Empty", filters={})
+        assert resp.status_code == 422, resp.text
+        resp = _create(client, cookies, name="Empty list", filters={"team": []})
+        assert resp.status_code == 422, resp.text
+        resp = _create(client, cookies, name="Empty string", filters={"team": ""})
+        assert resp.status_code == 422, resp.text
+
+    def test_update_to_empty_filters_422(self, client):
+        cookies = _register(client, "alice")
+        resp = _create(client, cookies, name="Real", filters={"team": ["cnv"]})
+        assert resp.status_code == 201, resp.text
+        preset_id = resp.json()["id"]
+        resp = client.put(
+            f"/api/user/filter-presets/{preset_id}",
+            json={"filters": {}},
+            cookies=cookies,
+        )
+        assert resp.status_code == 422, resp.text
 
     def test_oversized_filter_value_422(self, client):
         cookies = _register(client, "alice")
