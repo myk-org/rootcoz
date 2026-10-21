@@ -427,7 +427,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
           <hr className="border-border-muted" />
 
           {/* Build Artifacts */}
-          <Section title={isProwJob ? 'Build Artifacts' : 'Jenkins Artifacts'} dotColor="bg-[#58a6ff]">
+          <Section title={isProwJob ? 'Build Artifacts' : 'Jenkins Artifacts'} dotColor="bg-signal-blue">
             <div className="flex items-center justify-between">
               <span className="text-sm text-text-secondary">
                 {isProwJob ? 'Fetch GCS build artifacts' : 'Fetch build artifacts'}

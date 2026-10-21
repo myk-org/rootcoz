@@ -36,18 +36,18 @@ function stripAnsi(text: string): string {
 }
 
 const LEVEL_COLORS: Record<string, string> = {
-  ERROR: 'text-red-400',
-  CRITICAL: 'text-red-500 font-bold',
-  WARNING: 'text-amber-400',
-  INFO: 'text-emerald-400',
-  DEBUG: 'text-zinc-500',
+  ERROR: 'text-signal-red',
+  CRITICAL: 'text-signal-red font-bold',
+  WARNING: 'text-signal-orange',
+  INFO: 'text-signal-green',
+  DEBUG: 'text-text-tertiary',
 }
 
 function getLineColor(line: string): string {
   for (const [level, color] of Object.entries(LEVEL_COLORS)) {
     if (line.includes(level)) return color
   }
-  return 'text-zinc-300'
+  return 'text-text-secondary'
 }
 
 const INITIAL_LINES_OPTIONS = ['100', '500', '1000', '2000']
