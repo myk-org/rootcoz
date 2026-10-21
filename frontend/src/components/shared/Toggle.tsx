@@ -8,7 +8,7 @@ export function Toggle({ checked, onChange, label, disabled }: { checked: boolea
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={`relative w-11 h-6 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-        checked ? 'bg-signal-blue' : 'bg-surface-hover'
+        checked ? 'bg-signal-blue' : 'bg-border-default'
       }`}
     >
       <span

@@ -220,7 +220,7 @@ export function LogsPage() {
 
       {/* Log output — scrollable */}
       <div ref={containerRef}
-        className="flex-1 h-0 overflow-y-auto bg-zinc-950 p-3 font-mono text-xs leading-5">
+        className="flex-1 h-0 overflow-y-auto bg-surface-page p-3 font-mono text-xs leading-5">
         {filteredLines.length === 0 && !error && (
           <div className="text-zinc-500 italic">Waiting for log entries...</div>
         )}
