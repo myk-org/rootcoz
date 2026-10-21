@@ -17,6 +17,7 @@ import {
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
@@ -145,6 +146,7 @@ type ReportsAction =
   | { type: 'CLEAR_STATUSES' }
   | { type: 'TOGGLE_LABEL'; label: string; action: 'include' | 'exclude' | 'off' }
   | { type: 'SET_REVIEW_STATUS'; value: ReviewStatusValue }
+  | { type: 'APPLY_FILTERS'; filters: Record<string, string | string[]> }
   | { type: 'TOGGLE_TOTALS_EXPANDED' }
   | { type: 'SET_TOTALS_EXPANDED'; value: boolean }
   | { type: 'TOGGLE_OVERRIDE_GROUP'; key: string }
@@ -251,6 +253,32 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     }
     case 'SET_REVIEW_STATUS':
       return { ...state, reviewStatus: action.value }
+    case 'APPLY_FILTERS': {
+      // Apply a saved filter preset (#179): replace every filter field,
+      // keeping tab, search, and already-fetched report data intact.
+      const f = action.filters
+      const listOf = (key: string): string[] => {
+        const v = f[key]
+        if (v === undefined) return []
+        return Array.isArray(v) ? v : [v]
+      }
+      const single = (key: string): string => {
+        const v = f[key]
+        return v === undefined ? '' : Array.isArray(v) ? (v[0] ?? '') : v
+      }
+      return {
+        ...state,
+        teams: new Set(listOf('team')),
+        tiers: new Set(listOf('tier')),
+        versions: new Set(listOf('version')),
+        dateFrom: single('from'),
+        dateTo: single('to'),
+        statuses: new Set(listOf('status')),
+        reviewStatus: parseReviewStatus(single('review_status') || null),
+        labels: listOf('label'),
+        excludeLabels: listOf('exclude_label'),
+      }
+    }
     case 'TOGGLE_TOTALS_EXPANDED':
       return { ...state, totalsExpanded: !state.totalsExpanded }
     case 'SET_TOTALS_EXPANDED':
@@ -611,6 +639,11 @@ export function ReportsPage() {
   }, [searchParams]) // eslint-disable-line react-hooks/exhaustive-deps -- compare against state inside
 
   // ─── State → URL sync ──────────────────────────────────────────
+  // Write only when the serialized state differs from the current URL —
+  // together with the guarded URL → state effect above this makes an
+  // alternation between the two effects impossible: every write strictly
+  // reduces the difference to zero (sidebar preset clicks navigate to a
+  // same-route query string without remounting this page).
   useEffect(() => {
     const params = new URLSearchParams()
     if (activeTab !== 'totals') params.set('report', TAB_URL_KEY[activeTab])
@@ -624,8 +657,10 @@ export function ReportsPage() {
     for (const l of labels) params.append('label', l)
     for (const l of excludeLabels) params.append('exclude_label', l)
     if (search) params.set('search', search)
-    setSearchParams(params, { replace: true })
-  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search, setSearchParams])
+    if (params.toString() !== searchParams.toString()) {
+      setSearchParams(params, { replace: true })
+    }
+  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams/setSearchParams are read from closure on purpose: react-router gives them a fresh identity on every location change, so listing them re-runs this effect on external navigations and clobbers them
 
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)
@@ -714,6 +749,11 @@ export function ReportsPage() {
       <div className="flex-1 min-w-0 space-y-6">
         {/* Filters — matching Dashboard order: Search → Metadata → Status → DateRange → Tags */}
         <div className="flex flex-wrap gap-3 items-center">
+          <FilterPresetsMenu
+            page="reports"
+            searchParams={searchParams}
+            onApply={(filters) => dispatch({ type: 'APPLY_FILTERS', filters })}
+          />
           <SearchInput value={search} onChange={(v) => dispatch({ type: 'SET_SEARCH', value: v })} placeholder="Filter reports..." className="w-full sm:w-64" />
           <MetadataDropdowns
             options={metadataOptions}

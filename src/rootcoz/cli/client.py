@@ -115,6 +115,10 @@ class RootCozClient:
                 detail=detail,
             )
 
+        if response.status_code == 204:
+            # 204 No Content has no body by definition — nothing to parse.
+            return None
+
         try:
             return response.json()
         except ValueError:
@@ -1382,6 +1386,61 @@ class RootCozClient:
     def get_default_server_settings(self) -> dict[str, Any]:
         """Get non-sensitive server settings. GET /api/default-server-settings"""
         return self._request("GET", "/api/default-server-settings")
+
+    # -- Filter presets --------------------------------------------------------
+
+    def list_filter_presets(self, page: str) -> list[dict[str, Any]]:
+        """List personal + server filter presets for a page.
+
+        GET /api/user/filter-presets?page={page}
+        """
+        return self._request("GET", "/api/user/filter-presets", params={"page": page})
+
+    def create_filter_preset(
+        self,
+        name: str,
+        page: str,
+        filters: dict[str, Any],
+        scope: str = "user",
+    ) -> dict[str, Any]:
+        """Save a filter combination as a named preset.
+
+        POST /api/user/filter-presets (scope="server" requires operator+)
+        """
+        return self._request(
+            "POST",
+            "/api/user/filter-presets",
+            json={"name": name, "page": page, "scope": scope, "filters": filters},
+            accept_statuses=(200, 201),
+        )
+
+    def update_filter_preset(
+        self,
+        preset_id: int,
+        name: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Rename and/or replace the filters of a preset.
+
+        PUT /api/user/filter-presets/{preset_id}
+        """
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if filters is not None:
+            body["filters"] = filters
+        return self._request("PUT", f"/api/user/filter-presets/{preset_id}", json=body)
+
+    def delete_filter_preset(self, preset_id: int) -> Any:
+        """Delete a filter preset (own personal or server).
+
+        DELETE /api/user/filter-presets/{preset_id}
+        """
+        return self._request(
+            "DELETE",
+            f"/api/user/filter-presets/{preset_id}",
+            accept_statuses=(200, 204),
+        )
 
     # -- Classification Override ----------------------------------------------
 

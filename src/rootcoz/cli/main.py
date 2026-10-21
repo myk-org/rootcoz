@@ -42,6 +42,10 @@ classifications_app = typer.Typer(
     help="List test classifications.", no_args_is_help=True
 )
 config_app = typer.Typer(help="Manage rootcoz configuration.")
+filter_presets_app = typer.Typer(
+    help="Manage saved filter presets (personal and server).",
+    no_args_is_help=True,
+)
 auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
 ai_keys_app = typer.Typer(help="Manage your AI provider keys.", no_args_is_help=True)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
@@ -71,6 +75,7 @@ app.add_typer(failure_app, name="failure")
 app.add_typer(chat_app, name="chat")
 app.add_typer(reports_app, name="reports")
 app.add_typer(config_app, name="config")
+config_app.add_typer(filter_presets_app, name="filter-presets")
 app.add_typer(auth_app, name="auth")
 auth_app.add_typer(ai_keys_app, name="ai-keys")
 app.add_typer(admin_app, name="admin")
@@ -88,7 +93,7 @@ _state: dict[str, Any] = {}
 _JSON_OPTION = typer.Option(False, "--json", help="Output as JSON instead of table.")
 
 # Config subcommands that require a server connection (all others are local-only).
-_SERVER_CONFIG_SUBCOMMANDS = frozenset({"defaults"})
+_SERVER_CONFIG_SUBCOMMANDS = frozenset({"defaults", "filter-presets"})
 
 
 def _split_csv(value: str) -> list[str]:
@@ -5004,3 +5009,111 @@ def config_defaults(
                         typer.echo(f"    - {item}")
         else:
             typer.echo(f"  {key}: {value}")
+
+
+# ─── Filter presets (config filter-presets) ─────────────────────────
+
+
+@filter_presets_app.command("list")
+def filter_presets_list(
+    page: str = typer.Option(
+        "dashboard", "--page", help="Preset page: dashboard or reports."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List saved filter presets (yours + server) for a page."""
+    if page not in ("dashboard", "reports"):
+        typer.echo("Page must be 'dashboard' or 'reports'.")
+        raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.list_filter_presets(page),
+        columns=["id", "name", "scope", "page", "created_at"],
+        labels={"created_at": "CREATED"},
+    )
+
+
+@filter_presets_app.command("add")
+def filter_presets_add(
+    name: str = typer.Argument(..., help="Preset name (unique per page)."),
+    page: str = typer.Option(
+        "dashboard", "--page", help="Preset page: dashboard or reports."
+    ),
+    scope: str = typer.Option(
+        "user", "--scope", help="Preset scope: user (personal) or server (operator+)."
+    ),
+    filters_json: str = typer.Argument(
+        ..., help='Filters as JSON, e.g. \'{"team": ["storage"], "tier": ["2"]}\''
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Save a filter preset from a JSON filter object."""
+    if page not in ("dashboard", "reports"):
+        typer.echo("Page must be 'dashboard' or 'reports'.")
+        raise typer.Exit(1)
+    if scope not in ("user", "server"):
+        typer.echo("Scope must be 'user' or 'server'.")
+        raise typer.Exit(1)
+    try:
+        filters = json_mod.loads(filters_json)
+    except ValueError as exc:
+        typer.echo(f"Invalid JSON filters: {exc}")
+        raise typer.Exit(1) from exc
+    if not isinstance(filters, dict):
+        typer.echo("Filters must be a JSON object of key to string or list of strings.")
+        raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.create_filter_preset(name, page, filters, scope),
+        columns=["id", "name", "scope", "page"],
+    )
+
+
+@filter_presets_app.command("update")
+def filter_presets_update(
+    preset_id: int = typer.Argument(..., help="Preset ID."),
+    name: str = typer.Option(None, "--name", help="New preset name."),
+    filters_json: str = typer.Option(
+        None, "--filters", help="Replacement filters as JSON object."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Rename a preset and/or replace its filters."""
+    filters = None
+    if filters_json is not None:
+        try:
+            filters = json_mod.loads(filters_json)
+        except ValueError as exc:
+            typer.echo(f"Invalid JSON filters: {exc}")
+            raise typer.Exit(1) from exc
+        if not isinstance(filters, dict):
+            typer.echo(
+                "Filters must be a JSON object of key to string or list of strings."
+            )
+            raise typer.Exit(1)
+    if name is None and filters is None:
+        typer.echo("Nothing to update — pass --name and/or --filters.")
+        raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.update_filter_preset(preset_id, name, filters),
+        columns=["id", "name", "scope", "page"],
+    )
+
+
+@filter_presets_app.command("delete")
+def filter_presets_delete(
+    preset_id: int = typer.Argument(..., help="Preset ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Delete a preset you own (personal) or any server preset (operator+)."""
+    _set_json(json_output)
+    _run_client_command(
+        False,
+        lambda c: c.delete_filter_preset(preset_id),
+        quiet=True,
+    )
+    if _state.get("json", False):
+        print_output({"deleted": preset_id}, columns=[], as_json=True)
+    else:
+        typer.echo(f"Preset {preset_id} deleted.")

@@ -7170,3 +7170,138 @@ class TestAdminServerProvidersCommands:
         )
         assert result.exit_code == 1
         assert "not configured" in result.output
+
+
+class TestConfigFilterPresets:
+    """Tests for 'rootcoz config filter-presets' commands (#179)."""
+
+    _PRESET: ClassVar[dict] = {
+        "id": 3,
+        "name": "Storage unreviewed",
+        "page": "dashboard",
+        "scope": "user",
+        "filters": {"team": ["storage"], "review_status": "unreviewed"},
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+    }
+
+    def test_list_human(self, mock_client):
+        mock_client.list_filter_presets.return_value = [self._PRESET]
+        result = runner.invoke(app, ["config", "filter-presets", "list"])
+        assert result.exit_code == 0
+        assert "Storage unreviewed" in result.output
+        mock_client.list_filter_presets.assert_called_once_with("dashboard")
+
+    def test_list_reports_page(self, mock_client):
+        mock_client.list_filter_presets.return_value = []
+        result = runner.invoke(
+            app, ["config", "filter-presets", "list", "--page", "reports"]
+        )
+        assert result.exit_code == 0
+        mock_client.list_filter_presets.assert_called_once_with("reports")
+
+    def test_list_invalid_page(self, mock_client):
+        result = runner.invoke(
+            app, ["config", "filter-presets", "list", "--page", "bogus"]
+        )
+        assert result.exit_code == 1
+        assert "dashboard" in result.output
+
+    def test_list_json(self, mock_client):
+        mock_client.list_filter_presets.return_value = [self._PRESET]
+        result = runner.invoke(app, ["config", "filter-presets", "list", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed[0]["name"] == "Storage unreviewed"
+
+    def test_add(self, mock_client):
+        mock_client.create_filter_preset.return_value = self._PRESET
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "filter-presets",
+                "add",
+                "Storage unreviewed",
+                '{"team": ["storage"]}',
+                "--scope",
+                "server",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.create_filter_preset.assert_called_once_with(
+            "Storage unreviewed", "dashboard", {"team": ["storage"]}, "server"
+        )
+
+    def test_add_invalid_json(self, mock_client):
+        result = runner.invoke(
+            app, ["config", "filter-presets", "add", "X", "{not json}"]
+        )
+        assert result.exit_code == 1
+        assert "Invalid JSON" in result.output
+
+    def test_add_invalid_scope(self, mock_client):
+        result = runner.invoke(
+            app,
+            ["config", "filter-presets", "add", "X", "{}", "--scope", "bogus"],
+        )
+        assert result.exit_code == 1
+        assert "Scope" in result.output
+
+    def test_update_rename(self, mock_client):
+        mock_client.update_filter_preset.return_value = {
+            **self._PRESET,
+            "name": "Renamed",
+        }
+        result = runner.invoke(
+            app, ["config", "filter-presets", "update", "3", "--name", "Renamed"]
+        )
+        assert result.exit_code == 0
+        mock_client.update_filter_preset.assert_called_once_with(3, "Renamed", None)
+
+    def test_update_filters(self, mock_client):
+        mock_client.update_filter_preset.return_value = self._PRESET
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "filter-presets",
+                "update",
+                "3",
+                "--filters",
+                '{"tier": ["2"]}',
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.update_filter_preset.assert_called_once_with(
+            3, None, {"tier": ["2"]}
+        )
+
+    def test_update_nothing(self, mock_client):
+        result = runner.invoke(app, ["config", "filter-presets", "update", "3"])
+        assert result.exit_code == 1
+        assert "Nothing to update" in result.output
+
+    def test_delete(self, mock_client):
+        mock_client.delete_filter_preset.return_value = None
+        result = runner.invoke(app, ["config", "filter-presets", "delete", "3"])
+        assert result.exit_code == 0
+        assert "deleted" in result.output
+        mock_client.delete_filter_preset.assert_called_once_with(3)
+
+    def test_delete_json_output(self, mock_client):
+        mock_client.delete_filter_preset.return_value = None
+        result = runner.invoke(
+            app, ["config", "filter-presets", "delete", "3", "--json"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed == {"deleted": 3}
+        mock_client.delete_filter_preset.assert_called_once_with(3)
+
+    def test_delete_error(self, mock_client):
+        mock_client.delete_filter_preset.side_effect = RootCozError(
+            status_code=404, detail="Preset not found"
+        )
+        result = runner.invoke(app, ["config", "filter-presets", "delete", "3"])
+        assert result.exit_code == 1

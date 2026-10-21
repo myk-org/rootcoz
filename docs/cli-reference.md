@@ -66,6 +66,10 @@ Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin
 | `rootcoz config servers` | List servers; supports `--json`. |
 | `rootcoz config completion [bash\|zsh]` | Print the rc-file snippet that wires up completion. |
 | `rootcoz config defaults` | Server-side analysis defaults (non-sensitive). Requires a server. |
+| `rootcoz config filter-presets list [--page dashboard\|reports]` | Saved filter presets (yours + server) for a page; supports `--json`. Requires a server. |
+| `rootcoz config filter-presets add NAME FILTERS_JSON [--page ...] [--scope user\|server]` | Save a preset from a JSON filter object, e.g. `'{"team": ["storage"]}'`. `--scope server` (operator+) shares it with every user. Requires a server. |
+| `rootcoz config filter-presets update ID [--name NAME] [--filters FILTERS_JSON]` | Rename a preset and/or replace its filters. Requires a server. |
+| `rootcoz config filter-presets delete ID` | Delete a preset you own (personal) or any server preset (operator+). Requires a server. |
 
 Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. See [Configuration Reference](configuration-reference.html) for the full list.
 

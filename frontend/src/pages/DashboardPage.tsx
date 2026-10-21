@@ -45,6 +45,8 @@ import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, Li
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { useAuth } from '@/lib/auth'
 import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
+import { applyFiltersToParams, FILTER_PRESET_KEYS } from '@/lib/filterPresets'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
@@ -532,6 +534,16 @@ export function DashboardPage() {
       <div className="space-y-6">
         {/* Filters — single wrapping row */}
         <div className="flex flex-wrap gap-3 items-center">
+          <FilterPresetsMenu
+            page="dashboard"
+            searchParams={searchParams}
+            onApply={(filters) =>
+              setSearchParams(
+                (prev) => applyFiltersToParams(prev, filters, FILTER_PRESET_KEYS.dashboard),
+                { replace: true },
+              )
+            }
+          />
           <SearchInput value={search} onChange={setSearch} placeholder="Filter jobs..." className="w-full sm:w-64" />
           <MetadataDropdowns
             options={metadataOptions}
