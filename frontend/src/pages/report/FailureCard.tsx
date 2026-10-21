@@ -304,7 +304,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
       <Card
         ref={cardRef}
         id={group.id}
-        className={`border-l-4 ${borderColor} animate-slide-up scroll-mt-24${activeHash === group.id ? ' ring-2 ring-accent-blue/50' : ''}${isSelected ? ' ring-2 ring-signal-blue/50' : ''}`}
+        className={`border-l-4 ${borderColor} animate-slide-up scroll-mt-24${activeHash === group.id ? ' ring-2 ring-signal-blue/50' : ''}${isSelected ? ' ring-2 ring-signal-blue/50' : ''}`}
         style={{ animationDelay: `${index * 50}ms`, animationFillMode: 'backwards' }}
       >
         {/* Header */}
@@ -355,7 +355,7 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
             {rep.reanalysis_status === 'running' && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className="flex items-center gap-1 rounded-md bg-accent-blue/15 px-2 py-1 text-[10px] font-mono text-accent-blue animate-pulse">
+                  <span className="flex items-center gap-1 rounded-md bg-signal-blue/15 px-2 py-1 text-[10px] font-mono text-signal-blue animate-pulse">
                     <RotateCw className="h-3 w-3 animate-spin" />
                     Re-analyzing
                   </span>
