@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -110,13 +110,10 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
   // the active preset must track the URL's target instead of staying stuck
   // on the previous selection, or Update would overwrite the wrong preset.
   useEffect(() => {
-    const syncActive = (applied?: { id: number; page: FilterPresetPage } | null) => {
-      const target = applied ?? getLastAppliedPreset()
-      if (target && target.page === page) setActiveId(target.id)
+    const handler = (event: Event) => {
+      const applied = (event as CustomEvent<{ id: number; page: FilterPresetPage }>).detail
+      if (applied && applied.page === page) setActiveId(applied.id)
     }
-    syncActive()
-    const handler = (event: Event) =>
-      syncActive((event as CustomEvent<{ id: number; page: FilterPresetPage }>).detail)
     window.addEventListener(PRESET_APPLIED_EVENT, handler)
     return () => window.removeEventListener(PRESET_APPLIED_EVENT, handler)
   }, [page])
@@ -126,6 +123,32 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
     [searchParams, keys],
   )
   const hasFilters = Object.keys(currentFilters).length > 0
+
+  // A clean URL means no preset is selected: returning to the page via a
+  // nav link (or clearing every filter) empties the URL filters, and the
+  // selection must drop in the same commit as the navigation — adjusting
+  // state during render keeps it in the same commit (Layout's pattern).
+  const [prevHasFilters, setPrevHasFilters] = useState(hasFilters)
+  if (prevHasFilters !== hasFilters) {
+    setPrevHasFilters(hasFilters)
+    if (!hasFilters) setActiveId(null)
+  }
+
+  // On mount, restore the last applied preset only when the URL still
+  // carries its filters — a nav-link return leaves a clean URL, so no
+  // preset is selected then. Runs once, after the preset list loads.
+  const restoredRef = useRef(false)
+  useEffect(() => {
+    if (restoredRef.current || presets === null) return
+    restoredRef.current = true
+    const last = getLastAppliedPreset()
+    if (!last || last.page !== page) return
+    const candidate = presets.find((p) => p.id === last.id)
+    if (candidate && filtersEqual(currentFilters, candidate.filters)) {
+      setActiveId(candidate.id)
+    }
+  }, [presets, page, currentFilters])
+
   const activePreset = presets?.find((p) => p.id === activeId) ?? null
   const modified = activePreset !== null && !filtersEqual(currentFilters, activePreset.filters)
 

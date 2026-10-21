@@ -660,7 +660,7 @@ export function ReportsPage() {
     if (params.toString() !== searchParams.toString()) {
       setSearchParams(params, { replace: true })
     }
-  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search, setSearchParams]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams read from closure; adding it to deps would clobber external navigations
+  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams/setSearchParams are read from closure on purpose: react-router gives them a fresh identity on every location change, so listing them re-runs this effect on external navigations and clobbers them
 
   const { options: metadataOptions } = useMetadataOptions()
   const fetchSeqRef = useRef(0)

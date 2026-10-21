@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { FilterPresetsMenu } from '../FilterPresetsMenu'
 import {
+  notifyPresetApplied,
   PRESET_APPLIED_EVENT,
   resetLastAppliedPresetForTests,
 } from '@/lib/filterPresets'
@@ -333,5 +334,46 @@ describe('FilterPresetsMenu', () => {
       new CustomEvent(PRESET_APPLIED_EVENT, { detail: { id: 3, page: 'reports' } }),
     )
     expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Presets')
+  })
+
+  it('drops the selection when the URL filters are cleared (nav-link return)', async () => {
+    const { rerender } = renderMenu(
+      params({ team: ['storage'], review_status: 'unreviewed' }),
+    )
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await openMenu()
+    await user.click(screen.getByTestId('filter-preset-1'))
+    expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Storage unreviewed')
+    // User clicks the Dashboard nav link — same route, clean URL
+    rerender(
+      <FilterPresetsMenu page="dashboard" searchParams={new URLSearchParams()} onApply={vi.fn()} />,
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Presets'),
+    )
+    expect(screen.queryByTestId('filter-preset-update')).toBeNull()
+    expect(screen.queryByTestId('filter-preset-unload')).toBeNull()
+  })
+
+  it('does not restore the last applied preset on a clean URL (fresh mount)', async () => {
+    // Simulate a preset applied earlier in the session (module state)
+    notifyPresetApplied(1, 'dashboard')
+    renderMenu(new URLSearchParams())
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await waitFor(() => {
+      expect(screen.getByTestId('filter-presets-trigger').textContent).toContain('Presets')
+    })
+    expect(screen.queryByTestId('filter-preset-modified-dot')).toBeNull()
+  })
+
+  it('restores the last applied preset on mount when the URL still matches it', async () => {
+    notifyPresetApplied(1, 'dashboard')
+    renderMenu(params({ team: ['storage'], review_status: 'unreviewed' }))
+    await waitFor(() => expect(apiGet).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(screen.getByTestId('filter-presets-trigger').textContent).toContain(
+        'Storage unreviewed',
+      ),
+    )
   })
 })
