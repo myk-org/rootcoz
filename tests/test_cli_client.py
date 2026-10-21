@@ -3280,3 +3280,102 @@ class TestRootCozClientTranscripts:
         assert result["update_available"] is True
         # The new #341 releases array passes through without breaking the CLI
         assert result["releases"][0]["version"] == "4.6.1"
+
+
+class TestRootCozClientFilterPresets:
+    """Tests for filter preset client methods (#179)."""
+
+    def test_list_filter_presets(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/user/filter-presets"
+            assert request.url.params["page"] == "dashboard"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 1,
+                        "name": "Storage",
+                        "page": "dashboard",
+                        "scope": "user",
+                        "filters": {"team": ["storage"]},
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            )
+
+        client = _make_client(handler)
+        result = client.list_filter_presets("dashboard")
+        assert result[0]["name"] == "Storage"
+
+    def test_create_filter_preset(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/user/filter-presets"
+            body = json.loads(request.content)
+            assert body == {
+                "name": "My preset",
+                "page": "dashboard",
+                "scope": "server",
+                "filters": {"team": ["storage"]},
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "id": 7,
+                    "name": "My preset",
+                    "page": "dashboard",
+                    "scope": "server",
+                    "filters": {"team": ["storage"]},
+                    "created_at": "2026-01-01T00:00:00",
+                    "updated_at": "2026-01-01T00:00:00",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.create_filter_preset(
+            "My preset", "dashboard", {"team": ["storage"]}, scope="server"
+        )
+        assert result["id"] == 7
+
+    def test_update_filter_preset(self):
+        def handler(request):
+            assert request.method == "PUT"
+            assert request.url.path == "/api/user/filter-presets/7"
+            body = json.loads(request.content)
+            assert body == {"name": "Renamed"}
+            return httpx.Response(
+                200,
+                json={
+                    "id": 7,
+                    "name": "Renamed",
+                    "page": "dashboard",
+                    "scope": "user",
+                    "filters": {},
+                    "created_at": "2026-01-01T00:00:00",
+                    "updated_at": "2026-01-02T00:00:00",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.update_filter_preset(7, name="Renamed")
+        assert result["name"] == "Renamed"
+
+    def test_update_filter_preset_omits_unset_fields(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body == {"name": "Renamed"}
+            return httpx.Response(200, json={})
+
+        client = _make_client(handler)
+        client.update_filter_preset(7, name="Renamed")
+
+    def test_delete_filter_preset_204(self):
+        def handler(request):
+            assert request.method == "DELETE"
+            assert request.url.path == "/api/user/filter-presets/7"
+            return httpx.Response(204)
+
+        client = _make_client(handler)
+        assert client.delete_filter_preset(7) is None

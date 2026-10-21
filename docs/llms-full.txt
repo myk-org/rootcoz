@@ -1235,6 +1235,8 @@ This prints just the three fields a status check needs, instead of the full resu
 ## Advanced Usage
 - **Everything in flight, from the dashboard.** The dashboard lists every job with its status badge, a Mode column reading `Submitted` or `Analyzed`, failure and pass/skip counts, review progress, comment count, and the submitter. Filter by status, review state, analysis state, date range, team, tier, version, and labels. Newest rows appear without a manual refresh, so several submissions can be watched at once.
 
+- **Save filter combinations as presets.** Any filter combination on the dashboard or the reports page can be saved as a named preset and reapplied with one click — no re-selecting teams, tiers, and tags every visit. The `Presets` button at the start of the filter bar opens the list; `Save current filters as…` names and stores the current combination. When saving you pick the scope: **Personal** presets live in your account, while **Server filter** presets (operators and admins only) appear for every user. The sidebar has a `Saved filters` section with your presets and the server's, grouped separately — clicking an entry jumps to its page with the filters applied. Loading a preset shows its name on the button; if you then change any filter, an amber dot and an `Update` button let you overwrite the preset, and the ✕ unloads it without clearing the filters. Presets are per page (dashboard presets do not appear on reports) and capped at 20 per page per scope. See [CLI Command Reference](cli-reference.html) for the `rootcoz config filter-presets` commands and [API Reference](api-reference.html) for `/api/user/filter-presets`.
+
 - **Check status from a script.** `--fields` limits the response to an allowlisted set of paths, which is much cheaper than fetching a full report.
 
   ```bash
@@ -2431,6 +2433,10 @@ That single authenticated GET returns the stored analysis for one job, including
 | POST | `/api/validate-token` | viewer | Validate a GitHub or Jira token before saving. Jira tokens are validated against the selected method's server URL (`jira_cloud_url` with an email, `jira_server_url` without); an ATOA-prefixed value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side and the server must have `atlassian_oauth_client_id` configured |
 | POST | `/api/jira-projects` | viewer | List Jira projects visible to the supplied credentials |
 | POST | `/api/jira-security-levels` | viewer | List Jira security levels for a project |
+| GET | `/api/user/filter-presets?page={dashboard\|reports}` | viewer | Saved filter presets for a page: your personal presets plus every server preset, newest first. Each entry carries `id`, `name`, `page`, `scope` (`user` or `server`), `filters` (URL query param names as-is; dashboard uses `date_from`/`date_to`, reports uses `from`/`to`), `created_at`, `updated_at` |
+| POST | `/api/user/filter-presets` | viewer | Save the current filter combination as a named preset. Body is `{name, page, scope, filters}` — `scope` defaults to `user`; `scope=server` requires operator+ (`403` below that). Name is 1–100 chars, stripped; `filters` accepts at most 50 known keys per page (unknown keys → `422`). `409` when the name already exists in the same scope+page; `422` at 20 presets per page per scope |
+| PUT | `/api/user/filter-presets/{preset_id}` | viewer | Rename and/or replace a preset's filters (`{name}`, `{filters}`, both optional). Personal presets: only the owner, `404` otherwise (existence is never leaked). Server presets: operator+ (`403` below that). `409` on a name conflict in the same scope+page |
+| DELETE | `/api/user/filter-presets/{preset_id}` | viewer | Delete a preset. Same rules as PUT: own personal preset (`404` for anyone else's), server preset operator+ (`403` below that). Returns `204` |
 
 Registration returns the raw API key exactly once and sends `Cache-Control: no-store`. Store it before you navigate away.
 
@@ -2779,6 +2785,10 @@ Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin
 | `rootcoz config servers` | List servers; supports `--json`. |
 | `rootcoz config completion [bash\|zsh]` | Print the rc-file snippet that wires up completion. |
 | `rootcoz config defaults` | Server-side analysis defaults (non-sensitive). Requires a server. |
+| `rootcoz config filter-presets list [--page dashboard\|reports]` | Saved filter presets (yours + server) for a page; supports `--json`. Requires a server. |
+| `rootcoz config filter-presets add NAME FILTERS_JSON [--page ...] [--scope user\|server]` | Save a preset from a JSON filter object, e.g. `'{"team": ["storage"]}'`. `--scope server` (operator+) shares it with every user. Requires a server. |
+| `rootcoz config filter-presets update ID [--name NAME] [--filters FILTERS_JSON]` | Rename a preset and/or replace its filters. Requires a server. |
+| `rootcoz config filter-presets delete ID` | Delete a preset you own (personal) or any server preset (operator+). Requires a server. |
 
 Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. See [Configuration Reference](configuration-reference.html) for the full list.
 

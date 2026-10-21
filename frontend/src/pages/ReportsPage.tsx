@@ -17,6 +17,7 @@ import {
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
+import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
@@ -145,6 +146,7 @@ type ReportsAction =
   | { type: 'CLEAR_STATUSES' }
   | { type: 'TOGGLE_LABEL'; label: string; action: 'include' | 'exclude' | 'off' }
   | { type: 'SET_REVIEW_STATUS'; value: ReviewStatusValue }
+  | { type: 'APPLY_FILTERS'; filters: Record<string, string | string[]> }
   | { type: 'TOGGLE_TOTALS_EXPANDED' }
   | { type: 'SET_TOTALS_EXPANDED'; value: boolean }
   | { type: 'TOGGLE_OVERRIDE_GROUP'; key: string }
@@ -251,6 +253,32 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     }
     case 'SET_REVIEW_STATUS':
       return { ...state, reviewStatus: action.value }
+    case 'APPLY_FILTERS': {
+      // Apply a saved filter preset (#179): replace every filter field,
+      // keeping tab, search, and already-fetched report data intact.
+      const f = action.filters
+      const listOf = (key: string): string[] => {
+        const v = f[key]
+        if (v === undefined) return []
+        return Array.isArray(v) ? v : [v]
+      }
+      const single = (key: string): string => {
+        const v = f[key]
+        return v === undefined ? '' : Array.isArray(v) ? (v[0] ?? '') : v
+      }
+      return {
+        ...state,
+        teams: new Set(listOf('team')),
+        tiers: new Set(listOf('tier')),
+        versions: new Set(listOf('version')),
+        dateFrom: single('from'),
+        dateTo: single('to'),
+        statuses: new Set(listOf('status')),
+        reviewStatus: parseReviewStatus(single('review_status') || null),
+        labels: listOf('label'),
+        excludeLabels: listOf('exclude_label'),
+      }
+    }
     case 'TOGGLE_TOTALS_EXPANDED':
       return { ...state, totalsExpanded: !state.totalsExpanded }
     case 'SET_TOTALS_EXPANDED':
@@ -714,6 +742,11 @@ export function ReportsPage() {
       <div className="flex-1 min-w-0 space-y-6">
         {/* Filters — matching Dashboard order: Search → Metadata → Status → DateRange → Tags */}
         <div className="flex flex-wrap gap-3 items-center">
+          <FilterPresetsMenu
+            page="reports"
+            searchParams={searchParams}
+            onApply={(filters) => dispatch({ type: 'APPLY_FILTERS', filters })}
+          />
           <SearchInput value={search} onChange={(v) => dispatch({ type: 'SET_SEARCH', value: v })} placeholder="Filter reports..." className="w-full sm:w-64" />
           <MetadataDropdowns
             options={metadataOptions}

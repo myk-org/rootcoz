@@ -1598,6 +1598,37 @@ class SetCanViewReportsRequest(BaseModel):
     can_view_reports: CanViewReportsFlag
 
 
+# ─── Filter presets (#179) ─────────────────────────────────────────
+
+
+class CreateFilterPresetRequest(BaseModel):
+    """POST /api/user/filter-presets body — save the current filter combination."""
+
+    name: Annotated[str, StringConstraints(min_length=1, max_length=100)]
+    page: Literal["dashboard", "reports"]
+    scope: Literal["user", "server"] = "user"
+    filters: dict[str, str | list[str]] = Field(max_length=50)
+
+
+class UpdateFilterPresetRequest(BaseModel):
+    """PUT /api/user/filter-presets/{id} body — rename and/or replace filters."""
+
+    name: Annotated[str, StringConstraints(min_length=1, max_length=100)] | None = None
+    filters: dict[str, str | list[str]] | None = Field(default=None, max_length=50)
+
+
+class FilterPresetResponse(BaseModel):
+    """One saved filter preset (personal or server scope)."""
+
+    id: int
+    name: str
+    page: str
+    scope: str
+    filters: dict[str, str | list[str]]
+    created_at: str
+    updated_at: str
+
+
 # Resolve forward references (AnalysisResult → CrossFailurePattern; CodeFix → SimilarIssue)
 AnalysisResult.model_rebuild()
 CodeFix.model_rebuild()

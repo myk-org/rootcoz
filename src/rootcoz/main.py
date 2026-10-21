@@ -169,6 +169,7 @@ from rootcoz.models import (
     ChatMessageRequest,
     ChildJobAnalysis,
     ClassifyTestRequest,
+    CreateFilterPresetRequest,
     CreateIssueRequest,
     CrossFailurePattern,
     ExporterInfo,
@@ -197,6 +198,7 @@ from rootcoz.models import (
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
+    UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
 )
 from rootcoz.monitoring import (
@@ -11446,6 +11448,127 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _revoke_ai_sessions(sessions)
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+
+
+# --- Filter presets (#179) ---
+
+# URL query param names each page's presets may carry (validated on save).
+_FILTER_PRESET_KEYS: dict[str, set[str]] = {
+    "dashboard": {
+        "team",
+        "tier",
+        "version",
+        "label",
+        "exclude_label",
+        "status",
+        "review_status",
+        "date_from",
+        "date_to",
+    },
+    "reports": {
+        "team",
+        "tier",
+        "version",
+        "label",
+        "exclude_label",
+        "status",
+        "review_status",
+        "from",
+        "to",
+    },
+}
+
+
+def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
+    """Reject unknown filter keys for the page with 422 (never silently drop)."""
+    unknown = set(filters) - _FILTER_PRESET_KEYS[page]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
+        )
+
+
+@app.get("/api/user/filter-presets", operation_id="listFilterPresets")
+async def list_filter_presets(page: str, request: Request) -> JSONResponse:
+    """List the user's personal presets plus all server presets for a page."""
+    _require_authenticated(request)
+    if page not in storage.FILTER_PRESET_PAGES:
+        raise HTTPException(
+            status_code=422,
+            detail="page must be one of: " + ", ".join(storage.FILTER_PRESET_PAGES),
+        )
+    presets = await storage.list_filter_presets(request.state.username, page)
+    return JSONResponse(content=presets, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/user/filter-presets", operation_id="createFilterPreset")
+async def create_filter_preset(
+    body: CreateFilterPresetRequest, request: Request
+) -> JSONResponse:
+    """Save a filter combination as a named preset (server scope: operator+)."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    if body.scope == "server":
+        _require_operator(request)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Preset name cannot be empty")
+    _validate_filter_preset_filters(body.page, body.filters)
+    try:
+        preset = await storage.create_filter_preset(
+            request.state.username, body.page, body.scope, name, body.filters
+        )
+    except storage.FilterPresetLimitExceeded as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage.FilterPresetNameConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(content=preset, status_code=201)
+
+
+@app.put("/api/user/filter-presets/{preset_id}", operation_id="updateFilterPreset")
+async def update_filter_preset_endpoint(
+    preset_id: int, body: UpdateFilterPresetRequest, request: Request
+) -> JSONResponse:
+    """Rename and/or replace the filters of a preset the user may manage."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    existing = await storage.get_filter_preset(preset_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if existing["scope"] == "server":
+        _require_operator(request)
+    name = body.name.strip() if body.name is not None else None
+    if name == "":
+        raise HTTPException(status_code=422, detail="Preset name cannot be empty")
+    if body.filters is not None:
+        _validate_filter_preset_filters(existing["page"], body.filters)
+    try:
+        preset = await storage.update_filter_preset(
+            preset_id, request.state.username, name, body.filters
+        )
+    except storage.FilterPresetNotFound as exc:
+        raise HTTPException(status_code=404, detail="Preset not found") from exc
+    except storage.FilterPresetNameConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return JSONResponse(content=preset)
+
+
+@app.delete("/api/user/filter-presets/{preset_id}", operation_id="deleteFilterPreset")
+async def delete_filter_preset_endpoint(preset_id: int, request: Request) -> Response:
+    """Delete a preset the user may manage (own personal or server)."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    existing = await storage.get_filter_preset(preset_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if existing["scope"] == "server":
+        _require_operator(request)
+    try:
+        await storage.delete_filter_preset(preset_id, request.state.username)
+    except storage.FilterPresetNotFound as exc:
+        raise HTTPException(status_code=404, detail="Preset not found") from exc
+    return Response(status_code=204)
 
 
 # --- User token endpoints ---
