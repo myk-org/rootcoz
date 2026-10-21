@@ -1459,6 +1459,35 @@ async def init_db() -> None:
             "ON test_entries (job_id, child_job_name, child_build_number, status)"
         )
 
+        # Named filter presets (#179): saved filter combinations per page.
+        # scope='user' rows are personal (unique per username+page+name);
+        # scope='server' rows are shared (unique per page+name, creator kept
+        # in username for audit). Partial unique indexes express both rules.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS filter_presets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'user' CHECK(scope IN ('user', 'server')),
+                page TEXT NOT NULL CHECK(page IN ('dashboard', 'reports')),
+                name TEXT NOT NULL CHECK(length(name) <= 100),
+                filters TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_filter_presets_user_unique "
+            "ON filter_presets (username, page, name) WHERE scope = 'user'"
+        )
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_filter_presets_server_unique "
+            "ON filter_presets (page, name) WHERE scope = 'server'"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_filter_presets_scope_page "
+            "ON filter_presets (scope, page)"
+        )
+
         # Migration: case-insensitive username uniqueness.
         # Lowercase all existing usernames, merge case-variant duplicates
         # (keep earliest created_at, upgrade to highest-privilege role),
@@ -9235,3 +9264,217 @@ async def get_report_issues_created(
         "jira_total": jira_total,
         "issues": paginated,
     }
+
+
+# ─── Filter presets (#179) ──────────────────────────────────────────
+
+# Hardcoded per the issue spec — deliberately NOT a server setting.
+MAX_FILTER_PRESETS = 20
+FILTER_PRESET_PAGES = ("dashboard", "reports")
+
+
+class FilterPresetNotFound(KeyError):
+    """Preset does not exist or is not manageable by the caller."""
+
+
+class FilterPresetNameConflict(ValueError):
+    """A preset with the same name already exists in the same scope+page."""
+
+
+class FilterPresetLimitExceeded(ValueError):
+    """The per-scope, per-page preset count limit was reached."""
+
+
+def _filter_preset_row(row: Any) -> dict[str, Any]:
+    """Shape a filter_presets row for API responses (filters parsed)."""
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "page": row["page"],
+        "scope": row["scope"],
+        "filters": json.loads(row["filters"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+async def _fetch_filter_preset(db: aiosqlite.Connection, preset_id: int) -> Any:
+    cursor = await db.execute(
+        "SELECT id, username, scope, page, name, filters, created_at, updated_at"
+        " FROM filter_presets WHERE id = ?",
+        (preset_id,),
+    )
+    return await cursor.fetchone()
+
+
+async def _fetch_manageable_filter_preset(
+    db: aiosqlite.Connection, preset_id: int, username: str
+) -> Any:
+    """Fetch a preset the user may manage: their own personal or any server
+    preset (role enforcement for server presets lives in the API layer).
+    Ownership is part of the retrieval query, so another user's personal
+    preset is indistinguishable from a missing one."""
+    cursor = await db.execute(
+        "SELECT id, username, scope, page, name, filters, created_at, updated_at"
+        " FROM filter_presets WHERE id = ? AND (scope = 'server' OR username = ?)",
+        (preset_id, username),
+    )
+    return await cursor.fetchone()
+
+
+async def _filter_preset_name_taken(
+    db: aiosqlite.Connection,
+    *,
+    page: str,
+    scope: str,
+    username: str,
+    name: str,
+    exclude_id: int | None = None,
+) -> bool:
+    """Check name uniqueness within one scope+page (personal: one user)."""
+    if scope == "server":
+        query = (
+            "SELECT 1 FROM filter_presets"
+            " WHERE page = ? AND scope = 'server' AND name = ?"
+        )
+        params: list[Any] = [page, name]
+    else:
+        query = (
+            "SELECT 1 FROM filter_presets"
+            " WHERE page = ? AND scope = 'user' AND username = ? AND name = ?"
+        )
+        params = [page, username, name]
+    if exclude_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_id)
+    cursor = await db.execute(query, params)
+    return await cursor.fetchone() is not None
+
+
+async def list_filter_presets(username: str, page: str) -> list[dict[str, Any]]:
+    """Personal presets of the user plus all server presets for a page."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT id, username, scope, page, name, filters, created_at, updated_at"
+            " FROM filter_presets"
+            " WHERE page = ? AND (scope = 'server' OR (scope = 'user' AND username = ?))"
+            " ORDER BY created_at DESC, id DESC",
+            (page, username),
+        )
+        rows = await cursor.fetchall()
+    return [_filter_preset_row(row) for row in rows]
+
+
+async def create_filter_preset(
+    username: str, page: str, scope: str, name: str, filters: dict[str, Any]
+) -> dict[str, Any]:
+    """Insert a preset; the caller enforces the operator+ gate for server scope."""
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if scope == "server":
+            count_query = "SELECT COUNT(*) FROM filter_presets WHERE page = ? AND scope = 'server'"
+            count_params: list[Any] = [page]
+        else:
+            count_query = (
+                "SELECT COUNT(*) FROM filter_presets"
+                " WHERE page = ? AND scope = 'user' AND username = ?"
+            )
+            count_params = [page, username]
+        cursor = await db.execute(count_query, count_params)
+        (count,) = await cursor.fetchone()
+        if count >= MAX_FILTER_PRESETS:
+            raise FilterPresetLimitExceeded(
+                f"Maximum {MAX_FILTER_PRESETS} presets per page"
+            )
+        if await _filter_preset_name_taken(
+            db, page=page, scope=scope, username=username, name=name
+        ):
+            raise FilterPresetNameConflict("Preset name already exists for this page")
+        cursor = await db.execute(
+            "INSERT INTO filter_presets (username, scope, page, name, filters)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (username, scope, page, name, json.dumps(filters)),
+        )
+        preset_id = cursor.lastrowid
+        await db.commit()
+        row = await _fetch_filter_preset(db, preset_id)
+    return _filter_preset_row(row)
+
+
+async def get_manageable_filter_preset(
+    preset_id: int, username: str
+) -> dict[str, Any] | None:
+    """Fetch one preset the user may manage (own personal or any server
+    preset) for role gating. Ownership is enforced in the retrieval query."""
+    async with _connect_db() as db:
+        row = await _fetch_manageable_filter_preset(db, preset_id, username)
+    return _filter_preset_row(row) if row else None
+
+
+async def update_filter_preset(
+    preset_id: int,
+    username: str,
+    name: str | None = None,
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Update name/filters of a preset the user may manage.
+
+    Manageable = the user's own personal preset or any server preset
+    (role enforcement for server presets lives in the API layer). The
+    scope/owner guard is in the UPDATE WHERE clause, never a bare
+    fetch-then-check.
+    """
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        # Recon read for the uniqueness check; ownership is part of the
+        # retrieval query, and the UPDATE WHERE re-asserts it.
+        row = await _fetch_manageable_filter_preset(db, preset_id, username)
+        if row is None:
+            raise FilterPresetNotFound("Preset not found")
+        if (
+            name is not None
+            and name != row["name"]
+            and await _filter_preset_name_taken(
+                db,
+                page=row["page"],
+                scope=row["scope"],
+                username=row["username"],
+                name=name,
+                exclude_id=preset_id,
+            )
+        ):
+            raise FilterPresetNameConflict("Preset name already exists for this page")
+        sets: list[str] = []
+        params: list[Any] = []
+        if name is not None:
+            sets.append("name = ?")
+            params.append(name)
+        if filters is not None:
+            sets.append("filters = ?")
+            params.append(json.dumps(filters))
+        sets.append("updated_at = datetime('now')")
+        params.extend([preset_id, username])
+        cursor = await db.execute(
+            "UPDATE filter_presets SET "
+            + ", ".join(sets)
+            + " WHERE id = ? AND (scope = 'server' OR username = ?)",
+            params,
+        )
+        if cursor.rowcount == 0:
+            raise FilterPresetNotFound("Preset not found")
+        await db.commit()
+        row = await _fetch_filter_preset(db, preset_id)
+    return _filter_preset_row(row)
+
+
+async def delete_filter_preset(preset_id: int, username: str) -> None:
+    """Delete a preset the user may manage (own personal or server)."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM filter_presets"
+            " WHERE id = ? AND (scope = 'server' OR username = ?)",
+            (preset_id, username),
+        )
+        if cursor.rowcount == 0:
+            raise FilterPresetNotFound("Preset not found")
+        await db.commit()

@@ -169,6 +169,7 @@ from rootcoz.models import (
     ChatMessageRequest,
     ChildJobAnalysis,
     ClassifyTestRequest,
+    CreateFilterPresetRequest,
     CreateIssueRequest,
     CrossFailurePattern,
     ExporterInfo,
@@ -179,6 +180,7 @@ from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
     FeedbackResponse,
+    FilterPresetResponse,
     JobMetadataInput,
     OverrideClassificationRequest,
     OverridePatternRequest,
@@ -197,6 +199,7 @@ from rootcoz.models import (
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
+    UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
 )
 from rootcoz.monitoring import (
@@ -11446,6 +11449,165 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _revoke_ai_sessions(sessions)
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
+
+
+# --- Filter presets (#179) ---
+
+# URL query param names each page's presets may carry (validated on save).
+_FILTER_PRESET_KEYS: dict[str, set[str]] = {
+    "dashboard": {
+        "team",
+        "tier",
+        "version",
+        "label",
+        "exclude_label",
+        "status",
+        "review_status",
+        "analysis_state",
+        "date_from",
+        "date_to",
+    },
+    "reports": {
+        "team",
+        "tier",
+        "version",
+        "label",
+        "exclude_label",
+        "status",
+        "review_status",
+        "from",
+        "to",
+    },
+}
+
+
+def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
+    """Reject unknown filter keys for the page with 422 (never silently drop)."""
+    unknown = set(filters) - _FILTER_PRESET_KEYS[page]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
+        )
+
+
+# SQLite integers are signed 64-bit; an out-of-range preset id cannot exist.
+_SQLITE_INT_MAX = 2**63 - 1
+
+
+def _validate_preset_id(preset_id: int) -> None:
+    """Reject ids SQLite cannot store (404) instead of raising OverflowError."""
+    if preset_id < 1 or preset_id > _SQLITE_INT_MAX:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+
+@app.get(
+    "/api/user/filter-presets",
+    operation_id="listFilterPresets",
+    response_model=list[FilterPresetResponse],
+)
+async def list_filter_presets(
+    page: str, request: Request, response: Response
+) -> list[FilterPresetResponse]:
+    """List the user's personal presets plus all server presets for a page."""
+    _require_authenticated(request)
+    if page not in storage.FILTER_PRESET_PAGES:
+        raise HTTPException(
+            status_code=422,
+            detail="page must be one of: " + ", ".join(storage.FILTER_PRESET_PAGES),
+        )
+    presets = await storage.list_filter_presets(request.state.username, page)
+    response.headers["Cache-Control"] = "no-store"
+    return [FilterPresetResponse(**preset) for preset in presets]
+
+
+@app.post(
+    "/api/user/filter-presets",
+    operation_id="createFilterPreset",
+    response_model=FilterPresetResponse,
+    status_code=201,
+)
+async def create_filter_preset(
+    body: CreateFilterPresetRequest, request: Request
+) -> FilterPresetResponse:
+    """Save a filter combination as a named preset (server scope: operator+)."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    if body.scope == "server":
+        _require_operator(request)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Preset name cannot be empty")
+    _validate_filter_preset_filters(body.page, body.filters)
+    try:
+        preset = await storage.create_filter_preset(
+            request.state.username, body.page, body.scope, name, body.filters
+        )
+    except storage.FilterPresetLimitExceeded as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage.FilterPresetNameConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FilterPresetResponse(**preset)
+
+
+@app.put(
+    "/api/user/filter-presets/{preset_id}",
+    operation_id="updateFilterPresetEndpoint",
+    response_model=FilterPresetResponse,
+)
+async def update_filter_preset_endpoint(
+    preset_id: int, body: UpdateFilterPresetRequest, request: Request
+) -> FilterPresetResponse:
+    """Rename and/or replace the filters of a preset the user may manage."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    _validate_preset_id(preset_id)
+    # Ownership-scoped fetch: another user's personal preset is
+    # indistinguishable from a missing one, before any body validation.
+    existing = await storage.get_manageable_filter_preset(
+        preset_id, request.state.username
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if existing["scope"] == "server":
+        _require_operator(request)
+    name = body.name.strip() if body.name is not None else None
+    if name == "":
+        raise HTTPException(status_code=422, detail="Preset name cannot be empty")
+    if body.filters is not None:
+        _validate_filter_preset_filters(existing["page"], body.filters)
+    try:
+        preset = await storage.update_filter_preset(
+            preset_id, request.state.username, name, body.filters
+        )
+    except storage.FilterPresetNotFound as exc:
+        raise HTTPException(status_code=404, detail="Preset not found") from exc
+    except storage.FilterPresetNameConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FilterPresetResponse(**preset)
+
+
+@app.delete(
+    "/api/user/filter-presets/{preset_id}",
+    operation_id="deleteFilterPresetEndpoint",
+    status_code=204,
+)
+async def delete_filter_preset_endpoint(preset_id: int, request: Request) -> None:
+    """Delete a preset the user may manage (own personal or server)."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    _validate_preset_id(preset_id)
+    existing = await storage.get_manageable_filter_preset(
+        preset_id, request.state.username
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if existing["scope"] == "server":
+        _require_operator(request)
+    try:
+        await storage.delete_filter_preset(preset_id, request.state.username)
+    except storage.FilterPresetNotFound as exc:
+        raise HTTPException(status_code=404, detail="Preset not found") from exc
 
 
 # --- User token endpoints ---

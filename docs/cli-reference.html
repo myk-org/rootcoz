@@ -390,6 +390,22 @@
 <td><code>rootcoz config defaults</code></td>
 <td>Server-side analysis defaults (non-sensitive). Requires a server.</td>
 </tr>
+<tr>
+<td><code>rootcoz config filter-presets list [--page dashboard\|reports]</code></td>
+<td>Saved filter presets (yours + server) for a page; supports <code>--json</code>. Requires a server.</td>
+</tr>
+<tr>
+<td><code>rootcoz config filter-presets add NAME FILTERS_JSON [--page ...] [--scope user\|server]</code></td>
+<td>Save a preset from a JSON filter object, e.g. <code>'{"team": ["storage"]}'</code>. <code>--scope server</code> (operator+) shares it with every user. Requires a server.</td>
+</tr>
+<tr>
+<td><code>rootcoz config filter-presets update ID [--name NAME] [--filters FILTERS_JSON]</code></td>
+<td>Rename a preset and/or replace its filters. Requires a server.</td>
+</tr>
+<tr>
+<td><code>rootcoz config filter-presets delete ID</code></td>
+<td>Delete a preset you own (personal) or any server preset (operator+). Requires a server.</td>
+</tr>
 </tbody>
 </table></div>
 <p>Config keys are grouped as <code>[default] server = "NAME"</code>, <code>[servers.NAME]</code> entries, and a shared <code>[defaults]</code> table merged into every server. Per-server keys include <code>url</code>, <code>username</code>, <code>api_key</code>, <code>no_verify_ssl</code>, <code>ai_provider</code>, <code>ai_model</code>, <code>jenkins_*</code>, <code>jira_*</code>, <code>github_token</code>, <code>peers</code>, <code>additional_repos</code>, <code>labels</code>, <code>prow_url</code>, and <code>gcs_bucket</code>. See <a href="configuration-reference.html">Configuration Reference</a> for the full list.</p>

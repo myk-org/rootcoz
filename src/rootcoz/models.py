@@ -1,10 +1,12 @@
 """Pydantic request and response models."""
 
+import json
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     Field,
@@ -1596,6 +1598,90 @@ class SetCanViewReportsRequest(BaseModel):
     """Admin PUT /api/admin/users/{username}/can-view-reports body."""
 
     can_view_reports: CanViewReportsFlag
+
+
+# ─── Filter presets (#179) ─────────────────────────────────────────
+
+
+# Bounds for stored preset payloads: presets are returned on every list
+# call and server presets to every user, so values must stay small.
+MAX_FILTER_PRESET_VALUE_LENGTH = 200
+MAX_FILTER_PRESET_LIST_LENGTH = 100
+MAX_FILTER_PRESET_JSON_LENGTH = 10_000
+
+
+def _validate_filter_preset_values(
+    filters: dict[str, str | list[str]],
+) -> dict[str, str | list[str]]:
+    """Bound stored preset filters: per-value length, list length, total JSON.
+
+    Also rejects presets that apply nothing: an empty filter set is
+    indistinguishable from a clean URL, which breaks the menu's
+    selection-follows-URL behavior (a clean page would show the preset
+    as selected, and applying it would drop the selection entirely).
+    """
+    if not any(
+        (value if isinstance(value, str) else [v for v in value if v])
+        for value in filters.values()
+    ):
+        raise ValueError("filters must contain at least one filter with a value")
+    if len(json.dumps(filters)) > MAX_FILTER_PRESET_JSON_LENGTH:
+        raise ValueError(
+            f"filters must serialize to at most {MAX_FILTER_PRESET_JSON_LENGTH} characters"
+        )
+    for key, value in filters.items():
+        if isinstance(value, str):
+            if len(value) > MAX_FILTER_PRESET_VALUE_LENGTH:
+                raise ValueError(
+                    f"filter value for '{key}' exceeds"
+                    f" {MAX_FILTER_PRESET_VALUE_LENGTH} characters"
+                )
+        else:
+            if len(value) > MAX_FILTER_PRESET_LIST_LENGTH:
+                raise ValueError(
+                    f"filter '{key}' exceeds {MAX_FILTER_PRESET_LIST_LENGTH} values"
+                )
+            if any(len(item) > MAX_FILTER_PRESET_VALUE_LENGTH for item in value):
+                raise ValueError(
+                    f"filter value in '{key}' exceeds"
+                    f" {MAX_FILTER_PRESET_VALUE_LENGTH} characters"
+                )
+    return filters
+
+
+FilterPresetFilters = Annotated[
+    dict[str, str | list[str]],
+    Field(max_length=50),
+    AfterValidator(_validate_filter_preset_values),
+]
+
+
+class CreateFilterPresetRequest(BaseModel):
+    """POST /api/user/filter-presets body — save the current filter combination."""
+
+    name: Annotated[str, StringConstraints(min_length=1, max_length=100)]
+    page: Literal["dashboard", "reports"]
+    scope: Literal["user", "server"] = "user"
+    filters: FilterPresetFilters
+
+
+class UpdateFilterPresetRequest(BaseModel):
+    """PUT /api/user/filter-presets/{id} body — rename and/or replace filters."""
+
+    name: Annotated[str, StringConstraints(min_length=1, max_length=100)] | None = None
+    filters: FilterPresetFilters | None = None
+
+
+class FilterPresetResponse(BaseModel):
+    """One saved filter preset (personal or server scope)."""
+
+    id: int
+    name: str
+    page: str
+    scope: str
+    filters: dict[str, str | list[str]]
+    created_at: str
+    updated_at: str
 
 
 # Resolve forward references (AnalysisResult → CrossFailurePattern; CodeFix → SimilarIssue)

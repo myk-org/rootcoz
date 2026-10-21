@@ -442,6 +442,30 @@
 <td>viewer</td>
 <td>List Jira security levels for a project</td>
 </tr>
+<tr>
+<td>GET</td>
+<td><code>/api/user/filter-presets?page={dashboard\|reports}</code></td>
+<td>viewer</td>
+<td>Saved filter presets for a page: your personal presets plus every server preset, newest first. Each entry carries <code>id</code>, <code>name</code>, <code>page</code>, <code>scope</code> (<code>user</code> or <code>server</code>), <code>filters</code> (URL query param names as-is; dashboard uses <code>date_from</code>/<code>date_to</code>, reports uses <code>from</code>/<code>to</code>), <code>created_at</code>, <code>updated_at</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/user/filter-presets</code></td>
+<td>viewer</td>
+<td>Save the current filter combination as a named preset. Body is <code>{name, page, scope, filters}</code> — <code>scope</code> defaults to <code>user</code>; <code>scope=server</code> requires operator+ (<code>403</code> below that). Name is 1–100 chars, stripped; <code>filters</code> accepts at most 50 known keys per page (unknown keys → <code>422</code>). <code>409</code> when the name already exists in the same scope+page; <code>422</code> at 20 presets per page per scope</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/user/filter-presets/{preset_id}</code></td>
+<td>viewer</td>
+<td>Rename and/or replace a preset's filters (<code>{name}</code>, <code>{filters}</code>, both optional). Personal presets: only the owner, <code>404</code> otherwise (existence is never leaked). Server presets: operator+ (<code>403</code> below that). <code>409</code> on a name conflict in the same scope+page</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/user/filter-presets/{preset_id}</code></td>
+<td>viewer</td>
+<td>Delete a preset. Same rules as PUT: own personal preset (<code>404</code> for anyone else's), server preset operator+ (<code>403</code> below that). Returns <code>204</code></td>
+</tr>
 </tbody>
 </table></div>
 <p>Registration returns the raw API key exactly once and sends <code>Cache-Control: no-store</code>. Store it before you navigate away.</p>

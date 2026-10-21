@@ -400,6 +400,9 @@
 <p><strong>Everything in flight, from the dashboard.</strong> The dashboard lists every job with its status badge, a Mode column reading <code>Submitted</code> or <code>Analyzed</code>, failure and pass/skip counts, review progress, comment count, and the submitter. Filter by status, review state, analysis state, date range, team, tier, version, and labels. Newest rows appear without a manual refresh, so several submissions can be watched at once.</p>
 </li>
 <li>
+<p><strong>Save filter combinations as presets.</strong> Any filter combination on the dashboard or the reports page can be saved as a named preset and reapplied with one click — no re-selecting teams, tiers, and tags every visit. The <code>Presets</code> button at the start of the filter bar opens the list; <code>Save current filters as…</code> names and stores the current combination. When saving you pick the scope: <strong>Personal</strong> presets live in your account, while <strong>Server filter</strong> presets (operators and admins only) appear for every user. The sidebar has a <code>Saved filters</code> section with your presets and the server's, grouped separately — clicking an entry jumps to its page with the filters applied. Loading a preset shows its name on the button; if you then change any filter, an amber dot and an <code>Update</code> button let you overwrite the preset, and the ✕ unloads it without clearing the filters. Presets are per page (dashboard presets do not appear on reports) and capped at 20 per page per scope. See <a href="cli-reference.html">CLI Command Reference</a> for the <code>rootcoz config filter-presets</code> commands and <a href="api-reference.html">API Reference</a> for <code>/api/user/filter-presets</code>.</p>
+</li>
+<li>
 <p><strong>Check status from a script.</strong> <code>--fields</code> limits the response to an allowlisted set of paths, which is much cheaper than fetching a full report.</p>
 </li>
 </ul>
