@@ -1364,10 +1364,11 @@ async def init_db() -> None:
         # API key per exact Pi provider ID (same at-rest pattern as the user
         # AI credential map). verified_at records the last successful
         # verification (add or rotate) — a stored key is always a tested key.
-        # generation (#350 r2) is the credential version: every add/rotate
-        # bumps it, and a key-scoped capture's row writes are bound to the
-        # generation its discovery ran against. key_capture_status records
-        # the last capture outcome for the admin listing.
+        # generation (#350) is the credential version: every add/rotate
+        # assigns the next value from server_ai_credential_seq, and a
+        # key-scoped capture's row writes are bound to the generation its
+        # discovery ran against. key_capture_status records the last capture
+        # outcome for the admin listing.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS server_ai_providers (
                 provider TEXT PRIMARY KEY,
@@ -1379,6 +1380,17 @@ async def init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now')),
                 generation INTEGER NOT NULL DEFAULT 0,
                 key_capture_status TEXT
+            )
+        """)
+
+        # Durable monotonic credential-version sequence (#350 r3): a global
+        # counter, so a re-added provider never receives a generation a
+        # removed credential (and its in-flight capture) once held. Seeded
+        # from the table max on first use inside the credential write.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS server_ai_credential_seq (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                value INTEGER NOT NULL
             )
         """)
 
@@ -6031,17 +6043,23 @@ async def get_server_credential_generation(provider: str) -> int | None:
     return None if row is None else row[0]
 
 
-async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> None:
+async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> int:
     """Upsert one admin-stored server provider key (encrypted at rest).
 
     Provider identity is case-insensitive: a rotate hitting an existing row
     whose spelling differs only in case replaces it (keeping the stored
-    spelling) instead of duplicating the provider. Every write bumps the
-    credential ``generation`` (#350 r2) so in-flight key-scoped captures can
-    detect that the credential moved on — including a rotation to the same
-    key value.
+    spelling) instead of duplicating the provider. Every write assigns the
+    next value from the durable global sequence (#350 r3) so in-flight
+    key-scoped captures can detect that the credential moved on — including
+    a rotation to the same key value, and a removal followed by a re-add.
+
+    Returns the generation this write assigned, from inside the same
+    transaction — the only value a capture may bind to. A separate later
+    read could observe a concurrent rotation's generation instead (#350
+    r3), which would hand the older capture the newer credential's guard.
     """
     async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
         row = await (
             await db.execute(
                 "SELECT provider FROM server_ai_providers"
@@ -6050,16 +6068,34 @@ async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> 
             )
         ).fetchone()
         canonical = row[0] if row is not None else provider
+        # Seed once from the table max (pre-sequence rows), then advance —
+        # all inside this transaction, so concurrent upserts serialize on
+        # BEGIN IMMEDIATE and never share a generation.
         await db.execute(
-            "INSERT INTO server_ai_providers (provider, api_key_enc, created_by, updated_by)"
-            " VALUES (?, ?, ?, ?)"
+            "INSERT INTO server_ai_credential_seq (id, value)"
+            " SELECT 1, COALESCE((SELECT max(generation) FROM server_ai_providers), 0)"
+            " WHERE NOT EXISTS (SELECT 1 FROM server_ai_credential_seq)"
+        )
+        await db.execute(
+            "UPDATE server_ai_credential_seq SET value = value + 1 WHERE id = 1"
+        )
+        generation = (
+            await (
+                await db.execute("SELECT value FROM server_ai_credential_seq")
+            ).fetchone()
+        )[0]
+        await db.execute(
+            "INSERT INTO server_ai_providers"
+            " (provider, api_key_enc, created_by, updated_by, generation)"
+            " VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT(provider) DO UPDATE SET"
             " api_key_enc = excluded.api_key_enc, verified_at = datetime('now'),"
             " updated_by = excluded.updated_by, updated_at = datetime('now'),"
-            " generation = server_ai_providers.generation + 1",
-            (canonical, encrypt_value(key), updated_by, updated_by),
+            " generation = excluded.generation",
+            (canonical, encrypt_value(key), updated_by, updated_by, generation),
         )
         await db.commit()
+        return generation
 
 
 async def list_server_provider_models() -> list[dict[str, Any]]:

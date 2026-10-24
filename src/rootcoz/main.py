@@ -12427,7 +12427,10 @@ async def _capture_key_scoped_models(
     the generation and supersedes). Every row write is bound to
     ``generation`` — the credential generation this discovery ran against —
     so a capture that loses the race to a concurrent add/rotate/remove
-    writes nothing. Only ``source: "listing"`` models are stored:
+    writes nothing — and a rotation landing between the superseded check
+    and the write makes the conditional write itself return ``False``, which
+    this function reports as ``"superseded"`` too (#350 r3): a skipped
+    write is never reported as a stored capture. Only ``source: "listing"`` models are stored:
     manifest-only models are not key-verified. A supported listing with
     zero accessible models is stored as a sentinel row — "verified empty"
     — so the pool exposes nothing instead of falling back to the catalog.
@@ -12445,16 +12448,21 @@ async def _capture_key_scoped_models(
         # refresh (same key) keeps the last captured listing instead.
         if not await _key_scoped_capture_superseded(provider, key, generation):
             if keep_on_failure:
-                await storage.set_server_provider_key_capture_status(
+                stored = await storage.set_server_provider_key_capture_status(
                     provider, "unavailable", expected_generation=generation
                 )
             else:
-                await storage.set_server_provider_key_models(
+                stored = await storage.set_server_provider_key_models(
                     provider,
                     [],
                     status="unavailable",
                     expected_generation=generation,
                 )
+            # A skipped write (rotation landed between the superseded check
+            # and the conditional write) is a superseded capture, never a
+            # success — nothing was stored (#350 r3).
+            if not stored:
+                return [], "superseded"
         return [], "unavailable"
     if await _key_scoped_capture_superseded(provider, key, generation):
         logger.warning(
@@ -12464,36 +12472,36 @@ async def _capture_key_scoped_models(
         )
         return [], "superseded"
     if not discovery["modelListingSupported"]:
-        await storage.set_server_provider_key_models(
+        stored = await storage.set_server_provider_key_models(
             provider,
             [],
             status="unsupported",
             expected_generation=generation,
         )
-        return [], "unsupported"
+        return ([], "unsupported") if stored else ([], "superseded")
     # Manifest-only models are the provider manifest's, not the key's — a
     # restricted key must never see them as verified (#350 r1).
     listing_models = [
         entry for entry in discovery["models"] if entry.get("source") != "manifest"
     ]
     if listing_models:
-        await storage.set_server_provider_key_models(
+        stored = await storage.set_server_provider_key_models(
             provider,
             listing_models,
             status="supported",
             expected_generation=generation,
         )
-        return listing_models, "supported"
+        return (listing_models, "supported") if stored else ([], "superseded")
     # Supported listing, zero key-accessible models: the sentinel row keeps
     # "verified empty" distinct from "no listing" so the pool exposes
     # nothing instead of falling back to the static catalog (#350 r1).
-    await storage.set_server_provider_key_models(
+    stored = await storage.set_server_provider_key_models(
         provider,
         [{"id": "", "sentinel": True}],
         status="supported",
         expected_generation=generation,
     )
-    return [], "supported"
+    return ([], "supported") if stored else ([], "superseded")
 
 
 async def _verify_and_store_server_provider_key(
@@ -12555,7 +12563,11 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
-    await storage.set_server_ai_credential(
+    # The generation this write assigned, returned from inside the upsert's
+    # transaction — never re-read: an overlapping rotation (even to the same
+    # key) landing before a separate read would hand this capture the newer
+    # credential's generation and let its stale snapshot through (#350 r3).
+    generation = await storage.set_server_ai_credential(
         provider, key, request.state.username or "admin"
     )
     # Key-scoped capture (#350): after a successful verification, record the
@@ -12570,7 +12582,7 @@ async def _verify_and_store_server_provider_key(
         provider,
         key,
         keep_on_failure=False,
-        generation=await storage.get_server_credential_generation(provider),
+        generation=generation,
     )
     if not replacing:
         await _seed_server_provider_selection(
@@ -12713,9 +12725,10 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 # static catalog (no listing endpoint / failed discovery).
                 "key_scoped": provider_lower in key_scoped,
                 # Outcome of the last key-scoped capture (#350 r2):
-                # supported / unsupported / unavailable — "unavailable"
-                # (rows absent after a failed capture) tells the admin to
-                # refresh instead of assuming no listing endpoint exists.
+                # supported / unsupported / unavailable. "unavailable" can
+                # coexist with key_scoped true — a failed refresh kept the
+                # last snapshot — telling the admin the listed models are
+                # stale, not that no listing endpoint exists.
                 "key_scoped_status": record.get("key_capture_status")
                 if record
                 else None,
@@ -12803,6 +12816,14 @@ async def refresh_server_provider_models(
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
+    # A None generation means the provider was removed between the key read
+    # and this read — never bind a capture to "no credential" (#350 r3): an
+    # unbound write would re-insert the rows the removal just deleted.
+    generation = await storage.get_server_credential_generation(provider)
+    if generation is None:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
     # Same key, so a failed discovery keeps the last captured listing
     # (#350 r2); the generation binding still discards the refresh when a
     # concurrent rotation moves the credential on.
@@ -12810,7 +12831,7 @@ async def refresh_server_provider_models(
         provider,
         key,
         keep_on_failure=True,
-        generation=await storage.get_server_credential_generation(provider),
+        generation=generation,
     )
     logger.info(
         "[AUDIT] Admin '%s' refreshed key-scoped models for '%s' (%s, %d models)",

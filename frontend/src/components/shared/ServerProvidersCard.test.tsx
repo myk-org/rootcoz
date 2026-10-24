@@ -301,6 +301,37 @@ describe('ServerProvidersCard provider list', () => {
     )
   })
 
+  it('hints a stale capture when a key-scoped listing refresh failed (#350 r3)', async () => {
+    get.mockResolvedValue(listResult([
+      // Rows still exist (key_scoped) but the last refresh failed — the
+      // failure must surface next to the Key-scoped badge, not hide it.
+      { ...providersState()[0], key_scoped: true, key_scoped_status: 'unavailable' },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('gemini')
+    expect(screen.getByText('Key-scoped')).toBeInTheDocument()
+    expect(screen.getByText('listing failed — showing last capture')).toBeInTheDocument()
+    expect(screen.getByTitle('Model listing failed — showing the last captured list; try Refresh models')).toBeInTheDocument()
+  })
+
+  it('reports the kept listing when a refresh fails over an existing snapshot (#350 r3)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValueOnce(listResult([providersState()[0]]))
+      .mockResolvedValueOnce(listResult([
+        { ...providersState()[0], key_scoped: true, key_scoped_status: 'unavailable' },
+      ]))
+    post.mockResolvedValue({ ok: true, status: 'unavailable', model_count: 0 } as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Refresh gemini models' }))
+    // The refetched list still carries a snapshot — the notice must say
+    // the previous listing is in use, not imply a static-catalog fallback.
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Key-scoped listing unavailable for gemini; the previous captured listing is still in use.',
+    )
+  })
+
   it('shows an alert when the refresh fails (#350)', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([providersState()[0]]))

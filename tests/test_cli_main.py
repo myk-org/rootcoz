@@ -7049,7 +7049,7 @@ class TestAdminServerProvidersCommands:
         )
 
     def test_server_providers_refresh_models_unavailable(self, mock_client):
-        """An unavailable listing reports the catalog fallback, not a failure."""
+        """An unavailable listing reports the kept snapshot, not a failure."""
         mock_client.admin_refresh_server_provider_models.return_value = {
             "ok": True,
             "status": "unavailable",
@@ -7062,7 +7062,25 @@ class TestAdminServerProvidersCommands:
         assert result.exit_code == 0
         assert (
             "Key-scoped model listing unavailable for google;"
-            " selection falls back to the static catalog" in result.output
+            " the previous captured listing is still in use"
+            " (static catalog when none exists)" in result.output
+        )
+
+    def test_server_providers_refresh_models_superseded(self, mock_client):
+        """A superseded refresh reports the concurrent change, not fallback."""
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "superseded",
+            "model_count": 0,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "google"],
+        )
+        assert result.exit_code == 0
+        assert (
+            "Key-scoped model listing superseded for google;"
+            " a concurrent credential change owns the stored listing" in result.output
         )
 
     def test_server_providers_rotate_key_prompts_hidden_when_flag_omitted(

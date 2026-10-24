@@ -3807,6 +3807,20 @@ def admin_server_providers_refresh_models(
                 f"Refreshed key-scoped models for {provider}:"
                 f" {data.get('model_count', 0)} model(s)"
             )
+        elif status == "unavailable":
+            # A failed refresh keeps the last captured listing (#350 r3) —
+            # the notice must not imply a static-catalog fallback when a
+            # snapshot is still in use.
+            typer.echo(
+                f"Key-scoped model listing unavailable for {provider};"
+                " the previous captured listing is still in use"
+                " (static catalog when none exists)"
+            )
+        elif status == "superseded":
+            typer.echo(
+                f"Key-scoped model listing superseded for {provider};"
+                " a concurrent credential change owns the stored listing"
+            )
         else:
             typer.echo(
                 f"Key-scoped model listing {status} for {provider};"

@@ -2016,3 +2016,237 @@ async def test_non_catalog_provider_keeps_stored_casing(client, monkeypatch):
         assert scoped["MyGateway"][0]["verified"] is True
     finally:
         ai_client.force_server_credentials.reset(token)
+
+
+# --- Overlapping credential writes and capture bindings (#350 r3) ---
+
+
+async def test_credential_upsert_returns_its_assigned_generation(tmp_path, monkeypatch):
+    """Storage: the upsert returns the generation it assigned (#350 r3).
+
+    That returned value — produced inside the write transaction — is the
+    only generation a capture may bind to; a separate later read could
+    observe a concurrent rotation's generation instead.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-gen3.db")
+    await storage.init_db()
+    first = await storage.set_server_ai_credential("google", SECRET, "admin")
+    second = await storage.set_server_ai_credential("google", SECRET, "admin")
+    assert second == first + 1
+    assert await storage.get_server_credential_generation("google") == second
+    # A capture bound to the older generation writes nothing even though
+    # the key value is unchanged.
+    assert (
+        await storage.set_server_provider_key_models(
+            "google", [{"id": "m"}], expected_generation=first
+        )
+        is False
+    )
+    assert await storage.list_server_provider_key_models() == []
+
+
+async def test_same_key_rotation_cannot_lend_its_generation(client, monkeypatch):
+    """An overlapping same-key rotation supersedes the older capture (r3).
+
+    The rotation lands between the credential write and the point where
+    the old code read the generation back separately — a capture must stay
+    bound to the generation its OWN upsert assigned, never the newer one a
+    later read might observe, so the older discovery cannot replace the
+    newer rotation's snapshot when it finishes last.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
+    real_set = storage.set_server_ai_credential
+
+    async def set_then_overlap(provider, key, updated_by):
+        generation = await real_set(provider, key, updated_by)
+        # An overlapping rotation to the SAME key lands before the endpoint
+        # could read the generation back.
+        await real_set(provider, key, "other-admin")
+        return generation
+
+    monkeypatch.setattr(storage, "set_server_ai_credential", set_then_overlap)
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert added.status_code == 200
+    assert added.json()["ok"] is True
+    # The older capture (bound to its own generation) was discarded.
+    assert await storage.list_server_provider_key_models() == []
+
+
+async def test_readded_key_never_reuses_removed_generation(tmp_path, monkeypatch):
+    """A re-added key cannot accept a removed key's in-flight capture (r3).
+
+    The credential version is a durable global sequence — an INSERT never
+    falls back to the schema default — so a capture still bound to the
+    removed credential's generation fails the guard after a re-add of the
+    same key value.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-readd.db")
+    await storage.init_db()
+    first = await storage.set_server_ai_credential("google", SECRET, "admin")
+    # A second provider keeps the table max above google's generation.
+    second = await storage.set_server_ai_credential("openai", SECRET, "admin")
+    await storage.delete_server_ai_provider("google")
+    readded = await storage.set_server_ai_credential("google", SECRET, "admin")
+    assert readded not in (first, second)
+    assert readded > second
+    # The in-flight capture from the removed credential cannot write.
+    assert (
+        await storage.set_server_provider_key_models(
+            "google", [{"id": "m"}], expected_generation=first
+        )
+        is False
+    )
+    assert await storage.list_server_provider_key_models() == []
+
+
+async def test_rotation_landing_before_capture_write_reports_superseded(
+    client, monkeypatch
+):
+    """A skipped generation-bound write reports superseded, not success (r3).
+
+    A rotation landing between the superseded check and the conditional
+    write makes the write itself return False — the refresh must reply
+    ``superseded`` (nothing was stored), never ``supported`` with a model
+    count.
+    """
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    real_set_models = storage.set_server_provider_key_models
+    real_set_credential = storage.set_server_ai_credential
+
+    async def rotate_then_write(provider, models, **kwargs):
+        # The rotation lands after the capture's superseded check passed.
+        await real_set_credential(provider, "rotated-mid-capture-1", "admin")
+        return await real_set_models(provider, models, **kwargs)
+
+    monkeypatch.setattr(storage, "set_server_provider_key_models", rotate_then_write)
+    refreshed = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert refreshed.status_code == 200
+    body = refreshed.json()
+    assert body["status"] == "superseded"
+    assert body["model_count"] == 0
+    # The stale refresh stored nothing: the captured rows are untouched.
+    rows = await storage.list_server_provider_key_models()
+    assert [(row["provider"], row["model"]) for row in rows] == [
+        ("google", "gemini-2.5-pro")
+    ]
+
+
+async def test_rotation_landing_before_keep_rows_status_write_reports_superseded(
+    client, monkeypatch
+):
+    """A skipped keep-rows status write also reports superseded (r3).
+
+    The keep_on_failure branch (failed discovery, rows kept) must not
+    claim ``unavailable`` when its status write was skipped by a rotation.
+    """
+    import httpx
+
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    _mock_key_discovery(monkeypatch, httpx.ConnectError("sidecar down"))
+    real_status = storage.set_server_provider_key_capture_status
+    real_set_credential = storage.set_server_ai_credential
+
+    async def rotate_then_status(provider, status, **kwargs):
+        # The rotation lands after the capture's superseded check passed.
+        await real_set_credential(provider, "rotated-mid-failure-1", "admin")
+        return await real_status(provider, status, **kwargs)
+
+    monkeypatch.setattr(
+        storage, "set_server_provider_key_capture_status", rotate_then_status
+    )
+    degraded = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert degraded.status_code == 200
+    assert degraded.json()["status"] == "superseded"
+    # The status write was skipped: the recorded outcome is untouched.
+    listed = await storage.list_server_ai_providers()
+    assert listed[0]["key_capture_status"] == "supported"
+
+
+async def test_removal_mid_capture_leaves_no_orphan_rows(client, monkeypatch):
+    """A capture whose provider was removed never resurrects rows (r3).
+
+    The removal deletes the key, selection, and key-scoped rows
+    atomically; the in-flight capture must lose and leave the deletion
+    standing — no orphaned models offered for a provider with no key.
+    """
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    inner_discovery = ai_client.models_for_api_key
+
+    async def removing_discovery(provider, key):
+        # The provider is removed while discovery is in flight.
+        await storage.delete_server_ai_provider(provider)
+        return await inner_discovery(provider, key)
+
+    monkeypatch.setattr(ai_client, "models_for_api_key", removing_discovery)
+    refreshed = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["status"] == "superseded"
+    assert await storage.list_server_provider_key_models() == []
+    assert await storage.get_server_ai_credential("google") is None
+
+
+async def test_refresh_never_binds_capture_to_missing_credential(client, monkeypatch):
+    """A provider removed before the generation read 404s instead (r3).
+
+    A None generation must never become an unbound capture — that write
+    would re-insert the rows the removal just deleted.
+    """
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    real_generation = storage.get_server_credential_generation
+
+    async def remove_then_read(provider):
+        # The removal lands between the key read and the generation read.
+        await storage.delete_server_ai_provider(provider)
+        return await real_generation(provider)
+
+    monkeypatch.setattr(storage, "get_server_credential_generation", remove_then_read)
+    refreshed = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert refreshed.status_code == 404
+    assert refreshed.json()["detail"] == "Provider 'google' has no stored key"
+    assert await storage.list_server_provider_key_models() == []
+
+
+async def test_failed_refresh_with_snapshot_stays_key_scoped(client, monkeypatch):
+    """A failed refresh keeps the snapshot AND reports unavailable (r3).
+
+    The API must surface ``key_scoped: true`` together with
+    ``key_scoped_status: "unavailable"`` — that combination is what lets
+    the card show a stale-listing hint instead of hiding the failure.
+    """
+    import httpx
+
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    _mock_key_discovery(monkeypatch, httpx.ConnectError("sidecar down"))
+    degraded = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert degraded.status_code == 200
+    assert degraded.json()["status"] == "unavailable"
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+    providers = {p["provider"]: p for p in listed.json()["providers"]}
+    assert providers["google"]["key_scoped"] is True
+    assert providers["google"]["key_scoped_status"] == "unavailable"

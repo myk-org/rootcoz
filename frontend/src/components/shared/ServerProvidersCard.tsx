@@ -49,10 +49,10 @@ export function ServerProvidersCard() {
   const [removeTarget, setRemoveTarget] = useState<{ provider: string; warning: RemoveWarning } | null>(null)
   const { providers: catalog, originalIds } = useProviderCatalog()
 
-  function refreshProviders(): Promise<boolean> {
+  function refreshProviders(): Promise<ServerProvider[] | null> {
     return api.get<ServerProviderListResult>('/api/admin/server-providers')
-      .then((result) => { setProviders(result.providers); return true })
-      .catch(() => { setError('Could not load server providers'); return false })
+      .then((result) => { setProviders(result.providers); return result.providers })
+      .catch(() => { setError('Could not load server providers'); return null })
   }
 
   useEffect(() => {
@@ -196,9 +196,16 @@ export function ServerProvidersCard() {
       resetProviderCatalogCache()
       const refetched = await refreshProviders()
       if (refetched) {
-        setNotice(res.status === 'supported'
-          ? `Refreshed key-scoped models for ${providerId}: ${res.model_count} model(s).`
-          : `Key-scoped listing ${res.status} for ${providerId}; selection uses the static catalog.`)
+        if (res.status === 'supported') {
+          setNotice(`Refreshed key-scoped models for ${providerId}: ${res.model_count} model(s).`)
+        } else if (refetched.find((p) => p.provider === providerId)?.key_scoped) {
+          // A failed refresh kept the last captured listing (#350 r3) —
+          // the notice must not imply a static-catalog fallback while a
+          // snapshot is still in use.
+          setNotice(`Key-scoped listing ${res.status} for ${providerId}; the previous captured listing is still in use.`)
+        } else {
+          setNotice(`Key-scoped listing ${res.status} for ${providerId}; selection uses the static catalog.`)
+        }
       }
     } catch (err) {
       setError(extractApiDetail(err) ?? 'Could not refresh models')
@@ -231,7 +238,19 @@ export function ServerProvidersCard() {
                     <>
                       <Badge variant={item.verified ? 'success' : 'warning'}>{item.verified ? 'Verified' : 'Unverified'}</Badge>
                       {item.key_scoped ? (
-                        <Badge variant="outline" title="Model selection is restricted to what the stored key can access">Key-scoped</Badge>
+                        <>
+                          <Badge variant="outline" title="Model selection is restricted to what the stored key can access">Key-scoped</Badge>
+                          {item.key_scoped_status === 'unavailable' && (
+                            // A failed refresh kept the snapshot (#350 r3) —
+                            // surface the failure even though rows exist.
+                            <span
+                              className="text-xs text-text-tertiary"
+                              title="Model listing failed — showing the last captured list; try Refresh models"
+                            >
+                              listing failed — showing last capture
+                            </span>
+                          )}
+                        </>
                       ) : (
                         <span
                           className="text-xs text-text-tertiary"
