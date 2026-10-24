@@ -92,6 +92,15 @@ _state: dict[str, Any] = {}
 # both globally (before the subcommand) and per-command (after it).
 _JSON_OPTION = typer.Option(False, "--json", help="Output as JSON instead of table.")
 
+# Settings export/import options (#361) — module-level singletons so ruff's
+# B008 accepts them as argument defaults (None/... defaults get flagged).
+_EXPORT_OUTPUT_OPTION = typer.Option(
+    None, "--output", "-o", help="Write the JSON document to a file instead of stdout."
+)
+_IMPORT_INPUT_OPTION = typer.Option(
+    ..., "--input", "-i", help="Settings export JSON file to import."
+)
+
 # Config subcommands that require a server connection (all others are local-only).
 _SERVER_CONFIG_SUBCOMMANDS = frozenset({"defaults", "filter-presets"})
 
@@ -3540,6 +3549,69 @@ def admin_settings_persist(
     )
     if not _state.get("json", False):
         typer.echo(f"Persisted to DB: {key}")
+
+
+@admin_settings_app.command("export")
+def admin_settings_export(
+    include_sensitive: bool = typer.Option(
+        False,
+        "--include-sensitive",
+        help="Include decrypted sensitive settings (the file will contain secrets).",
+    ),
+    output: Path = _EXPORT_OUTPUT_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Export DB-stored server settings to a JSON document."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_export_settings(include_sensitive=include_sensitive),
+        emit_output=False,
+        quiet=bool(output),
+    )
+    if output:
+        output.write_text(json_mod.dumps(data, indent=2) + "\n")
+        if not _state.get("json", False):
+            typer.echo(f"Exported {len(data.get('settings', {}))} settings to {output}")
+            if data.get("warning"):
+                typer.echo(f"Warning: {data['warning']}")
+    elif not _state.get("json", False):
+        typer.echo(json_mod.dumps(data, indent=2))
+
+
+@admin_settings_app.command("import")
+def admin_settings_import(
+    input: Path = _IMPORT_INPUT_OPTION,
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate and show the diff without applying anything.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Import a settings export document (validated, atomic, with a diff)."""
+    try:
+        document = json_mod.loads(input.read_text())
+    except (OSError, json_mod.JSONDecodeError) as exc:
+        typer.echo(f"Error reading {input}: {exc}", err=True)
+        raise typer.Exit(1)
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_import_settings(document, dry_run=dry_run),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        applied = data.get("applied", {})
+        unchanged = data.get("unchanged", [])
+        for key, diff in sorted(applied.items()):
+            typer.echo(f"  {key}: {diff.get('from')!r} -> {diff.get('to')!r}")
+        typer.echo(
+            f"{len(applied)} setting(s) "
+            f"{'would be ' if dry_run else ''}applied, {len(unchanged)} unchanged"
+        )
+        if data.get("restart_required"):
+            typer.echo(f"Restart required for: {', '.join(data['restart_required'])}")
+        for warning in data.get("warnings", []):
+            typer.echo(f"Warning: {warning}")
 
 
 @admin_settings_app.command("test")

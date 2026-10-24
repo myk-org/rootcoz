@@ -9677,6 +9677,203 @@ class TestAdminSettingsEndpoints:
         assert response.status_code in (401, 403)
 
 
+class TestAdminSettingsExportImport:
+    """Tests for GET /api/admin/settings/export and POST /api/admin/settings/import."""
+
+    _NO_ADMIN_HEADERS: ClassVar[dict[str, str]] = {"Authorization": ""}
+
+    def test_export_contains_only_db_stored_settings(self, test_client) -> None:
+        """Export holds DB overrides only — env/default values stay out."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_url": "https://db.jenkins.com"}},
+        )
+        response = test_client.get("/api/admin/settings/export")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        doc = response.json()
+        assert doc["version"] == 1
+        assert "exported_at" in doc
+        # jenkins_url has a DB override; ai_call_timeout does not (env/default)
+        assert doc["settings"] == {"jenkins_url": "https://db.jenkins.com"}
+
+    def test_export_excludes_sensitive_by_default(self, test_client) -> None:
+        """Sensitive settings are omitted unless include_sensitive is set."""
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"github_token": "gh-secret"}
+            },  # pragma: allowlist secret
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "github_token" not in doc["settings"]
+        assert "warning" not in doc
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == "gh-secret"
+        assert "secrets" in doc["warning"]
+
+    def test_export_skips_internal_rows(self, test_client) -> None:
+        """Internal bookkeeping rows (jira_verified_method) never export."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jira_auth_mode": "basic"}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "jira_verified_method" not in doc["settings"]
+        assert doc["settings"]["jira_auth_mode"] == "basic"
+
+    def test_export_non_admin_forbidden(self, test_client) -> None:
+        response = test_client.get(
+            "/api/admin/settings/export", headers=self._NO_ADMIN_HEADERS
+        )
+        assert response.status_code in (401, 403)
+
+    def test_import_applies_and_reports_diff(self, test_client) -> None:
+        """A valid document applies and returns per-setting diff."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10", "log_level": "INFO"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "ai_call_timeout": "25",
+                    "log_level": "INFO",
+                    "public_base_url": "https://rootcoz.example.com",
+                },
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["applied"] == {
+            "ai_call_timeout": {"from": "10", "to": "25"},
+            "public_base_url": {"from": None, "to": "https://rootcoz.example.com"},
+        }
+        assert data["unchanged"] == ["log_level"]
+        # log_level changed nothing; public_base_url needs no restart
+        assert data["restart_required"] == []
+        # Values actually applied
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "25"
+
+    def test_import_reports_restart_required(self, test_client) -> None:
+        """Changed restart-required settings are listed in the response."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"log_level": "DEBUG", "vapid_claim_email": "a@b.c"},
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["restart_required"] == ["log_level", "vapid_claim_email"]
+
+    def test_import_masks_sensitive_values_in_diff(self, test_client) -> None:
+        """Sensitive values never appear in the diff — masked as ***."""
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"github_token": "old-secret"}
+            },  # pragma: allowlist secret
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"github_token": "new-secret"},
+            },  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert response.json()["applied"]["github_token"] == {
+            "from": "***",
+            "to": "***",
+        }
+        # The value itself round-trips: re-export with sensitive included
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == "new-secret"
+
+    def test_import_invalid_value_is_atomic(self, test_client) -> None:
+        """One invalid entry rejects the whole import — nothing is applied."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"ai_call_timeout": "30", "jenkins_timeout": "abc"},
+            },
+        )
+        assert response.status_code == 422
+        assert "jenkins_timeout" in response.json()["detail"]
+        # The valid entry was NOT applied
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "10"
+
+    def test_import_unknown_key_rejected(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"nonexistent_key": "x"}},
+        )
+        assert response.status_code == 422
+        assert "Unknown settings" in response.json()["detail"]
+
+    def test_import_server_only_key_rejected(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"admin_key": "new-key"},
+            },  # pragma: allowlist secret
+        )
+        assert response.status_code == 422
+        assert "Server-only" in response.json()["detail"]
+
+    def test_import_rejects_wrong_version_and_empty(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 2, "settings": {"ai_call_timeout": "30"}},
+        )
+        assert response.status_code == 422
+        assert "version" in response.json()["detail"]
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {}},
+        )
+        assert response.status_code == 422
+
+    def test_import_dry_run_validates_without_applying(self, test_client) -> None:
+        """dry_run reports the diff but writes nothing."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "dry_run": True,
+                "settings": {"ai_call_timeout": "40"},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["dry_run"] is True
+        assert data["applied"] == {"ai_call_timeout": {"from": None, "to": "40"}}
+        # Nothing was written — no DB override exists
+        assert _settings_item(test_client, "ai_call_timeout")["source"] != "db"
+
+    def test_import_non_admin_forbidden(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"ai_call_timeout": "30"}},
+            headers=self._NO_ADMIN_HEADERS,
+        )
+        assert response.status_code in (401, 403)
+
+
 class TestIntegrationConnectionEndpoints:
     """Tests for POST /api/admin/settings/test/{integration}."""
 

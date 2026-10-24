@@ -79,6 +79,7 @@ Jobs can omit `gcs_prefix`; RootCoz auto-resolves it via prowjob.json or the Pro
 - **Public OpenAPI** — `/openapi.json`, `/docs`, and `/redoc` are available without authentication
 - **Sparse result fields** — `GET /results/{job_id}?fields=status,result.summary,...` returns only allowlisted paths (full values). Discover paths via `GET /api/results/fields` or `rootcoz results fields`
 - **Reports access flag** — Non-admins need `can_view_reports` (admin grant / `rootcoz admin users set-can-view-reports`) to call `/api/reports/*` and `rootcoz reports`
+- **Server settings export/import** — Admins can export all DB-stored server settings to JSON and import them on another instance (`rootcoz admin settings export` / `import`, or the Server Settings page)
 - **Analyze-time labels** — Pass `--label` / `-l` on `rootcoz analyze` (or `labels` in the API / config.toml) to merge job metadata labels at submit time
 
 ## Custom Analysis Agents

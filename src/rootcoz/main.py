@@ -111,6 +111,7 @@ from rootcoz.config import (
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
+    decrypt_value_or_none,
     encrypt_sensitive_fields,
     get_hmac_secret,
     strip_sensitive_from_response,
@@ -12969,35 +12970,29 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
-@app.put("/api/admin/settings", operation_id="updateAdminSettings")
-async def update_admin_settings(request: Request) -> JSONResponse:
-    """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
-    _require_admin(request)
-    body = await request.json()
-    settings_updates = body.get("settings", {})
+def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
+    """Validate admin settings updates; return per-entry error messages.
 
-    if not settings_updates:
-        raise HTTPException(status_code=400, detail="No settings provided")
+    Shared by the PUT update and the settings import endpoints so every
+    write path applies the same rules. Mutates *settings_updates* the same
+    way the PUT path always has: fields with model-level validators are
+    normalized in place.
+    """
+    errors: list[str] = []
 
     # Validate keys exist in Settings model
     valid_keys = set(Settings.model_fields.keys())
     invalid_keys = set(settings_updates.keys()) - valid_keys
     if invalid_keys:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown settings: {', '.join(sorted(invalid_keys))}",
-        )
+        errors.append(f"Unknown settings: {', '.join(sorted(invalid_keys))}")
 
     # Block writes to server-only settings — these are env-only toggles
     server_only_keys = set(settings_updates.keys()) & _SERVER_ONLY_SETTINGS
     if server_only_keys:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Server-only settings (env var only): {', '.join(sorted(server_only_keys))}",
+        errors.append(
+            f"Server-only settings (env var only): "
+            f"{', '.join(sorted(server_only_keys))}"
         )
-
-    # Validate values against Settings field types and constraints
-    errors = []
 
     # Pre-validate fields with Pydantic model-level validators
     for key in ("prow_url", "gcs_bucket", "jira_auth_mode", "default_user_role"):
@@ -13015,6 +13010,8 @@ async def update_admin_settings(request: Request) -> JSONResponse:
                 errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
 
     for key, value in settings_updates.items():
+        if key not in valid_keys:
+            continue
         field_info = Settings.model_fields[key]
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
@@ -13074,6 +13071,20 @@ async def update_admin_settings(request: Request) -> JSONResponse:
                         errors.append(f"{key}: must be <= {meta.le}")
             except ValueError, TypeError:
                 errors.append(f"{key}: must be an integer")
+    return errors
+
+
+@app.put("/api/admin/settings", operation_id="updateAdminSettings")
+async def update_admin_settings(request: Request) -> JSONResponse:
+    """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
+    _require_admin(request)
+    body = await request.json()
+    settings_updates = body.get("settings", {})
+
+    if not settings_updates:
+        raise HTTPException(status_code=400, detail="No settings provided")
+
+    errors = _validate_settings_updates(settings_updates)
     if errors:
         raise HTTPException(
             status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
@@ -13095,6 +13106,169 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         content=content,
         status_code=200,
     )
+
+
+# Schema version of the settings export document — bumped on breaking
+# changes to the export shape so imports can reject mismatched documents.
+_SETTINGS_EXPORT_VERSION = 1
+
+# Warning shown when an export includes decrypted sensitive values.
+_SETTINGS_EXPORT_SECRETS_WARNING = (
+    "This export contains decrypted secrets in plaintext — store and "
+    "transfer it securely and delete it once imported."
+)
+
+
+def _diff_import_updates(
+    updates: dict[str, str], db_settings: dict[str, dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+    """Diff import values against current DB overrides.
+
+    Returns ``(applied, unchanged, restart_required)`` — sensitive values
+    are masked as ``"***"`` and never appear in the diff.
+    """
+    applied: dict[str, dict[str, Any]] = {}
+    unchanged: list[str] = []
+    restart_required: list[str] = []
+    for key, value in updates.items():
+        old = db_settings[key]["value"] if key in db_settings else None
+        if old and key in _SENSITIVE_SETTINGS:
+            # Compare against decrypted plaintext; an undecryptable value
+            # (key rotation) counts as changed so the import overwrites it.
+            old = decrypt_value_or_none(old)
+        if old == value:
+            unchanged.append(key)
+            continue
+        masked = key in _SENSITIVE_SETTINGS
+        applied[key] = {
+            "from": "***" if masked else old,
+            "to": "***" if masked else value,
+        }
+        if key in _RESTART_REQUIRED_SETTINGS:
+            restart_required.append(key)
+    return applied, unchanged, restart_required
+
+
+@app.get("/api/admin/settings/export", operation_id="exportServerSettings")
+async def export_server_settings(
+    request: Request,
+    include_sensitive: bool = Query(
+        False, description="Include decrypted sensitive settings in the export"
+    ),
+) -> JSONResponse:
+    """Export all DB-stored server settings as a JSON document.
+
+    Only database overrides are exported — env-only values are deployment
+    config, not server settings. Sensitive settings are excluded unless
+    ``include_sensitive`` is set; when included they are decrypted plaintext
+    (re-encrypted values would only be usable with the same
+    ``ROOTCOZ_ENCRYPTION_KEY``), and the response carries a warning.
+    """
+    _require_admin(request)
+
+    settings: dict[str, str] = {}
+    sensitive_included = False
+    for key, row in sorted((await storage.get_server_settings()).items()):
+        # Internal bookkeeping rows (e.g. jira_verified_method) and
+        # server-only bootstrap values are not admin settings — skip them.
+        if key not in _FIELD_TO_CATEGORY or key in _SERVER_ONLY_SETTINGS:
+            continue
+        value = row["value"]
+        if key in _SENSITIVE_SETTINGS:
+            if not include_sensitive:
+                continue
+            sensitive_included = True
+            decrypted = decrypt_value_or_none(value)
+            if decrypted is None:
+                # Undecryptable ciphertext (key rotation) is useless in an
+                # export — skip rather than ship garbage.
+                logger.debug("Cannot decrypt setting %s for export; skipping", key)
+                continue
+            value = decrypted
+        settings[key] = value
+
+    content: dict[str, Any] = {
+        "version": _SETTINGS_EXPORT_VERSION,
+        "exported_at": datetime.now(UTC).isoformat(),
+        "settings": settings,
+    }
+    if sensitive_included:
+        content["warning"] = _SETTINGS_EXPORT_SECRETS_WARNING
+
+    logger.info(
+        "Admin settings exported: keys=%d, include_sensitive=%s, by=%s",
+        len(settings),
+        include_sensitive,
+        request.state.username,
+    )
+    return JSONResponse(content=content, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/admin/settings/import", operation_id="importServerSettings")
+async def import_server_settings(request: Request) -> JSONResponse:
+    """Import a settings export document (validated, atomic, with a diff).
+
+    Body: an export document, optionally with ``"dry_run": true`` to
+    validate and report the diff without applying anything. Every key and
+    value is validated before anything is written — one invalid entry
+    rejects the whole import (422 with the offending entries listed).
+    """
+    _require_admin(request)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="Body must be a JSON settings export document"
+        )
+    if not isinstance(body, dict) or body.get("version") != _SETTINGS_EXPORT_VERSION:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Unsupported export document: expected version "
+                f"{_SETTINGS_EXPORT_VERSION}"
+            ),
+        )
+    raw_settings = body.get("settings")
+    if not isinstance(raw_settings, dict) or not raw_settings:
+        raise HTTPException(status_code=422, detail="No settings in export document")
+    updates = {str(k): "" if v is None else str(v) for k, v in raw_settings.items()}
+
+    # Validate the whole batch before anything is applied — the same
+    # rules the per-setting PUT enforces, plus the empty-override gates
+    # the shared save path applies (checked here so a rejection is a 422
+    # before any DB write, keeping the import atomic).
+    errors = _validate_settings_updates(updates)
+    for key, value in updates.items():
+        if not value and (error := _empty_override_error(key)):
+            errors.append(error)
+    if errors:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid settings: {'; '.join(errors)}"
+        )
+
+    applied, unchanged, restart_required = _diff_import_updates(
+        updates, await storage.get_server_settings()
+    )
+    content: dict[str, Any] = {
+        "applied": applied,
+        "unchanged": unchanged,
+        "restart_required": restart_required,
+    }
+    if body.get("dry_run"):
+        content["dry_run"] = True
+        return JSONResponse(content=content)
+
+    username = request.state.username or "admin"
+    warnings = await _save_settings_to_db(updates, username)
+    if warnings:
+        content["warnings"] = warnings
+    logger.info(
+        "Admin settings imported: applied=%d, unchanged=%d, by=%s",
+        len(applied),
+        len(unchanged),
+        username,
+    )
+    return JSONResponse(content=content)
 
 
 # Settings where an explicit empty override is unsafe regardless of type:

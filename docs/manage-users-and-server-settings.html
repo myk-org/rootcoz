@@ -655,6 +655,7 @@
 <h2 id="advanced-usage">Advanced Usage</h2>
 <ul>
 <li><strong>Reset to environment values.</strong> Database overrides always win over environment variables. Reset the setting in the UI (or delete it with <code>DELETE /api/admin/settings/{key}</code>) when you want the deployment's env var back in charge.</li>
+<li><strong>Export and import server settings.</strong> The Server Settings page has <code>Export settings</code> / <code>Import settings</code> buttons in the header. Export downloads a JSON document of the <strong>database overrides only</strong> — environment-only values are deployment config, not server settings, and stay out. Sensitive settings (API keys, tokens, passwords) are excluded unless you tick <code>Include secrets</code> and confirm the warning; the file then holds them as plaintext (re-encrypted values would only be usable with the same <code>ROOTCOZ_ENCRYPTION_KEY</code>), so store and transfer it securely and delete it once imported. Import validates every key and value with the same rules as saving a single setting, applies the whole document <strong>atomically</strong> — one invalid value rejects the entire import with <code>422</code> and nothing is applied — and reports a per-setting diff plus which changed settings need a restart. Sensitive values are masked (<code>***</code>) in the diff and never appear in it. The CLI mirrors both: <code>rootcoz admin settings export [--include-sensitive] [--output FILE]</code> and <code>rootcoz admin settings import --input FILE [--dry-run]</code>, where <code>--dry-run</code> validates and shows the diff without applying anything.</li>
 <li><strong>Audit trail.</strong> Logins, registrations, key rotations, approvals, role changes, report grants, and deletions are all written to the audit log with the acting admin's username, and both actions and log lines are visible on the <code>Logs</code> page.</li>
 <li><strong>Automate with the CLI.</strong> User creation, role changes, <code>can_view_reports</code>, and pending approvals are all available from the CLI (<code>admin users ...</code>). See <a href="cli-reference.html">CLI Command Reference</a> for details.</li>
 <li><strong>Give analysis more context.</strong> The <code>AI</code>, <code>GitHub</code>, and <code>Server</code> categories hold most of the knobs that change how much context an analysis gets. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</li>
@@ -695,6 +696,10 @@
 <li>
 <p>A setting did not take effect after saving.<br>
   Check for the ⚠️ restart badge. <code>default_user_role</code>, <code>secure_cookies</code>, <code>trust_proxy_headers</code>, <code>metadata_rules_file</code>, and the three <code>Web Push</code> settings only apply after the server restarts.</p>
+</li>
+<li>
+<p>A settings import was rejected with <code>Invalid settings: ...</code>.
+  Every key and value is checked before anything is applied, and one invalid entry rejects the whole import. The error lists the offending entries — fix them in the export file (or on the source server) and import again. Nothing was partially applied.</p>
 </li>
 <li>
 <p>Everyone's logins and tokens broke after an infrastructure change.<br>

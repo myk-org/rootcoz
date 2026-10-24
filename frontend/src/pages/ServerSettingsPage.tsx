@@ -40,6 +40,9 @@ import {
   Clock,
   RefreshCw,
   Zap,
+  Download,
+  Upload,
+  X,
 } from 'lucide-react'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -79,6 +82,15 @@ interface ServerSetting {
 interface CategoryGroup {
   category: string
   settings: ServerSetting[]
+}
+
+// POST /api/admin/settings/import response — sensitive values arrive masked.
+interface SettingsImportResult {
+  applied: Record<string, { from: string | null; to: string }>
+  unchanged: string[]
+  restart_required: string[]
+  warnings?: string[]
+  dry_run?: boolean
 }
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
@@ -505,6 +517,16 @@ export function ServerSettingsPage() {
   // "Save to DB" in-flight key (persisting an env-sourced setting into the DB).
   const [persistingKey, setPersistingKey] = useState<string | null>(null)
 
+  // Settings export/import state (#361)
+  const [exporting, setExporting] = useState(false)
+  const [includeSecrets, setIncludeSecrets] = useState(false)
+  const [confirmSecretExport, setConfirmSecretExport] = useState(false)
+  const [importDoc, setImportDoc] = useState<{ name: string; doc: unknown } | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<SettingsImportResult | null>(null)
+  const [settingsIoError, setSettingsIoError] = useState<string | null>(null)
+  const importFileRef = useRef<HTMLInputElement>(null)
+
   // Debounced search
   const [searchInput, setSearchInput] = useState('')
   useEffect(() => {
@@ -644,6 +666,78 @@ export function ServerSettingsPage() {
       dispatch({ type: 'SAVE_ERROR', error: msg })
     } finally {
       setPersistingKey(null)
+    }
+  }
+
+  // ---- Export / import server settings (#361) ----
+  async function runExport() {
+    setExporting(true)
+    setSettingsIoError(null)
+    try {
+      const doc = await api.get<Record<string, unknown>>(
+        `/api/admin/settings/export${includeSecrets ? '?include_sensitive=true' : ''}`,
+      )
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `rootcoz-settings-${new Date().toISOString().slice(0, 10)}.json`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setSettingsIoError(
+        err instanceof ApiError
+          ? extractApiDetail(err) ?? `Export failed (${err.status})`
+          : 'Failed to export settings',
+      )
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  function handleExport() {
+    // Including secrets needs an explicit confirmation — the file holds them
+    // in plaintext.
+    if (includeSecrets) {
+      setConfirmSecretExport(true)
+      return
+    }
+    void runExport()
+  }
+
+  function handleImportFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = '' // allow re-selecting the same file
+    if (!file) return
+    setSettingsIoError(null)
+    void file.text().then(text => {
+      try {
+        setImportDoc({ name: file.name, doc: JSON.parse(text) })
+      } catch {
+        setSettingsIoError(`${file.name} is not a valid JSON file`)
+      }
+    })
+  }
+
+  async function handleConfirmImport() {
+    if (!importDoc) return
+    setImporting(true)
+    try {
+      const result = await api.post<SettingsImportResult>(
+        '/api/admin/settings/import',
+        importDoc.doc,
+      )
+      setImportResult(result)
+      setImportDoc(null)
+      await fetchSettings(true)
+    } catch (err) {
+      setSettingsIoError(
+        err instanceof ApiError
+          ? extractApiDetail(err) ?? `Import failed (${err.status})`
+          : 'Failed to import settings',
+      )
+    } finally {
+      setImporting(false)
     }
   }
 
@@ -1498,6 +1592,41 @@ export function ServerSettingsPage() {
               </TooltipTrigger>
               <TooltipContent>Collapse all categories</TooltipContent>
             </Tooltip>
+            <label className="flex shrink-0 items-center gap-1.5 text-xs text-text-secondary">
+              <Checkbox
+                checked={includeSecrets}
+                onCheckedChange={(checked) => setIncludeSecrets(checked === true)}
+                aria-label="Include secrets in export"
+              />
+              Include secrets
+            </label>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={handleExport}
+              disabled={exporting}
+            >
+              {exporting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Download className="mr-1 h-3.5 w-3.5" />}
+              Export settings
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={() => importFileRef.current?.click()}
+              disabled={importing}
+            >
+              {importing ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Upload className="mr-1 h-3.5 w-3.5" />}
+              Import settings
+            </Button>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept="application/json"
+              className="hidden"
+              onChange={handleImportFile}
+            />
           </div>
         </div>
 
@@ -1515,6 +1644,78 @@ export function ServerSettingsPage() {
         {saveWarning && (
           <p role="status" className="text-center text-signal-amber text-sm py-2">{saveWarning}</p>
         )}
+
+        {/* Export/import errors (#361) */}
+        {settingsIoError && (
+          <p role="alert" className="text-center text-signal-red text-sm py-2">{settingsIoError}</p>
+        )}
+
+        {/* Import summary (#361) */}
+        {importResult && (
+          <div role="status" className="space-y-2 rounded-lg border border-border-default bg-surface-card p-4 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-text-primary">
+                Imported {Object.keys(importResult.applied).length} setting{Object.keys(importResult.applied).length === 1 ? '' : 's'}, {importResult.unchanged.length} unchanged
+              </span>
+              <button
+                type="button"
+                onClick={() => setImportResult(null)}
+                className="rounded-md p-1 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary"
+                aria-label="Dismiss import summary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {importResult.restart_required.length > 0 && (
+              <p className="flex items-center gap-1.5 text-signal-amber">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                Restart required for: {importResult.restart_required.join(', ')}
+              </p>
+            )}
+            {Object.entries(importResult.applied).map(([key, diff]) => (
+              <p key={key} className="font-mono text-xs text-text-secondary">
+                {key}: {diff.from ?? '(not set)'} &rarr; {diff.to}
+              </p>
+            ))}
+            {importResult.warnings?.map(warning => (
+              <p key={warning} className="text-xs text-signal-amber">{warning}</p>
+            ))}
+          </div>
+        )}
+
+        {/* Export-with-secrets confirmation (#361) */}
+        <AlertDialog open={confirmSecretExport} onOpenChange={setConfirmSecretExport}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Export includes secrets</AlertDialogTitle>
+              <AlertDialogDescription>
+                The exported file will contain sensitive settings (API keys, tokens, passwords) in plaintext. Store and transfer it securely, and delete it once imported.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void runExport()}>Export</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Import confirmation (#361) */}
+        <AlertDialog open={importDoc !== null} onOpenChange={(open) => !open && setImportDoc(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Import settings</AlertDialogTitle>
+              <AlertDialogDescription>
+                Apply the settings from {importDoc?.name}? Values in the file overwrite the current database overrides — the import is validated first and rejected as a whole if any value is invalid.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void handleConfirmImport()}>
+                {importing ? 'Importing…' : 'Import'}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         {/* Loading skeleton */}
         {state.loading ? (

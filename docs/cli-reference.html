@@ -1118,6 +1118,16 @@
 <td>Drop the DB override and fall back to env or default.</td>
 </tr>
 <tr>
+<td><code>settings export</code></td>
+<td><code>--include-sensitive</code>, <code>--output</code>/<code>-o</code></td>
+<td>Write the DB-stored settings to a JSON document (stdout without <code>--output</code>). Secrets are excluded unless <code>--include-sensitive</code>.</td>
+</tr>
+<tr>
+<td><code>settings import</code></td>
+<td><code>--input</code>/<code>-i</code> (required), <code>--dry-run</code></td>
+<td>Apply an export document. Validated and atomic; prints a per-setting diff. <code>--dry-run</code> validates and shows the diff without applying.</td>
+</tr>
+<tr>
 <td><code>models refresh</code></td>
 <td>—</td>
 <td>Re-read the model list from the sidecar.</td>
