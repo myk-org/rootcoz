@@ -12350,16 +12350,17 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
         for row in await storage.list_free_ai_models()
         if row["provider"].lower() == provider.lower()
     }
-    key_scoped = [
-        row["model"]
+    key_scoped_rows = [
+        row
         for row in await storage.list_server_provider_key_models()
         if row["provider"].lower() == provider.lower()
     ]
-    if key_scoped:
+    if key_scoped_rows:
         # Key-scoped (#350): seed exactly what the key can access — the
         # static catalog may list models this key cannot use, and may lack
-        # models it can.
-        base_models = key_scoped
+        # models it can. A sentinel-only listing (verified empty) seeds
+        # nothing: the key can access no models at all.
+        base_models = [row["model"] for row in key_scoped_rows if row["model"]]
     else:
         base_models = [
             entry["id"]
@@ -12387,33 +12388,60 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
 
 
 async def _capture_key_scoped_models(
-    provider: str, key: str, updated_by: str
+    provider: str, key: str
 ) -> tuple[list[dict[str, Any]], str]:
     """Run key-scoped discovery and persist its result (#350).
 
     Returns ``(models, status)`` where status is ``"supported"`` (rows
-    stored), ``"unsupported"`` (no listing endpoint — rows cleared), or
-    ``"unavailable"`` (discovery failed — rows cleared). The two
-    non-supported outcomes never raise: the caller's operation succeeds
-    and the server pool falls back to the static catalog for this
-    provider.
+    stored), ``"unsupported"`` (no listing endpoint — rows cleared),
+    ``"unavailable"`` (discovery failed — previous rows KEPT, so a sidecar
+    hiccup never reverts the provider to the static catalog), or
+    ``"superseded"`` (the stored credential changed during discovery — the
+    capture is discarded so one key never wears another key's listing; a
+    rotation to the same key value is harmless and proceeds). Only
+    ``source: "listing"`` models are stored: manifest-only models are not
+    key-verified. A supported listing with zero accessible models is
+    stored as a sentinel row — "verified empty" — so the pool exposes
+    nothing instead of falling back to the catalog.
     """
-    models: list[dict[str, Any]] = []
-    status = "unsupported"
     try:
         from rootcoz.ai_client import models_for_api_key
 
         discovery = await models_for_api_key(provider, key)
-        if discovery["modelListingSupported"]:
-            models = discovery["models"]
-            status = "supported"
     except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
-        status = "unavailable"
         logger.warning(
             "Key-scoped model discovery unavailable for provider=%s", provider
         )
-    await storage.set_server_provider_key_models(provider, models, updated_by)
-    return models, status
+        return [], "unavailable"
+    try:
+        current_key = await storage.get_server_ai_credential(provider)
+    except storage.UnreadableAiCredentialsError:
+        current_key = None
+    if current_key != key:
+        logger.warning(
+            "Key-scoped capture superseded for provider=%s (credential changed"
+            " during discovery); discarding",
+            provider,
+        )
+        return [], "superseded"
+    if not discovery["modelListingSupported"]:
+        await storage.set_server_provider_key_models(provider, [])
+        return [], "unsupported"
+    # Manifest-only models are the provider manifest's, not the key's — a
+    # restricted key must never see them as verified (#350 r1).
+    listing_models = [
+        entry for entry in discovery["models"] if entry.get("source") != "manifest"
+    ]
+    if listing_models:
+        await storage.set_server_provider_key_models(provider, listing_models)
+        return listing_models, "supported"
+    # Supported listing, zero key-accessible models: the sentinel row keeps
+    # "verified empty" distinct from "no listing" so the pool exposes
+    # nothing instead of falling back to the static catalog (#350 r1).
+    await storage.set_server_provider_key_models(
+        provider, [{"id": "", "sentinel": True}]
+    )
+    return [], "supported"
 
 
 async def _verify_and_store_server_provider_key(
@@ -12482,9 +12510,7 @@ async def _verify_and_store_server_provider_key(
     # models this key can actually access. A listing-unsupported provider or
     # a transient discovery failure never blocks the add — it stores no rows,
     # and the server pool falls back to the static catalog for this provider.
-    key_models, capture_status = await _capture_key_scoped_models(
-        provider, key, request.state.username or "admin"
-    )
+    key_models, capture_status = await _capture_key_scoped_models(provider, key)
     if not replacing:
         await _seed_server_provider_selection(
             provider, request.state.username or "admin"
@@ -12554,6 +12580,8 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         )
     # Key-scoped models the static catalog lacks still belong to the offered
     # set (#350) — the listing is the source of truth for a keyed provider.
+    # The empty-string sentinel (verified-empty listing) contributes no
+    # offered model but still marks the provider key-scoped.
     for provider_lower, scoped_rows in key_scoped.items():
         provider = next(
             (p for p in models_by_provider if p.lower() == provider_lower),
@@ -12561,7 +12589,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         )
         known = {m["id"] for m in models_by_provider.get(provider, [])}
         for model, row in sorted(scoped_rows.items()):
-            if model not in known:
+            if model and model not in known:
                 models_by_provider.setdefault(provider, []).append(
                     {"id": model, "name": row.get("name") or model}
                 )
@@ -12679,9 +12707,11 @@ async def refresh_server_provider_models(
     Captures permission drift since add/rotate without re-entering the key:
     the refreshed listing replaces the stored rows, existing admin
     selections survive (runtime filtering withdraws newly inaccessible
-    models), and an existing selection is never reseeded — the same rules
-    rotate applies. Never re-verifies with an LLM call; a dead key simply
-    reports ``unavailable`` and leaves the catalog fallback in place.
+    models), and the selection is NEVER reseeded — a deliberately empty
+    selection (an admin who deselected every model) must survive a
+    refresh instead of quietly re-including the whole listing. Never
+    re-verifies with an LLM call; a dead key simply reports
+    ``unavailable`` and keeps the last captured listing.
     """
     _require_admin(request)
     canonical = await _canonical_key_provider_id(provider)
@@ -12700,12 +12730,7 @@ async def refresh_server_provider_models(
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
-    models, status = await _capture_key_scoped_models(
-        provider, key, request.state.username or "admin"
-    )
-    # Same seeding rule as add: a provider whose selection was never edited
-    # follows its (possibly changed) listing; an admin restriction survives.
-    await _seed_server_provider_selection(provider, request.state.username or "admin")
+    models, status = await _capture_key_scoped_models(provider, key)
     logger.info(
         "[AUDIT] Admin '%s' refreshed key-scoped models for '%s' (%s, %d models)",
         request.state.username,

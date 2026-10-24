@@ -49,10 +49,10 @@ export function ServerProvidersCard() {
   const [removeTarget, setRemoveTarget] = useState<{ provider: string; warning: RemoveWarning } | null>(null)
   const { providers: catalog, originalIds } = useProviderCatalog()
 
-  function refreshProviders() {
+  function refreshProviders(): Promise<boolean> {
     return api.get<ServerProviderListResult>('/api/admin/server-providers')
-      .then((result) => { setProviders(result.providers) })
-      .catch(() => { setError('Could not load server providers') })
+      .then((result) => { setProviders(result.providers); return true })
+      .catch(() => { setError('Could not load server providers'); return false })
   }
 
   useEffect(() => {
@@ -182,7 +182,9 @@ export function ServerProvidersCard() {
   }
 
   // Re-runs key-scoped discovery with the stored key (#350) — picks up
-  // permission drift without re-entering the key.
+  // permission drift without re-entering the key. The success notice only
+  // shows when the follow-up list refetch also succeeded — a refreshed
+  // listing with a stale card would claim success while showing old data.
   async function refreshModels(providerId: string) {
     if (busy) return
     setBusy(providerId)
@@ -192,10 +194,12 @@ export function ServerProvidersCard() {
       const res = await api.post<RefreshModelsResult>(
         `/api/admin/server-providers/${encodeURIComponent(providerId)}/refresh-models`)
       resetProviderCatalogCache()
-      await refreshProviders()
-      setNotice(res.status === 'supported'
-        ? `Refreshed key-scoped models for ${providerId}: ${res.model_count} model(s).`
-        : `Key-scoped listing ${res.status} for ${providerId}; selection uses the static catalog.`)
+      const refetched = await refreshProviders()
+      if (refetched) {
+        setNotice(res.status === 'supported'
+          ? `Refreshed key-scoped models for ${providerId}: ${res.model_count} model(s).`
+          : `Key-scoped listing ${res.status} for ${providerId}; selection uses the static catalog.`)
+      }
     } catch (err) {
       setError(extractApiDetail(err) ?? 'Could not refresh models')
     } finally {
@@ -231,7 +235,7 @@ export function ServerProvidersCard() {
                       ) : (
                         <span
                           className="text-xs text-text-tertiary"
-                          title="This provider has no model-listing endpoint — selection uses the static catalog"
+                          title="Model listing unavailable for this key — selection uses the static catalog; try Refresh models"
                         >
                           static catalog
                         </span>

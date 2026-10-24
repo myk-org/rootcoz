@@ -7031,6 +7031,39 @@ class TestAdminServerProvidersCommands:
             "gemini-2.5-pro",  # pragma: allowlist secret
         )
 
+    def test_server_providers_refresh_models(self, mock_client):
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "supported",
+            "model_count": 22,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "EnMaaS"],
+        )
+        assert result.exit_code == 0
+        assert "Refreshed key-scoped models for EnMaaS: 22 model(s)" in result.output
+        mock_client.admin_refresh_server_provider_models.assert_called_once_with(
+            "EnMaaS"
+        )
+
+    def test_server_providers_refresh_models_unavailable(self, mock_client):
+        """An unavailable listing reports the catalog fallback, not a failure."""
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "unavailable",
+            "model_count": 0,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "google"],
+        )
+        assert result.exit_code == 0
+        assert (
+            "Key-scoped model listing unavailable for google;"
+            " selection falls back to the static catalog" in result.output
+        )
+
     def test_server_providers_rotate_key_prompts_hidden_when_flag_omitted(
         self, mock_client
     ):

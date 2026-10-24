@@ -68,7 +68,8 @@ def _mock_key_discovery(monkeypatch, models, *, listing_supported=True):
     """Mock key-scoped discovery; ``models`` may be an exception to raise.
 
     The mock returns the normalized shape the real ``models_for_api_key``
-    produces (id/name/provider/capabilities entries).
+    produces (id/name/provider/source/capabilities entries). Entries may
+    carry ``"source": "manifest"`` to exercise manifest filtering.
     """
     calls = []
 
@@ -83,6 +84,7 @@ def _mock_key_discovery(monkeypatch, models, *, listing_supported=True):
                     "id": entry["id"],
                     "name": entry.get("name") or entry["id"],
                     "provider": provider,
+                    "source": entry.get("source", "listing"),
                     "capabilities": entry.get("capabilities", {}),
                 }
                 for entry in models
@@ -177,7 +179,6 @@ async def test_key_scoped_models_storage_roundtrip(tmp_path, monkeypatch):
             },
             {"id": "gemini-3-pro"},
         ],
-        "admin",
     )
     rows = await storage.list_server_provider_key_models()
     assert [(row["provider"], row["model"]) for row in rows] == [
@@ -192,20 +193,16 @@ async def test_key_scoped_models_storage_roundtrip(tmp_path, monkeypatch):
     assert rows[1]["capabilities"] is None
     # Case-insensitive replace: a different-case spelling swaps, not adds
     # (the submitted spelling wins, matching set_server_provider_models).
-    await storage.set_server_provider_key_models(
-        "Google", [{"id": "gemini-2.5-flash"}], "admin"
-    )
+    await storage.set_server_provider_key_models("Google", [{"id": "gemini-2.5-flash"}])
     rows = await storage.list_server_provider_key_models()
     assert [(row["provider"].lower(), row["model"]) for row in rows] == [
         ("google", "gemini-2.5-flash")
     ]
     # An empty list clears the rows — the catalog-fallback marker.
-    await storage.set_server_provider_key_models("google", [], "admin")
+    await storage.set_server_provider_key_models("google", [])
     assert await storage.list_server_provider_key_models() == []
     # Provider deletion removes key-scoped rows with everything else.
-    await storage.set_server_provider_key_models(
-        "google", [{"id": "gemini-2.5-pro"}], "admin"
-    )
+    await storage.set_server_provider_key_models("google", [{"id": "gemini-2.5-pro"}])
     await storage.set_server_ai_credential("google", SECRET, "admin")
     await storage.delete_server_ai_provider("google")
     assert await storage.list_server_provider_key_models() == []
@@ -510,7 +507,10 @@ async def test_add_captures_key_scoped_models_and_restricts_exposure(
     """A supported listing becomes the offered set — catalog and beyond (#350)."""
     key_models = [
         {"id": "gemini-2.5-pro", "name": "Gemini Pro"},
-        {"id": "gemini-3-pro", "capabilities": {"inputTokenLimit": 2000000}},
+        {
+            "id": "gemini-3-pro",
+            "capabilities": {"inputTokenLimit": 2000000, "outputTokenLimit": 65536},
+        },
     ]
     _add_google_provider(client, monkeypatch, key_models)
     # The listing was captured verbatim, capabilities included.
@@ -552,7 +552,10 @@ async def test_add_captures_key_scoped_models_and_restricts_exposure(
         gemini3 = next(m for m in scoped["google"] if m["id"] == "gemini-3-pro")
         assert gemini3["verified"] is True
         assert gemini3["name"] == "gemini-3-pro"
-        assert gemini3["capabilities"] == {"inputTokenLimit": 2000000}
+        assert gemini3["capabilities"] == {
+            "inputTokenLimit": 2000000,
+            "outputTokenLimit": 65536,
+        }
     finally:
         ai_client.force_server_credentials.reset(token)
     await ai_client.require_selected_server_pair("google", "gemini-3-pro")
@@ -640,7 +643,9 @@ async def test_refresh_models_endpoint(client, monkeypatch):
     assert {(row["provider"], row["model"]) for row in selection} == {
         ("google", "gemini-2.5-pro")
     }
-    # Unavailable discovery reports the fallback instead of failing.
+    # Unavailable discovery reports the degraded status and KEEPS the last
+    # captured listing (#350 r1) — a sidecar hiccup must not revert the
+    # provider to the static catalog.
     import httpx
 
     _mock_key_discovery(monkeypatch, httpx.ConnectError("sidecar down"))
@@ -650,7 +655,11 @@ async def test_refresh_models_endpoint(client, monkeypatch):
     )
     assert degraded.status_code == 200
     assert degraded.json()["status"] == "unavailable"
-    assert await storage.list_server_provider_key_models() == []
+    rows = await storage.list_server_provider_key_models()
+    assert {(row["provider"], row["model"]) for row in rows} == {
+        ("google", "gemini-2.5-pro"),
+        ("google", "gemini-3-pro"),
+    }
     # No stored key → 404 (provider must be key-supported to reach the
     # lookup); unsupported provider id → 400.
     _mock_supported(monkeypatch, ["google", "openai"])
@@ -664,6 +673,167 @@ async def test_refresh_models_endpoint(client, monkeypatch):
         headers=_admin_headers(),
     )
     assert unsupported.status_code == 400
+
+
+async def test_refresh_never_reseeds_a_deliberately_empty_selection(
+    client, monkeypatch
+):
+    """An admin who deselected every model keeps that choice on refresh (#350 r1)."""
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+    # Deselect everything — a managed provider with no selection rows
+    # deliberately exposes nothing.
+    client.put(
+        "/api/admin/server-providers/google/models",
+        headers=_admin_headers(),
+        json={"models": [{"id": "gemini-2.5-pro", "included": False, "free": False}]},
+    )
+    assert await storage.list_server_provider_models() == []
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}, {"id": "gemini-3-pro"}])
+    refreshed = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert refreshed.status_code == 200
+    # The empty selection survived — nothing was silently re-included.
+    assert await storage.list_server_provider_models() == []
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        assert "google" not in await ai_client.scoped_models()
+    finally:
+        ai_client.force_server_credentials.reset(token)
+
+
+async def test_empty_supported_listing_exposes_nothing(client, monkeypatch):
+    """A supported listing with zero models is "verified empty", not a fallback (#350 r1)."""
+    _add_google_provider(client, monkeypatch, [])
+    rows = await storage.list_server_provider_key_models()
+    # A sentinel row marks the verified-empty listing.
+    assert [(row["provider"], row["model"]) for row in rows] == [("google", "")]
+    # The admin listing reports the provider key-scoped with no models.
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+    providers = {p["provider"]: p for p in listed.json()["providers"]}
+    assert providers["google"]["key_scoped"] is True
+    assert [m["id"] for m in providers["google"]["models"]] == []
+    # Nothing is exposed on server credentials — NOT the catalog fallback.
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        assert "google" not in await ai_client.scoped_models()
+    finally:
+        ai_client.force_server_credentials.reset(token)
+
+
+async def test_manifest_only_models_are_not_key_verified(client, monkeypatch):
+    """Manifest-only models from discovery never enter the server pool (#350 r1)."""
+    _add_google_provider(
+        client,
+        monkeypatch,
+        [
+            {"id": "gemini-2.5-pro"},
+            {"id": "manifest-only-model", "source": "manifest"},
+        ],
+    )
+    rows = await storage.list_server_provider_key_models()
+    assert [(row["provider"], row["model"]) for row in rows] == [
+        ("google", "gemini-2.5-pro")
+    ]
+
+
+async def test_non_catalog_provider_with_listing_appears_in_scoped_models(
+    tmp_path, monkeypatch
+):
+    """A keyed provider the static catalog lost still exposes its listing (#350 r1)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp.db")
+    await storage.init_db()
+    # The catalog does NOT list this provider at all.
+    _fake_catalog(monkeypatch, CATALOG)
+    await storage.set_server_ai_credential("newprovider", SECRET, "admin")
+    await storage.set_server_provider_key_models(
+        "newprovider", [{"id": "newmodel", "name": "New Model"}]
+    )
+    await storage.set_server_provider_models(
+        "newprovider", [{"id": "newmodel"}], "admin"
+    )
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [m["id"] for m in scoped["newprovider"]] == ["newmodel"]
+        assert scoped["newprovider"][0]["verified"] is True
+    finally:
+        ai_client.force_server_credentials.reset(token)
+
+
+async def test_concurrent_rotation_supersedes_stale_capture(client, monkeypatch):
+    """A capture whose key was rotated mid-discovery is discarded (#350 r1)."""
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    discovery_calls = _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
+    # Rotate the credential while discovery is in flight — between the
+    # capture's start and its post-discovery key check.
+    inner_discovery = ai_client.models_for_api_key
+
+    async def rotating_discovery(provider, key):
+        await storage.set_server_ai_credential(provider, "newer-key-value-9", "admin")
+        return await inner_discovery(provider, key)
+
+    monkeypatch.setattr(ai_client, "models_for_api_key", rotating_discovery)
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert added.status_code == 200
+    assert added.json()["ok"] is True
+    # The stale capture was discarded: no rows were written for the old key.
+    assert await storage.list_server_provider_key_models() == []
+    assert discovery_calls == [("google", SECRET)]
+
+
+def test_repeated_model_ids_dedupe_in_storage(tmp_path, monkeypatch):
+    """A discovery response repeating an id must not fail the write (#350 r1)."""
+    import asyncio
+
+    async def run():
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp.db")
+        await storage.init_db()
+        await storage.set_server_provider_key_models(
+            "google", [{"id": "m"}, {"id": "m"}, {"id": "m"}]
+        )
+        rows = await storage.list_server_provider_key_models()
+        assert [(row["provider"], row["model"]) for row in rows] == [("google", "m")]
+
+    asyncio.run(run())
+
+
+async def test_key_scoped_entry_with_broken_limits_is_skipped(tmp_path, monkeypatch):
+    """Declared-but-broken capability limits keep a model out of the pool (#350 r1)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp.db")
+    await storage.init_db()
+    _fake_catalog(monkeypatch, CATALOG)
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    await storage.set_server_provider_key_models(
+        "google",
+        [
+            {"id": "good-model"},
+            {
+                "id": "broken-limits",
+                "capabilities": {"inputTokenLimit": 1000000},  # partial
+            },
+        ],
+    )
+    await storage.set_server_provider_models(
+        "google", [{"id": "good-model"}, {"id": "broken-limits"}], "admin"
+    )
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [m["id"] for m in scoped["google"]] == ["good-model"]
+    finally:
+        ai_client.force_server_credentials.reset(token)
 
 
 async def test_models_put_and_free_models_accept_key_scoped_pairs(client, monkeypatch):
@@ -704,7 +874,7 @@ async def test_scoped_models_key_scoped_rows_restrict_and_extend(tmp_path, monke
     # unmanaged with its full catalog.
     await storage.set_server_ai_credential("google", SECRET, "admin")
     await storage.set_server_provider_key_models(
-        "google", [{"id": "gemini-2.5-pro"}, {"id": "gemini-3-pro"}], "admin"
+        "google", [{"id": "gemini-2.5-pro"}, {"id": "gemini-3-pro"}]
     )
     token = ai_client.force_server_credentials.set(True)
     try:

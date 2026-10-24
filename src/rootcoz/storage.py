@@ -6059,42 +6059,50 @@ async def list_server_provider_key_models() -> list[dict[str, Any]]:
 
 
 async def set_server_provider_key_models(
-    provider: str, models: list[dict[str, Any]], updated_by: str
+    provider: str, models: list[dict[str, Any]]
 ) -> None:
     """Replace one provider's key-scoped model rows atomically (#350).
 
     ``models`` holds ``{"id", "name", "capabilities"}`` entries from the
-    sidecar's key-scoped discovery. An empty list clears the rows — the
-    documented fallback to the static catalog for listing-unsupported
-    providers and failed discovery alike. Provider identity is
-    case-insensitive: every stored spelling of this provider is replaced.
-    Only this provider's rows are touched.
+    sidecar's key-scoped discovery. An entry with ``"sentinel": True`` (and
+    an empty id) marks "listing supported, zero accessible models" so a
+    verified-empty listing stays distinct from "no listing" — the pool
+    exposes nothing instead of falling back to the catalog. Any other empty
+    id is dropped. Repeated ids are deduplicated (the table keys on
+    provider+model and a discovery response repeating an id must not fail
+    the write). An empty list clears the rows — the documented fallback to
+    the static catalog. Provider identity is case-insensitive: every stored
+    spelling of this provider is replaced. Only this provider's rows are
+    touched.
     """
+    deduped: dict[str, dict[str, Any]] = {}
+    for entry in models:
+        if not isinstance(entry.get("id"), str):
+            continue
+        model = entry["id"]
+        if not model.strip() and not entry.get("sentinel"):
+            continue
+        deduped[model] = entry
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         await db.execute(
             "DELETE FROM server_provider_key_models WHERE lower(provider) = lower(?)",
             (provider,),
         )
-        entries = [
-            entry
-            for entry in models
-            if isinstance(entry.get("id"), str) and entry["id"].strip()
-        ]
-        if entries:
+        if deduped:
             await db.executemany(
                 "INSERT INTO server_provider_key_models"
                 " (provider, model, name, capabilities) VALUES (?, ?, ?, ?)",
                 [
                     (
                         provider,
-                        entry["id"].strip(),
-                        entry.get("name") or entry["id"].strip(),
+                        model,
+                        entry.get("name") or model,
                         json.dumps(entry["capabilities"])
                         if isinstance(entry.get("capabilities"), dict)
                         else None,
                     )
-                    for entry in entries
+                    for model, entry in sorted(deduped.items())
                 ],
             )
         await db.commit()

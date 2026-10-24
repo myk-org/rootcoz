@@ -41,6 +41,7 @@ async def test_key_discovery_keeps_only_session_limits(monkeypatch):
                 "provider": "google",
                 "id": "new-model",
                 "name": "New model",
+                "source": "listing",
                 "capabilities": {"inputTokenLimit": 1000, "outputTokenLimit": 100},
             }
         ],
