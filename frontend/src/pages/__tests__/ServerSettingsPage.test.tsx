@@ -1426,25 +1426,42 @@ describe('ServerSettingsPage export and import settings', () => {
     await screen.findByText('PUBLIC_BASE_URL')
     get.mockResolvedValueOnce(exportDoc as never)
 
+    // Export opens the dialog; the secrets choice lives inside it.
     fireEvent.click(screen.getByRole('button', { name: /Export settings/ }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('Export settings')
+    expect(within(dialog).getByRole('checkbox', { name: 'Include secrets in export' })).not.toBeChecked()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Export' }))
     await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
     expect(get).toHaveBeenLastCalledWith('/api/admin/settings/export')
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:settings')
   })
 
-  it('asks for confirmation before exporting with secrets', async () => {
+  it('warns about plaintext when secrets are included in the export dialog', async () => {
     renderPage()
     await screen.findByText('PUBLIC_BASE_URL')
     get.mockResolvedValueOnce(exportDoc as never)
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Include secrets in export' }))
     fireEvent.click(screen.getByRole('button', { name: /Export settings/ }))
     const dialog = await screen.findByRole('alertdialog')
+
+    // Checking secrets inside the dialog surfaces the plaintext warning.
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Include secrets in export' }))
     expect(dialog).toHaveTextContent('plaintext')
 
     fireEvent.click(within(dialog).getByRole('button', { name: 'Export' }))
     await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
     expect(get).toHaveBeenLastCalledWith('/api/admin/settings/export?include_sensitive=true')
+  })
+
+  it('keeps the toolbar free of orphaned controls: no global expand/collapse, no secrets checkbox', async () => {
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    expect(screen.queryByRole('button', { name: 'Expand all categories' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Collapse all categories' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: 'Include secrets in export' })).not.toBeInTheDocument()
   })
 
   it('imports a file after confirmation and shows the diff summary', async () => {

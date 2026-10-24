@@ -30,8 +30,6 @@ import {
   Search,
   ChevronDown,
   ChevronRight,
-  ChevronsUpDown,
-  ChevronsDownUp,
   Eye,
   EyeOff,
   AlertTriangle,
@@ -195,8 +193,6 @@ type PageAction =
   | { type: 'REVEAL_VALUE'; key: string; value: string; generation: number }
   | { type: 'HIDE_VALUE'; key: string }
   | { type: 'CLEAR_REVEALED'; keys: string[] }
-  | { type: 'EXPAND_ALL' }
-  | { type: 'COLLAPSE_ALL'; categories: string[] }
   | { type: 'SHOW_HISTORY'; key: string }
   | { type: 'HIDE_HISTORY' }
   | { type: 'SET_HISTORY'; history: HistoryEntry[] }
@@ -270,10 +266,6 @@ function reducer(state: PageState, action: PageAction): PageState {
       }
       return { ...state, revealedKeys: nextKeys, revealedValues, revealGenerations }
     }
-    case 'EXPAND_ALL':
-      return { ...state, collapsedCategories: new Set<string>() }
-    case 'COLLAPSE_ALL':
-      return { ...state, collapsedCategories: new Set<string>(action.categories) }
     case 'SHOW_HISTORY':
       return { ...state, historyKey: action.key, history: [], historyLoading: true }
     case 'HIDE_HISTORY':
@@ -520,7 +512,7 @@ export function ServerSettingsPage() {
   // Settings export/import state (#361)
   const [exporting, setExporting] = useState(false)
   const [includeSecrets, setIncludeSecrets] = useState(false)
-  const [confirmSecretExport, setConfirmSecretExport] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   const [importDoc, setImportDoc] = useState<{ name: string; doc: unknown } | null>(null)
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<SettingsImportResult | null>(null)
@@ -696,13 +688,10 @@ export function ServerSettingsPage() {
   }
 
   function handleExport() {
-    // Including secrets needs an explicit confirmation — the file holds them
-    // in plaintext.
-    if (includeSecrets) {
-      setConfirmSecretExport(true)
-      return
-    }
-    void runExport()
+    // The export dialog owns the secrets choice (#361 UI review): the
+    // checkbox lives with the action it affects, so the toolbar stays two
+    // plain buttons and nothing about "secrets" floats unattached.
+    setExportOpen(true)
   }
 
   function handleImportFile(event: React.ChangeEvent<HTMLInputElement>) {
@@ -1566,40 +1555,6 @@ export function ServerSettingsPage() {
                 aria-label="Search settings"
               />
             </div>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => dispatch({ type: 'EXPAND_ALL' })}
-                  className="p-1.5 rounded-md border border-border-default bg-surface-elevated hover:bg-surface-hover text-text-secondary transition-colors"
-                  aria-label="Expand all categories"
-                >
-                  <ChevronsUpDown className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Expand all categories</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => dispatch({ type: 'COLLAPSE_ALL', categories: [...new Set(state.settings.map(s => s.category))] })}
-                  className="p-1.5 rounded-md border border-border-default bg-surface-elevated hover:bg-surface-hover text-text-secondary transition-colors"
-                  aria-label="Collapse all categories"
-                >
-                  <ChevronsDownUp className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Collapse all categories</TooltipContent>
-            </Tooltip>
-            <label className="flex shrink-0 items-center gap-1.5 text-xs text-text-secondary">
-              <Checkbox
-                checked={includeSecrets}
-                onCheckedChange={(checked) => setIncludeSecrets(checked === true)}
-                aria-label="Include secrets in export"
-              />
-              Include secrets
-            </label>
             <Button
               size="sm"
               variant="outline"
@@ -1683,18 +1638,41 @@ export function ServerSettingsPage() {
           </div>
         )}
 
-        {/* Export-with-secrets confirmation (#361) */}
-        <AlertDialog open={confirmSecretExport} onOpenChange={setConfirmSecretExport}>
+        {/* Export dialog (#361): the secrets choice lives with the export action. */}
+        <AlertDialog open={exportOpen} onOpenChange={setExportOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Export includes secrets</AlertDialogTitle>
+              <AlertDialogTitle>Export settings</AlertDialogTitle>
               <AlertDialogDescription>
-                The exported file will contain sensitive settings (API keys, tokens, passwords) in plaintext. Store and transfer it securely, and delete it once imported.
+                Download a JSON document of the saved server settings, ready to import on another instance.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            <label className="flex items-start gap-2 rounded-md border border-border-default p-3 text-sm text-text-primary">
+              <Checkbox
+                checked={includeSecrets}
+                onCheckedChange={(checked) => setIncludeSecrets(checked === true)}
+                aria-label="Include secrets in export"
+                className="mt-0.5"
+              />
+              <span>
+                Include secrets (API keys, tokens, passwords)
+                {includeSecrets && (
+                  <span className="mt-1 block text-xs text-signal-amber">
+                    The file will contain them in plaintext. Store and transfer it securely, and delete it once imported.
+                  </span>
+                )}
+              </span>
+            </label>
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={() => void runExport()}>Export</AlertDialogAction>
+              <AlertDialogAction
+                onClick={() => {
+                  setExportOpen(false)
+                  void runExport()
+                }}
+              >
+                Export
+              </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
