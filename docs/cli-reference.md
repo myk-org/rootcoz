@@ -258,8 +258,8 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `settings set KEY VALUE` | — | Persist a server setting. |
 | `settings history` | `--key`/`-k`, `--limit`/`-l` (50) | Change log. |
 | `settings reset KEY` | — | Drop the DB override and fall back to env or default. |
-| `settings export` | `--include-sensitive`, `--output`/`-o` | Write the DB-stored settings to a JSON document (stdout without `--output`). Secrets are excluded unless `--include-sensitive`. |
-| `settings import` | `--input`/`-i` (required), `--dry-run` | Apply an export document. Validated and atomic; prints a per-setting diff. `--dry-run` validates and shows the diff without applying. |
+| `settings export` | `--include-sensitive`, `--output`/`-o` | Write the DB-stored settings to a JSON document (stdout without `--output`). Secrets are excluded unless `--include-sensitive`; without it, embedded credentials (repo `@token`s, URL userinfo) are stripped from the export. An `--output` file is written with owner-only `0600` permissions. |
+| `settings import` | `--input`/`-i` (required), `--dry-run` | Apply an export document. Validated and atomic (single transaction); prints a per-setting diff with credentials masked. `--dry-run` validates and shows the diff without applying. |
 | `models refresh` | — | Re-read the model list from the sidecar. |
 | `models free-list` | — | List admin-declared free provider+model pairs. |
 | `models free-add` | `--provider`, `--model` | Declare one provider+model pair as free (validated against the catalog). |

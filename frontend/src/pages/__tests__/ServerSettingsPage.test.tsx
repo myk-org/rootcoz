@@ -1488,7 +1488,7 @@ describe('ServerSettingsPage export and import settings', () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
   })
 
-  it('surfaces a validation error and applies nothing on a rejected import', async () => {
+  it('surfaces a validation error and keeps the dialog open for retry', async () => {
     const err = new ApiError(0, '', null)
     err.status = 422
     err.body = { detail: 'Invalid settings: jenkins_timeout: must be an integer' }
@@ -1504,6 +1504,73 @@ describe('ServerSettingsPage export and import settings', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Import' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('jenkins_timeout: must be an integer')
+    // The dialog stayed open — the parsed document is still available
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('settings.json')
+  })
+
+  it('retries the same file without reselection after a failed import', async () => {
+    const err = new ApiError(0, '', null)
+    err.status = 422
+    err.body = { detail: 'Invalid settings: jenkins_timeout: must be an integer' }
+    post.mockRejectedValueOnce(err as never)
+    post.mockResolvedValueOnce({ applied: {}, unchanged: [], restart_required: [] } as never)
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(exportDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    await screen.findByRole('alertdialog')
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('jenkins_timeout: must be an integer')
+
+    // Retry the confirm without reselecting the file — now it succeeds
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported 0 settings, 0 unchanged')
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+  })
+
+  it('cancels an open editor and clears revealed values after a successful import', async () => {
+    get.mockImplementation(async (url: unknown) => {
+      const key = typeof url === 'string' ? url.match(/reveal_key=([^&]+)/)?.[1] : undefined
+      const settings = baseSettings()
+      if (key) {
+        const item = settings.find((s) => s.key === decodeURIComponent(key))
+        if (item) item.value = 'decrypted-old' // pragma: allowlist secret
+      }
+      return settings
+    })
+    post.mockResolvedValue({ applied: {}, unchanged: [], restart_required: [] } as never)
+    renderPage()
+
+    // Reveal a sensitive value, then open its editor with a stale draft
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    await screen.findByText('JENKINS_PASSWORD')
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('decrypted-old'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }))
+    expect(screen.getByLabelText('Edit JENKINS_PASSWORD')).toBeInTheDocument()
+
+    // Import a document that touches the revealed key
+    const importDoc = { version: 1, settings: { jenkins_password: 'imported' } } // pragma: allowlist secret
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(importDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    await screen.findByRole('alertdialog')
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported 0 settings, 0 unchanged')
+
+    // The open editor was cancelled — no stale draft can overwrite the import
+    expect(screen.queryByRole('textbox', { name: 'Edit JENKINS_PASSWORD' })).not.toBeInTheDocument()
+    // The cached reveal was cleared — the row falls back to the masked value
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('••••••••'),
+    )
+    expect(screen.queryByText('decrypted-old')).not.toBeInTheDocument()
   })
 
   it('rejects a non-JSON file before any request', async () => {

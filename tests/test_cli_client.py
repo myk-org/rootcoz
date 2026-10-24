@@ -2253,6 +2253,14 @@ class TestAdminSettings:
         result = client.admin_import_settings(document, dry_run=True)
         assert result["dry_run"] is True
 
+    @pytest.mark.parametrize("document", [[], None, "not an object"])
+    def test_admin_import_settings_rejects_non_object(self, document):
+        """Non-object documents fail before the mapping expansion — a
+        controlled client error, never a TypeError."""
+        client = _make_client(lambda request: None)
+        with pytest.raises(RootCozError, match="import document must be a JSON object"):
+            client.admin_import_settings(document)
+
     def test_test_integration(self):
         def handler(request):
             assert request.method == "POST"

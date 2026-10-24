@@ -3,6 +3,7 @@
 import csv
 import json as json_mod
 import logging
+import os
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -3569,7 +3570,18 @@ def admin_settings_export(
         quiet=bool(output),
     )
     if output:
-        output.write_text(json_mod.dumps(data, indent=2) + "\n")
+        payload = json_mod.dumps(data, indent=2) + "\n"
+        try:
+            # 0600: the file can hold decrypted secrets (--include-sensitive)
+            # and must not be readable by other local users; fchmod also
+            # tightens a pre-existing file, which O_CREAT alone would keep.
+            fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                os.fchmod(fh.fileno(), 0o600)
+                fh.write(payload)
+        except OSError as exc:
+            typer.echo(f"Error writing {output}: {exc}", err=True)
+            raise typer.Exit(1)
         if not _state.get("json", False):
             typer.echo(f"Exported {len(data.get('settings', {}))} settings to {output}")
             if data.get("warning"):
@@ -3591,7 +3603,7 @@ def admin_settings_import(
     """Import a settings export document (validated, atomic, with a diff)."""
     try:
         document = json_mod.loads(input.read_text())
-    except (OSError, json_mod.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json_mod.JSONDecodeError) as exc:
         typer.echo(f"Error reading {input}: {exc}", err=True)
         raise typer.Exit(1)
     data = _run_client_command(

@@ -429,6 +429,12 @@ class RootCozClient:
         self, document: dict[str, Any], dry_run: bool = False
     ) -> dict[str, Any]:
         """Import a settings export document. POST /api/admin/settings/import"""
+        if not isinstance(document, dict):
+            # Mirrors the server's document-validation 422 — a non-object
+            # document would otherwise crash the mapping expansion below.
+            raise RootCozError(
+                status_code=422, detail="import document must be a JSON object"
+            )
         return self._request(
             "POST",
             "/api/admin/settings/import",

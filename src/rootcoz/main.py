@@ -283,7 +283,12 @@ from rootcoz.transcripts import (
     transcript_summary,
     write_sidecar_env_bridge,
 )
-from rootcoz.url_utils import redact_urls_in_text
+from rootcoz.url_utils import (
+    mask_url_userinfo_in_text,
+    redact_urls_in_text,
+    strip_url_userinfo,
+    strip_url_userinfo_in_text,
+)
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -9628,8 +9633,6 @@ async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict[str, Any]
 
 def _strip_url_userinfo(url: str) -> str:
     """Remove userinfo (username/password) from a URL for safe API responses."""
-    from rootcoz.url_utils import strip_url_userinfo
-
     return strip_url_userinfo(url)
 
 
@@ -13039,6 +13042,9 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
                     "health probe (startup would fail on every restart) — use "
                     "127.0.0.1, 0.0.0.0, or leave it empty"
                 )
+            # Save the stripped host — the env bridge exports the stored
+            # value verbatim, so padding would reach pi-config's listen host.
+            settings_updates[key] = host
         # Check integer fields
         annotation = field_info.annotation
         is_int = annotation is int or (
@@ -13071,6 +13077,18 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
                         errors.append(f"{key}: must be <= {meta.le}")
             except ValueError, TypeError:
                 errors.append(f"{key}: must be an integer")
+        # Type-check every remaining value against its Settings field — an
+        # invalid value (e.g. "not-a-bool" for a bool field) would otherwise
+        # be persisted, and once get_settings() cannot validate the merged
+        # overrides it silently falls back to the base env settings.
+        try:
+            Settings.model_validate({key: value})
+        except ValidationError as exc:
+            for err in exc.errors():
+                ctx_err = err.get("ctx", {}).get("error")
+                errors.append(
+                    f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
+                )
     return errors
 
 
@@ -13119,6 +13137,52 @@ _SETTINGS_EXPORT_SECRETS_WARNING = (
 )
 
 
+def _transform_additional_repos(
+    raw: str, url_fn: Callable[[str], str], token_suffix: str
+) -> str:
+    """Rebuild an ``additional_repos`` value, transforming each repo URL.
+
+    ``url_fn`` is applied to every URL (strip or mask userinfo). An
+    embedded ``@token`` is replaced by ``token_suffix`` — empty drops the
+    credential entirely, ``"***"`` masks it for display. A malformed
+    stored value falls back to a best-effort whole-value transform.
+    """
+    try:
+        repos = parse_additional_repos(raw)
+    except ValueError:
+        return url_fn(raw)
+    parts = []
+    for repo in repos:
+        part = f"{repo['name']}:{url_fn(repo['url'])}"
+        if repo.get("ref"):
+            part += f":{repo['ref']}"
+        if repo.get("token") and token_suffix:
+            part += f"@{token_suffix}"
+        parts.append(part)
+    return ",".join(parts)
+
+
+def _sanitize_export_value(key: str, value: str) -> str:
+    """Strip credentials from a non-sensitive value on default exports.
+
+    ``additional_repos`` entries can carry an embedded ``@token`` and repo
+    URLs can carry userinfo — those must not leave without the
+    ``include_sensitive`` opt-in.
+    """
+    if key == "additional_repos":
+        return _transform_additional_repos(value, strip_url_userinfo, "")
+    return strip_url_userinfo_in_text(value)
+
+
+def _mask_diff_value(key: str, value: str | None) -> str | None:
+    """Mask credential substrings (URL userinfo, repo tokens) in diff display."""
+    if value is None:
+        return None
+    if key == "additional_repos":
+        return _transform_additional_repos(value, mask_url_userinfo_in_text, "***")
+    return mask_url_userinfo_in_text(value)
+
+
 def _diff_import_updates(
     updates: dict[str, str], db_settings: dict[str, dict[str, Any]]
 ) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
@@ -13141,8 +13205,8 @@ def _diff_import_updates(
             continue
         masked = key in _SENSITIVE_SETTINGS
         applied[key] = {
-            "from": "***" if masked else old,
-            "to": "***" if masked else value,
+            "from": "***" if masked else _mask_diff_value(key, old),
+            "to": "***" if masked else _mask_diff_value(key, value),
         }
         if key in _RESTART_REQUIRED_SETTINGS:
             restart_required.append(key)
@@ -13177,6 +13241,12 @@ async def export_server_settings(
         if key in _SENSITIVE_SETTINGS:
             if not include_sensitive:
                 continue
+            if value == "":
+                # An explicit empty override is meaningful (it deliberately
+                # beats the env value) — export it as-is; there is nothing
+                # to decrypt.
+                settings[key] = ""
+                continue
             sensitive_included = True
             decrypted = decrypt_value_or_none(value)
             if decrypted is None:
@@ -13185,6 +13255,10 @@ async def export_server_settings(
                 logger.debug("Cannot decrypt setting %s for export; skipping", key)
                 continue
             value = decrypted
+        elif not include_sensitive:
+            # Default exports must not leak embedded credentials — repo
+            # tokens and URL userinfo leave only with the opt-in.
+            value = _sanitize_export_value(key, value)
         settings[key] = value
 
     content: dict[str, Any] = {
@@ -13291,6 +13365,10 @@ def _empty_override_error(key: str) -> str | None:
     validator rejects ""), and infrastructure settings with unsafe empty
     semantics are denied outright.
     """
+    if key not in Settings.model_fields:
+        # Unknown keys are already reported by the shared validator —
+        # indexing model_fields here would turn a 422 into a 500.
+        return None
     if key in _EMPTY_OVERRIDE_FORBIDDEN:
         return (
             f"Setting '{key}' cannot be empty — the sidecar bridge would "
@@ -13337,6 +13415,7 @@ async def _save_settings_to_db(
             if error:
                 raise HTTPException(status_code=400, detail=error)
 
+    db_values: dict[str, str] = {}
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         # Upsert (empty allowed — an explicit empty override beats env).
@@ -13345,10 +13424,12 @@ async def _save_settings_to_db(
         if str_value and key in _SENSITIVE_SETTINGS:
             from rootcoz.encryption import encrypt_value
 
-            db_value = encrypt_value(str_value)
+            db_values[key] = encrypt_value(str_value)
         else:
-            db_value = str_value
-        await storage.set_server_setting(key, db_value, updated_by=username)
+            db_values[key] = str_value
+    # One atomic batch write — a mid-batch failure must not leave earlier
+    # keys applied while later ones are missing (half-applied import).
+    await storage.set_server_settings_batch(db_values, updated_by=username)
 
     # Changed Jira credentials or auth mode invalidate the verified-method
     # record — it reflects the last successful test of the previous setup.

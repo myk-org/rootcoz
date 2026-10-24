@@ -709,7 +709,7 @@ export function ServerSettingsPage() {
   }
 
   async function handleConfirmImport() {
-    if (!importDoc) return
+    if (!importDoc || importing) return
     setImporting(true)
     try {
       const result = await api.post<SettingsImportResult>(
@@ -718,6 +718,13 @@ export function ServerSettingsPage() {
       )
       setImportResult(result)
       setImportDoc(null)
+      // An open editor holds a pre-import draft that would overwrite the
+      // imported value on Save — cancel it before the refetch lands.
+      dispatch({ type: 'CANCEL_EDIT' })
+      // Revealed values are pre-import plaintext — clear them so the fresh
+      // (masked) values show and editors never pre-fill a stale secret.
+      const doc = importDoc.doc as { settings?: Record<string, unknown> }
+      dispatch({ type: 'CLEAR_REVEALED', keys: Object.keys(doc.settings ?? {}) })
       await fetchSettings(true)
     } catch (err) {
       setSettingsIoError(
@@ -725,6 +732,8 @@ export function ServerSettingsPage() {
           ? extractApiDetail(err) ?? `Import failed (${err.status})`
           : 'Failed to import settings',
       )
+      // importDoc is kept — the dialog stays open so the admin can retry
+      // the same file without reselecting it.
     } finally {
       setImporting(false)
     }
@@ -1686,9 +1695,22 @@ export function ServerSettingsPage() {
                 Apply the settings from {importDoc?.name}? Values in the file overwrite the current database overrides — the import is validated first and rejected as a whole if any value is invalid.
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {/* The page-level alert sits behind the dialog overlay — while the
+                dialog stays open for a retry, the error must be visible here. */}
+            {importDoc && settingsIoError && (
+              <p role="alert" className="text-signal-red text-sm">{settingsIoError}</p>
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={() => void handleConfirmImport()}>
+              <AlertDialogAction
+                onClick={e => {
+                  // Keep the dialog open — handleConfirmImport closes it via
+                  // importDoc only on success; a failed import must stay
+                  // retryable without reselecting the file.
+                  e.preventDefault()
+                  void handleConfirmImport()
+                }}
+              >
                 {importing ? 'Importing…' : 'Import'}
               </AlertDialogAction>
             </AlertDialogFooter>

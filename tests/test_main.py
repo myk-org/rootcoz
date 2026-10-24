@@ -9873,6 +9873,123 @@ class TestAdminSettingsExportImport:
         )
         assert response.status_code in (401, 403)
 
+    def test_import_invalid_boolean_value_rejected(self, test_client) -> None:
+        """A value its Settings field rejects never reaches the DB — once
+        stored, get_settings() cannot validate the merged overrides and
+        silently falls back to the base env settings (all-or-nothing loss).
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"secure_cookies": "not-a-bool"}},
+        )
+        assert response.status_code == 422
+        assert "secure_cookies" in response.json()["detail"]
+        assert _settings_item(test_client, "secure_cookies")["source"] != "db"
+
+    def test_put_invalid_boolean_value_rejected(self, test_client) -> None:
+        """The shared validator covers the PUT path too."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"secure_cookies": "not-a-bool"}},
+        )
+        assert response.status_code == 400
+        assert "secure_cookies" in response.json()["detail"]
+
+    def test_import_sidecar_host_stored_stripped(self, test_client) -> None:
+        """The validated (stripped) host is what gets stored — padding would
+        pass through the env bridge to pi-config's listen host on restart.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"sidecar_host": " 127.0.0.1 "}},
+        )
+        assert response.status_code == 200
+        assert _settings_item(test_client, "sidecar_host")["value"] == "127.0.0.1"
+
+    @pytest.mark.parametrize("empty_value", [None, ""])
+    def test_import_unknown_key_with_empty_value(
+        self, test_client, empty_value
+    ) -> None:
+        """Unknown keys with empty values return the collected 422, not a
+        KeyError-turned-500 from _empty_override_error.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"bogus": empty_value}},
+        )
+        assert response.status_code == 422
+        assert "Unknown settings" in response.json()["detail"]
+
+    def test_export_sanitizes_embedded_credentials_by_default(
+        self, test_client
+    ) -> None:
+        """Default exports strip repo tokens and URL userinfo — credentials
+        leave only with the include_sensitive opt-in.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "additional_repos": (
+                        "main:https://user:pass@github.com/org/repo@secret-token"  # pragma: allowlist secret
+                    ),
+                    "tests_repo_url": "https://user:pass@github.com/org/tests",  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["additional_repos"] == "main:https://github.com/org/repo"
+        assert doc["settings"]["tests_repo_url"] == "https://github.com/org/tests"
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert (
+            doc["settings"]["additional_repos"]
+            == (
+                "main:https://user:pass@github.com/org/repo@secret-token"  # pragma: allowlist secret
+            )
+        )
+        assert doc["settings"]["tests_repo_url"] == (
+            "https://user:pass@github.com/org/tests"  # pragma: allowlist secret
+        )
+
+    def test_import_diff_masks_embedded_credentials(self, test_client) -> None:
+        """Credential substrings in non-sensitive values are masked in the
+        import diff display.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "additional_repos": "main:https://github.com/org/repo@secret-token",  # pragma: allowlist secret
+                    "tests_repo_url": "https://user:pass@github.com/org/tests",  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert (
+            applied["additional_repos"]["to"] == "main:https://github.com/org/repo@***"
+        )
+        assert applied["tests_repo_url"]["to"] == "https://***@github.com/org/tests"
+        assert "secret-token" not in response.text
+        assert "user:pass" not in response.text
+
+    def test_export_includes_empty_sensitive_override(self, test_client) -> None:
+        """An explicit empty sensitive override (which deliberately beats the
+        env value) round-trips through a sensitive export as "".
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"github_token": ""}},
+        )
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == ""
+
 
 class TestIntegrationConnectionEndpoints:
     """Tests for POST /api/admin/settings/test/{integration}."""

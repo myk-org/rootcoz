@@ -5196,6 +5196,22 @@ class TestAdminSettingsCommand:
         )
         written = json.loads(out.read_text())
         assert written["settings"] == {"github_token": "gh-secret"}
+        # The file can hold decrypted secrets — it must be owner-only
+        assert out.stat().st_mode & 0o777 == 0o600
+
+    def test_admin_settings_export_unwritable_output(self, mock_client, tmp_path):
+        """Filesystem errors surface as a controlled CLI error, not a traceback."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {},
+        }
+        out = tmp_path / "missing-dir" / "settings.json"
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        assert not out.exists()
 
     def test_admin_settings_import(self, mock_client, tmp_path):
         mock_client.admin_import_settings.return_value = {
@@ -5245,6 +5261,42 @@ class TestAdminSettingsCommand:
         )
         assert result.exit_code == 1
         assert "Error reading" in result.output
+
+    def test_admin_settings_import_invalid_utf8(self, mock_client, tmp_path):
+        """Invalid encoding surfaces as a controlled CLI error (a
+        UnicodeDecodeError is a ValueError, not an OSError)."""
+        doc = tmp_path / "export.json"
+        doc.write_bytes(b"\xff\xfe not utf-8")
+        result = runner.invoke(
+            app,
+            ["admin", "settings", "import", "--input", str(doc)],
+        )
+        assert result.exit_code == 1
+        assert "Error reading" in result.output
+        mock_client.admin_import_settings.assert_not_called()
+
+    @pytest.mark.parametrize("content", ["[]", "null", '"a string"'])
+    def test_admin_settings_import_non_object_document(
+        self, mock_client, tmp_path, content
+    ):
+        """A non-object document is a controlled CLI error, not a crash in
+        the client's mapping expansion."""
+        doc = tmp_path / "export.json"
+        doc.write_text(content)
+
+        def handler(request):
+            raise AssertionError("request must not be sent")
+
+        # A real client (mock transport): the mocked admin_import_settings
+        # would happily accept a list — the guard lives in the client.
+        real_client = make_test_client(handler)
+        with patch("rootcoz.cli.main._get_client", return_value=real_client):
+            result = runner.invoke(
+                app,
+                ["admin", "settings", "import", "--input", str(doc)],
+            )
+        assert result.exit_code == 1
+        assert "JSON object" in result.output
 
     def test_admin_settings_test(self, mock_client):
         mock_client.test_integration.return_value = {

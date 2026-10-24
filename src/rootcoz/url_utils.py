@@ -55,6 +55,29 @@ def strip_url_query(url: str) -> str:
 _URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>`]+")
 
 
+def strip_url_userinfo_in_text(text: str) -> str:
+    """Strip userinfo from every http(s) URL in free text."""
+    if not text:
+        return text
+    return _URL_IN_TEXT.sub(lambda match: strip_url_userinfo(match.group(0)), text)
+
+
+def mask_url_userinfo_in_text(text: str) -> str:
+    """Replace userinfo in http(s) URLs in free text with ``***`` (display only)."""
+    if not text:
+        return text
+
+    def _mask(match: re.Match[str]) -> str:
+        url = match.group(0)
+        parsed = urlparse(url)
+        if parsed.username is None and parsed.password is None:
+            return url
+        host = parsed.netloc.rsplit("@", 1)[-1]
+        return urlunparse(parsed._replace(netloc=f"***@{host}"))
+
+    return _URL_IN_TEXT.sub(_mask, text)
+
+
 def redact_urls_in_text(text: str) -> str:
     """Replace http(s) URLs in free text with credential- and query-free forms."""
     if not text:
