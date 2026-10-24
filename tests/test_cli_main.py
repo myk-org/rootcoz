@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import ClassVar
+from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -5233,6 +5233,64 @@ class TestAdminSettingsCommand:
         # The symlink target keeps its content and its group-read mode
         assert target.read_text() == "keep"
         assert target.stat().st_mode & 0o777 == 0o640
+
+    def test_admin_settings_export_replaces_existing_file(self, mock_client, tmp_path):
+        """Exporting over an existing file replaces it atomically (0600, no
+        leftovers) instead of truncating it in place."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        out = tmp_path / "settings.json"
+        out.write_text('{"old": true}')
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 0
+        assert json.loads(out.read_text())["settings"] == {
+            "jenkins_url": "http://jenkins"
+        }
+        assert out.stat().st_mode & 0o777 == 0o600
+        # No temp file survives a successful export
+        assert list(tmp_path.iterdir()) == [out]
+
+    def test_admin_settings_export_mid_write_failure_preserves_existing(
+        self, mock_client, tmp_path, monkeypatch
+    ):
+        """A failed write leaves the pre-existing export byte-identical and
+        cleans up the temp file (PR #362 Qodo finding)."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        out = tmp_path / "settings.json"
+        out.write_text('{"original": true}')
+        original_bytes = out.read_bytes()
+
+        class _FailingFile:
+            def __init__(self, fd: int) -> None:
+                self._fd = fd
+
+            def write(self, data: str) -> int:
+                raise OSError(28, "No space left on device")
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                os.close(self._fd)
+
+        monkeypatch.setattr(
+            "rootcoz.cli.main.os.fdopen", lambda fd, *a, **kw: _FailingFile(fd)
+        )
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        assert out.read_bytes() == original_bytes
+        # No temp file survives a failed export
+        assert list(tmp_path.iterdir()) == [out]
 
     def test_admin_settings_import(self, mock_client, tmp_path):
         mock_client.admin_import_settings.return_value = {
