@@ -778,12 +778,37 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     if selection is None:
         selection = (set(), set())
     selected_providers, selected_pairs = selection
+    # Key-scoped listings captured at add/rotate (#350): for a keyed provider
+    # the stored listing replaces the static catalog as the server pool's
+    # model set — a restricted key must not expose models it cannot use, and
+    # may offer models the catalog lacks. Providers with no rows (listing
+    # unsupported, discovery failed, or pre-#350 rows) keep the catalog.
+    key_scoped: dict[str, dict[str, dict[str, Any]]] = {}
+    try:
+        from rootcoz.storage import list_server_provider_key_models
+
+        for row in await list_server_provider_key_models():
+            key_scoped.setdefault(row["provider"].lower(), {})[row["model"]] = row
+    except sqlite3.Error, OSError:
+        logger.warning("Unable to load key-scoped server provider models")
     for provider, entries in build_friendly_catalog(catalog).items():
         if active is not None and not is_server_provider_active(provider):
             # Server credential source withdrawn; user-key discovery below
             # can still surface this provider's models with 'user' only.
             continue
         has_selection = provider.lower() in selected_providers
+        scoped_rows = key_scoped.get(provider.lower())
+        if scoped_rows is not None:
+            entries = [
+                {
+                    "id": model,
+                    "name": row.get("name") or model,
+                    "provider": provider,
+                    "source": _source_for_sidecar(provider),
+                    "capabilities": row.get("capabilities") or {},
+                }
+                for model, row in sorted(scoped_rows.items())
+            ]
         for entry in entries:
             if has_selection and (provider.lower(), entry["id"]) not in selected_pairs:
                 # Admin deselected this model from server exposure; user-key

@@ -11,13 +11,16 @@ import { ModelCombobox } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; models: ServerProviderModel[] }
 
 /** GET /api/admin/server-providers — one entry per catalog + stored provider. */
 type ServerProviderListResult = { providers: ServerProvider[] }
 
 /** POST add/rotate-key — HTTP 200 with ok:false when the key is rejected. */
 type VerifyKeyResult = { ok: boolean; outcome?: string; message?: string }
+
+/** POST refresh-models — re-run of key-scoped discovery with the stored key. */
+type RefreshModelsResult = { ok: boolean; status: string; model_count: number }
 
 type RemoveWarning = { models: string[]; free: string[] }
 
@@ -178,6 +181,28 @@ export function ServerProvidersCard() {
     setNotice(`${providerId} removed.`)
   }
 
+  // Re-runs key-scoped discovery with the stored key (#350) — picks up
+  // permission drift without re-entering the key.
+  async function refreshModels(providerId: string) {
+    if (busy) return
+    setBusy(providerId)
+    setError('')
+    setNotice('')
+    try {
+      const res = await api.post<RefreshModelsResult>(
+        `/api/admin/server-providers/${encodeURIComponent(providerId)}/refresh-models`)
+      resetProviderCatalogCache()
+      await refreshProviders()
+      setNotice(res.status === 'supported'
+        ? `Refreshed key-scoped models for ${providerId}: ${res.model_count} model(s).`
+        : `Key-scoped listing ${res.status} for ${providerId}; selection uses the static catalog.`)
+    } catch (err) {
+      setError(extractApiDetail(err) ?? 'Could not refresh models')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <Card className="mt-3 border-border-muted">
       <CardContent className="space-y-4 p-5">
@@ -201,6 +226,17 @@ export function ServerProvidersCard() {
                   {item.has_key ? (
                     <>
                       <Badge variant={item.verified ? 'success' : 'warning'}>{item.verified ? 'Verified' : 'Unverified'}</Badge>
+                      {item.key_scoped ? (
+                        <Badge variant="outline" title="Model selection is restricted to what the stored key can access">Key-scoped</Badge>
+                      ) : (
+                        <span
+                          className="text-xs text-text-tertiary"
+                          title="This provider has no model-listing endpoint — selection uses the static catalog"
+                        >
+                          static catalog
+                        </span>
+                      )}
+                      <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => refreshModels(item.provider)} aria-label={`Refresh ${item.provider} models`}>Refresh models</Button>
                       <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setTested(false); setEditing(item.provider); setError('') }} aria-label={`Rotate ${item.provider} key`}>Rotate key</Button>
                       <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => requestRemove(item.provider)} aria-label={`Remove ${item.provider}`}>Remove</Button>
                     </>

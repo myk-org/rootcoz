@@ -268,6 +268,13 @@ class RootCozClient:
             },
         )
 
+    def admin_refresh_server_provider_models(self, provider: str) -> dict[str, Any]:
+        """Re-run key-scoped model discovery with the stored key."""
+        return self._request(
+            "POST",
+            f"/api/admin/server-providers/{quote(provider, safe='')}/refresh-models",
+        )
+
     def admin_set_server_provider_models(
         self, provider: str, models: list[dict[str, Any]]
     ) -> dict[str, Any]:

@@ -3711,6 +3711,7 @@ def admin_server_providers_list(json_output: bool = _JSON_OPTION) -> None:
         typer.echo(
             f"{provider['provider']}: key={'yes' if provider.get('has_key') else 'no'}"
             f" verified={'yes' if provider.get('verified') else 'no'}"
+            f" key-scoped={'yes' if provider.get('key_scoped') else 'no'}"
             f" models={len(models)} included={len(included)} free={len(free)}"
         )
 
@@ -3784,6 +3785,31 @@ def admin_server_providers_rotate(
             f"Key NOT rotated ({data.get('outcome')}): {data.get('message', '')}"
         )
     raise typer.Exit(code=1)
+
+
+@admin_server_providers_app.command("refresh-models")
+def admin_server_providers_refresh_models(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Re-run key-scoped model discovery with the stored key (#350)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_refresh_server_provider_models(provider),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        status = data.get("status")
+        if status == "supported":
+            typer.echo(
+                f"Refreshed key-scoped models for {provider}:"
+                f" {data.get('model_count', 0)} model(s)"
+            )
+        else:
+            typer.echo(
+                f"Key-scoped model listing {status} for {provider};"
+                " selection falls back to the static catalog"
+            )
 
 
 @admin_server_providers_app.command("models")

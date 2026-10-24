@@ -6862,20 +6862,30 @@ class TestAdminServerProvidersCommands:
                     "provider": "google",
                     "has_key": True,
                     "verified": True,
+                    "key_scoped": True,
                     "models": [
                         {"id": "gemini-2.5-pro", "included": True, "free": True},
                         {"id": "gemini-2.5-flash", "included": False, "free": False},
                     ],
                 },
-                {"provider": "openai", "has_key": False, "verified": False},
+                {
+                    "provider": "openai",
+                    "has_key": False,
+                    "verified": False,
+                    "key_scoped": False,
+                },
             ]
         }
         result = runner.invoke(app, ["admin", "server-providers", "list"])
         assert result.exit_code == 0
-        assert "google: key=yes verified=yes models=2 included=1 free=1" in (
-            result.output
+        assert (
+            "google: key=yes verified=yes key-scoped=yes models=2 included=1 free=1"
+            in result.output
         )
-        assert "openai: key=no verified=no models=0 included=0 free=0" in result.output
+        assert (
+            "openai: key=no verified=no key-scoped=no models=0 included=0 free=0"
+            in result.output
+        )
         mock_client.admin_list_server_providers.assert_called_once()
 
     def test_server_providers_list_json(self, mock_client):

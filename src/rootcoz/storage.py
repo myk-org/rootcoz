@@ -1388,6 +1388,21 @@ async def init_db() -> None:
             )
         """)
 
+        # Key-scoped model listing captured at add/rotate time (#350): the
+        # models the stored key can actually access, per the sidecar's
+        # key-scoped discovery. A row set exists only when the last
+        # add/rotate produced a supported listing; absence means the
+        # provider falls back to the static catalog + admin selection.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS server_provider_key_models (
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                name TEXT,
+                capabilities TEXT,
+                PRIMARY KEY (provider, model)
+            )
+        """)
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -6015,6 +6030,76 @@ async def list_server_provider_models() -> list[dict[str, Any]]:
         return [dict(row) for row in await cursor.fetchall()]
 
 
+async def list_server_provider_key_models() -> list[dict[str, Any]]:
+    """List key-scoped model rows captured at add/rotate (#350).
+
+    ``capabilities`` is parsed from its stored JSON so consumers get a
+    dict (or ``None``) without each re-implementing the parse. Absence of
+    rows for a provider means "no supported listing at last add/rotate"
+    — the server pool then falls back to the static catalog.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT provider, model, name, capabilities"
+            " FROM server_provider_key_models ORDER BY provider, model"
+        )
+        rows = []
+        for row in await cursor.fetchall():
+            entry = dict(row)
+            try:
+                entry["capabilities"] = (
+                    json.loads(entry["capabilities"])
+                    if entry.get("capabilities")
+                    else None
+                )
+            except ValueError, TypeError:
+                entry["capabilities"] = None
+            rows.append(entry)
+        return rows
+
+
+async def set_server_provider_key_models(
+    provider: str, models: list[dict[str, Any]], updated_by: str
+) -> None:
+    """Replace one provider's key-scoped model rows atomically (#350).
+
+    ``models`` holds ``{"id", "name", "capabilities"}`` entries from the
+    sidecar's key-scoped discovery. An empty list clears the rows — the
+    documented fallback to the static catalog for listing-unsupported
+    providers and failed discovery alike. Provider identity is
+    case-insensitive: every stored spelling of this provider is replaced.
+    Only this provider's rows are touched.
+    """
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            "DELETE FROM server_provider_key_models WHERE lower(provider) = lower(?)",
+            (provider,),
+        )
+        entries = [
+            entry
+            for entry in models
+            if isinstance(entry.get("id"), str) and entry["id"].strip()
+        ]
+        if entries:
+            await db.executemany(
+                "INSERT INTO server_provider_key_models"
+                " (provider, model, name, capabilities) VALUES (?, ?, ?, ?)",
+                [
+                    (
+                        provider,
+                        entry["id"].strip(),
+                        entry.get("name") or entry["id"].strip(),
+                        json.dumps(entry["capabilities"])
+                        if isinstance(entry.get("capabilities"), dict)
+                        else None,
+                    )
+                    for entry in entries
+                ],
+            )
+        await db.commit()
+
+
 async def set_server_provider_models(
     provider: str, models: list[dict[str, Any]], updated_by: str
 ) -> None:
@@ -6110,6 +6195,10 @@ async def delete_server_ai_provider(provider: str) -> dict[str, list[str]]:
         )
         await db.execute(
             "DELETE FROM server_provider_models WHERE lower(provider) = lower(?)",
+            (provider,),
+        )
+        await db.execute(
+            "DELETE FROM server_provider_key_models WHERE lower(provider) = lower(?)",
             (provider,),
         )
         await db.execute(
