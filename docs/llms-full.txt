@@ -2295,6 +2295,7 @@ That creates an active operator who can submit analyses, and one server setting 
 ## Advanced Usage
 
 - **Reset to environment values.** Database overrides always win over environment variables. Reset the setting in the UI (or delete it with `DELETE /api/admin/settings/{key}`) when you want the deployment's env var back in charge.
+- **Export and import server settings.** The Server Settings page has `Export settings` / `Import settings` buttons in the header. Export downloads a JSON document of the **database overrides only** — environment-only values are deployment config, not server settings, and stay out. Sensitive settings (API keys, tokens, passwords) are excluded unless you tick `Include secrets` and confirm the warning; the file then holds them as plaintext (re-encrypted values would only be usable with the same `ROOTCOZ_ENCRYPTION_KEY`), so store and transfer it securely and delete it once imported. Without the secrets opt-in the export is also scrubbed of embedded credentials: `@token` suffixes in `additional_repos` entries and username/password userinfo in URLs are stripped, so no credential leaves without the opt-in. Import validates every key and value with the same rules as saving a single setting, applies the whole document **atomically** — one invalid value rejects the entire import with `422` and nothing is applied, and the write itself is a single database transaction — and reports a per-setting diff plus which changed settings need a restart. Sensitive values are masked (`***`) in the diff, and credential substrings (URL userinfo, repo tokens) in non-sensitive values are masked too. A scrubbed export also never strips credentials from the target on import: a setting whose imported value matches the scrubbed form of its current value is skipped and reported as unchanged, so the target's credential-bearing value (for example a repo `@token`) wins. If validation fails, the confirmation dialog stays open with the error — but retrying resends the same parsed document, so fixing the file on disk changes nothing until you select the file again. The CLI mirrors both: `rootcoz admin settings export [--include-sensitive] [--output FILE]` and `rootcoz admin settings import --input FILE [--dry-run]`, where `--dry-run` validates and shows the diff without applying anything. An `--output` file is written with owner-only `0600` permissions because it can hold decrypted secrets; a missing directory or unwritable destination is a clean CLI error, not a traceback.
 - **Audit trail.** Logins, registrations, key rotations, approvals, role changes, report grants, and deletions are all written to the audit log with the acting admin's username, and both actions and log lines are visible on the `Logs` page.
 - **Automate with the CLI.** User creation, role changes, `can_view_reports`, and pending approvals are all available from the CLI (`admin users ...`). See [CLI Command Reference](cli-reference.html) for details.
 - **Give analysis more context.** The `AI`, `GitHub`, and `Server` categories hold most of the knobs that change how much context an analysis gets. See [Configuring Analysis Context](configure-analysis-context.html) for details.
@@ -2328,6 +2329,9 @@ That creates an active operator who can submit analyses, and one server setting 
 
 - A setting did not take effect after saving.
   Check for the ⚠️ restart badge. `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, and the three `Web Push` settings only apply after the server restarts.
+
+- A settings import was rejected with `Invalid settings: ...`.
+  Every key and value is checked before anything is applied, and one invalid entry rejects the whole import. The error lists the offending entries — fix them in the export file (or on the source server) and import again. Nothing was partially applied.
 
 - Everyone's logins and tokens broke after an infrastructure change.
   `ROOTCOZ_ENCRYPTION_KEY` changed. Sessions survive, but stored API key hashes and encrypted tokens do not — rotate keys and re-enter tokens.
@@ -2979,6 +2983,8 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `settings set KEY VALUE` | — | Persist a server setting. |
 | `settings history` | `--key`/`-k`, `--limit`/`-l` (50) | Change log. |
 | `settings reset KEY` | — | Drop the DB override and fall back to env or default. |
+| `settings export` | `--include-sensitive`, `--output`/`-o` | Write the DB-stored settings to a JSON document (stdout without `--output`). Secrets are excluded unless `--include-sensitive`; without it, embedded credentials (repo `@token`s, URL userinfo) are stripped from the export. An `--output` file is written with owner-only `0600` permissions. |
+| `settings import` | `--input`/`-i` (required), `--dry-run` | Apply an export document. Validated and atomic (single transaction); prints a per-setting diff with credentials masked. `--dry-run` validates and shows the diff without applying. |
 | `models refresh` | — | Re-read the model list from the sidecar. |
 | `models free-list` | — | List admin-declared free provider+model pairs. |
 | `models free-add` | `--provider`, `--model` | Declare one provider+model pair as free (validated against the catalog). |

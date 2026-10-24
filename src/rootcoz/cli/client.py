@@ -427,6 +427,27 @@ class RootCozClient:
             params["key"] = key
         return self._request("GET", "/api/admin/settings/history", params=params)
 
+    def admin_export_settings(self, include_sensitive: bool = False) -> dict[str, Any]:
+        """Export DB-stored server settings. GET /api/admin/settings/export"""
+        params = {"include_sensitive": "true"} if include_sensitive else None
+        return self._request("GET", "/api/admin/settings/export", params=params)
+
+    def admin_import_settings(
+        self, document: dict[str, Any], dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Import a settings export document. POST /api/admin/settings/import"""
+        if not isinstance(document, dict):
+            # Mirrors the server's document-validation 422 — a non-object
+            # document would otherwise crash the mapping expansion below.
+            raise RootCozError(
+                status_code=422, detail="import document must be a JSON object"
+            )
+        return self._request(
+            "POST",
+            "/api/admin/settings/import",
+            json={**document, "dry_run": dry_run},
+        )
+
     def test_integration(self, integration: str) -> dict[str, Any]:
         """Test an integration connection. POST /api/admin/settings/test/{integration}"""
         return self._request("POST", f"/api/admin/settings/test/{integration}")

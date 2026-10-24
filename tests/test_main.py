@@ -9677,6 +9677,495 @@ class TestAdminSettingsEndpoints:
         assert response.status_code in (401, 403)
 
 
+class TestAdminSettingsExportImport:
+    """Tests for GET /api/admin/settings/export and POST /api/admin/settings/import."""
+
+    _NO_ADMIN_HEADERS: ClassVar[dict[str, str]] = {"Authorization": ""}
+
+    def test_export_contains_only_db_stored_settings(self, test_client) -> None:
+        """Export holds DB overrides only — env/default values stay out."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_url": "https://db.jenkins.com"}},
+        )
+        response = test_client.get("/api/admin/settings/export")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        doc = response.json()
+        assert doc["version"] == 1
+        assert "exported_at" in doc
+        # jenkins_url has a DB override; ai_call_timeout does not (env/default)
+        assert doc["settings"] == {"jenkins_url": "https://db.jenkins.com"}
+
+    def test_export_excludes_sensitive_by_default(self, test_client) -> None:
+        """Sensitive settings are omitted unless include_sensitive is set."""
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"github_token": "gh-secret"}
+            },  # pragma: allowlist secret
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "github_token" not in doc["settings"]
+        assert "warning" not in doc
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == "gh-secret"
+        assert "secrets" in doc["warning"]
+
+    def test_export_skips_internal_rows(self, test_client) -> None:
+        """Internal bookkeeping rows (jira_verified_method) never export."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jira_auth_mode": "basic"}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "jira_verified_method" not in doc["settings"]
+        assert doc["settings"]["jira_auth_mode"] == "basic"
+
+    def test_export_non_admin_forbidden(self, test_client) -> None:
+        response = test_client.get(
+            "/api/admin/settings/export", headers=self._NO_ADMIN_HEADERS
+        )
+        assert response.status_code in (401, 403)
+
+    def test_import_applies_and_reports_diff(self, test_client) -> None:
+        """A valid document applies and returns per-setting diff."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10", "log_level": "INFO"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "ai_call_timeout": "25",
+                    "log_level": "INFO",
+                    "public_base_url": "https://rootcoz.example.com",
+                },
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["applied"] == {
+            "ai_call_timeout": {"from": "10", "to": "25"},
+            "public_base_url": {"from": None, "to": "https://rootcoz.example.com"},
+        }
+        assert data["unchanged"] == ["log_level"]
+        # log_level changed nothing; public_base_url needs no restart
+        assert data["restart_required"] == []
+        # Values actually applied
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "25"
+
+    def test_import_reports_restart_required(self, test_client) -> None:
+        """Changed restart-required settings are listed in the response."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"log_level": "DEBUG", "vapid_claim_email": "a@b.c"},
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["restart_required"] == ["log_level", "vapid_claim_email"]
+
+    def test_import_masks_sensitive_values_in_diff(self, test_client) -> None:
+        """Sensitive values never appear in the diff — masked as ***."""
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"github_token": "old-secret"}
+            },  # pragma: allowlist secret
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"github_token": "new-secret"},
+            },  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert response.json()["applied"]["github_token"] == {
+            "from": "***",
+            "to": "***",
+        }
+        # The value itself round-trips: re-export with sensitive included
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == "new-secret"
+
+    def test_import_invalid_value_is_atomic(self, test_client) -> None:
+        """One invalid entry rejects the whole import — nothing is applied."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"ai_call_timeout": "30", "jenkins_timeout": "abc"},
+            },
+        )
+        assert response.status_code == 422
+        assert "jenkins_timeout" in response.json()["detail"]
+        # The valid entry was NOT applied
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "10"
+
+    def test_import_unknown_key_rejected(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"nonexistent_key": "x"}},
+        )
+        assert response.status_code == 422
+        assert "Unknown settings" in response.json()["detail"]
+
+    def test_import_server_only_key_rejected(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"admin_key": "new-key"},
+            },  # pragma: allowlist secret
+        )
+        assert response.status_code == 422
+        assert "Server-only" in response.json()["detail"]
+
+    def test_import_rejects_wrong_version_and_empty(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 2, "settings": {"ai_call_timeout": "30"}},
+        )
+        assert response.status_code == 422
+        assert "version" in response.json()["detail"]
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {}},
+        )
+        assert response.status_code == 422
+
+    def test_import_dry_run_validates_without_applying(self, test_client) -> None:
+        """dry_run reports the diff but writes nothing."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "dry_run": True,
+                "settings": {"ai_call_timeout": "40"},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["dry_run"] is True
+        assert data["applied"] == {"ai_call_timeout": {"from": None, "to": "40"}}
+        # Nothing was written — no DB override exists
+        assert _settings_item(test_client, "ai_call_timeout")["source"] != "db"
+
+    def test_import_non_admin_forbidden(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"ai_call_timeout": "30"}},
+            headers=self._NO_ADMIN_HEADERS,
+        )
+        assert response.status_code in (401, 403)
+
+    def test_import_invalid_boolean_value_rejected(self, test_client) -> None:
+        """A value its Settings field rejects never reaches the DB — once
+        stored, get_settings() cannot validate the merged overrides and
+        silently falls back to the base env settings (all-or-nothing loss).
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"secure_cookies": "not-a-bool"}},
+        )
+        assert response.status_code == 422
+        assert "secure_cookies" in response.json()["detail"]
+        assert _settings_item(test_client, "secure_cookies")["source"] != "db"
+
+    def test_put_invalid_boolean_value_rejected(self, test_client) -> None:
+        """The shared validator covers the PUT path too."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"secure_cookies": "not-a-bool"}},
+        )
+        assert response.status_code == 400
+        assert "secure_cookies" in response.json()["detail"]
+
+    def test_import_sidecar_host_stored_stripped(self, test_client) -> None:
+        """The validated (stripped) host is what gets stored — padding would
+        pass through the env bridge to pi-config's listen host on restart.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"sidecar_host": " 127.0.0.1 "}},
+        )
+        assert response.status_code == 200
+        assert _settings_item(test_client, "sidecar_host")["value"] == "127.0.0.1"
+
+    @pytest.mark.parametrize("empty_value", [None, ""])
+    def test_import_unknown_key_with_empty_value(
+        self, test_client, empty_value
+    ) -> None:
+        """Unknown keys with empty values return the collected 422, not a
+        KeyError-turned-500 from _empty_override_error.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"bogus": empty_value}},
+        )
+        assert response.status_code == 422
+        assert "Unknown settings" in response.json()["detail"]
+
+    def test_export_sanitizes_embedded_credentials_by_default(
+        self, test_client
+    ) -> None:
+        """Default exports strip repo tokens and URL userinfo — credentials
+        leave only with the include_sensitive opt-in.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "additional_repos": (
+                        "main:https://user:pass@github.com/org/repo@secret-token"  # pragma: allowlist secret
+                    ),
+                    "tests_repo_url": "https://user:pass@github.com/org/tests",  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["additional_repos"] == "main:https://github.com/org/repo"
+        assert doc["settings"]["tests_repo_url"] == "https://github.com/org/tests"
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert (
+            doc["settings"]["additional_repos"]
+            == (
+                "main:https://user:pass@github.com/org/repo@secret-token"  # pragma: allowlist secret
+            )
+        )
+        assert doc["settings"]["tests_repo_url"] == (
+            "https://user:pass@github.com/org/tests"  # pragma: allowlist secret
+        )
+
+    def test_import_diff_masks_embedded_credentials(self, test_client) -> None:
+        """Credential substrings in non-sensitive values are masked in the
+        import diff display.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "additional_repos": "main:https://github.com/org/repo@secret-token",  # pragma: allowlist secret
+                    "tests_repo_url": "https://user:pass@github.com/org/tests",  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert (
+            applied["additional_repos"]["to"] == "main:https://github.com/org/repo@***"
+        )
+        assert applied["tests_repo_url"]["to"] == "https://***@github.com/org/tests"
+        assert "secret-token" not in response.text
+        assert "user:pass" not in response.text
+
+    def test_export_includes_empty_sensitive_override(self, test_client) -> None:
+        """An explicit empty sensitive override (which deliberately beats the
+        env value) round-trips through a sensitive export as "".
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"github_token": ""}},
+        )
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == ""
+
+    def test_export_skips_malformed_additional_repos(self, test_client) -> None:
+        """An unparseable additional_repos value never ships in a default
+        export — its credentials could sit anywhere a parser cannot find
+        (#361 Qodo r2: fail closed, skip).
+        """
+        raw = (
+            "main:https://github.com/org/repo@secret-token,"  # pragma: allowlist secret
+            "other:https://user:pass@github.com/org/other,"  # trailing comma: unparseable  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"additional_repos": raw}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "additional_repos" not in doc["settings"]
+        assert "secret-token" not in json.dumps(doc)
+        assert "user:pass" not in json.dumps(doc)
+        # The secrets opt-in still exports the raw value verbatim
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["additional_repos"] == raw
+
+    def test_import_diff_masks_malformed_additional_repos(self, test_client) -> None:
+        """Malformed additional_repos values are masked whole in the import
+        diff — on both the from and to side (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "additional_repos": (
+                        "main:https://user:pass@github.com/org/repo,"  # trailing comma  # pragma: allowlist secret
+                    )
+                }
+            },
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "additional_repos": (
+                        "other:https://github.com/org/other@secret-token"  # trailing comma makes it malformed too  # pragma: allowlist secret
+                        ","
+                    )
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert applied["additional_repos"] == {"from": "***", "to": "***"}
+        assert "secret-token" not in response.text
+        assert "user:pass" not in response.text
+
+    def test_export_strips_git_url_userinfo(self, test_client) -> None:
+        """git:// is a supported clone scheme — its URL userinfo is a
+        credential and must not leave a default export (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "git://user:pass@host/repo"  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["tests_repo_url"] == "git://host/repo"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "tests_repo_url": "git://user:pass@other/repo"  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["applied"]["tests_repo_url"]["to"] == (
+            "git://***@other/repo"
+        )
+        assert "user:pass" not in response.text
+
+    def test_export_survives_malformed_stored_url(self, test_client) -> None:
+        """A stored URL urlparse rejects must not raise from export — the
+        sanitizer fails safe and still drops the userinfo (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "https://user:pass@[broken"  # pragma: allowlist secret
+                }
+            },
+        )
+        response = test_client.get("/api/admin/settings/export")
+        assert response.status_code == 200
+        doc = response.json()
+        assert doc["settings"]["tests_repo_url"] == "https://[broken"
+        assert "user:pass" not in response.text
+
+        diff = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"tests_repo_url": "https://other/repo"},
+            },
+        ).json()
+        assert diff["applied"]["tests_repo_url"]["from"] == "https://***@[broken"
+        assert "user:pass" not in json.dumps(diff)
+
+    def test_import_default_export_preserves_tokenized_repos(self, test_client) -> None:
+        """Importing a default (sanitized) export must not wipe target repo
+        tokens — a key whose imported value matches the sanitized form of
+        the current value is skipped and reported as unchanged (#361 r2).
+        """
+        tokenized = (
+            "main:https://github.com/org/repo@secret-token"  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"additional_repos": tokenized}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["additional_repos"] == "main:https://github.com/org/repo"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": doc["settings"]},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "additional_repos" in data["unchanged"]
+        assert "additional_repos" not in data["applied"]
+        # The token survived — the target's credential-bearing value wins
+        assert _settings_item(test_client, "additional_repos")["value"] == (tokenized)
+
+    def test_put_bad_integer_reports_single_error(self, test_client) -> None:
+        """Each integer violation produces exactly one message — the manual
+        pre-checks duplicated pydantic's (#361 Qodo r2).
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"peer_analysis_max_rounds": "0"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail.count("peer_analysis_max_rounds") == 1
+        assert "must be >= 1" in detail
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_timeout": "abc"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail.count("jenkins_timeout") == 1
+        assert "must be an integer" in detail
+
+    def test_import_bad_integer_reports_single_error(self, test_client) -> None:
+        """Same dedupe guarantee on the import (422) path."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"peer_analysis_max_rounds": "0"},
+            },
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail.count("peer_analysis_max_rounds") == 1
+        assert "must be >= 1" in detail
+
+
 class TestIntegrationConnectionEndpoints:
     """Tests for POST /api/admin/settings/test/{integration}."""
 
