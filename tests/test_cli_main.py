@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import ClassVar
+from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -5234,6 +5234,64 @@ class TestAdminSettingsCommand:
         assert target.read_text() == "keep"
         assert target.stat().st_mode & 0o777 == 0o640
 
+    def test_admin_settings_export_replaces_existing_file(self, mock_client, tmp_path):
+        """Exporting over an existing file replaces it atomically (0600, no
+        leftovers) instead of truncating it in place."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        out = tmp_path / "settings.json"
+        out.write_text('{"old": true}')
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 0
+        assert json.loads(out.read_text())["settings"] == {
+            "jenkins_url": "http://jenkins"
+        }
+        assert out.stat().st_mode & 0o777 == 0o600
+        # No temp file survives a successful export
+        assert list(tmp_path.iterdir()) == [out]
+
+    def test_admin_settings_export_mid_write_failure_preserves_existing(
+        self, mock_client, tmp_path, monkeypatch
+    ):
+        """A failed write leaves the pre-existing export byte-identical and
+        cleans up the temp file (PR #362 Qodo finding)."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        out = tmp_path / "settings.json"
+        out.write_text('{"original": true}')
+        original_bytes = out.read_bytes()
+
+        class _FailingFile:
+            def __init__(self, fd: int) -> None:
+                self._fd = fd
+
+            def write(self, data: str) -> int:
+                raise OSError(28, "No space left on device")
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                os.close(self._fd)
+
+        monkeypatch.setattr(
+            "rootcoz.cli.main.os.fdopen", lambda fd, *a, **kw: _FailingFile(fd)
+        )
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        assert out.read_bytes() == original_bytes
+        # No temp file survives a failed export
+        assert list(tmp_path.iterdir()) == [out]
+
     def test_admin_settings_import(self, mock_client, tmp_path):
         mock_client.admin_import_settings.return_value = {
             "applied": {"jenkins_url": {"from": "http://old", "to": "http://new"}},
@@ -7026,20 +7084,31 @@ class TestAdminServerProvidersCommands:
                     "provider": "google",
                     "has_key": True,
                     "verified": True,
+                    "key_scoped": True,
+                    "key_scoped_status": "supported",
                     "models": [
                         {"id": "gemini-2.5-pro", "included": True, "free": True},
                         {"id": "gemini-2.5-flash", "included": False, "free": False},
                     ],
                 },
-                {"provider": "openai", "has_key": False, "verified": False},
+                {
+                    "provider": "openai",
+                    "has_key": False,
+                    "verified": False,
+                    "key_scoped": False,
+                },
             ]
         }
         result = runner.invoke(app, ["admin", "server-providers", "list"])
         assert result.exit_code == 0
-        assert "google: key=yes verified=yes models=2 included=1 free=1" in (
-            result.output
+        assert (
+            "google: key=yes verified=yes key-scoped=yes key-scoped-status=supported"
+            " models=2 included=1 free=1" in result.output
         )
-        assert "openai: key=no verified=no models=0 included=0 free=0" in result.output
+        assert (
+            "openai: key=no verified=no key-scoped=no key-scoped-status=-"
+            " models=0 included=0 free=0" in result.output
+        )
         mock_client.admin_list_server_providers.assert_called_once()
 
     def test_server_providers_list_json(self, mock_client):
@@ -7183,6 +7252,57 @@ class TestAdminServerProvidersCommands:
             "google",
             "g-key-3",
             "gemini-2.5-pro",  # pragma: allowlist secret
+        )
+
+    def test_server_providers_refresh_models(self, mock_client):
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "supported",
+            "model_count": 22,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "EnMaaS"],
+        )
+        assert result.exit_code == 0
+        assert "Refreshed key-scoped models for EnMaaS: 22 model(s)" in result.output
+        mock_client.admin_refresh_server_provider_models.assert_called_once_with(
+            "EnMaaS"
+        )
+
+    def test_server_providers_refresh_models_unavailable(self, mock_client):
+        """An unavailable listing reports the kept snapshot, not a failure."""
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "unavailable",
+            "model_count": 0,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "google"],
+        )
+        assert result.exit_code == 0
+        assert (
+            "Key-scoped model listing unavailable for google;"
+            " the previous captured listing is still in use"
+            " (static catalog when none exists)" in result.output
+        )
+
+    def test_server_providers_refresh_models_superseded(self, mock_client):
+        """A superseded refresh reports the concurrent change, not fallback."""
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "superseded",
+            "model_count": 0,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "google"],
+        )
+        assert result.exit_code == 0
+        assert (
+            "Key-scoped model listing superseded for google;"
+            " a concurrent credential change owns the stored listing" in result.output
         )
 
     def test_server_providers_rotate_key_prompts_hidden_when_flag_omitted(

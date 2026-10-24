@@ -9835,6 +9835,46 @@ class TestAdminSettingsExportImport:
         assert response.status_code == 422
         assert "Server-only" in response.json()["detail"]
 
+    def test_export_omits_derived_settings(self, test_client) -> None:
+        """Derived settings are instance-computed, not user data — a DB row
+        for one never ships in either export mode, so a transferred document
+        cannot pin a stale sidecar_url on another instance.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sidecar_url": "http://127.0.0.1:9100"}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "sidecar_url" not in doc["settings"]
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert "sidecar_url" not in doc["settings"]
+
+    def test_import_derived_key_rejected(self, test_client) -> None:
+        """A stale export carrying sidecar_url must not pin the derived URL
+        on this instance — 422 naming the key, nothing applied.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "sidecar_url": "http://127.0.0.1:9100",
+                    "ai_call_timeout": "30",
+                },
+            },
+        )
+        assert response.status_code == 422
+        assert "sidecar_url" in response.json()["detail"]
+        # Atomic rejection — the valid entry was NOT applied either
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "10"
+        assert _settings_item(test_client, "sidecar_url")["source"] != "db"
+
     def test_import_rejects_wrong_version_and_empty(self, test_client) -> None:
         response = test_client.post(
             "/api/admin/settings/import",
@@ -10128,6 +10168,98 @@ class TestAdminSettingsExportImport:
         assert "additional_repos" not in data["applied"]
         # The token survived — the target's credential-bearing value wins
         assert _settings_item(test_client, "additional_repos")["value"] == (tokenized)
+
+    def test_export_strips_url_query_tokens_by_default(self, test_client) -> None:
+        """A query or fragment can carry a token (``?token=SECRET``) —
+        default exports strip it from URL settings and additional_repos
+        entries (fail closed); the base URL stays importable and the
+        secrets opt-in keeps the value verbatim.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "https://git.example/repo?token=SECRET#frag",  # pragma: allowlist secret
+                    "additional_repos": "infra:https://git.example/infra?token=SECRET",  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["tests_repo_url"] == "https://git.example/repo"
+        assert doc["settings"]["additional_repos"] == "infra:https://git.example/infra"
+        assert "SECRET" not in json.dumps(doc)
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["tests_repo_url"] == (
+            "https://git.example/repo?token=SECRET#frag"  # pragma: allowlist secret
+        )
+        assert doc["settings"]["additional_repos"] == (
+            "infra:https://git.example/infra?token=SECRET"  # pragma: allowlist secret
+        )
+
+    def test_import_diff_masks_url_query_tokens(self, test_client) -> None:
+        """Query/fragment tokens are masked in the import diff display."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "tests_repo_url": "https://git.example/repo?token=SECRET",  # pragma: allowlist secret
+                    "additional_repos": "infra:https://git.example/infra?token=SECRET",  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert applied["tests_repo_url"]["to"] == "https://git.example/repo?***"
+        assert (
+            applied["additional_repos"]["to"] == "infra:https://git.example/infra?***"
+        )
+        assert "SECRET" not in response.text
+
+    def test_import_default_export_preserves_query_tokenized_urls(
+        self, test_client
+    ) -> None:
+        """Importing a default (sanitized) export must not wipe target query
+        tokens — the skip compares against _sanitize_export_value, which now
+        strips queries, so the credential-bearing target value wins.
+        """
+        tokenized_url = (
+            "https://git.example/repo?token=SECRET"  # pragma: allowlist secret
+        )
+        tokenized_repos = (
+            "infra:https://git.example/infra?token=SECRET"  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": tokenized_url,
+                    "additional_repos": tokenized_repos,
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["tests_repo_url"] == "https://git.example/repo"
+        assert doc["settings"]["additional_repos"] == "infra:https://git.example/infra"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": doc["settings"]},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "tests_repo_url" in data["unchanged"]
+        assert "additional_repos" in data["unchanged"]
+        assert "tests_repo_url" not in data["applied"]
+        assert "additional_repos" not in data["applied"]
+        # The query tokens survived — the target's credential-bearing values win
+        assert _settings_item(test_client, "tests_repo_url")["value"] == tokenized_url
+        assert (
+            _settings_item(test_client, "additional_repos")["value"] == tokenized_repos
+        )
 
     def test_put_bad_integer_reports_single_error(self, test_client) -> None:
         """Each integer violation produces exactly one message — the manual

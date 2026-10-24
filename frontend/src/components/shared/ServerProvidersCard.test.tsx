@@ -45,7 +45,7 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; models: Model[] }
 
 function providersState(): Provider[] {
   return [
@@ -242,6 +242,104 @@ describe('ServerProvidersCard provider list', () => {
     await user.click(screen.getByRole('combobox', { name: 'Provider' }))
     expect(await screen.findByRole('option', { name: 'gemini' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
+  })
+
+  it('badges a key-scoped provider and hints the static-catalog fallback otherwise (#350)', async () => {
+    get.mockResolvedValue(listResult([
+      { ...providersState()[0], key_scoped: true },
+      { provider: 'openai', has_key: true, verified: true, supports_key: true, key_scoped: false, models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('gemini')
+    // One badge for the key-scoped provider, one hint for the keyed
+    // provider without a captured listing — nothing else renders either.
+    expect(screen.getAllByText('Key-scoped')).toHaveLength(1)
+    expect(screen.getAllByText('static catalog')).toHaveLength(1)
+  })
+
+  it('hints a failed listing differently from a missing listing endpoint (#350 r2)', async () => {
+    get.mockResolvedValue(listResult([
+      // Discovery failed for this key — the hint must suggest a refresh,
+      // not claim the provider has no listing endpoint.
+      { ...providersState()[0], key_scoped: false, key_scoped_status: 'unavailable' },
+      { provider: 'openai', has_key: true, verified: true, supports_key: true, key_scoped: false, key_scoped_status: 'unsupported', models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('gemini')
+    expect(screen.getAllByText('listing failed')).toHaveLength(1)
+    expect(screen.getAllByText('static catalog')).toHaveLength(1)
+    // The failed-listing hint points at Refresh models as the remedy.
+    expect(screen.getByTitle('Model listing failed — try Refresh models; until then selection uses the static catalog')).toBeInTheDocument()
+  })
+
+  it('refreshes key-scoped models with the stored key and reports the outcome (#350)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([providersState()[0]]))
+    post.mockResolvedValue({ ok: true, status: 'supported', model_count: 2 } as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Refresh gemini models' }))
+    expect(post).toHaveBeenCalledWith('/api/admin/server-providers/gemini/refresh-models')
+    // The list is refetched and the notice reports the refreshed count.
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Refreshed key-scoped models for gemini: 2 model(s).',
+    )
+    expect(get).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports the catalog fallback when the refreshed listing is unavailable (#350)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([providersState()[0]]))
+    post.mockResolvedValue({ ok: true, status: 'unavailable', model_count: 0 } as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Refresh gemini models' }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Key-scoped listing unavailable for gemini; selection uses the static catalog.',
+    )
+  })
+
+  it('hints a stale capture when a key-scoped listing refresh failed (#350 r3)', async () => {
+    get.mockResolvedValue(listResult([
+      // Rows still exist (key_scoped) but the last refresh failed — the
+      // failure must surface next to the Key-scoped badge, not hide it.
+      { ...providersState()[0], key_scoped: true, key_scoped_status: 'unavailable' },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('gemini')
+    expect(screen.getByText('Key-scoped')).toBeInTheDocument()
+    expect(screen.getByText('listing failed — showing last capture')).toBeInTheDocument()
+    expect(screen.getByTitle('Model listing failed — showing the last captured list; try Refresh models')).toBeInTheDocument()
+  })
+
+  it('reports the kept listing when a refresh fails over an existing snapshot (#350 r3)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValueOnce(listResult([providersState()[0]]))
+      .mockResolvedValueOnce(listResult([
+        { ...providersState()[0], key_scoped: true, key_scoped_status: 'unavailable' },
+      ]))
+    post.mockResolvedValue({ ok: true, status: 'unavailable', model_count: 0 } as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Refresh gemini models' }))
+    // The refetched list still carries a snapshot — the notice must say
+    // the previous listing is in use, not imply a static-catalog fallback.
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Key-scoped listing unavailable for gemini; the previous captured listing is still in use.',
+    )
+  })
+
+  it('shows an alert when the refresh fails (#350)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([providersState()[0]]))
+    post.mockRejectedValueOnce(new Error('boom'))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Refresh gemini models' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not refresh models')
   })
 
   it('never offers catalog providers that cannot take session keys', async () => {

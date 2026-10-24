@@ -2062,6 +2062,10 @@ class TestRootCozClientAdminUsers:
                         "warnings": {"selected_models": [], "free_models": []},
                     },
                 )
+            if path.endswith("/refresh-models"):
+                return httpx.Response(
+                    200, json={"ok": True, "status": "supported", "model_count": 2}
+                )
             return httpx.Response(200, json={"outcome": "accepted", "ok": True})
 
         client = _make_client(handler)
@@ -2081,6 +2085,12 @@ class TestRootCozClientAdminUsers:
         )
         assert (
             state["seen"]["POST"][0] == "/api/admin/server-providers/google/rotate-key"
+        )
+        refreshed = client.admin_refresh_server_provider_models("google")
+        assert refreshed == {"ok": True, "status": "supported", "model_count": 2}
+        assert (
+            state["seen"]["POST"][0]
+            == "/api/admin/server-providers/google/refresh-models"
         )
         client.admin_set_server_provider_models(
             "google", [{"id": "gemini-2.5-pro", "included": True, "free": False}]

@@ -12,7 +12,10 @@ from rootcoz.prow_validation import (
     validate_prow_job_name,
 )
 from rootcoz.url_utils import (
+    mask_url_credentials_in_text,
+    mask_url_query_in_text,
     mask_url_userinfo_in_text,
+    strip_url_credentials,
     strip_url_userinfo_in_text,
 )
 
@@ -132,3 +135,39 @@ class TestStripUrlUserinfo:
             mask_url_userinfo_in_text(f"url {broken} end")
             == "url https://***@[broken end"
         )
+
+
+class TestUrlQueryCredentials:
+    """A query or fragment can carry a token — strip/mask it like userinfo."""
+
+    def test_strip_url_credentials(self):
+        token_url = "https://host/repo?token=SECRET"  # pragma: allowlist secret
+        assert strip_url_credentials(token_url) == "https://host/repo"
+        assert strip_url_credentials("https://host/repo#frag") == "https://host/repo"
+        url = "https://u:p@host/repo?token=SECRET#frag"  # pragma: allowlist secret
+        assert strip_url_credentials(url) == "https://host/repo"
+        assert strip_url_credentials("https://host/repo") == "https://host/repo"
+
+    def test_strip_url_credentials_malformed_never_raises(self):
+        broken = "https://user:pass@[broken?token=SECRET"  # pragma: allowlist secret
+        assert strip_url_credentials(broken) == "https://[broken"
+
+    def test_mask_url_query_in_text(self):
+        assert (
+            mask_url_query_in_text(
+                "see https://host/repo?token=SECRET now"
+            )  # pragma: allowlist secret
+            == "see https://host/repo?*** now"
+        )
+        assert (
+            mask_url_query_in_text("https://host/repo#frag") == "https://host/repo?***"
+        )
+        assert mask_url_query_in_text("https://host/repo") == "https://host/repo"
+
+    def test_mask_url_credentials_in_text(self):
+        url = "https://user:pass@host/repo?token=SECRET"  # pragma: allowlist secret
+        assert mask_url_credentials_in_text(url) == "https://***@host/repo?***"
+
+    def test_mask_url_credentials_malformed_never_raises(self):
+        broken = "https://user:pass@[broken?token=SECRET"  # pragma: allowlist secret
+        assert mask_url_credentials_in_text(broken) == "https://***@[broken?***"

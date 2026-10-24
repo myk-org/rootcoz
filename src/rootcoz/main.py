@@ -284,10 +284,10 @@ from rootcoz.transcripts import (
     write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import (
-    mask_url_userinfo_in_text,
+    mask_url_credentials_in_text,
     redact_urls_in_text,
+    strip_url_credentials,
     strip_url_userinfo,
-    strip_url_userinfo_in_text,
 )
 from rootcoz.utils import (
     is_sensitive_key,
@@ -12260,11 +12260,20 @@ async def set_free_ai_models_endpoint(
         (str(entry.get("provider") or "").lower(), str(entry.get("id") or ""))
         for entry in catalog
     }
+    # Key-scoped pairs (#350): a keyed provider's captured listing is a
+    # valid free-model target even for models the static catalog lacks.
+    key_scoped_pairs = {
+        (row["provider"].lower(), row["model"])
+        for row in await storage.list_server_provider_key_models()
+    }
     unknown: list[dict[str, str]] = []
     for entry in body.models:
         if (entry.provider.lower(), entry.model) in existing:
             continue
-        if (entry.provider.lower(), entry.model) not in catalog_pairs:
+        if (entry.provider.lower(), entry.model) not in catalog_pairs and (
+            entry.provider.lower(),
+            entry.model,
+        ) not in key_scoped_pairs:
             unknown.append({"provider": entry.provider, "model": entry.model})
     if unknown:
         raise HTTPException(
@@ -12322,18 +12331,18 @@ async def set_free_ai_models_endpoint(
 
 
 async def _seed_server_provider_selection(provider: str, updated_by: str) -> None:
-    """Seed a full-catalog selection for a newly-keyed provider (#347 r4).
+    """Seed a selection for a newly-keyed provider (#347 r4, #350).
 
     A stored key makes a provider *managed* (see
     ``ai_client._load_server_pool_selection``), and a managed provider with
     no selection rows exposes nothing — so adding a verified key to a
     provider that served its whole catalog via deployment credentials
     would silently withdraw every model from discovery and
-    ``require_selected_server_pair``. Seeding one row per current catalog
-    model (free flags preserved) keeps the exposure exactly as it was.
-    An existing admin selection stays authoritative — a restriction must
-    survive a key add — and the rotate path never reseeds for the same
-    reason.
+    ``require_selected_server_pair``. Seeding one row per model keeps the
+    exposure exactly as it was: the key-scoped listing when the last
+    add/rotate captured one (#350), the full catalog otherwise. An existing
+    admin selection stays authoritative — a restriction must survive a key
+    add — and the rotate path never reseeds for the same reason.
     """
     if any(
         row["provider"].lower() == provider.lower()
@@ -12345,21 +12354,32 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
         for row in await storage.list_free_ai_models()
         if row["provider"].lower() == provider.lower()
     }
-    catalog_models = [
-        entry["id"]
-        for entry in await _get_model_catalog()
-        if isinstance(entry.get("provider"), str)
-        and entry["provider"].lower() == provider.lower()
-        and isinstance(entry.get("id"), str)
-        and entry["id"]
+    key_scoped_rows = [
+        row
+        for row in await storage.list_server_provider_key_models()
+        if row["provider"].lower() == provider.lower()
     ]
-    entries = [{"id": model, "free": model in free_models} for model in catalog_models]
+    if key_scoped_rows:
+        # Key-scoped (#350): seed exactly what the key can access — the
+        # static catalog may list models this key cannot use, and may lack
+        # models it can. A sentinel-only listing (verified empty) seeds
+        # nothing: the key can access no models at all.
+        base_models = [row["model"] for row in key_scoped_rows if row["model"]]
+    else:
+        base_models = [
+            entry["id"]
+            for entry in await _get_model_catalog()
+            if isinstance(entry.get("provider"), str)
+            and entry["provider"].lower() == provider.lower()
+            and isinstance(entry.get("id"), str)
+            and entry["id"]
+        ]
+    entries = [{"id": model, "free": model in free_models} for model in base_models]
     # Free pairs whose model left the catalog survive the seeding (stale
     # pairs are ignored at runtime) so a key add never rewrites unrelated
     # free-model state.
     entries.extend(
-        {"id": model, "free": True}
-        for model in sorted(free_models - set(catalog_models))
+        {"id": model, "free": True} for model in sorted(free_models - set(base_models))
     )
     if entries:
         await storage.set_server_provider_models(provider, entries, updated_by)
@@ -12369,6 +12389,123 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
             provider,
             len(entries),
         )
+
+
+async def _key_scoped_capture_superseded(
+    provider: str, key: str, generation: int | None
+) -> bool:
+    """Whether the credential moved on from the one a discovery used (#350 r2).
+
+    A capture is superseded when the stored key no longer equals the key
+    the discovery ran with (unreadable counts as moved on), or when the
+    credential generation changed — which also covers a rotation to the
+    same key value and a concurrent removal.
+    """
+    try:
+        current_key = await storage.get_server_ai_credential(provider)
+    except storage.UnreadableAiCredentialsError:
+        return True
+    if current_key != key:
+        return True
+    return await storage.get_server_credential_generation(provider) != generation
+
+
+async def _capture_key_scoped_models(
+    provider: str,
+    key: str,
+    *,
+    keep_on_failure: bool,
+    generation: int | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Run key-scoped discovery and persist its result (#350).
+
+    Returns ``(models, status)`` where status is ``"supported"`` (rows
+    stored), ``"unsupported"`` (no listing endpoint — rows cleared),
+    ``"unavailable"`` (discovery failed — rows kept on refresh
+    (``keep_on_failure=True``, key unchanged) so a sidecar hiccup never
+    reverts the provider to the static catalog; cleared after add/rotate
+    (``keep_on_failure=False``) so the previous key's listing is never
+    exposed as the new key's), or ``"superseded"`` (the credential changed
+    during discovery — the capture is discarded so one key never wears
+    another key's listing; a rotation to the same key value still bumps
+    the generation and supersedes). Every row write is bound to
+    ``generation`` — the credential generation this discovery ran against —
+    so a capture that loses the race to a concurrent add/rotate/remove
+    writes nothing — and a rotation landing between the superseded check
+    and the write makes the conditional write itself return ``False``, which
+    this function reports as ``"superseded"`` too (#350 r3): a skipped
+    write is never reported as a stored capture. Only ``source: "listing"`` models are stored:
+    manifest-only models are not key-verified. A supported listing with
+    zero accessible models is stored as a sentinel row — "verified empty"
+    — so the pool exposes nothing instead of falling back to the catalog.
+    """
+    try:
+        from rootcoz.ai_client import models_for_api_key
+
+        discovery = await models_for_api_key(provider, key)
+    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+        logger.warning(
+            "Key-scoped model discovery unavailable for provider=%s", provider
+        )
+        # A failed capture after add/rotate must not leave the previous
+        # key's rows exposed as the new key's verified listing; a failed
+        # refresh (same key) keeps the last captured listing instead.
+        if not await _key_scoped_capture_superseded(provider, key, generation):
+            if keep_on_failure:
+                stored = await storage.set_server_provider_key_capture_status(
+                    provider, "unavailable", expected_generation=generation
+                )
+            else:
+                stored = await storage.set_server_provider_key_models(
+                    provider,
+                    [],
+                    status="unavailable",
+                    expected_generation=generation,
+                )
+            # A skipped write (rotation landed between the superseded check
+            # and the conditional write) is a superseded capture, never a
+            # success — nothing was stored (#350 r3).
+            if not stored:
+                return [], "superseded"
+        return [], "unavailable"
+    if await _key_scoped_capture_superseded(provider, key, generation):
+        logger.warning(
+            "Key-scoped capture superseded for provider=%s (credential changed"
+            " during discovery); discarding",
+            provider,
+        )
+        return [], "superseded"
+    if not discovery["modelListingSupported"]:
+        stored = await storage.set_server_provider_key_models(
+            provider,
+            [],
+            status="unsupported",
+            expected_generation=generation,
+        )
+        return ([], "unsupported") if stored else ([], "superseded")
+    # Manifest-only models are the provider manifest's, not the key's — a
+    # restricted key must never see them as verified (#350 r1).
+    listing_models = [
+        entry for entry in discovery["models"] if entry.get("source") != "manifest"
+    ]
+    if listing_models:
+        stored = await storage.set_server_provider_key_models(
+            provider,
+            listing_models,
+            status="supported",
+            expected_generation=generation,
+        )
+        return (listing_models, "supported") if stored else ([], "superseded")
+    # Supported listing, zero key-accessible models: the sentinel row keeps
+    # "verified empty" distinct from "no listing" so the pool exposes
+    # nothing instead of falling back to the static catalog (#350 r1).
+    stored = await storage.set_server_provider_key_models(
+        provider,
+        [{"id": "", "sentinel": True}],
+        status="supported",
+        expected_generation=generation,
+    )
+    return ([], "supported") if stored else ([], "superseded")
 
 
 async def _verify_and_store_server_provider_key(
@@ -12430,17 +12567,38 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
-    await storage.set_server_ai_credential(
+    # The generation this write assigned, returned from inside the upsert's
+    # transaction — never re-read: an overlapping rotation (even to the same
+    # key) landing before a separate read would hand this capture the newer
+    # credential's generation and let its stale snapshot through (#350 r3).
+    generation = await storage.set_server_ai_credential(
         provider, key, request.state.username or "admin"
+    )
+    # Key-scoped capture (#350): after a successful verification, record the
+    # models this key can actually access. A listing-unsupported provider or
+    # a transient discovery failure never blocks the add — a failed
+    # discovery clears any previous key's rows (this key's listing is
+    # unknown, never the old key's), and the server pool falls back to the
+    # static catalog for this provider. The capture is bound to the
+    # credential generation just written (#350 r2): a concurrent rotate
+    # bumps it and this capture's writes are skipped.
+    key_models, capture_status = await _capture_key_scoped_models(
+        provider,
+        key,
+        keep_on_failure=False,
+        generation=generation,
     )
     if not replacing:
         await _seed_server_provider_selection(
             provider, request.state.username or "admin"
         )
     logger.info(
-        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified)",
+        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified%s)",
         request.state.username,
         provider,
+        f", {len(key_models)} key-scoped models"
+        if capture_status == "supported"
+        else "",
     )
     return JSONResponse(
         content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
@@ -12475,6 +12633,18 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     for row in await storage.list_free_ai_models():
         free_by_provider.setdefault(row["provider"].lower(), set()).add(row["model"])
     supported = {p.lower() for p in await supported_key_providers()}
+    # Key-scoped listings captured at add/rotate (#350): for a keyed
+    # provider these replace the static catalog as the offered model set —
+    # a restricted key must not offer models it cannot use. Providers with
+    # no rows (listing unsupported / discovery failed) keep the catalog.
+    key_scoped: dict[str, dict[str, dict[str, Any]]] = {}
+    # Stored spelling per lowercase join key (#350 r2): fallback entries for
+    # providers the catalog no longer lists must keep the stored casing —
+    # pi-config matches session providers by their exact id.
+    key_scoped_ids: dict[str, str] = {}
+    for row in await storage.list_server_provider_key_models():
+        key_scoped.setdefault(row["provider"].lower(), {})[row["model"]] = row
+        key_scoped_ids.setdefault(row["provider"].lower(), row["provider"])
 
     models_by_provider: dict[str, list[dict[str, Any]]] = {}
     for entry in catalog:
@@ -12482,11 +12652,31 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         model = entry.get("id")
         if not isinstance(provider, str) or not isinstance(model, str) or not model:
             continue
+        scoped_rows = key_scoped.get(provider.lower())
+        if scoped_rows is not None and model not in scoped_rows:
+            # Key-scoped (#350): the catalog model is not accessible to the
+            # stored key — do not offer it.
+            continue
         models_by_provider.setdefault(provider, []).append(
             {"id": model, "name": entry.get("name") or model}
         )
-    # Stored selections whose model left the catalog stay visible so the UI
-    # can render and clear them (stale pairs are ignored at runtime).
+    # Key-scoped models the static catalog lacks still belong to the offered
+    # set (#350) — the listing is the source of truth for a keyed provider.
+    # The empty-string sentinel (verified-empty listing) contributes no
+    # offered model but still marks the provider key-scoped.
+    for provider_lower, scoped_rows in key_scoped.items():
+        provider = next(
+            (p for p in models_by_provider if p.lower() == provider_lower),
+            key_scoped_ids.get(provider_lower, provider_lower),
+        )
+        known = {m["id"] for m in models_by_provider.get(provider, [])}
+        for model, row in sorted(scoped_rows.items()):
+            if model and model not in known:
+                models_by_provider.setdefault(provider, []).append(
+                    {"id": model, "name": row.get("name") or model}
+                )
+    # Stored selections whose model left the offered set stay visible so
+    # the UI can render and clear them (stale pairs are ignored at runtime).
     for provider_lower, selected in selections.items():
         provider = next(
             (p for p in models_by_provider if p.lower() == provider_lower),
@@ -12533,6 +12723,19 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 "verified": record is not None,
                 "verified_at": record.get("verified_at", "") if record else "",
                 "supports_key": provider.lower() in supported,
+                # True when the last add/rotate captured a key-scoped listing
+                # (#350) — the models above are exactly what the key can
+                # access. A keyed provider without it falls back to the
+                # static catalog (no listing endpoint / failed discovery).
+                "key_scoped": provider_lower in key_scoped,
+                # Outcome of the last key-scoped capture (#350 r2):
+                # supported / unsupported / unavailable. "unavailable" can
+                # coexist with key_scoped true — a failed refresh kept the
+                # last snapshot — telling the admin the listed models are
+                # stale, not that no listing endpoint exists.
+                "key_scoped_status": record.get("key_capture_status")
+                if record
+                else None,
                 "models": models,
             }
         )
@@ -12582,6 +12785,73 @@ async def rotate_server_provider_key(
     )
 
 
+@app.post(
+    "/api/admin/server-providers/{provider:path}/refresh-models",
+    operation_id="refreshServerProviderModels",
+)
+async def refresh_server_provider_models(
+    provider: str, request: Request
+) -> JSONResponse:
+    """Re-run key-scoped discovery with the stored key (admin only).
+
+    Captures permission drift since add/rotate without re-entering the key:
+    the refreshed listing replaces the stored rows, existing admin
+    selections survive (runtime filtering withdraws newly inaccessible
+    models), and the selection is NEVER reseeded — a deliberately empty
+    selection (an admin who deselected every model) must survive a
+    refresh instead of quietly re-including the whole listing. Never
+    re-verifies with an LLM call; a dead key simply reports
+    ``unavailable`` and keeps the last captured listing.
+    """
+    _require_admin(request)
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    provider = canonical
+    try:
+        key = await storage.get_server_ai_credential(provider)
+    except storage.UnreadableAiCredentialsError:
+        raise HTTPException(
+            status_code=500, detail="Stored server AI credentials are unreadable"
+        ) from None
+    if key is None:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    # A None generation means the provider was removed between the key read
+    # and this read — never bind a capture to "no credential" (#350 r3): an
+    # unbound write would re-insert the rows the removal just deleted.
+    generation = await storage.get_server_credential_generation(provider)
+    if generation is None:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    # Same key, so a failed discovery keeps the last captured listing
+    # (#350 r2); the generation binding still discards the refresh when a
+    # concurrent rotation moves the credential on.
+    models, status = await _capture_key_scoped_models(
+        provider,
+        key,
+        keep_on_failure=True,
+        generation=generation,
+    )
+    logger.info(
+        "[AUDIT] Admin '%s' refreshed key-scoped models for '%s' (%s, %d models)",
+        request.state.username,
+        provider,
+        status,
+        len(models),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response(
+            {"ok": True, "status": status, "model_count": len(models)}
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.put(
     "/api/admin/server-providers/{provider:path}/models",
     operation_id="setServerProviderModelsEndpoint",
@@ -12628,10 +12898,18 @@ async def set_server_provider_models_endpoint(
         )
         for entry in await _get_model_catalog()
     }
+    # Key-scoped pairs (#350): a keyed provider's captured listing is a
+    # valid selection target even for models the static catalog lacks.
+    key_scoped_pairs = {
+        (row["provider"].lower(), row["model"])
+        for row in await storage.list_server_provider_key_models()
+    }
     unknown = [
         {"provider": provider, "model": e["id"]}
         for e in entries
-        if e["id"] not in existing and (provider.lower(), e["id"]) not in catalog_pairs
+        if e["id"] not in existing
+        and (provider.lower(), e["id"]) not in catalog_pairs
+        and (provider.lower(), e["id"]) not in key_scoped_pairs
     ]
     if unknown:
         raise HTTPException(
@@ -13154,7 +13432,7 @@ def _transform_additional_repos(
 ) -> str | None:
     """Rebuild an ``additional_repos`` value, transforming each repo URL.
 
-    ``url_fn`` is applied to every URL (strip or mask userinfo). An
+    ``url_fn`` is applied to every URL (strip or mask credentials). An
     embedded ``@token`` is replaced by ``token_suffix`` — empty drops the
     credential entirely, ``"***"`` masks it for display. Returns None for
     a malformed stored value: its credentials could sit anywhere a parser
@@ -13179,13 +13457,14 @@ def _sanitize_export_value(key: str, value: str) -> str | None:
     """Strip credentials from a non-sensitive value on default exports.
 
     ``additional_repos`` entries can carry an embedded ``@token`` and repo
-    URLs can carry userinfo — those must not leave without the
-    ``include_sensitive`` opt-in. Returns None when the stored value is
-    too malformed to sanitize (fail closed: the key is skipped).
+    URLs can carry userinfo or a query/fragment token — those must not
+    leave without the ``include_sensitive`` opt-in. Returns None when the
+    stored value is too malformed to sanitize (fail closed: the key is
+    skipped).
     """
     if key == "additional_repos":
-        return _transform_additional_repos(value, strip_url_userinfo, "")
-    return strip_url_userinfo_in_text(value)
+        return _transform_additional_repos(value, strip_url_credentials, "")
+    return redact_urls_in_text(value)
 
 
 def _mask_diff_value(key: str, value: str | None) -> str | None:
@@ -13193,11 +13472,11 @@ def _mask_diff_value(key: str, value: str | None) -> str | None:
     if value is None:
         return None
     if key == "additional_repos":
-        masked = _transform_additional_repos(value, mask_url_userinfo_in_text, "***")
+        masked = _transform_additional_repos(value, mask_url_credentials_in_text, "***")
         # A malformed value is masked whole — its credentials could sit
         # anywhere a parser cannot find (#361 Qodo r2).
         return "***" if masked is None else masked
-    return mask_url_userinfo_in_text(value)
+    return mask_url_credentials_in_text(value)
 
 
 def _diff_import_updates(
@@ -13258,9 +13537,16 @@ async def export_server_settings(
     settings: dict[str, str] = {}
     sensitive_included = False
     for key, row in sorted((await storage.get_server_settings()).items()):
-        # Internal bookkeeping rows (e.g. jira_verified_method) and
-        # server-only bootstrap values are not admin settings — skip them.
-        if key not in _FIELD_TO_CATEGORY or key in _SERVER_ONLY_SETTINGS:
+        # Internal bookkeeping rows (e.g. jira_verified_method), server-only
+        # bootstrap values, and derived settings are not transferable
+        # settings — a derived value (e.g. sidecar_url from sidecar_port) is
+        # instance-computed, and shipping it would pin a stale URL on
+        # another instance (same rule the persist endpoint enforces).
+        if (
+            key not in _FIELD_TO_CATEGORY
+            or key in _SERVER_ONLY_SETTINGS
+            or key in _DERIVED_SETTINGS
+        ):
             continue
         value = row["value"]
         if key in _SENSITIVE_SETTINGS:
@@ -13346,6 +13632,13 @@ async def import_server_settings(request: Request) -> JSONResponse:
     # before any DB write, keeping the import atomic).
     errors = _validate_settings_updates(updates)
     for key, value in updates.items():
+        if key in _DERIVED_SETTINGS:
+            # Same rule the persist endpoint enforces: a derived value is
+            # computed from sidecar_port at boot — importing one would pin
+            # a stale URL from the exporting instance.
+            errors.append(
+                f"{key} is derived from sidecar_port — set sidecar_port instead"
+            )
         if not value and (error := _empty_override_error(key)):
             errors.append(error)
     if errors:

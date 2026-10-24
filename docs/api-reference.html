@@ -1248,17 +1248,22 @@
 <tr>
 <td>GET</td>
 <td><code>/api/admin/server-providers</code></td>
-<td>Per provider: key presence, verification state, and its models with <code>included</code> + <code>free</code> flags — never the keys</td>
+<td>Per provider: key presence, verification state, <code>key_scoped</code> flag, <code>key_scoped_status</code> (last capture outcome: <code>supported</code>/<code>unsupported</code>/<code>unavailable</code>, null when no capture ran), and its models with <code>included</code> + <code>free</code> flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/api/admin/server-providers</code></td>
-<td>Add a server provider key: <code>provider</code>, <code>api_key</code>, <code>verification_model</code> — verified with a real sidecar turn before storing; <code>409</code> when a key is already stored</td>
+<td>Add a server provider key: <code>provider</code>, <code>api_key</code>, <code>verification_model</code> — verified with a real sidecar turn before storing, then the key-scoped model listing is captured; <code>409</code> when a key is already stored</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/api/admin/server-providers/{provider}/rotate-key</code></td>
-<td>Replace the key (re-verified first); <code>404</code> when none is stored</td>
+<td>Replace the key (re-verified first); <code>404</code> when none is stored; the key-scoped listing is re-captured</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/server-providers/{provider}/refresh-models</code></td>
+<td>Re-run key-scoped discovery with the stored key (no re-entry, no LLM call); reports <code>status</code> (<code>supported</code>/<code>unsupported</code>/<code>unavailable</code>) and <code>model_count</code>; <code>404</code> when no key is stored</td>
 </tr>
 <tr>
 <td>PUT</td>

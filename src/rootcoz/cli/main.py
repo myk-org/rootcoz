@@ -1,10 +1,12 @@
 """rootcoz -- CLI tool for the rootcoz REST API."""
 
 import csv
+import errno
 import json as json_mod
 import logging
 import os
 import sys
+import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3573,17 +3575,28 @@ def admin_settings_export(
         payload = json_mod.dumps(data, indent=2) + "\n"
         try:
             # 0600: the file can hold decrypted secrets (--include-sensitive)
-            # and must not be readable by other local users; fchmod also
-            # tightens a pre-existing file, which O_CREAT alone would keep.
-            # O_NOFOLLOW refuses a symlink output — following it would chmod
-            # whatever the link points at (#361 Qodo r2).
-            nofollow = getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(
-                output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow, 0o600
+            # and must not be readable by other local users. The temp file is
+            # created 0600 by mkstemp and os.replace carries that mode onto
+            # the destination, so a pre-existing group-readable file is
+            # tightened too.
+            # A symlink output is refused up front — following it would write
+            # through the link (#361 Qodo r2); os.replace itself never follows
+            # symlinks either.
+            if output.is_symlink():
+                raise OSError(errno.ELOOP, "output is a symlink", str(output))
+            # Atomic write: a failed write must leave an existing export
+            # untouched, not truncated (PR #362 Qodo finding).
+            fd, tmp_name = tempfile.mkstemp(
+                dir=output.parent, prefix=f"{output.name}.", suffix=".tmp"
             )
-            with os.fdopen(fd, "w") as fh:
-                os.fchmod(fh.fileno(), 0o600)
-                fh.write(payload)
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(payload)
+                os.replace(tmp_path, output)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
         except OSError as exc:
             typer.echo(f"Error writing {output}: {exc}", err=True)
             raise typer.Exit(1)
@@ -3800,6 +3813,9 @@ def admin_server_providers_list(json_output: bool = _JSON_OPTION) -> None:
         typer.echo(
             f"{provider['provider']}: key={'yes' if provider.get('has_key') else 'no'}"
             f" verified={'yes' if provider.get('verified') else 'no'}"
+            f" key-scoped={'yes' if provider.get('key_scoped') else 'no'}"
+            # Older servers lack the field; '-' keeps the line parseable.
+            f" key-scoped-status={provider.get('key_scoped_status') or '-'}"
             f" models={len(models)} included={len(included)} free={len(free)}"
         )
 
@@ -3873,6 +3889,45 @@ def admin_server_providers_rotate(
             f"Key NOT rotated ({data.get('outcome')}): {data.get('message', '')}"
         )
     raise typer.Exit(code=1)
+
+
+@admin_server_providers_app.command("refresh-models")
+def admin_server_providers_refresh_models(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Re-run key-scoped model discovery with the stored key (#350)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_refresh_server_provider_models(provider),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        status = data.get("status")
+        if status == "supported":
+            typer.echo(
+                f"Refreshed key-scoped models for {provider}:"
+                f" {data.get('model_count', 0)} model(s)"
+            )
+        elif status == "unavailable":
+            # A failed refresh keeps the last captured listing (#350 r3) —
+            # the notice must not imply a static-catalog fallback when a
+            # snapshot is still in use.
+            typer.echo(
+                f"Key-scoped model listing unavailable for {provider};"
+                " the previous captured listing is still in use"
+                " (static catalog when none exists)"
+            )
+        elif status == "superseded":
+            typer.echo(
+                f"Key-scoped model listing superseded for {provider};"
+                " a concurrent credential change owns the stored listing"
+            )
+        else:
+            typer.echo(
+                f"Key-scoped model listing {status} for {provider};"
+                " selection falls back to the static catalog"
+            )
 
 
 @admin_server_providers_app.command("models")

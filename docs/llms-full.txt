@@ -2300,6 +2300,7 @@ That creates an active operator who can submit analyses, and one server setting 
 - **Automate with the CLI.** User creation, role changes, `can_view_reports`, and pending approvals are all available from the CLI (`admin users ...`). See [CLI Command Reference](cli-reference.html) for details.
 - **Give analysis more context.** The `AI`, `GitHub`, and `Server` categories hold most of the knobs that change how much context an analysis gets. See [Configuring Analysis Context](configure-analysis-context.html) for details.
 - **Declare free models.** In Server Settings → AI, the *Free AI models* card below the settings rows manages the free provider+model pair list. Pick a provider and model from the server catalog and click `Add`; remove pairs with the per-row `Remove` button. "Free" is this list — never the catalog's cost fields — and every pair is validated against the server catalog at save time. The `ENABLE_FREE_MODELS` toggle above it decides whether the list is live. The CLI mirrors it: `admin models free-list` / `free-add` / `free-remove`.
+- **Scope a server provider's models to its key.** When a stored server provider key supports model listing, adding or rotating it captures the models that key can actually access — the provider's model selection (and every user's model picker on server credentials) then offers exactly that set, marked with a `Key-scoped` badge. A keyed provider without a listing endpoint shows a *static catalog* hint and keeps the catalog-based behavior. `Refresh models` on a provider row re-runs the listing with the stored key to pick up permission drift without re-entering it; the CLI mirrors it: `admin server-providers refresh-models --provider PROVIDER`.
 - **Keep the bootstrap key reachable.** `ADMIN_KEY` authenticates a superuser that lives outside the database. If you rotate it while signed in as a database admin, keep a copy of the new value or you can lock yourself out.
 - **Encryption key rotation.** `ROOTCOZ_ENCRYPTION_KEY` is not a server setting in the UI. Changing it re-derives both the Fernet key used for at-rest secrets and the HMAC secret used to hash API keys. Existing API key hashes stop matching, so every user must be given a new key; stored user tokens, AI credentials, and encrypted settings become undecryptable and must be re-entered. Sessions survive, because a session row stores only the username, admin flag, role, and expiry.
 
@@ -2637,9 +2638,10 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | PUT | `/api/admin/users/{username}/can-use-server-providers` | Grant or revoke server AI credentials |
 | GET | `/api/admin/free-models` | List admin-declared free provider+model pairs (with `version` fingerprint) |
 | PUT | `/api/admin/free-models` | Replace the free pair list (validated against the catalog); optional `expected_version` from a prior GET rejects concurrent edits with `409` |
-| GET | `/api/admin/server-providers` | Per provider: key presence, verification state, and its models with `included` + `free` flags — never the keys |
-| POST | `/api/admin/server-providers` | Add a server provider key: `provider`, `api_key`, `verification_model` — verified with a real sidecar turn before storing; `409` when a key is already stored |
-| POST | `/api/admin/server-providers/{provider}/rotate-key` | Replace the key (re-verified first); `404` when none is stored |
+| GET | `/api/admin/server-providers` | Per provider: key presence, verification state, `key_scoped` flag, `key_scoped_status` (last capture outcome: `supported`/`unsupported`/`unavailable`, null when no capture ran), and its models with `included` + `free` flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access |
+| POST | `/api/admin/server-providers` | Add a server provider key: `provider`, `api_key`, `verification_model` — verified with a real sidecar turn before storing, then the key-scoped model listing is captured; `409` when a key is already stored |
+| POST | `/api/admin/server-providers/{provider}/rotate-key` | Replace the key (re-verified first); `404` when none is stored; the key-scoped listing is re-captured |
+| POST | `/api/admin/server-providers/{provider}/refresh-models` | Re-run key-scoped discovery with the stored key (no re-entry, no LLM call); reports `status` (`supported`/`unsupported`/`unavailable`) and `model_count`; `404` when no key is stored |
 | PUT | `/api/admin/server-providers/{provider}/models` | Replace the provider's model selection `{id, included, free}[]` (validated against the catalog); `free` implies `included`, and the free flags write the same `free_ai_models` pairs |
 | DELETE | `/api/admin/server-providers/{provider}` | Remove the key, selection, and free pairs; `200` with a warning payload listing the affected models |
 | GET | `/api/admin/settings` | All settings with value, source, and metadata; `reveal_key` unmasks one key or `__all__` |
@@ -2987,9 +2989,10 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `models free-list` | — | List admin-declared free provider+model pairs. |
 | `models free-add` | `--provider`, `--model` | Declare one provider+model pair as free (validated against the catalog). |
 | `models free-remove` | `--provider`, `--model` | Remove one pair from the free list. |
-| `server-providers list` | — | Server provider key state and per-model selection. |
-| `server-providers add` | `--provider`, `--api-key`, `--verification-model` | Add a server provider key (verified with a real sidecar turn before storing). |
-| `server-providers rotate-key` | `--provider`, `--api-key`, `--verification-model` | Replace a key (re-verified first). |
+| `server-providers list` | — | Server provider key state, key-scoped flag, and per-model selection. |
+| `server-providers add` | `--provider`, `--api-key`, `--verification-model` | Add a server provider key (verified with a real sidecar turn before storing; the key-scoped model listing is captured). |
+| `server-providers rotate-key` | `--provider`, `--api-key`, `--verification-model` | Replace a key (re-verified first; the key-scoped listing is re-captured). |
+| `server-providers refresh-models` | `--provider` | Re-run key-scoped discovery with the stored key — picks up permission drift without re-entering the key. |
 | `server-providers models` | `--provider`, `--models`, `--free` | Set the provider's exposed models; comma-separated ids passed verbatim (real ids may end in `:free`). `--free` lists the free subset (free implies included; entries not in `--models` are auto-included). Models not listed are deselected. |
 | `server-providers remove` | `--provider` | Remove the key, selection, and free pairs. |
 

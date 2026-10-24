@@ -1150,17 +1150,22 @@
 <tr>
 <td><code>server-providers list</code></td>
 <td>—</td>
-<td>Server provider key state and per-model selection.</td>
+<td>Server provider key state, key-scoped flag, and per-model selection.</td>
 </tr>
 <tr>
 <td><code>server-providers add</code></td>
 <td><code>--provider</code>, <code>--api-key</code>, <code>--verification-model</code></td>
-<td>Add a server provider key (verified with a real sidecar turn before storing).</td>
+<td>Add a server provider key (verified with a real sidecar turn before storing; the key-scoped model listing is captured).</td>
 </tr>
 <tr>
 <td><code>server-providers rotate-key</code></td>
 <td><code>--provider</code>, <code>--api-key</code>, <code>--verification-model</code></td>
-<td>Replace a key (re-verified first).</td>
+<td>Replace a key (re-verified first; the key-scoped listing is re-captured).</td>
+</tr>
+<tr>
+<td><code>server-providers refresh-models</code></td>
+<td><code>--provider</code></td>
+<td>Re-run key-scoped discovery with the stored key — picks up permission drift without re-entering the key.</td>
 </tr>
 <tr>
 <td><code>server-providers models</code></td>
