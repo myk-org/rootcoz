@@ -811,11 +811,17 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     # may offer models the catalog lacks. Providers with no rows (listing
     # unsupported, discovery failed, or pre-#350 rows) keep the catalog.
     key_scoped: dict[str, dict[str, dict[str, Any]]] = {}
+    # Stored spelling per lowercase join key (#350 r2): fallback entries for
+    # providers the catalog no longer lists must keep the stored casing —
+    # pi-config looks up session providers by their exact id, so emitting
+    # ``mygateway`` for a stored ``MyGateway`` breaks session creation.
+    key_scoped_ids: dict[str, str] = {}
     try:
         from rootcoz.storage import list_server_provider_key_models
 
         for row in await list_server_provider_key_models():
             key_scoped.setdefault(row["provider"].lower(), {})[row["model"]] = row
+            key_scoped_ids.setdefault(row["provider"].lower(), row["provider"])
     except sqlite3.Error, OSError:
         logger.warning("Unable to load key-scoped server provider models")
 
@@ -867,16 +873,20 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     # A captured listing for a provider the static catalog no longer lists
     # still defines its server pool — the admin API offers those models, so
     # discovery must not silently drop the provider (#350 r1).
+    # The stored spelling is the provider id (#350 r2): the catalog join
+    # key is lowercase, but the emitted entries must carry the exact id
+    # pi-config resolves sessions with.
     for provider_lower, scoped_rows in key_scoped.items():
         if provider_lower in seen_catalog_providers:
             continue
-        if active is not None and not is_server_provider_active(provider_lower):
+        provider = key_scoped_ids.get(provider_lower, provider_lower)
+        if active is not None and not is_server_provider_active(provider):
             continue
         has_selection = provider_lower in selected_providers
-        for entry in _key_scoped_entries(provider_lower, scoped_rows):
+        for entry in _key_scoped_entries(provider, scoped_rows):
             if has_selection and (provider_lower, entry["id"]) not in selected_pairs:
                 continue
-            pairs[(provider_lower, entry["id"])] = {
+            pairs[(provider, entry["id"])] = {
                 **entry,
                 "credential_sources": ["server"],
                 "can_use_server_providers": allowed,

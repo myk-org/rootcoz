@@ -28,6 +28,16 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_KEY", "sp-bootstrap-key")
     monkeypatch.setenv("SECURE_COOKIES", "false")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "server-providers.db"))
+
+    # Hermetic default: every add/rotate/refresh in this file reaches key-scoped
+    # capture, and an unmocked ``models_for_api_key`` fires REAL discovery at
+    # SIDECAR_URL — the dev compose publishes 9100, so tests would hit the live
+    # sidecar. Tests that care about discovery results override this via
+    # _mock_key_discovery (a later monkeypatch.setattr wins).
+    async def _hermetic_discovery(provider, api_key):
+        return {"modelListingSupported": False, "models": []}
+
+    monkeypatch.setattr(ai_client, "models_for_api_key", _hermetic_discovery)
     get_settings.cache_clear()
     with TestClient(app) as client:
         yield client
@@ -660,6 +670,16 @@ async def test_refresh_models_endpoint(client, monkeypatch):
         ("google", "gemini-2.5-pro"),
         ("google", "gemini-3-pro"),
     }
+    # The kept listing stays key-scoped, but the status records why the
+    # models on screen are stale (#350 r2).
+    providers = {
+        p["provider"]: p
+        for p in client.get(
+            "/api/admin/server-providers", headers=_admin_headers()
+        ).json()["providers"]
+    }
+    assert providers["google"]["key_scoped"] is True
+    assert providers["google"]["key_scoped_status"] == "unavailable"
     # No stored key → 404 (provider must be key-supported to reach the
     # lookup); unsupported provider id → 400.
     _mock_supported(monkeypatch, ["google", "openai"])
@@ -1737,3 +1757,262 @@ async def test_add_exact_match_wins_over_case_insensitive_fallback(client, monke
     assert verified[0][0] == "foo"
     stored = await storage.list_server_ai_providers()
     assert [row["provider"] for row in stored] == ["foo"]
+
+
+# --- Credential generation binding and capture outcomes (#350 r2) ---
+
+
+async def test_stale_capture_write_is_generation_gated(tmp_path, monkeypatch):
+    """Storage: a row write bound to a moved-on generation writes nothing.
+
+    Every credential write bumps the generation — including a rotation to
+    the same key value and a removal — so a capture that lost the race can
+    never leave one key wearing another key's (or a removed key's) listing.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-gen.db")
+    await storage.init_db()
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    generation = await storage.get_server_credential_generation("google")
+    # Same-key rotation mid-capture: the key check alone would pass, the
+    # generation must not.
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    assert await storage.get_server_credential_generation("google") == generation + 1
+    assert (
+        await storage.set_server_provider_key_models(
+            "google", [{"id": "m"}], expected_generation=generation
+        )
+        is False
+    )
+    assert await storage.list_server_provider_key_models() == []
+    # A removal mid-capture supersedes the same way — no resurrection.
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    generation = await storage.get_server_credential_generation("google")
+    await storage.delete_server_ai_provider("google")
+    assert (
+        await storage.set_server_provider_key_models(
+            "google", [{"id": "m"}], expected_generation=generation
+        )
+        is False
+    )
+    assert await storage.list_server_provider_key_models() == []
+    # The current generation writes and records the capture outcome.
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    generation = await storage.get_server_credential_generation("google")
+    assert (
+        await storage.set_server_provider_key_models(
+            "google",
+            [{"id": "m"}],
+            expected_generation=generation,
+            status="supported",
+        )
+        is True
+    )
+    rows = await storage.list_server_ai_providers()
+    assert rows[0]["key_capture_status"] == "supported"
+    # Status-only write (kept listing) leaves the rows alone.
+    assert (
+        await storage.set_server_provider_key_capture_status(
+            "google", "unavailable", expected_generation=generation
+        )
+        is True
+    )
+    assert [
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_key_models()
+    ] == [("google", "m")]
+    assert (await storage.list_server_ai_providers())[0]["key_capture_status"] == (
+        "unavailable"
+    )
+
+
+async def test_concurrent_same_key_rotation_supersedes_stale_capture(
+    client, monkeypatch
+):
+    """A same-value re-store mid-discovery still discards the stale capture.
+
+    The old key-equality check let this capture through (same key value);
+    only the generation binding — every credential write bumps it — makes
+    the overlapping write lose (#350 r2).
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
+    inner_discovery = ai_client.models_for_api_key
+
+    async def rotating_discovery(provider, key):
+        # Re-store the SAME key value while discovery is in flight.
+        await storage.set_server_ai_credential(provider, key, "admin")
+        return await inner_discovery(provider, key)
+
+    monkeypatch.setattr(ai_client, "models_for_api_key", rotating_discovery)
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": SECRET,
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert added.status_code == 200
+    assert added.json()["ok"] is True
+    # The stale capture was discarded: no rows were written.
+    assert await storage.list_server_provider_key_models() == []
+
+
+async def test_rotate_with_failing_discovery_clears_previous_key_rows(
+    client, monkeypatch
+):
+    """A failed discovery after rotation never exposes the old key's listing.
+
+    The rotated key's access is unknown, so the previous key's rows must be
+    cleared (static-catalog fallback) instead of surviving as the new key's
+    verified listing — including models the static catalog does not even
+    list (#350 r2).
+    """
+    import httpx
+
+    # The old key's listing includes a model the catalog lacks.
+    _add_google_provider(
+        client, monkeypatch, [{"id": "gemini-2.5-pro"}, {"id": "gemini-3-pro"}]
+    )
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert "gemini-3-pro" in [m["id"] for m in scoped["google"]]
+    finally:
+        ai_client.force_server_credentials.reset(token)
+
+    # Rotate to a different key whose discovery fails.
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google"])
+    _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, httpx.ConnectError("sidecar down"))
+    rotated = client.post(
+        "/api/admin/server-providers/google/rotate-key",
+        headers=_admin_headers(),
+        json={
+            "provider": "google",
+            "api_key": "new-key-with-failing-discovery-1",  # pragma: allowlist secret
+            "verification_model": "gemini-2.5-pro",
+        },
+    )
+    assert rotated.status_code == 200
+    assert rotated.json()["ok"] is True
+    # The old key's rows are cleared...
+    assert await storage.list_server_provider_key_models() == []
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+    providers = {p["provider"]: p for p in listed.json()["providers"]}
+    assert providers["google"]["key_scoped"] is False
+    assert providers["google"]["key_scoped_status"] == "unavailable"
+    # ...and its non-catalog model is no longer exposed at runtime: the
+    # provider falls back to the catalog (the stale selection survivor is
+    # ignored, so only the catalog model remains).
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
+    finally:
+        ai_client.force_server_credentials.reset(token)
+
+    # A refresh that keeps failing reports unavailable but never clears the
+    # captured rows once one exists (key unchanged — keep_on_failure).
+    _mock_key_discovery(monkeypatch, [{"id": "gemini-2.5-pro"}])
+    refreshed = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert refreshed.json()["status"] == "supported"
+    _mock_key_discovery(monkeypatch, httpx.ConnectError("sidecar down"))
+    degraded = client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    assert degraded.json()["status"] == "unavailable"
+    rows = await storage.list_server_provider_key_models()
+    assert [(row["provider"], row["model"]) for row in rows] == [
+        ("google", "gemini-2.5-pro")
+    ]
+
+
+async def test_list_reports_key_scoped_status_per_outcome(client, monkeypatch):
+    """GET exposes the last capture outcome for every keyed provider (#350 r2).
+
+    ``unsupported`` and ``unavailable`` both leave no rows; the persisted
+    status is what lets the UI tell a missing listing endpoint from a
+    failed discovery.
+    """
+    _add_google_provider(client, monkeypatch, [{"id": "gemini-2.5-pro"}])
+
+    def google_entry():
+        providers = {
+            p["provider"]: p
+            for p in client.get(
+                "/api/admin/server-providers", headers=_admin_headers()
+            ).json()["providers"]
+        }
+        return providers["google"]
+
+    entry = google_entry()
+    assert entry["key_scoped"] is True
+    assert entry["key_scoped_status"] == "supported"
+    # A provider that never captured (no key) reports no status.
+    providers = {
+        p["provider"]: p
+        for p in client.get(
+            "/api/admin/server-providers", headers=_admin_headers()
+        ).json()["providers"]
+    }
+    assert providers["openai"]["key_scoped_status"] is None
+
+    # Refresh to an unsupported listing: rows cleared, status follows.
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+    client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    entry = google_entry()
+    assert entry["key_scoped"] is False
+    assert entry["key_scoped_status"] == "unsupported"
+
+    # Refresh with discovery down: status unavailable.
+    import httpx
+
+    _mock_key_discovery(monkeypatch, httpx.ConnectError("sidecar down"))
+    client.post(
+        "/api/admin/server-providers/google/refresh-models",
+        headers=_admin_headers(),
+    )
+    entry = google_entry()
+    assert entry["key_scoped"] is False
+    assert entry["key_scoped_status"] == "unavailable"
+
+
+async def test_non_catalog_provider_keeps_stored_casing(client, monkeypatch):
+    """A mixed-case custom provider id survives to the emitted entries (#350 r2).
+
+    pi-config resolves session providers by their exact id, so a stored
+    ``MyGateway`` must never be offered as ``mygateway`` — in the admin
+    listing or the scoped-models pool.
+    """
+    _fake_catalog(monkeypatch, CATALOG)  # MyGateway is NOT in the catalog
+    _mock_supported(monkeypatch, [])
+    await storage.set_server_ai_credential("MyGateway", SECRET, "admin")
+    await storage.set_server_provider_key_models(
+        "MyGateway", [{"id": "gw-model", "name": "Gateway Model"}]
+    )
+    await storage.set_server_provider_models("MyGateway", [{"id": "gw-model"}], "admin")
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+    providers = {p["provider"]: p for p in listed.json()["providers"]}
+    assert "MyGateway" in providers
+    assert "mygateway" not in providers
+    assert [m["id"] for m in providers["MyGateway"]["models"]] == ["gw-model"]
+    token = ai_client.force_server_credentials.set(True)
+    try:
+        scoped = await ai_client.scoped_models()
+        assert "MyGateway" in scoped
+        assert "mygateway" not in scoped
+        assert scoped["MyGateway"][0]["verified"] is True
+    finally:
+        ai_client.force_server_credentials.reset(token)

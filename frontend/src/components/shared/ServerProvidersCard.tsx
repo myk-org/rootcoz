@@ -11,7 +11,7 @@ import { ModelCombobox } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; models: ServerProviderModel[] }
 
 /** GET /api/admin/server-providers — one entry per catalog + stored provider. */
 type ServerProviderListResult = { providers: ServerProvider[] }
@@ -235,9 +235,11 @@ export function ServerProvidersCard() {
                       ) : (
                         <span
                           className="text-xs text-text-tertiary"
-                          title="Model listing unavailable for this key — selection uses the static catalog; try Refresh models"
+                          title={item.key_scoped_status === 'unavailable'
+                            ? 'Model listing failed — try Refresh models; until then selection uses the static catalog'
+                            : 'Model listing unavailable for this key — selection uses the static catalog; try Refresh models'}
                         >
-                          static catalog
+                          {item.key_scoped_status === 'unavailable' ? 'listing failed' : 'static catalog'}
                         </span>
                       )}
                       <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => refreshModels(item.provider)} aria-label={`Refresh ${item.provider} models`}>Refresh models</Button>

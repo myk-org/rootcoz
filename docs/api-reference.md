@@ -284,7 +284,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | PUT | `/api/admin/users/{username}/can-use-server-providers` | Grant or revoke server AI credentials |
 | GET | `/api/admin/free-models` | List admin-declared free provider+model pairs (with `version` fingerprint) |
 | PUT | `/api/admin/free-models` | Replace the free pair list (validated against the catalog); optional `expected_version` from a prior GET rejects concurrent edits with `409` |
-| GET | `/api/admin/server-providers` | Per provider: key presence, verification state, `key_scoped` flag, and its models with `included` + `free` flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access |
+| GET | `/api/admin/server-providers` | Per provider: key presence, verification state, `key_scoped` flag, `key_scoped_status` (last capture outcome: `supported`/`unsupported`/`unavailable`, null when no capture ran), and its models with `included` + `free` flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access |
 | POST | `/api/admin/server-providers` | Add a server provider key: `provider`, `api_key`, `verification_model` — verified with a real sidecar turn before storing, then the key-scoped model listing is captured; `409` when a key is already stored |
 | POST | `/api/admin/server-providers/{provider}/rotate-key` | Replace the key (re-verified first); `404` when none is stored; the key-scoped listing is re-captured |
 | POST | `/api/admin/server-providers/{provider}/refresh-models` | Re-run key-scoped discovery with the stored key (no re-entry, no LLM call); reports `status` (`supported`/`unsupported`/`unavailable`) and `model_count`; `404` when no key is stored |

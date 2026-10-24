@@ -1364,6 +1364,10 @@ async def init_db() -> None:
         # API key per exact Pi provider ID (same at-rest pattern as the user
         # AI credential map). verified_at records the last successful
         # verification (add or rotate) — a stored key is always a tested key.
+        # generation (#350 r2) is the credential version: every add/rotate
+        # bumps it, and a key-scoped capture's row writes are bound to the
+        # generation its discovery ran against. key_capture_status records
+        # the last capture outcome for the admin listing.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS server_ai_providers (
                 provider TEXT PRIMARY KEY,
@@ -1372,7 +1376,9 @@ async def init_db() -> None:
                 created_by TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_by TEXT,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                generation INTEGER NOT NULL DEFAULT 0,
+                key_capture_status TEXT
             )
         """)
 
@@ -1402,6 +1408,14 @@ async def init_db() -> None:
                 PRIMARY KEY (provider, model)
             )
         """)
+        # Credential versioning and capture status (#350 r2) for pre-existing
+        # installs — fresh databases get both columns in CREATE TABLE above.
+        await _migrate_add_column(
+            db, "server_ai_providers", "generation", "INTEGER NOT NULL DEFAULT 0"
+        )
+        await _migrate_add_column(
+            db, "server_ai_providers", "key_capture_status", "TEXT"
+        )
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chat_messages (
@@ -5985,13 +5999,36 @@ async def get_server_ai_credential(provider: str) -> str | None:
 
 
 async def list_server_ai_providers() -> list[dict[str, Any]]:
-    """List stored server provider credentials without exposing keys."""
+    """List stored server provider credentials without exposing keys.
+
+    Each row also carries ``generation`` (the credential version, #350 r2)
+    and ``key_capture_status`` (the last key-scoped capture outcome).
+    """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT provider, verified_at, created_by, updated_by, updated_at"
+            "SELECT provider, verified_at, created_by, updated_by, updated_at,"
+            " generation, key_capture_status"
             " FROM server_ai_providers ORDER BY provider"
         )
         return [dict(row) for row in await cursor.fetchall()]
+
+
+async def get_server_credential_generation(provider: str) -> int | None:
+    """Read the credential generation for a provider, or None when unset.
+
+    The generation is the credential version (#350 r2): every add/rotate
+    bumps it, so a capture can bind its writes to the generation its
+    discovery ran against and discard them when the credential moved on.
+    """
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT generation FROM server_ai_providers"
+                " WHERE lower(provider) = lower(?)",
+                (provider,),
+            )
+        ).fetchone()
+    return None if row is None else row[0]
 
 
 async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> None:
@@ -5999,7 +6036,10 @@ async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> 
 
     Provider identity is case-insensitive: a rotate hitting an existing row
     whose spelling differs only in case replaces it (keeping the stored
-    spelling) instead of duplicating the provider.
+    spelling) instead of duplicating the provider. Every write bumps the
+    credential ``generation`` (#350 r2) so in-flight key-scoped captures can
+    detect that the credential moved on — including a rotation to the same
+    key value.
     """
     async with _connect_db() as db:
         row = await (
@@ -6015,7 +6055,8 @@ async def set_server_ai_credential(provider: str, key: str, updated_by: str) -> 
             " VALUES (?, ?, ?, ?)"
             " ON CONFLICT(provider) DO UPDATE SET"
             " api_key_enc = excluded.api_key_enc, verified_at = datetime('now'),"
-            " updated_by = excluded.updated_by, updated_at = datetime('now')",
+            " updated_by = excluded.updated_by, updated_at = datetime('now'),"
+            " generation = server_ai_providers.generation + 1",
             (canonical, encrypt_value(key), updated_by, updated_by),
         )
         await db.commit()
@@ -6058,9 +6099,34 @@ async def list_server_provider_key_models() -> list[dict[str, Any]]:
         return rows
 
 
+async def _credential_generation_is(
+    db: aiosqlite.Connection, provider: str, expected: int | None
+) -> bool:
+    """Whether the stored credential's generation still equals ``expected``.
+
+    ``None`` means "no binding" (unconditional). A missing provider row
+    never matches: a capture whose credential was removed mid-discovery is
+    as superseded as one whose key was rotated (#350 r2).
+    """
+    if expected is None:
+        return True
+    row = await (
+        await db.execute(
+            "SELECT generation FROM server_ai_providers"
+            " WHERE lower(provider) = lower(?)",
+            (provider,),
+        )
+    ).fetchone()
+    return row is not None and row[0] == expected
+
+
 async def set_server_provider_key_models(
-    provider: str, models: list[dict[str, Any]]
-) -> None:
+    provider: str,
+    models: list[dict[str, Any]],
+    *,
+    expected_generation: int | None = None,
+    status: str | None = None,
+) -> bool:
     """Replace one provider's key-scoped model rows atomically (#350).
 
     ``models`` holds ``{"id", "name", "capabilities"}`` entries from the
@@ -6074,6 +6140,13 @@ async def set_server_provider_key_models(
     the static catalog. Provider identity is case-insensitive: every stored
     spelling of this provider is replaced. Only this provider's rows are
     touched.
+
+    The replacement is generation-bound (#350 r2): when ``expected_generation``
+    is given and the stored credential's generation has moved on (a
+    concurrent add/rotate/remove — even to the same key value), nothing is
+    written and the call returns ``False``, so one key never wears another
+    key's listing. ``status`` records the capture outcome on the credential
+    row (``supported``/``unsupported``/``unavailable``) for the admin listing.
     """
     deduped: dict[str, dict[str, Any]] = {}
     for entry in models:
@@ -6085,6 +6158,9 @@ async def set_server_provider_key_models(
         deduped[model] = entry
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
+        if not await _credential_generation_is(db, provider, expected_generation):
+            await db.commit()
+            return False
         await db.execute(
             "DELETE FROM server_provider_key_models WHERE lower(provider) = lower(?)",
             (provider,),
@@ -6105,7 +6181,38 @@ async def set_server_provider_key_models(
                     for model, entry in sorted(deduped.items())
                 ],
             )
+        if status is not None:
+            await db.execute(
+                "UPDATE server_ai_providers SET key_capture_status = ?"
+                " WHERE lower(provider) = lower(?)",
+                (status, provider),
+            )
         await db.commit()
+        return True
+
+
+async def set_server_provider_key_capture_status(
+    provider: str, status: str, *, expected_generation: int | None = None
+) -> bool:
+    """Record a capture outcome without touching the stored model rows.
+
+    Used when discovery failed but the previous listing is kept (refresh,
+    #350 r2): the admin listing still reports why the models on screen are
+    stale. Generation-bound like the row replacement — returns ``False``
+    when the credential moved on.
+    """
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        if not await _credential_generation_is(db, provider, expected_generation):
+            await db.commit()
+            return False
+        await db.execute(
+            "UPDATE server_ai_providers SET key_capture_status = ?"
+            " WHERE lower(provider) = lower(?)",
+            (status, provider),
+        )
+        await db.commit()
+        return True
 
 
 async def set_server_provider_models(

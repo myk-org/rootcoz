@@ -45,7 +45,7 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; models: Model[] }
 
 function providersState(): Provider[] {
   return [
@@ -256,6 +256,22 @@ describe('ServerProvidersCard provider list', () => {
     // provider without a captured listing — nothing else renders either.
     expect(screen.getAllByText('Key-scoped')).toHaveLength(1)
     expect(screen.getAllByText('static catalog')).toHaveLength(1)
+  })
+
+  it('hints a failed listing differently from a missing listing endpoint (#350 r2)', async () => {
+    get.mockResolvedValue(listResult([
+      // Discovery failed for this key — the hint must suggest a refresh,
+      // not claim the provider has no listing endpoint.
+      { ...providersState()[0], key_scoped: false, key_scoped_status: 'unavailable' },
+      { provider: 'openai', has_key: true, verified: true, supports_key: true, key_scoped: false, key_scoped_status: 'unsupported', models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('gemini')
+    expect(screen.getAllByText('listing failed')).toHaveLength(1)
+    expect(screen.getAllByText('static catalog')).toHaveLength(1)
+    // The failed-listing hint points at Refresh models as the remedy.
+    expect(screen.getByTitle('Model listing failed — try Refresh models; until then selection uses the static catalog')).toBeInTheDocument()
   })
 
   it('refreshes key-scoped models with the stored key and reports the outcome (#350)', async () => {

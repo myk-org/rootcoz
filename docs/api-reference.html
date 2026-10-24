@@ -1248,7 +1248,7 @@
 <tr>
 <td>GET</td>
 <td><code>/api/admin/server-providers</code></td>
-<td>Per provider: key presence, verification state, <code>key_scoped</code> flag, and its models with <code>included</code> + <code>free</code> flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access</td>
+<td>Per provider: key presence, verification state, <code>key_scoped</code> flag, <code>key_scoped_status</code> (last capture outcome: <code>supported</code>/<code>unsupported</code>/<code>unavailable</code>, null when no capture ran), and its models with <code>included</code> + <code>free</code> flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access</td>
 </tr>
 <tr>
 <td>POST</td>
