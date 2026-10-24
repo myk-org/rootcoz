@@ -284,10 +284,10 @@ from rootcoz.transcripts import (
     write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import (
-    mask_url_userinfo_in_text,
+    mask_url_credentials_in_text,
     redact_urls_in_text,
+    strip_url_credentials,
     strip_url_userinfo,
-    strip_url_userinfo_in_text,
 )
 from rootcoz.utils import (
     is_sensitive_key,
@@ -13432,7 +13432,7 @@ def _transform_additional_repos(
 ) -> str | None:
     """Rebuild an ``additional_repos`` value, transforming each repo URL.
 
-    ``url_fn`` is applied to every URL (strip or mask userinfo). An
+    ``url_fn`` is applied to every URL (strip or mask credentials). An
     embedded ``@token`` is replaced by ``token_suffix`` — empty drops the
     credential entirely, ``"***"`` masks it for display. Returns None for
     a malformed stored value: its credentials could sit anywhere a parser
@@ -13457,13 +13457,14 @@ def _sanitize_export_value(key: str, value: str) -> str | None:
     """Strip credentials from a non-sensitive value on default exports.
 
     ``additional_repos`` entries can carry an embedded ``@token`` and repo
-    URLs can carry userinfo — those must not leave without the
-    ``include_sensitive`` opt-in. Returns None when the stored value is
-    too malformed to sanitize (fail closed: the key is skipped).
+    URLs can carry userinfo or a query/fragment token — those must not
+    leave without the ``include_sensitive`` opt-in. Returns None when the
+    stored value is too malformed to sanitize (fail closed: the key is
+    skipped).
     """
     if key == "additional_repos":
-        return _transform_additional_repos(value, strip_url_userinfo, "")
-    return strip_url_userinfo_in_text(value)
+        return _transform_additional_repos(value, strip_url_credentials, "")
+    return redact_urls_in_text(value)
 
 
 def _mask_diff_value(key: str, value: str | None) -> str | None:
@@ -13471,11 +13472,11 @@ def _mask_diff_value(key: str, value: str | None) -> str | None:
     if value is None:
         return None
     if key == "additional_repos":
-        masked = _transform_additional_repos(value, mask_url_userinfo_in_text, "***")
+        masked = _transform_additional_repos(value, mask_url_credentials_in_text, "***")
         # A malformed value is masked whole — its credentials could sit
         # anywhere a parser cannot find (#361 Qodo r2).
         return "***" if masked is None else masked
-    return mask_url_userinfo_in_text(value)
+    return mask_url_credentials_in_text(value)
 
 
 def _diff_import_updates(
