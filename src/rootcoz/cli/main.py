@@ -3575,7 +3575,12 @@ def admin_settings_export(
             # 0600: the file can hold decrypted secrets (--include-sensitive)
             # and must not be readable by other local users; fchmod also
             # tightens a pre-existing file, which O_CREAT alone would keep.
-            fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            # O_NOFOLLOW refuses a symlink output — following it would chmod
+            # whatever the link points at (#361 Qodo r2).
+            nofollow = getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(
+                output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | nofollow, 0o600
+            )
             with os.fdopen(fd, "w") as fh:
                 os.fchmod(fh.fileno(), 0o600)
                 fh.write(payload)

@@ -9990,6 +9990,181 @@ class TestAdminSettingsExportImport:
         ).json()
         assert doc["settings"]["github_token"] == ""
 
+    def test_export_skips_malformed_additional_repos(self, test_client) -> None:
+        """An unparseable additional_repos value never ships in a default
+        export — its credentials could sit anywhere a parser cannot find
+        (#361 Qodo r2: fail closed, skip).
+        """
+        raw = (
+            "main:https://github.com/org/repo@secret-token,"  # pragma: allowlist secret
+            "other:https://user:pass@github.com/org/other,"  # trailing comma: unparseable  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"additional_repos": raw}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "additional_repos" not in doc["settings"]
+        assert "secret-token" not in json.dumps(doc)
+        assert "user:pass" not in json.dumps(doc)
+        # The secrets opt-in still exports the raw value verbatim
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["additional_repos"] == raw
+
+    def test_import_diff_masks_malformed_additional_repos(self, test_client) -> None:
+        """Malformed additional_repos values are masked whole in the import
+        diff — on both the from and to side (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "additional_repos": (
+                        "main:https://user:pass@github.com/org/repo,"  # trailing comma  # pragma: allowlist secret
+                    )
+                }
+            },
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "additional_repos": (
+                        "other:https://github.com/org/other@secret-token"  # trailing comma makes it malformed too  # pragma: allowlist secret
+                        ","
+                    )
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert applied["additional_repos"] == {"from": "***", "to": "***"}
+        assert "secret-token" not in response.text
+        assert "user:pass" not in response.text
+
+    def test_export_strips_git_url_userinfo(self, test_client) -> None:
+        """git:// is a supported clone scheme — its URL userinfo is a
+        credential and must not leave a default export (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "git://user:pass@host/repo"  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["tests_repo_url"] == "git://host/repo"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "tests_repo_url": "git://user:pass@other/repo"  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["applied"]["tests_repo_url"]["to"] == (
+            "git://***@other/repo"
+        )
+        assert "user:pass" not in response.text
+
+    def test_export_survives_malformed_stored_url(self, test_client) -> None:
+        """A stored URL urlparse rejects must not raise from export — the
+        sanitizer fails safe and still drops the userinfo (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "https://user:pass@[broken"  # pragma: allowlist secret
+                }
+            },
+        )
+        response = test_client.get("/api/admin/settings/export")
+        assert response.status_code == 200
+        doc = response.json()
+        assert doc["settings"]["tests_repo_url"] == "https://[broken"
+        assert "user:pass" not in response.text
+
+        diff = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"tests_repo_url": "https://other/repo"},
+            },
+        ).json()
+        assert diff["applied"]["tests_repo_url"]["from"] == "https://***@[broken"
+        assert "user:pass" not in json.dumps(diff)
+
+    def test_import_default_export_preserves_tokenized_repos(self, test_client) -> None:
+        """Importing a default (sanitized) export must not wipe target repo
+        tokens — a key whose imported value matches the sanitized form of
+        the current value is skipped and reported as unchanged (#361 r2).
+        """
+        tokenized = (
+            "main:https://github.com/org/repo@secret-token"  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"additional_repos": tokenized}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["additional_repos"] == "main:https://github.com/org/repo"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": doc["settings"]},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "additional_repos" in data["unchanged"]
+        assert "additional_repos" not in data["applied"]
+        # The token survived — the target's credential-bearing value wins
+        assert _settings_item(test_client, "additional_repos")["value"] == (tokenized)
+
+    def test_put_bad_integer_reports_single_error(self, test_client) -> None:
+        """Each integer violation produces exactly one message — the manual
+        pre-checks duplicated pydantic's (#361 Qodo r2).
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"peer_analysis_max_rounds": "0"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail.count("peer_analysis_max_rounds") == 1
+        assert "must be >= 1" in detail
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_timeout": "abc"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail.count("jenkins_timeout") == 1
+        assert "must be an integer" in detail
+
+    def test_import_bad_integer_reports_single_error(self, test_client) -> None:
+        """Same dedupe guarantee on the import (422) path."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"peer_analysis_max_rounds": "0"},
+            },
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail.count("peer_analysis_max_rounds") == 1
+        assert "must be >= 1" in detail
+
 
 class TestIntegrationConnectionEndpoints:
     """Tests for POST /api/admin/settings/test/{integration}."""

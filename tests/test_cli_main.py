@@ -5213,6 +5213,27 @@ class TestAdminSettingsCommand:
         assert "Error writing" in result.output
         assert not out.exists()
 
+    def test_admin_settings_export_refuses_symlink_output(self, mock_client, tmp_path):
+        """A symlink output is refused — following it would chmod whatever the
+        link points at (#361 Qodo r2)."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {},
+        }
+        target = tmp_path / "group-readable.json"
+        target.write_text("keep")
+        target.chmod(0o640)
+        link = tmp_path / "link.json"
+        link.symlink_to(target)
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(link)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        # The symlink target keeps its content and its group-read mode
+        assert target.read_text() == "keep"
+        assert target.stat().st_mode & 0o777 == 0o640
+
     def test_admin_settings_import(self, mock_client, tmp_path):
         mock_client.admin_import_settings.return_value = {
             "applied": {"jenkins_url": {"from": "http://old", "to": "http://new"}},

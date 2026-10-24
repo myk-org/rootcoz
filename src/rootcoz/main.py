@@ -13045,12 +13045,18 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
             # Save the stripped host — the env bridge exports the stored
             # value verbatim, so padding would reach pi-config's listen host.
             settings_updates[key] = host
-        # Check integer fields
+        # Integer fields get explicit bounds first — some clamp in
+        # mode="before" validators (session_ttl_hours), so model_validate
+        # alone would accept out-of-range values. When this check already
+        # flagged the key, model_validate is skipped: a violation must
+        # produce exactly one message, not the manual one plus pydantic's
+        # duplicate (#361 Qodo r2).
         annotation = field_info.annotation
         is_int = annotation is int or (
             hasattr(annotation, "__args__")
             and int in getattr(annotation, "__args__", ())
         )
+        int_error = False
         if is_int:
             try:
                 int_val = int(value)
@@ -13063,20 +13069,26 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
                         and int_val <= meta.gt
                     ):
                         errors.append(f"{key}: must be > {meta.gt}")
+                        int_error = True
                     if (
                         hasattr(meta, "ge")
                         and meta.ge is not None
                         and int_val < meta.ge
                     ):
                         errors.append(f"{key}: must be >= {meta.ge}")
+                        int_error = True
                     if (
                         hasattr(meta, "le")
                         and meta.le is not None
                         and int_val > meta.le
                     ):
                         errors.append(f"{key}: must be <= {meta.le}")
+                        int_error = True
             except ValueError, TypeError:
                 errors.append(f"{key}: must be an integer")
+                int_error = True
+        if int_error:
+            continue
         # Type-check every remaining value against its Settings field — an
         # invalid value (e.g. "not-a-bool" for a bool field) would otherwise
         # be persisted, and once get_settings() cannot validate the merged
@@ -13139,18 +13151,19 @@ _SETTINGS_EXPORT_SECRETS_WARNING = (
 
 def _transform_additional_repos(
     raw: str, url_fn: Callable[[str], str], token_suffix: str
-) -> str:
+) -> str | None:
     """Rebuild an ``additional_repos`` value, transforming each repo URL.
 
     ``url_fn`` is applied to every URL (strip or mask userinfo). An
     embedded ``@token`` is replaced by ``token_suffix`` — empty drops the
-    credential entirely, ``"***"`` masks it for display. A malformed
-    stored value falls back to a best-effort whole-value transform.
+    credential entirely, ``"***"`` masks it for display. Returns None for
+    a malformed stored value: its credentials could sit anywhere a parser
+    cannot find, so callers must skip (export) or mask it whole (diff).
     """
     try:
         repos = parse_additional_repos(raw)
     except ValueError:
-        return url_fn(raw)
+        return None
     parts = []
     for repo in repos:
         part = f"{repo['name']}:{url_fn(repo['url'])}"
@@ -13162,12 +13175,13 @@ def _transform_additional_repos(
     return ",".join(parts)
 
 
-def _sanitize_export_value(key: str, value: str) -> str:
+def _sanitize_export_value(key: str, value: str) -> str | None:
     """Strip credentials from a non-sensitive value on default exports.
 
     ``additional_repos`` entries can carry an embedded ``@token`` and repo
     URLs can carry userinfo — those must not leave without the
-    ``include_sensitive`` opt-in.
+    ``include_sensitive`` opt-in. Returns None when the stored value is
+    too malformed to sanitize (fail closed: the key is skipped).
     """
     if key == "additional_repos":
         return _transform_additional_repos(value, strip_url_userinfo, "")
@@ -13179,7 +13193,10 @@ def _mask_diff_value(key: str, value: str | None) -> str | None:
     if value is None:
         return None
     if key == "additional_repos":
-        return _transform_additional_repos(value, mask_url_userinfo_in_text, "***")
+        masked = _transform_additional_repos(value, mask_url_userinfo_in_text, "***")
+        # A malformed value is masked whole — its credentials could sit
+        # anywhere a parser cannot find (#361 Qodo r2).
+        return "***" if masked is None else masked
     return mask_url_userinfo_in_text(value)
 
 
@@ -13200,7 +13217,15 @@ def _diff_import_updates(
             # Compare against decrypted plaintext; an undecryptable value
             # (key rotation) counts as changed so the import overwrites it.
             old = decrypt_value_or_none(old)
-        if old == value:
+        if old == value or (
+            old is not None
+            and key not in _SENSITIVE_SETTINGS
+            # A default (sanitized) export drops credentials; importing it
+            # must not wipe them from the target — when the document carries
+            # nothing new for a key, the target's credential-bearing value
+            # wins (#361 Qodo r2).
+            and value == _sanitize_export_value(key, old)
+        ):
             unchanged.append(key)
             continue
         masked = key in _SENSITIVE_SETTINGS
@@ -13257,8 +13282,16 @@ async def export_server_settings(
             value = decrypted
         elif not include_sensitive:
             # Default exports must not leak embedded credentials — repo
-            # tokens and URL userinfo leave only with the opt-in.
-            value = _sanitize_export_value(key, value)
+            # tokens and URL userinfo leave only with the opt-in. A value
+            # too malformed to sanitize is skipped, never shipped raw.
+            sanitized = _sanitize_export_value(key, value)
+            if sanitized is None:
+                logger.warning(
+                    "Skipping setting %s from default export: unparseable stored value",
+                    key,
+                )
+                continue
+            value = sanitized
         settings[key] = value
 
     content: dict[str, Any] = {
@@ -13333,7 +13366,12 @@ async def import_server_settings(request: Request) -> JSONResponse:
         return JSONResponse(content=content)
 
     username = request.state.username or "admin"
-    warnings = await _save_settings_to_db(updates, username)
+    # Only keys the diff marked as applied are written — unchanged keys
+    # (including sanitized-equal ones whose credentials the target keeps)
+    # must not be overwritten (#361 Qodo r2).
+    warnings = await _save_settings_to_db(
+        {key: value for key, value in updates.items() if key in applied}, username
+    )
     if warnings:
         content["warnings"] = warnings
     logger.info(

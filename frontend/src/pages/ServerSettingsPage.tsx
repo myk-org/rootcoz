@@ -183,7 +183,7 @@ type PageAction =
   | { type: 'SET_SEARCH'; search: string }
   | { type: 'TOGGLE_CATEGORY'; category: string }
   | { type: 'START_EDIT'; key: string; currentValue: string }
-  | { type: 'CANCEL_EDIT' }
+  | { type: 'CANCEL_EDIT'; keys?: string[] }
   | { type: 'SET_EDIT_VALUE'; value: string }
   | { type: 'SAVE_START' }
   | { type: 'SAVE_SUCCESS'; keepEditor?: boolean }
@@ -217,6 +217,10 @@ function reducer(state: PageState, action: PageAction): PageState {
     case 'START_EDIT':
       return { ...state, editingKey: action.key, editValue: action.currentValue, saveError: null }
     case 'CANCEL_EDIT':
+      // Optional keys scope the cancel (import): an editor on a setting the
+      // document does not touch keeps its draft (#361 Qodo r2).
+      if (action.keys && state.editingKey && !action.keys.includes(state.editingKey))
+        return state
       return { ...state, editingKey: null, editValue: '', saveError: null }
     case 'SET_EDIT_VALUE':
       return { ...state, editValue: action.value }
@@ -711,20 +715,25 @@ export function ServerSettingsPage() {
   async function handleConfirmImport() {
     if (!importDoc || importing) return
     setImporting(true)
+    // A retry must clear the previous attempt's error — the page-level
+    // alert would otherwise sit beside the success summary (#361 Qodo r2).
+    setSettingsIoError(null)
     try {
       const result = await api.post<SettingsImportResult>(
         '/api/admin/settings/import',
         importDoc.doc,
       )
       setImportResult(result)
+      const doc = importDoc.doc as { settings?: Record<string, unknown> }
+      const importedKeys = Object.keys(doc.settings ?? {})
       setImportDoc(null)
-      // An open editor holds a pre-import draft that would overwrite the
-      // imported value on Save — cancel it before the refetch lands.
-      dispatch({ type: 'CANCEL_EDIT' })
+      // An open editor on an imported key holds a pre-import draft that
+      // would overwrite the imported value on Save — cancel it before the
+      // refetch lands. Editors on untouched keys keep their drafts.
+      dispatch({ type: 'CANCEL_EDIT', keys: importedKeys })
       // Revealed values are pre-import plaintext — clear them so the fresh
       // (masked) values show and editors never pre-fill a stale secret.
-      const doc = importDoc.doc as { settings?: Record<string, unknown> }
-      dispatch({ type: 'CLEAR_REVEALED', keys: Object.keys(doc.settings ?? {}) })
+      dispatch({ type: 'CLEAR_REVEALED', keys: importedKeys })
       await fetchSettings(true)
     } catch (err) {
       setSettingsIoError(

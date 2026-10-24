@@ -11,6 +11,10 @@ from rootcoz.prow_validation import (
     validate_prow_build_id,
     validate_prow_job_name,
 )
+from rootcoz.url_utils import (
+    mask_url_userinfo_in_text,
+    strip_url_userinfo_in_text,
+)
 
 
 class TestNormalizeProwUrl:
@@ -105,4 +109,26 @@ class TestStripUrlUserinfo:
         )
         assert strip_url_userinfo("https://:@prow.example.com/path") == (
             "https://prow.example.com/path"
+        )
+
+    def test_strips_userinfo_from_git_urls(self):
+        """git:// is a supported clone scheme — its userinfo is a credential
+        and must be stripped/masked like http(s) (#361 Qodo r2)."""
+        git_url = "git://user:pass@host/repo"  # pragma: allowlist secret
+        assert strip_url_userinfo(git_url) == "git://host/repo"
+        assert strip_url_userinfo_in_text(f"see {git_url}") == "see git://host/repo"
+        assert mask_url_userinfo_in_text(f"see {git_url}") == "see git://***@host/repo"
+
+    def test_malformed_url_never_raises(self):
+        """A stored URL urlparse rejects (unmatched IPv6 bracket) must not
+        break a settings export — fail safe by dropping/masking the
+        userinfo-shaped prefix (#361 Qodo r2)."""
+        broken = "https://user:pass@[broken"  # pragma: allowlist secret
+        assert strip_url_userinfo(broken) == "https://[broken"
+        assert (
+            strip_url_userinfo_in_text(f"url {broken} end") == "url https://[broken end"
+        )
+        assert (
+            mask_url_userinfo_in_text(f"url {broken} end")
+            == "url https://***@[broken end"
         )

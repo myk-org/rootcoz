@@ -1529,6 +1529,9 @@ describe('ServerSettingsPage export and import settings', () => {
     fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Imported 0 settings, 0 unchanged')
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    // The retry cleared the previous attempt's error — no stale alert beside
+    // the success summary (#361 Qodo r2)
+    expect(screen.queryByText(/must be an integer/)).not.toBeInTheDocument()
   })
 
   it('cancels an open editor and clears revealed values after a successful import', async () => {
@@ -1571,6 +1574,31 @@ describe('ServerSettingsPage export and import settings', () => {
       expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('••••••••'),
     )
     expect(screen.queryByText('decrypted-old')).not.toBeInTheDocument()
+  })
+
+  it('keeps an open editor and its draft when the import does not touch that setting', async () => {
+    post.mockResolvedValue({ applied: {}, unchanged: [], restart_required: [] } as never)
+    renderPage()
+
+    // Open an editor on a setting the import document will not contain
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    await screen.findByText('JENKINS_USER')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_USER' }))
+    fireEvent.change(screen.getByLabelText('Edit JENKINS_USER'), {
+      target: { value: 'unsaved-draft' },
+    })
+
+    const importDoc = { version: 1, settings: { jenkins_password: 'imported' } } // pragma: allowlist secret
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(importDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    await screen.findByRole('alertdialog')
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported 0 settings, 0 unchanged')
+
+    // The untouched editor keeps its draft — only imported keys cancel (#361 Qodo r2)
+    expect(screen.getByLabelText('Edit JENKINS_USER')).toHaveValue('unsaved-draft')
   })
 
   it('rejects a non-JSON file before any request', async () => {

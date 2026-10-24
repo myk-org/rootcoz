@@ -5,17 +5,25 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse, urlunparse
 
+# Fallback for values urlparse rejects (e.g. an unmatched "[" in the
+# netloc): the userinfo-shaped prefix before the path is dropped/masked —
+# failing closed beats raising from a settings export (#361 Qodo r2).
+_USERINFO_PREFIX = re.compile(r"(?<=//)[^/?#\s]+@")
+
 
 def strip_url_userinfo(url: str) -> str:
     """Remove userinfo (username/password) from a URL."""
     if not url:
         return url
-    parsed = urlparse(url)
-    # ``is not None`` catches empty userinfo (e.g. ``https://@host`` / ``https://:@host``)
-    if parsed.username is not None or parsed.password is not None:
-        clean_netloc = parsed.netloc.rsplit("@", 1)[-1]
-        return urlunparse(parsed._replace(netloc=clean_netloc))
-    return url
+    try:
+        parsed = urlparse(url)
+        # ``is not None`` catches empty userinfo (e.g. ``https://@host`` / ``https://:@host``)
+        if parsed.username is not None or parsed.password is not None:
+            clean_netloc = parsed.netloc.rsplit("@", 1)[-1]
+            return urlunparse(parsed._replace(netloc=clean_netloc))
+        return url
+    except ValueError:  # Invalid IPv6 URL and friends — never raise from export
+        return _USERINFO_PREFIX.sub("", url)
 
 
 def sanitize_http_href(url: str) -> str:
@@ -52,34 +60,39 @@ def strip_url_query(url: str) -> str:
     return urlunparse(parsed._replace(query="", fragment=""))
 
 
-_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>`]+")
+# git:// is a supported clone scheme (RepositoryManager.clone_into
+# allowlist: https/git only) — its URLs carry userinfo too (#361 Qodo r2).
+_URL_IN_TEXT = re.compile(r"(?:https?|git)://[^\s\"'<>`]+")
 
 
 def strip_url_userinfo_in_text(text: str) -> str:
-    """Strip userinfo from every http(s) URL in free text."""
+    """Strip userinfo from every http(s)/git URL in free text."""
     if not text:
         return text
     return _URL_IN_TEXT.sub(lambda match: strip_url_userinfo(match.group(0)), text)
 
 
 def mask_url_userinfo_in_text(text: str) -> str:
-    """Replace userinfo in http(s) URLs in free text with ``***`` (display only)."""
+    """Replace userinfo in http(s)/git URLs in free text with ``***`` (display only)."""
     if not text:
         return text
 
     def _mask(match: re.Match[str]) -> str:
         url = match.group(0)
-        parsed = urlparse(url)
-        if parsed.username is None and parsed.password is None:
-            return url
-        host = parsed.netloc.rsplit("@", 1)[-1]
-        return urlunparse(parsed._replace(netloc=f"***@{host}"))
+        try:
+            parsed = urlparse(url)
+            if parsed.username is None and parsed.password is None:
+                return url
+            host = parsed.netloc.rsplit("@", 1)[-1]
+            return urlunparse(parsed._replace(netloc=f"***@{host}"))
+        except ValueError:  # Invalid IPv6 URL — mask the userinfo-shaped prefix
+            return _USERINFO_PREFIX.sub("***@", url)
 
     return _URL_IN_TEXT.sub(_mask, text)
 
 
 def redact_urls_in_text(text: str) -> str:
-    """Replace http(s) URLs in free text with credential- and query-free forms."""
+    """Replace http(s)/git URLs in free text with credential- and query-free forms."""
     if not text:
         return text
     return _URL_IN_TEXT.sub(
