@@ -8187,33 +8187,48 @@ async def get_server_setting(key: str) -> dict[str, Any] | None:
         }
 
 
+async def set_server_settings_batch(
+    settings: dict[str, str], updated_by: str = ""
+) -> None:
+    """Set multiple server setting overrides atomically. Records history.
+
+    All rows and their history entries commit in a single transaction — a
+    mid-batch failure leaves nothing applied, so the settings import is
+    all-or-nothing at the storage layer.
+    """
+    if not settings:
+        return
+    async with _connect_db() as db:
+        for key, value in settings.items():
+            # Read previous value for history
+            cursor = await db.execute(
+                "SELECT value FROM server_settings WHERE key = ?", (key,)
+            )
+            row = await cursor.fetchone()
+            previous_value = row["value"] if row else None
+
+            await db.execute(
+                """INSERT INTO server_settings (key, value, updated_by, updated_at)
+                   VALUES (?, ?, ?, datetime('now'))
+                   ON CONFLICT(key) DO UPDATE SET
+                     value = excluded.value,
+                     updated_by = excluded.updated_by,
+                     updated_at = excluded.updated_at""",
+                (key, value, updated_by),
+            )
+            # Record in history
+            await db.execute(
+                """INSERT INTO server_settings_history (key, value, previous_value, action, changed_by)
+                   VALUES (?, ?, ?, 'set', ?)""",
+                (key, value, previous_value, updated_by),
+            )
+        await db.commit()
+    logger.info("Server settings updated: keys=%s, by=%s", sorted(settings), updated_by)
+
+
 async def set_server_setting(key: str, value: str, updated_by: str = "") -> None:
     """Set a server setting override (upsert). Records history."""
-    async with _connect_db() as db:
-        # Read previous value for history
-        cursor = await db.execute(
-            "SELECT value FROM server_settings WHERE key = ?", (key,)
-        )
-        row = await cursor.fetchone()
-        previous_value = row["value"] if row else None
-
-        await db.execute(
-            """INSERT INTO server_settings (key, value, updated_by, updated_at)
-               VALUES (?, ?, ?, datetime('now'))
-               ON CONFLICT(key) DO UPDATE SET
-                 value = excluded.value,
-                 updated_by = excluded.updated_by,
-                 updated_at = excluded.updated_at""",
-            (key, value, updated_by),
-        )
-        # Record in history
-        await db.execute(
-            """INSERT INTO server_settings_history (key, value, previous_value, action, changed_by)
-               VALUES (?, ?, ?, 'set', ?)""",
-            (key, value, previous_value, updated_by),
-        )
-        await db.commit()
-    logger.info("Server setting updated: key=%s, by=%s", key, updated_by)
+    await set_server_settings_batch({key: value}, updated_by)
 
 
 async def delete_server_setting(key: str, deleted_by: str = "") -> bool:

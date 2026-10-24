@@ -2205,6 +2205,62 @@ class TestAdminSettings:
         result = client.admin_persist_setting("jenkins_url")
         assert result == {"key": "jenkins_url", "source": "db"}
 
+    def test_admin_export_settings(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/settings/export"
+            assert "include_sensitive=true" in str(request.url)
+            return httpx.Response(
+                200,
+                json={
+                    "version": 1,
+                    "exported_at": "2025-01-01T00:00:00+00:00",
+                    "settings": {"jenkins_url": "http://jenkins"},
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.admin_export_settings(include_sensitive=True)
+        assert result["settings"] == {"jenkins_url": "http://jenkins"}
+
+    def test_admin_export_settings_default_excludes_sensitive(self):
+        def handler(request):
+            assert "include_sensitive" not in str(request.url)
+            return httpx.Response(200, json={"version": 1, "settings": {}})
+
+        client = _make_client(handler)
+        client.admin_export_settings()
+
+    def test_admin_import_settings(self):
+        document = {"version": 1, "settings": {"jenkins_url": "http://new"}}
+
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/admin/settings/import"
+            body = json.loads(request.content)
+            assert body == {**document, "dry_run": True}
+            return httpx.Response(
+                200,
+                json={
+                    "applied": {"jenkins_url": {"from": None, "to": "http://new"}},
+                    "unchanged": [],
+                    "restart_required": [],
+                    "dry_run": True,
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.admin_import_settings(document, dry_run=True)
+        assert result["dry_run"] is True
+
+    @pytest.mark.parametrize("document", [[], None, "not an object"])
+    def test_admin_import_settings_rejects_non_object(self, document):
+        """Non-object documents fail before the mapping expansion — a
+        controlled client error, never a TypeError."""
+        client = _make_client(lambda request: None)
+        with pytest.raises(RootCozError, match="import document must be a JSON object"):
+            client.admin_import_settings(document)
+
     def test_test_integration(self):
         def handler(request):
             assert request.method == "POST"

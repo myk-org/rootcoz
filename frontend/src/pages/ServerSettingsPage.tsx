@@ -30,8 +30,6 @@ import {
   Search,
   ChevronDown,
   ChevronRight,
-  ChevronsUpDown,
-  ChevronsDownUp,
   Eye,
   EyeOff,
   AlertTriangle,
@@ -40,6 +38,9 @@ import {
   Clock,
   RefreshCw,
   Zap,
+  Download,
+  Upload,
+  X,
 } from 'lucide-react'
 import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
@@ -79,6 +80,15 @@ interface ServerSetting {
 interface CategoryGroup {
   category: string
   settings: ServerSetting[]
+}
+
+// POST /api/admin/settings/import response — sensitive values arrive masked.
+interface SettingsImportResult {
+  applied: Record<string, { from: string | null; to: string }>
+  unchanged: string[]
+  restart_required: string[]
+  warnings?: string[]
+  dry_run?: boolean
 }
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
@@ -173,7 +183,7 @@ type PageAction =
   | { type: 'SET_SEARCH'; search: string }
   | { type: 'TOGGLE_CATEGORY'; category: string }
   | { type: 'START_EDIT'; key: string; currentValue: string }
-  | { type: 'CANCEL_EDIT' }
+  | { type: 'CANCEL_EDIT'; keys?: string[] }
   | { type: 'SET_EDIT_VALUE'; value: string }
   | { type: 'SAVE_START' }
   | { type: 'SAVE_SUCCESS'; keepEditor?: boolean }
@@ -183,8 +193,6 @@ type PageAction =
   | { type: 'REVEAL_VALUE'; key: string; value: string; generation: number }
   | { type: 'HIDE_VALUE'; key: string }
   | { type: 'CLEAR_REVEALED'; keys: string[] }
-  | { type: 'EXPAND_ALL' }
-  | { type: 'COLLAPSE_ALL'; categories: string[] }
   | { type: 'SHOW_HISTORY'; key: string }
   | { type: 'HIDE_HISTORY' }
   | { type: 'SET_HISTORY'; history: HistoryEntry[] }
@@ -209,6 +217,10 @@ function reducer(state: PageState, action: PageAction): PageState {
     case 'START_EDIT':
       return { ...state, editingKey: action.key, editValue: action.currentValue, saveError: null }
     case 'CANCEL_EDIT':
+      // Optional keys scope the cancel (import): an editor on a setting the
+      // document does not touch keeps its draft (#361 Qodo r2).
+      if (action.keys && state.editingKey && !action.keys.includes(state.editingKey))
+        return state
       return { ...state, editingKey: null, editValue: '', saveError: null }
     case 'SET_EDIT_VALUE':
       return { ...state, editValue: action.value }
@@ -258,10 +270,6 @@ function reducer(state: PageState, action: PageAction): PageState {
       }
       return { ...state, revealedKeys: nextKeys, revealedValues, revealGenerations }
     }
-    case 'EXPAND_ALL':
-      return { ...state, collapsedCategories: new Set<string>() }
-    case 'COLLAPSE_ALL':
-      return { ...state, collapsedCategories: new Set<string>(action.categories) }
     case 'SHOW_HISTORY':
       return { ...state, historyKey: action.key, history: [], historyLoading: true }
     case 'HIDE_HISTORY':
@@ -505,6 +513,16 @@ export function ServerSettingsPage() {
   // "Save to DB" in-flight key (persisting an env-sourced setting into the DB).
   const [persistingKey, setPersistingKey] = useState<string | null>(null)
 
+  // Settings export/import state (#361)
+  const [exporting, setExporting] = useState(false)
+  const [includeSecrets, setIncludeSecrets] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [importDoc, setImportDoc] = useState<{ name: string; doc: unknown } | null>(null)
+  const [importing, setImporting] = useState(false)
+  const [importResult, setImportResult] = useState<SettingsImportResult | null>(null)
+  const [settingsIoError, setSettingsIoError] = useState<string | null>(null)
+  const importFileRef = useRef<HTMLInputElement>(null)
+
   // Debounced search
   const [searchInput, setSearchInput] = useState('')
   useEffect(() => {
@@ -644,6 +662,89 @@ export function ServerSettingsPage() {
       dispatch({ type: 'SAVE_ERROR', error: msg })
     } finally {
       setPersistingKey(null)
+    }
+  }
+
+  // ---- Export / import server settings (#361) ----
+  async function runExport() {
+    setExporting(true)
+    setSettingsIoError(null)
+    try {
+      const doc = await api.get<Record<string, unknown>>(
+        `/api/admin/settings/export${includeSecrets ? '?include_sensitive=true' : ''}`,
+      )
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `rootcoz-settings-${new Date().toISOString().slice(0, 10)}.json`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setSettingsIoError(
+        err instanceof ApiError
+          ? extractApiDetail(err) ?? `Export failed (${err.status})`
+          : 'Failed to export settings',
+      )
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  function handleExport() {
+    // The export dialog owns the secrets choice (#361 UI review): the
+    // checkbox lives with the action it affects, so the toolbar stays two
+    // plain buttons and nothing about "secrets" floats unattached.
+    setExportOpen(true)
+  }
+
+  function handleImportFile(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = '' // allow re-selecting the same file
+    if (!file) return
+    setSettingsIoError(null)
+    void file.text().then(text => {
+      try {
+        setImportDoc({ name: file.name, doc: JSON.parse(text) })
+      } catch {
+        setSettingsIoError(`${file.name} is not a valid JSON file`)
+      }
+    })
+  }
+
+  async function handleConfirmImport() {
+    if (!importDoc || importing) return
+    setImporting(true)
+    // A retry must clear the previous attempt's error — the page-level
+    // alert would otherwise sit beside the success summary (#361 Qodo r2).
+    setSettingsIoError(null)
+    try {
+      const result = await api.post<SettingsImportResult>(
+        '/api/admin/settings/import',
+        importDoc.doc,
+      )
+      setImportResult(result)
+      const doc = importDoc.doc as { settings?: Record<string, unknown> }
+      const importedKeys = Object.keys(doc.settings ?? {})
+      setImportDoc(null)
+      // An open editor on an imported key holds a pre-import draft that
+      // would overwrite the imported value on Save — cancel it before the
+      // refetch lands. Editors on untouched keys keep their drafts.
+      dispatch({ type: 'CANCEL_EDIT', keys: importedKeys })
+      // Revealed values are pre-import plaintext — clear them so the fresh
+      // (masked) values show and editors never pre-fill a stale secret.
+      dispatch({ type: 'CLEAR_REVEALED', keys: importedKeys })
+      await fetchSettings(true)
+    } catch (err) {
+      setSettingsIoError(
+        err instanceof ApiError
+          ? extractApiDetail(err) ?? `Import failed (${err.status})`
+          : 'Failed to import settings',
+      )
+      // importDoc is kept — the dialog stays open so the admin can retry
+      // the same file without reselecting it.
+    } finally {
+      setImporting(false)
     }
   }
 
@@ -1472,32 +1573,33 @@ export function ServerSettingsPage() {
                 aria-label="Search settings"
               />
             </div>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => dispatch({ type: 'EXPAND_ALL' })}
-                  className="p-1.5 rounded-md border border-border-default bg-surface-elevated hover:bg-surface-hover text-text-secondary transition-colors"
-                  aria-label="Expand all categories"
-                >
-                  <ChevronsUpDown className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Expand all categories</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => dispatch({ type: 'COLLAPSE_ALL', categories: [...new Set(state.settings.map(s => s.category))] })}
-                  className="p-1.5 rounded-md border border-border-default bg-surface-elevated hover:bg-surface-hover text-text-secondary transition-colors"
-                  aria-label="Collapse all categories"
-                >
-                  <ChevronsDownUp className="h-4 w-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Collapse all categories</TooltipContent>
-            </Tooltip>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={handleExport}
+              disabled={exporting}
+            >
+              {exporting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Download className="mr-1 h-3.5 w-3.5" />}
+              Export settings
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-9 shrink-0"
+              onClick={() => importFileRef.current?.click()}
+              disabled={importing}
+            >
+              {importing ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Upload className="mr-1 h-3.5 w-3.5" />}
+              Import settings
+            </Button>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept="application/json"
+              className="hidden"
+              onChange={handleImportFile}
+            />
           </div>
         </div>
 
@@ -1515,6 +1617,114 @@ export function ServerSettingsPage() {
         {saveWarning && (
           <p role="status" className="text-center text-signal-amber text-sm py-2">{saveWarning}</p>
         )}
+
+        {/* Export/import errors (#361) */}
+        {settingsIoError && (
+          <p role="alert" className="text-center text-signal-red text-sm py-2">{settingsIoError}</p>
+        )}
+
+        {/* Import summary (#361) */}
+        {importResult && (
+          <div role="status" className="space-y-2 rounded-lg border border-border-default bg-surface-card p-4 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="font-medium text-text-primary">
+                Imported {Object.keys(importResult.applied).length} setting{Object.keys(importResult.applied).length === 1 ? '' : 's'}, {importResult.unchanged.length} unchanged
+              </span>
+              <button
+                type="button"
+                onClick={() => setImportResult(null)}
+                className="rounded-md p-1 text-text-tertiary hover:bg-surface-hover hover:text-text-secondary"
+                aria-label="Dismiss import summary"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {importResult.restart_required.length > 0 && (
+              <p className="flex items-center gap-1.5 text-signal-amber">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                Restart required for: {importResult.restart_required.join(', ')}
+              </p>
+            )}
+            {Object.entries(importResult.applied).map(([key, diff]) => (
+              <p key={key} className="font-mono text-xs text-text-secondary">
+                {key}: {diff.from ?? '(not set)'} &rarr; {diff.to}
+              </p>
+            ))}
+            {importResult.warnings?.map(warning => (
+              <p key={warning} className="text-xs text-signal-amber">{warning}</p>
+            ))}
+          </div>
+        )}
+
+        {/* Export dialog (#361): the secrets choice lives with the export action. */}
+        <AlertDialog open={exportOpen} onOpenChange={setExportOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Export settings</AlertDialogTitle>
+              <AlertDialogDescription>
+                Download a JSON document of the saved server settings, ready to import on another instance.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <label className="flex items-start gap-2 rounded-md border border-border-default p-3 text-sm text-text-primary">
+              <Checkbox
+                checked={includeSecrets}
+                onCheckedChange={(checked) => setIncludeSecrets(checked === true)}
+                aria-label="Include secrets in export"
+                className="mt-0.5"
+              />
+              <span>
+                Include secrets (API keys, tokens, passwords)
+                {includeSecrets && (
+                  <span className="mt-1 block text-xs text-signal-amber">
+                    The file will contain them in plaintext. Store and transfer it securely, and delete it once imported.
+                  </span>
+                )}
+              </span>
+            </label>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  setExportOpen(false)
+                  void runExport()
+                }}
+              >
+                Export
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        {/* Import confirmation (#361) */}
+        <AlertDialog open={importDoc !== null} onOpenChange={(open) => !open && setImportDoc(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Import settings</AlertDialogTitle>
+              <AlertDialogDescription>
+                Apply the settings from {importDoc?.name}? Values in the file overwrite the current database overrides — the import is validated first and rejected as a whole if any value is invalid.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            {/* The page-level alert sits behind the dialog overlay — while the
+                dialog stays open for a retry, the error must be visible here. */}
+            {importDoc && settingsIoError && (
+              <p role="alert" className="text-signal-red text-sm">{settingsIoError}</p>
+            )}
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={e => {
+                  // Keep the dialog open — handleConfirmImport closes it via
+                  // importDoc only on success; a failed import must stay
+                  // retryable without reselecting the file.
+                  e.preventDefault()
+                  void handleConfirmImport()
+                }}
+              >
+                {importing ? 'Importing…' : 'Import'}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
 
         {/* Loading skeleton */}
         {state.loading ? (

@@ -6,7 +6,7 @@ import { useSSE } from '@/lib/useSSE'
 import { ServerSettingsPage } from '../ServerSettingsPage'
 
 vi.mock('@/lib/api', () => ({
-  api: { get: vi.fn(), put: vi.fn(), delete: vi.fn(), testIntegration: vi.fn(), persistSetting: vi.fn() },
+  api: { get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn(), testIntegration: vi.fn(), persistSetting: vi.fn() },
   extractApiDetail: (err: unknown) => {
     const detail = (err as { body?: { detail?: unknown } })?.body?.detail
     return typeof detail === 'string' ? detail : null
@@ -104,6 +104,7 @@ const baseSettings = (): TestSetting[] => [
 
 const get = vi.mocked(api.get)
 const put = vi.mocked(api.put)
+const post = vi.mocked(api.post)
 const testIntegration = vi.mocked(api.testIntegration)
 const persistSetting = vi.mocked(api.persistSetting)
 
@@ -1400,5 +1401,215 @@ describe('ServerSettingsPage save env setting to DB', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('jenkins_url has no environment value to persist')
     // Row still shows the env source — no silent state flip
     expect(screen.getByRole('button', { name: 'Save to DB' })).toBeInTheDocument()
+  })
+})
+
+describe('ServerSettingsPage export and import settings', () => {
+  const exportDoc = {
+    version: 1,
+    exported_at: '2025-01-01T00:00:00+00:00',
+    settings: { jenkins_url: 'https://jenkins.example.com' },
+  }
+
+  // jsdom has no Blob URL support — stub the object-URL lifecycle.
+  let createObjectURL: ReturnType<typeof vi.fn>
+  let revokeObjectURL: ReturnType<typeof vi.fn>
+  beforeEach(() => {
+    createObjectURL = vi.fn(() => 'blob:settings')
+    revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { value: createObjectURL, configurable: true })
+    Object.defineProperty(URL, 'revokeObjectURL', { value: revokeObjectURL, configurable: true })
+  })
+
+  it('exports DB settings as a JSON download without secrets by default', async () => {
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+    get.mockResolvedValueOnce(exportDoc as never)
+
+    // Export opens the dialog; the secrets choice lives inside it.
+    fireEvent.click(screen.getByRole('button', { name: /Export settings/ }))
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('Export settings')
+    expect(within(dialog).getByRole('checkbox', { name: 'Include secrets in export' })).not.toBeChecked()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Export' }))
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
+    expect(get).toHaveBeenLastCalledWith('/api/admin/settings/export')
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:settings')
+  })
+
+  it('warns about plaintext when secrets are included in the export dialog', async () => {
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+    get.mockResolvedValueOnce(exportDoc as never)
+
+    fireEvent.click(screen.getByRole('button', { name: /Export settings/ }))
+    const dialog = await screen.findByRole('alertdialog')
+
+    // Checking secrets inside the dialog surfaces the plaintext warning.
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Include secrets in export' }))
+    expect(dialog).toHaveTextContent('plaintext')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Export' }))
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1))
+    expect(get).toHaveBeenLastCalledWith('/api/admin/settings/export?include_sensitive=true')
+  })
+
+  it('keeps the toolbar free of orphaned controls: no global expand/collapse, no secrets checkbox', async () => {
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    expect(screen.queryByRole('button', { name: 'Expand all categories' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Collapse all categories' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: 'Include secrets in export' })).not.toBeInTheDocument()
+  })
+
+  it('imports a file after confirmation and shows the diff summary', async () => {
+    post.mockResolvedValue({
+      applied: { jenkins_url: { from: null, to: 'https://jenkins.example.com' } },
+      unchanged: [],
+      restart_required: ['log_level'],
+    } as never)
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(exportDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    const dialog = await screen.findByRole('alertdialog')
+    expect(dialog).toHaveTextContent('settings.json')
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported 1 setting, 0 unchanged')
+    expect(post).toHaveBeenCalledWith('/api/admin/settings/import', exportDoc)
+    expect(screen.getByText(/Restart required for: log_level/)).toBeInTheDocument()
+    // The refetch after import re-renders settings (get called again)
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+  })
+
+  it('surfaces a validation error and keeps the dialog open for retry', async () => {
+    const err = new ApiError(0, '', null)
+    err.status = 422
+    err.body = { detail: 'Invalid settings: jenkins_timeout: must be an integer' }
+    post.mockRejectedValueOnce(err as never)
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(exportDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    const dialog = await screen.findByRole('alertdialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Import' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('jenkins_timeout: must be an integer')
+    // The dialog stayed open — the parsed document is still available
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('settings.json')
+  })
+
+  it('retries the same file without reselection after a failed import', async () => {
+    const err = new ApiError(0, '', null)
+    err.status = 422
+    err.body = { detail: 'Invalid settings: jenkins_timeout: must be an integer' }
+    post.mockRejectedValueOnce(err as never)
+    post.mockResolvedValueOnce({ applied: {}, unchanged: [], restart_required: [] } as never)
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(exportDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    await screen.findByRole('alertdialog')
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('jenkins_timeout: must be an integer')
+
+    // Retry the confirm without reselecting the file — now it succeeds
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported 0 settings, 0 unchanged')
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    // The retry cleared the previous attempt's error — no stale alert beside
+    // the success summary (#361 Qodo r2)
+    expect(screen.queryByText(/must be an integer/)).not.toBeInTheDocument()
+  })
+
+  it('cancels an open editor and clears revealed values after a successful import', async () => {
+    get.mockImplementation(async (url: unknown) => {
+      const key = typeof url === 'string' ? url.match(/reveal_key=([^&]+)/)?.[1] : undefined
+      const settings = baseSettings()
+      if (key) {
+        const item = settings.find((s) => s.key === decodeURIComponent(key))
+        if (item) item.value = 'decrypted-old' // pragma: allowlist secret
+      }
+      return settings
+    })
+    post.mockResolvedValue({ applied: {}, unchanged: [], restart_required: [] } as never)
+    renderPage()
+
+    // Reveal a sensitive value, then open its editor with a stale draft
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    await screen.findByText('JENKINS_PASSWORD')
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('decrypted-old'),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }))
+    expect(screen.getByLabelText('Edit JENKINS_PASSWORD')).toBeInTheDocument()
+
+    // Import a document that touches the revealed key
+    const importDoc = { version: 1, settings: { jenkins_password: 'imported' } } // pragma: allowlist secret
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(importDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    await screen.findByRole('alertdialog')
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported 0 settings, 0 unchanged')
+
+    // The open editor was cancelled — no stale draft can overwrite the import
+    expect(screen.queryByRole('textbox', { name: 'Edit JENKINS_PASSWORD' })).not.toBeInTheDocument()
+    // The cached reveal was cleared — the row falls back to the masked value
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('••••••••'),
+    )
+    expect(screen.queryByText('decrypted-old')).not.toBeInTheDocument()
+  })
+
+  it('keeps an open editor and its draft when the import does not touch that setting', async () => {
+    post.mockResolvedValue({ applied: {}, unchanged: [], restart_required: [] } as never)
+    renderPage()
+
+    // Open an editor on a setting the import document will not contain
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
+    await screen.findByText('JENKINS_USER')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_USER' }))
+    fireEvent.change(screen.getByLabelText('Edit JENKINS_USER'), {
+      target: { value: 'unsaved-draft' },
+    })
+
+    const importDoc = { version: 1, settings: { jenkins_password: 'imported' } } // pragma: allowlist secret
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File([JSON.stringify(importDoc)], 'settings.json', { type: 'application/json' })] },
+    })
+    await screen.findByRole('alertdialog')
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Import' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Imported 0 settings, 0 unchanged')
+
+    // The untouched editor keeps its draft — only imported keys cancel (#361 Qodo r2)
+    expect(screen.getByLabelText('Edit JENKINS_USER')).toHaveValue('unsaved-draft')
+  })
+
+  it('rejects a non-JSON file before any request', async () => {
+    renderPage()
+    await screen.findByText('PUBLIC_BASE_URL')
+
+    const input = document.querySelector('input[type="file"]')!
+    fireEvent.change(input, {
+      target: { files: [new File(['not json'], 'settings.txt', { type: 'text/plain' })] },
+    })
+    expect(await screen.findByRole('alert')).toHaveTextContent('not a valid JSON file')
+    expect(post).not.toHaveBeenCalled()
   })
 })

@@ -5155,6 +5155,170 @@ class TestAdminSettingsCommand:
         parsed = json.loads(result.output)
         assert parsed["reset"] == "jenkins_url"
 
+    def test_admin_settings_export_stdout(self, mock_client):
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "exported_at": "2025-01-01T00:00:00+00:00",
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        result = runner.invoke(app, ["admin", "settings", "export"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["settings"] == {"jenkins_url": "http://jenkins"}
+        mock_client.admin_export_settings.assert_called_once_with(
+            include_sensitive=False
+        )
+
+    def test_admin_settings_export_file_and_sensitive(self, mock_client, tmp_path):
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "exported_at": "2025-01-01T00:00:00+00:00",
+            "settings": {"github_token": "gh-secret"},  # pragma: allowlist secret
+            "warning": "This export contains decrypted secrets in plaintext.",
+        }
+        out = tmp_path / "settings.json"
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "settings",
+                "export",
+                "--include-sensitive",
+                "--output",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Exported 1 settings" in result.output
+        assert "secrets" in result.output
+        mock_client.admin_export_settings.assert_called_once_with(
+            include_sensitive=True
+        )
+        written = json.loads(out.read_text())
+        assert written["settings"] == {"github_token": "gh-secret"}
+        # The file can hold decrypted secrets — it must be owner-only
+        assert out.stat().st_mode & 0o777 == 0o600
+
+    def test_admin_settings_export_unwritable_output(self, mock_client, tmp_path):
+        """Filesystem errors surface as a controlled CLI error, not a traceback."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {},
+        }
+        out = tmp_path / "missing-dir" / "settings.json"
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        assert not out.exists()
+
+    def test_admin_settings_export_refuses_symlink_output(self, mock_client, tmp_path):
+        """A symlink output is refused — following it would chmod whatever the
+        link points at (#361 Qodo r2)."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {},
+        }
+        target = tmp_path / "group-readable.json"
+        target.write_text("keep")
+        target.chmod(0o640)
+        link = tmp_path / "link.json"
+        link.symlink_to(target)
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(link)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        # The symlink target keeps its content and its group-read mode
+        assert target.read_text() == "keep"
+        assert target.stat().st_mode & 0o777 == 0o640
+
+    def test_admin_settings_import(self, mock_client, tmp_path):
+        mock_client.admin_import_settings.return_value = {
+            "applied": {"jenkins_url": {"from": "http://old", "to": "http://new"}},
+            "unchanged": ["ai_call_timeout"],
+            "restart_required": ["log_level"],
+        }
+        doc = tmp_path / "export.json"
+        doc.write_text(
+            json.dumps({"version": 1, "settings": {"jenkins_url": "http://new"}})
+        )
+        result = runner.invoke(
+            app, ["admin", "settings", "import", "--input", str(doc)]
+        )
+        assert result.exit_code == 0
+        assert "http://old" in result.output
+        assert "1 setting(s) applied, 1 unchanged" in result.output
+        assert "Restart required for: log_level" in result.output
+        mock_client.admin_import_settings.assert_called_once_with(
+            {"version": 1, "settings": {"jenkins_url": "http://new"}},
+            dry_run=False,
+        )
+
+    def test_admin_settings_import_dry_run(self, mock_client, tmp_path):
+        mock_client.admin_import_settings.return_value = {
+            "applied": {"jenkins_url": {"from": None, "to": "http://new"}},
+            "unchanged": [],
+            "restart_required": [],
+            "dry_run": True,
+        }
+        doc = tmp_path / "export.json"
+        doc.write_text(json.dumps({"version": 1, "settings": {}}))
+        result = runner.invoke(
+            app,
+            ["admin", "settings", "import", "--input", str(doc), "--dry-run"],
+        )
+        assert result.exit_code == 0
+        assert "would be applied" in result.output
+        mock_client.admin_import_settings.assert_called_once_with(
+            {"version": 1, "settings": {}}, dry_run=True
+        )
+
+    def test_admin_settings_import_missing_file(self, mock_client, tmp_path):
+        result = runner.invoke(
+            app,
+            ["admin", "settings", "import", "--input", str(tmp_path / "nope.json")],
+        )
+        assert result.exit_code == 1
+        assert "Error reading" in result.output
+
+    def test_admin_settings_import_invalid_utf8(self, mock_client, tmp_path):
+        """Invalid encoding surfaces as a controlled CLI error (a
+        UnicodeDecodeError is a ValueError, not an OSError)."""
+        doc = tmp_path / "export.json"
+        doc.write_bytes(b"\xff\xfe not utf-8")
+        result = runner.invoke(
+            app,
+            ["admin", "settings", "import", "--input", str(doc)],
+        )
+        assert result.exit_code == 1
+        assert "Error reading" in result.output
+        mock_client.admin_import_settings.assert_not_called()
+
+    @pytest.mark.parametrize("content", ["[]", "null", '"a string"'])
+    def test_admin_settings_import_non_object_document(
+        self, mock_client, tmp_path, content
+    ):
+        """A non-object document is a controlled CLI error, not a crash in
+        the client's mapping expansion."""
+        doc = tmp_path / "export.json"
+        doc.write_text(content)
+
+        def handler(request):
+            raise AssertionError("request must not be sent")
+
+        # A real client (mock transport): the mocked admin_import_settings
+        # would happily accept a list — the guard lives in the client.
+        real_client = make_test_client(handler)
+        with patch("rootcoz.cli.main._get_client", return_value=real_client):
+            result = runner.invoke(
+                app,
+                ["admin", "settings", "import", "--input", str(doc)],
+            )
+        assert result.exit_code == 1
+        assert "JSON object" in result.output
+
     def test_admin_settings_test(self, mock_client):
         mock_client.test_integration.return_value = {
             "ok": True,
