@@ -13537,9 +13537,16 @@ async def export_server_settings(
     settings: dict[str, str] = {}
     sensitive_included = False
     for key, row in sorted((await storage.get_server_settings()).items()):
-        # Internal bookkeeping rows (e.g. jira_verified_method) and
-        # server-only bootstrap values are not admin settings — skip them.
-        if key not in _FIELD_TO_CATEGORY or key in _SERVER_ONLY_SETTINGS:
+        # Internal bookkeeping rows (e.g. jira_verified_method), server-only
+        # bootstrap values, and derived settings are not transferable
+        # settings — a derived value (e.g. sidecar_url from sidecar_port) is
+        # instance-computed, and shipping it would pin a stale URL on
+        # another instance (same rule the persist endpoint enforces).
+        if (
+            key not in _FIELD_TO_CATEGORY
+            or key in _SERVER_ONLY_SETTINGS
+            or key in _DERIVED_SETTINGS
+        ):
             continue
         value = row["value"]
         if key in _SENSITIVE_SETTINGS:
@@ -13625,6 +13632,13 @@ async def import_server_settings(request: Request) -> JSONResponse:
     # before any DB write, keeping the import atomic).
     errors = _validate_settings_updates(updates)
     for key, value in updates.items():
+        if key in _DERIVED_SETTINGS:
+            # Same rule the persist endpoint enforces: a derived value is
+            # computed from sidecar_port at boot — importing one would pin
+            # a stale URL from the exporting instance.
+            errors.append(
+                f"{key} is derived from sidecar_port — set sidecar_port instead"
+            )
         if not value and (error := _empty_override_error(key)):
             errors.append(error)
     if errors:

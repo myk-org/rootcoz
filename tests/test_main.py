@@ -9835,6 +9835,46 @@ class TestAdminSettingsExportImport:
         assert response.status_code == 422
         assert "Server-only" in response.json()["detail"]
 
+    def test_export_omits_derived_settings(self, test_client) -> None:
+        """Derived settings are instance-computed, not user data — a DB row
+        for one never ships in either export mode, so a transferred document
+        cannot pin a stale sidecar_url on another instance.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sidecar_url": "http://127.0.0.1:9100"}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "sidecar_url" not in doc["settings"]
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert "sidecar_url" not in doc["settings"]
+
+    def test_import_derived_key_rejected(self, test_client) -> None:
+        """A stale export carrying sidecar_url must not pin the derived URL
+        on this instance — 422 naming the key, nothing applied.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "sidecar_url": "http://127.0.0.1:9100",
+                    "ai_call_timeout": "30",
+                },
+            },
+        )
+        assert response.status_code == 422
+        assert "sidecar_url" in response.json()["detail"]
+        # Atomic rejection — the valid entry was NOT applied either
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "10"
+        assert _settings_item(test_client, "sidecar_url")["source"] != "db"
+
     def test_import_rejects_wrong_version_and_empty(self, test_client) -> None:
         response = test_client.post(
             "/api/admin/settings/import",
