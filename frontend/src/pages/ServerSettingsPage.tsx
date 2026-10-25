@@ -103,6 +103,7 @@ const TEST_INTEGRATIONS: Record<string, string> = {
   Jira: 'jira',
   GitHub: 'github',
   'Report Portal': 'reportportal',
+  Datadog: 'datadog',
   Prow: 'prow',
 }
 

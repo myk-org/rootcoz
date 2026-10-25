@@ -11316,6 +11316,94 @@ class TestIntegrationConnectionEndpoints:
         assert data["ok"] is False
         assert "Report Portal connection failed" in data["message"]
 
+    def test_datadog_success(self, test_client) -> None:
+        """Datadog test pings /api/v1/validate with the DD-API-KEY header."""
+        settings = Settings(
+            datadog_api_key=SecretStr("not-a-real-key"),
+            datadog_site="datadoghq.eu",
+        )
+        response_payload = self._http_response(
+            200, {"valid": True}, "https://api.datadoghq.eu/api/v1/validate"
+        )
+        mock_patch, mock_client_cls = self._mock_async_client(response_payload)
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            mock_patch,
+        ):
+            response = test_client.post("/api/admin/settings/test/datadog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"] == {"site": "datadoghq.eu"}
+        assert "not-a-real-key" not in json.dumps(data)
+        instance = mock_client_cls.return_value.__aenter__.return_value
+        assert (
+            instance.get.call_args.args[0] == "https://api.datadoghq.eu/api/v1/validate"
+        )
+        assert (
+            mock_client_cls.call_args.kwargs["headers"]["DD-API-KEY"]
+            == "not-a-real-key"
+        )
+
+    def test_datadog_normalizes_site_before_validating(self, test_client) -> None:
+        """A site configured as a full URL is normalized to a bare hostname."""
+        settings = Settings(
+            datadog_api_key=SecretStr("not-a-real-key"),
+            datadog_site="https://api.datadoghq.com/",
+        )
+        response_payload = self._http_response(
+            200, {"valid": True}, "https://api.datadoghq.com/api/v1/validate"
+        )
+        mock_patch, mock_client_cls = self._mock_async_client(response_payload)
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            mock_patch,
+        ):
+            response = test_client.post("/api/admin/settings/test/datadog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"] == {"site": "datadoghq.com"}
+        instance = mock_client_cls.return_value.__aenter__.return_value
+        assert (
+            instance.get.call_args.args[0]
+            == "https://api.datadoghq.com/api/v1/validate"
+        )
+
+    def test_datadog_invalid_key_http_401(self, test_client) -> None:
+        """A 401 from the validate endpoint yields a rejected-key failure."""
+        settings = Settings(
+            datadog_api_key=SecretStr("not-a-real-key"),
+            datadog_site="datadoghq.eu",
+        )
+        response_payload = self._http_response(
+            401,
+            {"errors": ["Invalid API key"]},
+            "https://api.datadoghq.eu/api/v1/validate",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(response_payload)[0],
+        ):
+            response = test_client.post("/api/admin/settings/test/datadog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "API key rejected" in data["message"]
+
+    def test_datadog_not_configured(self, test_client) -> None:
+        """Missing API key reports not configured instead of erroring."""
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(datadog_api_key=None),
+        ):
+            response = test_client.post("/api/admin/settings/test/datadog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "not configured" in data["message"]
+        assert "datadog_api_key" in data["message"]
+
     def test_crash_log_and_message_have_no_credentials(
         self, test_client, caplog
     ) -> None:

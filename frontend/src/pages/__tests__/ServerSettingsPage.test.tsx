@@ -647,11 +647,11 @@ describe('ServerSettingsPage Jira auth method selection', () => {
 })
 
 describe('ServerSettingsPage test connection buttons', () => {
-  it('renders test buttons only for the five integrable categories', async () => {
+  it('renders test buttons only for the six integrable categories', async () => {
     renderPage()
     await screen.findByText('PUBLIC_BASE_URL')
 
-    for (const tab of ['Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Prow']) {
+    for (const tab of ['Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow']) {
       fireEvent.click(screen.getByRole('tab', { name: tab }))
       expect(await screen.findByRole('button', { name: /test connection/i })).toBeInTheDocument()
     }

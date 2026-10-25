@@ -105,7 +105,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
    - A markdown body with the test name, classification, job and build, the RootCoz report link (when `PUBLIC_BASE_URL` is set), the CI build link when available, and the AI diagnosis.
    - An alert type mapped from the classification: `PRODUCT BUG` → `error`; `INFRASTRUCTURE`, `CODE ISSUE`, and `AUTOMATION` → `warning`; anything else → `info`.
    - An `aggregation_key` of `rootcoz-{analysis_id}-{test_name}` so reruns of the same test group in the Datadog event stream.
-   - A tag taxonomy: `service:{DATADOG_SERVICE}` (default `cnv-qe-tests`), `env:{DATADOG_ENV}` (default `production`), `tfa.stage:automated`, `tfa.classification:{classification}`, `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
+   - A tag taxonomy: `service:{DATADOG_SERVICE}` and `env:{DATADOG_ENV}` (both optional — the tags are omitted when unset), `tfa.stage:automated`, `tfa.classification:{classification}`, `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
 
    Push it like any other exporter:
 

@@ -54,7 +54,7 @@ def _context(**overrides: Any) -> ExportContext:
 
 
 def _exporter(**overrides: Any) -> DatadogExporter:
-    params: dict[str, Any] = {"api_key": _API_KEY}
+    params: dict[str, Any] = {"api_key": _API_KEY, "site": "datadoghq.eu"}
     params.update(overrides)
     return DatadogExporter(**params)
 
@@ -129,8 +129,6 @@ class TestBuildEvent:
     def test_tags_shape(self):
         event = self._event()
         assert event["tags"] == [
-            "service:cnv-qe-tests",
-            "env:production",
             "tfa.stage:automated",
             "tfa.classification:PRODUCT_BUG",
             "job_name:e2e-suite",
@@ -139,6 +137,11 @@ class TestBuildEvent:
             "rootcoz.analysis_id:job-123",
             "pushed_by:alice",
         ]
+
+    def test_service_and_env_tags_omitted_when_unset(self):
+        event = self._event()
+        assert not any(t.startswith("service:") for t in event["tags"])
+        assert not any(t.startswith("env:") for t in event["tags"])
 
     def test_child_job_tag_when_scoped(self):
         event = self._event(child_job_name="child job", child_build_number=7)
@@ -369,8 +372,8 @@ class TestFactory:
         settings.datadog_enabled = True
         settings.datadog_api_key.get_secret_value.return_value = _API_KEY
         settings.datadog_site = "datadoghq.eu"
-        settings.datadog_service = "cnv-qe-tests"
-        settings.datadog_env = "production"
+        settings.datadog_service = None
+        settings.datadog_env = None
 
         exporter = _create_exporter("datadog", settings)
         assert isinstance(exporter, DatadogExporter)
@@ -410,31 +413,54 @@ class TestSettings:
         from rootcoz.config import Settings
 
         settings = Settings()
-        assert settings.datadog_site == "datadoghq.eu"
-        assert settings.datadog_service == "cnv-qe-tests"
-        assert settings.datadog_env == "production"
-        assert settings.enable_datadog is False
-        assert settings.datadog_enabled is False
+        assert settings.datadog_site is None
+        assert settings.datadog_service is None
+        assert settings.datadog_env is None
+        assert settings.enable_datadog is None
+        assert settings.datadog_enabled is False  # no API key
 
-    def test_enabled_requires_api_key(self, monkeypatch):
+    def test_enabled_requires_api_key_and_site(self, monkeypatch):
         from rootcoz.config import Settings
 
         monkeypatch.setenv("ENABLE_DATADOG", "true")
+        monkeypatch.setenv("DATADOG_SITE", "datadoghq.eu")
         assert Settings().datadog_enabled is False  # no API key
 
         monkeypatch.setenv("DATADOG_API_KEY", "dd-key")  # pragma: allowlist secret
         assert Settings().datadog_enabled is True
 
+    def test_enabled_requires_site(self, monkeypatch):
+        from rootcoz.config import Settings
+
+        monkeypatch.setenv("ENABLE_DATADOG", "true")
+        monkeypatch.setenv("DATADOG_API_KEY", "dd-key")  # pragma: allowlist secret
+        assert Settings().datadog_enabled is False  # no site
+
+        monkeypatch.setenv("DATADOG_SITE", "datadoghq.eu")
+        assert Settings().datadog_enabled is True
+
     def test_disabled_ignores_api_key(self, monkeypatch):
         from rootcoz.config import Settings
 
+        monkeypatch.setenv("ENABLE_DATADOG", "false")
         monkeypatch.setenv("DATADOG_API_KEY", "dd-key")  # pragma: allowlist secret
+        monkeypatch.setenv("DATADOG_SITE", "datadoghq.eu")
         assert Settings().datadog_enabled is False
+
+    def test_auto_enabled_by_api_key_and_site(self, monkeypatch):
+        from rootcoz.config import Settings
+
+        # None (unset) + key + site -> auto-enabled, same as Report Portal
+        monkeypatch.setenv("DATADOG_API_KEY", "dd-key")  # pragma: allowlist secret
+        monkeypatch.setenv("DATADOG_SITE", "datadoghq.eu")
+        assert Settings().enable_datadog is None
+        assert Settings().datadog_enabled is True
 
     def test_blank_api_key_is_none(self, monkeypatch):
         from rootcoz.config import Settings
 
         monkeypatch.setenv("ENABLE_DATADOG", "true")
+        monkeypatch.setenv("DATADOG_SITE", "datadoghq.eu")
         monkeypatch.setenv("DATADOG_API_KEY", "  ")
         settings = Settings()
         assert settings.datadog_api_key is None
@@ -653,21 +679,25 @@ class TestSiteNormalization:
         assert exporter._site == "datadoghq.eu"
         assert exporter._events_url == _EVENTS_URL
 
-    def test_garbage_falls_back_to_default_with_warning(self):
-        with patch("rootcoz.exporters.datadog.logger") as mock_logger:
-            exporter = _exporter(site="not a site!!")
-        assert exporter._site == "datadoghq.eu"
-        assert exporter._events_url == _EVENTS_URL
+    def test_garbage_site_rejected(self):
+        with (
+            patch("rootcoz.exporters.datadog.logger") as mock_logger,
+            pytest.raises(ValueError, match="Invalid Datadog site"),
+        ):
+            _exporter(site="not a site!!")
         assert mock_logger.warning.called
 
-    def test_no_dot_falls_back_to_default(self):
-        assert _exporter(site="localhost")._site == "datadoghq.eu"
+    def test_no_dot_rejected(self):
+        with pytest.raises(ValueError, match="Invalid Datadog site"):
+            _exporter(site="localhost")
 
-    def test_empty_falls_back_to_default_silently(self):
-        with patch("rootcoz.exporters.datadog.logger") as mock_logger:
-            exporter = _exporter(site="  ")
-        assert exporter._site == "datadoghq.eu"
-        assert not mock_logger.warning.called
+    def test_empty_site_rejected(self):
+        with pytest.raises(ValueError, match="Invalid Datadog site"):
+            _exporter(site="  ")
+
+    def test_unset_site_rejected(self):
+        with pytest.raises(ValueError, match="Invalid Datadog site"):
+            _exporter(site="")
 
 
 class TestAutoPushAnalysisTimestamp:
@@ -680,7 +710,12 @@ class TestAutoPushAnalysisTimestamp:
 
     @staticmethod
     def _settings() -> Settings:
-        return Settings(enable_auto_review=True, auto_push_exporters="datadog")
+        return Settings(
+            enable_auto_review=True,
+            auto_push_exporters="datadog",
+            datadog_api_key=_API_KEY,
+            datadog_site="datadoghq.eu",
+        )
 
     @staticmethod
     def _result_data() -> dict[str, Any]:

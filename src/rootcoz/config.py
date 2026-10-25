@@ -593,23 +593,27 @@ class Settings(BaseSettings):
     # Datadog Events integration (optional). Emits one event per failed
     # test when results are pushed to the 'datadog' exporter plugin.
     datadog_api_key: SecretStr | None = None
-    datadog_site: str = Field(
-        default="datadoghq.eu",
+    datadog_site: str | None = Field(
+        default=None,
         description=(
-            "Datadog site for the Events API (https://api.{site}/api/v1/events)."
+            "Datadog site hostname for the Events API, e.g. datadoghq.eu."
+            " Required to enable the exporter."
         ),
     )
-    datadog_service: str = Field(
-        default="cnv-qe-tests",
-        description="Value of the service: tag on emitted Datadog events.",
+    datadog_service: str | None = Field(
+        default=None,
+        description="Value of the service: tag on emitted Datadog events (optional).",
     )
-    datadog_env: str = Field(
-        default="production",
-        description="Value of the env: tag on emitted Datadog events.",
+    datadog_env: str | None = Field(
+        default=None,
+        description="Value of the env: tag on emitted Datadog events (optional).",
     )
-    enable_datadog: bool = Field(
-        default=False,
-        description=("Enable the Datadog Events exporter. Requires DATADOG_API_KEY."),
+    enable_datadog: bool | None = Field(
+        default=None,
+        description=(
+            "Push each analysis to Datadog as one event per failed test."
+            " When None, enabled if DATADOG_API_KEY is configured."
+        ),
     )
 
     # Web Push (VAPID) configuration (optional, server-only)
@@ -1034,12 +1038,19 @@ class Settings(BaseSettings):
     @property
     def datadog_enabled(self) -> bool:
         """Check if the Datadog Events exporter is enabled and configured."""
-        if not self.enable_datadog:
+        if self.enable_datadog is False:
             return False
         if not self.datadog_api_key or not self.datadog_api_key.get_secret_value():
-            logger.warning(
-                "enable_datadog is True but DATADOG_API_KEY is not configured"
-            )
+            if self.enable_datadog is True:
+                logger.warning(
+                    "enable_datadog is True but DATADOG_API_KEY is not configured"
+                )
+            return False
+        if not self.datadog_site:
+            if self.enable_datadog is True:
+                logger.warning(
+                    "enable_datadog is True but DATADOG_SITE is not configured"
+                )
             return False
         return True
 

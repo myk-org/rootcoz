@@ -37,9 +37,6 @@ _EVENTS_PATH = "/api/v1/events"
 #: Per-request timeout (seconds) for event submission.
 _REQUEST_TIMEOUT = 30.0
 
-#: Datadog site used when the configured value is missing or invalid.
-_DEFAULT_SITE = "datadoghq.eu"
-
 #: Valid Datadog site hostname: lowercase alphanumerics, hyphens, and dots,
 #: with at least one dot (``datadoghq.eu``, ``ddog.us``, ``us3.datadoghq.com``).
 _SITE_HOSTNAME_RE = re.compile(
@@ -81,24 +78,26 @@ _UNKNOWN_CLASSIFICATION = "UNKNOWN"
 _TAG_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_.:-]")
 
 
-def _normalize_site(site: str) -> str:
+def _normalize_site(site: str | None) -> str:
     """Normalize a configured Datadog site value to a bare hostname.
 
     Accepts full URLs (``https://datadoghq.eu``), values with an ``api.``
-    prefix, and trailing slashes. Values that do not normalize to a valid
-    hostname fall back to :data:`_DEFAULT_SITE` with a warning — a crafted
-    value must never redirect the ``DD-API-KEY`` header to an arbitrary
-    host embedded in a scheme or path.
+    prefix, and trailing slashes. Returns an empty string when the value
+    is empty or does not normalize to a valid hostname — the caller
+    decides how to surface that (no silent fallback site: falling back
+    would send the ``DD-API-KEY`` header to a site the operator never
+    chose).
 
     Args:
         site: Raw configured site value.
 
     Returns:
-        Bare lowercase hostname (e.g. ``datadoghq.eu``).
+        Bare lowercase hostname (e.g. ``datadoghq.eu``), or ``""`` when
+        empty/invalid.
     """
     raw = (site or "").strip()
     if not raw:
-        return _DEFAULT_SITE
+        return ""
     candidate = raw.rstrip("/")
     if "://" in candidate:
         candidate = urlparse(candidate).hostname or ""
@@ -108,9 +107,9 @@ def _normalize_site(site: str) -> str:
     candidate = candidate.removeprefix("api.")
     if not _SITE_HOSTNAME_RE.fullmatch(candidate):
         logger.warning(
-            "Invalid Datadog site %r, falling back to %r", raw, _DEFAULT_SITE
+            "Invalid Datadog site %r — no events can be emitted until it is fixed", raw
         )
-        return _DEFAULT_SITE
+        return ""
     return candidate
 
 
@@ -182,12 +181,17 @@ class DatadogExporter(Exporter):
         self,
         *,
         api_key: str,
-        site: str = "datadoghq.eu",
-        service: str = "cnv-qe-tests",
-        env: str = "production",
+        site: str,
+        service: str | None = None,
+        env: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._site = _normalize_site(site)
+        if not self._site:
+            raise ValueError(
+                f"Invalid Datadog site {site!r} — set DATADOG_SITE to a Datadog "
+                "hostname (e.g. datadoghq.eu)"
+            )
         self._service = service
         self._env = env
 
@@ -224,9 +228,12 @@ class DatadogExporter(Exporter):
 
         Tag order is stable so tests and consumers can rely on it.
         """
-        tags = [
-            f"service:{sanitize_tag_value(self._service)}",
-            f"env:{sanitize_tag_value(self._env)}",
+        tags: list[str] = []
+        if self._service:
+            tags.append(f"service:{sanitize_tag_value(self._service)}")
+        if self._env:
+            tags.append(f"env:{sanitize_tag_value(self._env)}")
+        tags += [
             "tfa.stage:automated",
             f"tfa.classification:{sanitize_tag_value(classification)}",
             f"job_name:{sanitize_tag_value(context.job_name)}",

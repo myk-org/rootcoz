@@ -173,12 +173,12 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
    | `DATADOG_API_KEY` | unset | string | yes | no | yes |
-   | `DATADOG_SITE` | `datadoghq.eu` | string | no | no | yes |
-   | `DATADOG_SERVICE` | `cnv-qe-tests` | string | no | no | yes |
-   | `DATADOG_ENV` | `production` | string | no | no | yes |
-   | `ENABLE_DATADOG` | `false` | boolean | no | no | yes |
+   | `DATADOG_SITE` | unset | string | no | no | yes |
+   | `DATADOG_SERVICE` | unset | string | no | no | yes |
+   | `DATADOG_ENV` | unset | string | no | no | yes |
+   | `ENABLE_DATADOG` | unset | boolean | no | no | yes |
 
-   Unlike Report Portal there is no auto-detection: the Datadog Events exporter is enabled only when `ENABLE_DATADOG=true` **and** `DATADOG_API_KEY` is set. `DATADOG_SITE` selects the Events API host (`https://api.{site}/api/v1/events`) and defaults to the EU site (`datadoghq.eu`) — set `datadoghq.com` or your regional site as needed. `DATADOG_SERVICE` and `DATADOG_ENV` feed the `service:` and `env:` tags on every emitted event.
+   Same enable semantics as Report Portal: when `ENABLE_DATADOG` is unset, the exporter is enabled automatically once `DATADOG_API_KEY` **and** `DATADOG_SITE` are configured; set `ENABLE_DATADOG=false` to force it off. `DATADOG_SITE` is the Datadog site hostname for the Events API (`https://api.{site}/api/v1/events`, e.g. `datadoghq.eu` or `datadoghq.com`) — there is no built-in default, you choose your regional site. `DATADOG_SERVICE` and `DATADOG_ENV` optionally feed the `service:` and `env:` tags on emitted events; the tags are omitted when unset.
 
 9. **Auth and Security category.**
 

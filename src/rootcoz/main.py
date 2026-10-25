@@ -133,7 +133,7 @@ from rootcoz.engine.core import (
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
-from rootcoz.exporters.datadog import DatadogExporter
+from rootcoz.exporters.datadog import DatadogExporter, _normalize_site
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
     ReportPortalClient,
@@ -8654,6 +8654,8 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
         api_key = settings.datadog_api_key
         if api_key is None or not api_key.get_secret_value():
             raise ValueError("datadog_api_key is required")
+        if not settings.datadog_site:
+            raise ValueError("datadog_site is required")
         return DatadogExporter(
             api_key=api_key.get_secret_value(),
             site=settings.datadog_site,
@@ -14383,6 +14385,45 @@ async def _test_reportportal_connection(settings: Settings) -> dict[str, Any]:
     )
 
 
+async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
+    """API-key validation ping against the effective Datadog settings.
+
+    Uses the same read-only ``GET /api/v1/validate`` call the Datadog
+    events push path relies on — a 200 with ``{"valid": true}`` proves
+    both reachability of the configured site and the API key.
+    """
+    api_key = settings.datadog_api_key
+    missing = [
+        name
+        for name, value in (
+            ("datadog_api_key", api_key),
+            ("datadog_site", settings.datadog_site),
+        )
+        if not value
+    ]
+    if missing:
+        return _test_result(
+            False, f"Datadog is not configured (missing: {', '.join(missing)})"
+        )
+    assert api_key is not None  # guaranteed by the missing-settings check above
+    site = _normalize_site(settings.datadog_site)
+    try:
+        data = await _integration_test_get_json(
+            f"https://api.{site}/api/v1/validate",
+            headers={"DD-API-KEY": api_key.get_secret_value()},
+        )
+    except _IntegrationTestError as exc:
+        message = str(exc)
+        if "authentication failed" in message:
+            message = "API key rejected (invalid or unauthorized)"
+        return _test_result(False, f"Datadog connection failed: {message}")
+    if data.get("valid") is not True:
+        return _test_result(
+            False, "Datadog connection failed: API key rejected (invalid key)"
+        )
+    return _test_result(True, f"Datadog API key is valid (site {site})", site=site)
+
+
 async def _test_prow_connection(settings: Settings) -> dict[str, Any]:
     """Prow deck reachability plus GCS bucket listability check.
 
@@ -14429,6 +14470,7 @@ _INTEGRATION_TESTERS: dict[str, Callable[[Settings], Awaitable[dict[str, Any]]]]
     "jira": _test_jira_connection,
     "github": _test_github_connection,
     "reportportal": _test_reportportal_connection,
+    "datadog": _test_datadog_connection,
     "prow": _test_prow_connection,
 }
 

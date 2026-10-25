@@ -573,12 +573,12 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
    | `DATADOG_API_KEY` | unset | string | yes | no | yes |
-   | `DATADOG_SITE` | `datadoghq.eu` | string | no | no | yes |
-   | `DATADOG_SERVICE` | `cnv-qe-tests` | string | no | no | yes |
-   | `DATADOG_ENV` | `production` | string | no | no | yes |
-   | `ENABLE_DATADOG` | `false` | boolean | no | no | yes |
+   | `DATADOG_SITE` | unset | string | no | no | yes |
+   | `DATADOG_SERVICE` | unset | string | no | no | yes |
+   | `DATADOG_ENV` | unset | string | no | no | yes |
+   | `ENABLE_DATADOG` | unset | boolean | no | no | yes |
 
-   Unlike Report Portal there is no auto-detection: the Datadog Events exporter is enabled only when `ENABLE_DATADOG=true` **and** `DATADOG_API_KEY` is set. `DATADOG_SITE` selects the Events API host (`https://api.{site}/api/v1/events`) and defaults to the EU site (`datadoghq.eu`) — set `datadoghq.com` or your regional site as needed. `DATADOG_SERVICE` and `DATADOG_ENV` feed the `service:` and `env:` tags on every emitted event.
+   Same enable semantics as Report Portal: when `ENABLE_DATADOG` is unset, the exporter is enabled automatically once `DATADOG_API_KEY` **and** `DATADOG_SITE` are configured; set `ENABLE_DATADOG=false` to force it off. `DATADOG_SITE` is the Datadog site hostname for the Events API (`https://api.{site}/api/v1/events`, e.g. `datadoghq.eu` or `datadoghq.com`) — there is no built-in default, you choose your regional site. `DATADOG_SERVICE` and `DATADOG_ENV` optionally feed the `service:` and `env:` tags on emitted events; the tags are omitted when unset.
 
 9. **Auth and Security category.**
 
@@ -1694,7 +1694,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
    - A markdown body with the test name, classification, job and build, the RootCoz report link (when `PUBLIC_BASE_URL` is set), the CI build link when available, and the AI diagnosis.
    - An alert type mapped from the classification: `PRODUCT BUG` → `error`; `INFRASTRUCTURE`, `CODE ISSUE`, and `AUTOMATION` → `warning`; anything else → `info`.
    - An `aggregation_key` of `rootcoz-{analysis_id}-{test_name}` so reruns of the same test group in the Datadog event stream.
-   - A tag taxonomy: `service:{DATADOG_SERVICE}` (default `cnv-qe-tests`), `env:{DATADOG_ENV}` (default `production`), `tfa.stage:automated`, `tfa.classification:{classification}`, `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
+   - A tag taxonomy: `service:{DATADOG_SERVICE}` and `env:{DATADOG_ENV}` (both optional — the tags are omitted when unset), `tfa.stage:automated`, `tfa.classification:{classification}`, `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
 
    Push it like any other exporter:
 
