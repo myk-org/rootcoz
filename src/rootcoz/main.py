@@ -99,6 +99,7 @@ from rootcoz.comment_enrichment import (
 )
 from rootcoz.config import (
     Settings,
+    atlassian_cloud_id_error,
     get_settings,
     jira_method_missing_fields,
     normalize_jira_auth_mode,
@@ -147,6 +148,7 @@ from rootcoz.jira import (
     JiraClient,
     JiraConnection,
     JiraOAuthMintError,
+    classify_jira_secret,
     complete_jira_connection,
     enrich_with_jira_matches,
     filter_matches_with_ai,
@@ -7595,16 +7597,22 @@ def _build_effective_jira_settings(
     Uses ``model_copy()`` to follow the same pattern as ``_merge_settings()``.
 
     The auth mode is pinned to the user's credential choice (which field
-    they filled in the credentials UI) — no inference from values:
+    they filled in the credentials UI), with one exception:
 
-    Service account mode: a user OAuth 2.0 credential client secret
-    (ATOA-prefixed) replaces the server's secret and clears the other
-    credentials so the effective credentials are unambiguous;
-    ``jira_auth_mode`` is set to ``oauth``. The client ID stays whatever
-    the server configures (``atlassian_oauth_client_id``) — the ID and
-    secret must belong to the same Atlassian OAuth 2.0 credential. An
-    ATST-prefixed scoped token instead routes to ``atst`` mode (Bearer
-    against the api.atlassian.com gateway, no minting).
+    Prefix detection wins over field placement: an ATOA-prefixed value
+    (OAuth 2.0 credential client secret) routes to ``oauth`` mode and an
+    ATST-prefixed scoped token routes to ``atst`` mode (Bearer against
+    the api.atlassian.com gateway, no minting) — whichever field they
+    arrived in, so validation (which detects the prefixes) and actual
+    use agree. The service-account field takes precedence when both
+    fields carry classified values.
+
+    A service-account OAuth 2.0 credential client secret replaces the
+    server's secret and clears the other credentials so the effective
+    credentials are unambiguous; ``jira_auth_mode`` is set to ``oauth``.
+    The client ID stays whatever the server configures
+    (``atlassian_oauth_client_id``) — the ID and secret must belong to
+    the same Atlassian OAuth 2.0 credential.
 
     Regular token mode: with an email, ``jira_auth_mode`` is ``basic`` and
     the token goes to ``jira_api_token``; without an email the token is a
@@ -7622,57 +7630,53 @@ def _build_effective_jira_settings(
     so that duplicate searches and bug creation target the user's chosen project.
     """
     overrides: dict[str, Any] = {}
-    if user_jira_sa_token and user_jira_sa_token.strip().startswith("ATOA"):
+    sa_value = (user_jira_sa_token or "").strip()
+    token_value = (user_jira_token or "").strip()
+    sa_kind = classify_jira_secret(sa_value)
+    token_kind = classify_jira_secret(token_value)
+    if sa_kind:
+        kind, value = sa_kind, sa_value
+    elif token_kind:
+        kind, value = token_kind, token_value
+    else:
+        kind, value = "", ""
+    if kind == "oauth":
         # OAuth 2.0 credential override — only an ATOA-prefixed client
-        # secret selects oauth mode; anything else would be ignored by the
-        # resolver and silently disable Jira, so it falls through to the
-        # regular-token branch.
-        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_sa_token.strip())
+        # secret selects oauth mode; the client ID stays whatever the
+        # server configures (the ID and secret must belong to the same
+        # Atlassian OAuth 2.0 credential).
+        overrides["jira_oauth_client_secret"] = SecretStr(value)
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
         overrides["jira_atst_token"] = None
-        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
-            oauth_token=user_jira_sa_token
-        )
-    elif user_jira_sa_token and user_jira_sa_token.strip().startswith("ATST"):
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(oauth_token=value)
+    elif kind == "atst":
         # ATST scoped-token override — an already-minted access token sent
         # as Bearer against the api.atlassian.com gateway (atst mode). No
         # minting, so no client ID is needed; the cloud ID and site URL
         # stay whatever the server configures.
-        overrides["jira_atst_token"] = SecretStr(user_jira_sa_token.strip())
+        overrides["jira_atst_token"] = SecretStr(value)
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
         overrides["jira_oauth_client_secret"] = None
         overrides["jira_auth_mode"] = "atst"
-    elif user_jira_token and user_jira_token.strip().startswith("ATOA"):
-        # An ATOA client secret supplied in the regular field: route it to
-        # oauth mode so validation (which detects the prefix) and actual
-        # use agree.
-        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_token.strip())
-        overrides["jira_api_token"] = None
-        overrides["jira_pat"] = None
-        overrides["jira_email"] = None
-        overrides["jira_atst_token"] = None
-        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
-            oauth_token=user_jira_token
-        )
-    elif user_jira_token and user_jira_token.strip():
+    elif token_value:
         email = (
             user_jira_email.strip()
             if user_jira_email and user_jira_email.strip()
             else None
         )
         if email:
-            overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
+            overrides["jira_api_token"] = SecretStr(token_value)
             overrides["jira_pat"] = None
         else:
             # No email: the user token is a bearer PAT, not a basic-auth pair.
-            overrides["jira_pat"] = SecretStr(user_jira_token.strip())
+            overrides["jira_pat"] = SecretStr(token_value)
             overrides["jira_api_token"] = None
         overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
-            api_token=user_jira_token, email=email
+            api_token=token_value, email=email
         )
         overrides["jira_oauth_client_secret"] = None
         overrides["jira_atst_token"] = None
@@ -7685,27 +7689,27 @@ def _build_effective_jira_settings(
 
 
 def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
-    """400 when an unrecognized SA token is the only Jira credential.
+    """400 when an unrecognized SA token is supplied — fail closed.
 
     The service-account field accepts exactly two token kinds: an ATOA
     OAuth 2.0 credential client secret (routes to the oauth method) and
     an ATST scoped access token (routes to the atst method). Any other
-    value adds no overrides in ``_build_effective_jira_settings`` —
-    without this check the request would silently run with the SERVER's
-    Jira credentials instead of the user's. Shared by every endpoint
-    that consumes ``jira_sa_token`` from a request body.
+    value is ALWAYS rejected, even when a regular ``jira_token`` is also
+    supplied: invalid input is never silently dropped in favor of the
+    other credential (which could mask the mistake and run with a
+    credential the user did not verify). Shared by every endpoint that
+    consumes ``jira_sa_token`` from a request body.
 
     Raises:
         HTTPException: 400 when the SA token is set but neither
-            ATOA- nor ATST-prefixed and no regular ``jira_token`` is
-            supplied.
+            ATOA- nor ATST-prefixed, regardless of any regular token.
     """
     token = (jira_token or "").strip()
     sa_token = (jira_sa_token or "").strip()
-    if sa_token and not sa_token.startswith(("ATOA", "ATST")) and not token:
+    if sa_token and classify_jira_secret(sa_token) is None:
         logger.info(
-            "Rejecting request with an unrecognized Jira service account "
-            "token and no regular token"
+            "Rejecting request with an unrecognized Jira service account token%s",
+            " alongside a regular token" if token else "",
         )
         raise HTTPException(
             status_code=400,
@@ -9790,9 +9794,9 @@ def _jira_client_from_body(
     token is present.
 
     Raises:
-        HTTPException: 400 when a legacy (non-ATOA) service-account secret is
-            the only supplied credential — it must be rejected, not silently
-            dropped in favor of the server's credentials.
+        HTTPException: 400 when a service-account secret with an
+            unrecognized prefix is supplied — it must be rejected, not
+            silently dropped in favor of another credential.
     """
     _require_usable_jira_sa_token(jira_token, jira_sa_token)
     token = jira_token.strip() if jira_token else ""
@@ -9954,8 +9958,9 @@ async def validate_token(
         # no-email → Server Bearer split. Each method reads its own
         # server-configured URL and TLS verification.
         email = body.email.strip()
-        is_sa_secret = token.startswith("ATOA")
-        is_atst_token = token.startswith("ATST")
+        kind = classify_jira_secret(token)
+        is_sa_secret = kind == "oauth"
+        is_atst_token = kind == "atst"
         connection = resolve_jira_connection_from_params(
             jira_cloud_url=settings.jira_cloud_url,
             jira_server_url=settings.jira_server_url,
@@ -11736,7 +11741,7 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
         if (
             field == "jira_sa_token"
             and kwargs[field]
-            and not kwargs[field].startswith(("ATOA", "ATST"))
+            and classify_jira_secret(kwargs[field]) is None
         ):
             raise HTTPException(
                 status_code=400,
@@ -13347,6 +13352,14 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
             for err in exc.errors():
                 ctx_err = err.get("ctx", {}).get("error")
                 errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
+
+    # An account-ID-shaped cloud ID is rejected with a direct 422 — the
+    # same status and clear message the per-request model validator
+    # produces, on every write path (PUT and settings import) that shares
+    # this function.
+    cloud_id = settings_updates.get("atlassian_oauth_cloud_id")
+    if cloud_id and (cloud_id_error := atlassian_cloud_id_error(str(cloud_id))):
+        raise HTTPException(status_code=422, detail=cloud_id_error)
 
     for key, value in settings_updates.items():
         if key not in valid_keys:
@@ -15485,19 +15498,26 @@ async def _resolve_chat_credentials(
         # reuse for user-scoped secret resolution (the user secret +
         # server client ID must belong to the same Atlassian OAuth 2.0
         # credential). The user's field choice pins the method; each
-        # method then reads its own URL. An ATOA-prefixed secret saved in
-        # the regular jira_token field is an OAuth 2.0 client secret —
-        # route it to the oauth path so chat agrees with validation and
-        # preview (which detect the prefix). An ATST-prefixed token in the
-        # service-account field routes to the atst path the same way.
+        # method then reads its own URL. Prefix detection wins over field
+        # placement (#327 semantics): an ATOA-prefixed secret or an
+        # ATST-prefixed scoped token saved in the regular jira_token field
+        # routes to the oauth/atst path so chat agrees with validation and
+        # effective settings (which detect the prefixes). The
+        # service-account field wins when both fields carry classified
+        # values.
         regular_token = jira_token.strip()
         sa_secret = jira_sa_token.strip()
         atst_token = ""
-        if sa_secret.startswith("ATST"):
+        sa_kind = classify_jira_secret(sa_secret)
+        token_kind = classify_jira_secret(regular_token)
+        if sa_kind == "atst":
             atst_token = sa_secret
             sa_secret = ""
-        if not sa_secret and regular_token.startswith("ATOA"):
-            sa_secret = regular_token
+        elif not sa_kind and token_kind:
+            if token_kind == "oauth":
+                sa_secret = regular_token
+            else:
+                atst_token = regular_token
             regular_token = ""
         jira_connection = resolve_jira_connection_from_params(
             jira_cloud_url=settings.jira_cloud_url,

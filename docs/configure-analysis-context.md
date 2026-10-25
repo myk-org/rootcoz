@@ -86,7 +86,7 @@ This clones the tests repository plus both extra repositories into the analysis 
    | `enable_jira` | Whether the search runs |
    | `jira_cloud_url` | Jira Cloud site URL for the `basic` (email + API token) method |
    | `jira_server_url` | Jira Server/DC base URL for the `pat` method |
-   | `atlassian_oauth_cloud_id` | Cloud ID locating the `oauth` method's scoped gateway |
+   | `atlassian_oauth_cloud_id` | Cloud ID (a plain UUID) locating the `oauth`/`atst` methods' scoped gateway — get it from `https://your-site.atlassian.net/_edge/tenant_info`; see [Configuration Reference](configuration-reference.html) |
    | `jira_project_key` | Project to search in |
    | `jira_max_results` | Maximum matches returned per search; default 5 |
    | `enable_jira_issues` | Whether new Jira bugs can be created, independently of search |

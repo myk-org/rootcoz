@@ -273,6 +273,22 @@ class TestBuildChatCustomTools:
         assert "search_jira" not in names
         assert "get_jira_issue" not in names
 
+    def test_jira_atst_in_regular_field_routes_to_atst(self):
+        """An ATST token in the regular field selects atst mode, like validation."""
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_token="ATST-tok",
+        )
+        names = [t["name"] for t in tools]
+        # The sync fallback has no cloud ID to build the gateway URL, so
+        # the atst connection stays unusable here: no Jira tool is built
+        # rather than a misrouted bearer/v2 tool. (Async callers pass a
+        # completed connection via jira_connection.)
+        assert "search_jira" not in names
+        assert "get_jira_issue" not in names
+
     def test_jira_v2_paths_for_server_bearer(self):
         """Server/DC bearer PAT keeps v2 endpoints with a fields param."""
         tools = build_chat_custom_tools(
@@ -434,6 +450,37 @@ class TestResolveChatCredentials:
         assert connection.headers["Authorization"] == "Bearer minted-token"
         # The saved secret was minted, never used as a basic/PAT bearer
         mint.assert_awaited_once_with("test-client-id", "ATOA-saved-secret", True)
+
+    async def test_atst_token_in_regular_field_builds_atst_connection(
+        self, monkeypatch
+    ):
+        """An ATST token saved as jira_token routes to atst, not basic/pat."""
+        settings = self._make_settings(
+            atlassian_oauth_client_id="test-client-id",
+            atlassian_oauth_cloud_id="cloud-id-1",
+        )
+        tokens = {
+            "jira_email": "user@example.com",
+            "jira_token": "ATST-saved-token",  # pragma: allowlist secret
+            "jira_sa_token": "",
+            "github_token": "",
+        }
+        _email, _token, connection, _gh, _repo = await self._resolve(
+            monkeypatch, settings, tokens
+        )
+        assert connection is not None
+        assert connection.mode == "atst"
+        assert connection.api_base.endswith("/cloud-id-1")
+        # The ATST token itself is the Bearer — no email/basic pairing
+        assert connection.headers["Authorization"] == "Bearer ATST-saved-token"
+        # The completed connection yields Jira chat tools
+        tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+            jira_connection=connection,
+        )
+        assert "search_jira" in [t["name"] for t in tools]
 
     async def test_oauth_without_cloud_id_completes_from_site_url(self, monkeypatch):
         """OAuth + site URL + no cloud ID: completion resolves it (Finding 6)."""

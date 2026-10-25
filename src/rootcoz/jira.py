@@ -256,6 +256,24 @@ def jira_method_url(settings: Settings) -> str:
     return ""
 
 
+def classify_jira_secret(value: str) -> str | None:
+    """Classify a user-supplied Jira secret by its Atlassian prefix.
+
+    Returns ``"oauth"`` for an ATOA-prefixed OAuth 2.0 credential client
+    secret, ``"atst"`` for an ATST-prefixed scoped access token, and
+    ``None`` for anything else (regular api tokens / PATs carry no known
+    prefix). Shared by every consumer that must let prefix detection win
+    over field placement — validation, effective settings, chat
+    resolution, and the SA-token save gate — so they all agree.
+    """
+    v = (value or "").strip()
+    if v.startswith("ATOA"):
+        return "oauth"
+    if v.startswith("ATST"):
+        return "atst"
+    return None
+
+
 def resolve_jira_connection_from_params(
     jira_cloud_url: str = "",
     jira_server_url: str = "",

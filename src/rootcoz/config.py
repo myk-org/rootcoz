@@ -1,6 +1,7 @@
 """Configuration settings from environment variables."""
 
 import os
+import re
 from functools import lru_cache
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
@@ -1020,6 +1021,29 @@ class Settings(BaseSettings):
             push_rootcoz_url=self.rp_push_rootcoz_url,
             push_tracker_links=self.rp_push_tracker_links,
         )
+
+
+# Atlassian account IDs look like "712020:f0a60b32-\u2026" (digits:uuid) —
+# a frequent mistaken value for the cloud ID, which is a plain UUID.
+_ATLASSIAN_ACCOUNT_ID_RE = re.compile(r"^\d+:[0-9a-fA-F-]+$")
+
+
+def atlassian_cloud_id_error(value: str | None) -> str | None:
+    """Error message when a cloud ID value has the account-ID shape.
+
+    Shared by every entry point that accepts ``atlassian_oauth_cloud_id``
+    (Server Settings writes and per-request analysis payloads) so an
+    Atlassian account ID (org:uuid) is rejected up front instead of
+    failing later with a confusing HTTP 404 from the api.atlassian.com
+    gateway. Returns None for acceptable values (plain UUID or empty).
+    """
+    if value and _ATLASSIAN_ACCOUNT_ID_RE.match(value.strip()):
+        return (
+            "atlassian_oauth_cloud_id looks like an Atlassian account ID "
+            "(org:uuid) \u2014 the cloud ID is a plain UUID; get it from "
+            "https://<your-site>.atlassian.net/_edge/tenant_info"
+        )
+    return None
 
 
 def normalize_jira_auth_mode(value: str | None) -> str:

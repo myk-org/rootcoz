@@ -133,6 +133,15 @@ const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
 
 const jiraMethodLabel = (id: JiraMethod) => JIRA_METHODS.find(m => m.id === id)!.label
 
+// Locator/TLS fields shared by oauth and atst (same Atlassian gateway tenant).
+const JIRA_SHARED_FIELDS = new Set(['atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'])
+
+function jiraSharedFieldHint(method: JiraMethod | null, key: string): string | undefined {
+  if (!method || !JIRA_SHARED_FIELDS.has(key)) return undefined
+  const other = method === 'oauth' ? 'atst' : method === 'atst' ? 'oauth' : null
+  return other ? `Shared with the ${jiraMethodLabel(other)} method — both target the same Atlassian gateway tenant.` : undefined
+}
+
 function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
   // oauth and atst share locator/TLS fields (atlassian_oauth_cloud_id,
   // jira_oauth_ssl_verify) — a shared field stays visible for either of
@@ -1521,6 +1530,7 @@ export function ServerSettingsPage() {
                     key={setting.key}
                     setting={setting}
                     saveToDbNode={saveToDbNode(setting)}
+                    hint={category === 'Jira' ? jiraSharedFieldHint(persistedJiraMethod, setting.key) : undefined}
                     isEditing={state.editingKey === setting.key}
                     editValue={state.editValue}
                     saving={state.saving}
@@ -1885,6 +1895,7 @@ function AiSettingRow({
 interface SettingRowProps {
   setting: ServerSetting
   saveToDbNode?: React.ReactNode
+  hint?: string
   isEditing: boolean
   editValue: string
   saving: boolean
@@ -1907,6 +1918,7 @@ interface SettingRowProps {
 function SettingRow({
   setting,
   saveToDbNode,
+  hint,
   isEditing,
   editValue,
   saving,
@@ -1963,6 +1975,7 @@ function SettingRow({
           aria-label={`Edit ${setting.env_var}`}
         />
         <p className="text-xs text-text-tertiary">{setting.description}</p>
+        {hint && <p className="text-xs text-text-quaternary">{hint}</p>}
         <div className="flex items-center gap-2">
           <Button size="sm" onClick={onSave} disabled={saving} className="h-7 text-xs">
             {saving ? (
@@ -2043,6 +2056,7 @@ function SettingRow({
 
           {/* Description */}
           <p className="text-xs text-text-tertiary">{setting.description}</p>
+          {hint && <p className="text-xs text-text-quaternary">{hint}</p>}
 
           {/* Modified by info */}
           {setting.source === 'db' && setting.updated_by && (
