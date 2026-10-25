@@ -18,6 +18,7 @@ from rootcoz.config import Settings
 from rootcoz.exporters.base import ExportContext
 from rootcoz.exporters.datadog import (
     DatadogExporter,
+    parse_alert_type_map,
     sanitize_tag_value,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
@@ -106,6 +107,65 @@ class TestSanitizeTagValue:
         assert sanitize_tag_value("///") == "unknown"
 
 
+class TestParseAlertTypeMap:
+    """Admin-configured classification→alert_type mapping parser."""
+
+    def test_empty_and_none_return_empty_mapping(self):
+        assert parse_alert_type_map("") == {}
+        assert parse_alert_type_map(None) == {}
+        assert parse_alert_type_map("   ") == {}
+
+    def test_valid_pairs(self):
+        assert parse_alert_type_map("PRODUCT BUG=error") == {"PRODUCT BUG": "error"}
+        assert parse_alert_type_map("A=info,B=success") == {
+            "A": "info",
+            "B": "success",
+        }
+
+    def test_all_valid_alert_types(self):
+        raw = "A=error,B=warning,C=info,D=success"
+        assert parse_alert_type_map(raw) == {
+            "A": "error",
+            "B": "warning",
+            "C": "info",
+            "D": "success",
+        }
+
+    def test_whitespace_tolerant(self):
+        raw = "  PRODUCT BUG = error , INFRASTRUCTURE=warning  "
+        assert parse_alert_type_map(raw) == {
+            "PRODUCT BUG": "error",
+            "INFRASTRUCTURE": "warning",
+        }
+
+    def test_trailing_comma_tolerated(self):
+        assert parse_alert_type_map("PRODUCT BUG=error,") == {"PRODUCT BUG": "error"}
+
+    def test_classification_may_contain_equals(self):
+        # split on the first '=' so classification text keeps later '='s
+        assert parse_alert_type_map("WEIRD=NAME=error") == {"WEIRD=NAME": "error"}
+
+    def test_invalid_alert_type_raises(self):
+        with pytest.raises(ValueError, match="fatal"):
+            parse_alert_type_map("PRODUCT BUG=fatal")
+
+    def test_wrong_case_alert_type_raises(self):
+        with pytest.raises(ValueError, match="Error"):
+            parse_alert_type_map("PRODUCT BUG=Error")
+
+    def test_missing_separator_raises(self):
+        with pytest.raises(ValueError, match="classification=alert_type"):
+            parse_alert_type_map("PRODUCT BUG")
+
+    def test_empty_classification_raises(self):
+        with pytest.raises(ValueError, match="empty classification"):
+            parse_alert_type_map("=error")
+
+    def test_constructor_rejects_invalid_mapping(self):
+        with pytest.raises(ValueError, match="invalid alert_type"):
+            _exporter(alert_type_map="PRODUCT BUG=fatal")
+
+
 class TestBuildEvent:
     """Payload shape for a single event."""
 
@@ -130,11 +190,11 @@ class TestBuildEvent:
         event = self._event()
         assert event["tags"] == [
             "tfa.stage:automated",
-            "tfa.classification:PRODUCT_BUG",
             "job_name:e2e-suite",
             "build_number:42",
             "test_name:test_login_flow",
             "rootcoz.analysis_id:job-123",
+            "tfa.classification:PRODUCT_BUG",
             "pushed_by:alice",
         ]
 
@@ -160,21 +220,42 @@ class TestBuildEvent:
         assert "service:my_svc" in event["tags"]
         assert "env:staging_eu" in event["tags"]
 
-    def test_alert_type_mapping(self):
-        cases = {
-            "PRODUCT BUG": "error",
-            "INFRASTRUCTURE": "warning",
-            "CODE ISSUE": "warning",
-            "AUTOMATION": "warning",
-            "UNKNOWN": "info",
-            "SOMETHING ELSE": "info",
-            "": "info",
-        }
-        for classification, expected in cases.items():
-            exporter = _exporter()
-            failure = _failure(classification=classification)
-            event = exporter._build_event(_context(), failure)
-            assert event["alert_type"] == expected, classification
+    def test_no_alert_type_field_without_mapping(self):
+        """No shipped mapping: unset config means no alert_type at all."""
+        for classification in (
+            "PRODUCT BUG",
+            "INFRASTRUCTURE",
+            "CODE ISSUE",
+            "AUTOMATION",
+            "UNKNOWN",
+            "SOMETHING ELSE",
+            "",
+        ):
+            event = _exporter()._build_event(
+                _context(), _failure(classification=classification)
+            )
+            assert "alert_type" not in event, classification
+
+    def test_admin_mapping_applied(self):
+        exporter = _exporter(alert_type_map="PRODUCT BUG=error, INFRASTRUCTURE=warning")
+        event = exporter._build_event(
+            _context(), _failure(classification="PRODUCT BUG")
+        )
+        assert event["alert_type"] == "error"
+        event = exporter._build_event(
+            _context(), _failure(classification="INFRASTRUCTURE")
+        )
+        assert event["alert_type"] == "warning"
+
+    def test_partial_mapping_leaves_unmapped_without_alert_type(self):
+        exporter = _exporter(alert_type_map="PRODUCT BUG=error")
+        mapped = exporter._build_event(
+            _context(), _failure(classification="PRODUCT BUG")
+        )
+        assert mapped["alert_type"] == "error"
+        for unmapped in ("INFRASTRUCTURE", "CODE ISSUE", "UNKNOWN"):
+            event = exporter._build_event(_context(), _failure(classification=unmapped))
+            assert "alert_type" not in event, unmapped
 
     def test_classification_verbatim_in_title_and_text(self):
         exporter = _exporter()
@@ -211,7 +292,7 @@ class TestBuildEvent:
             _context(), {"test_name": "test_x", "error": "boom"}
         )
         assert event["title"] == "[UNKNOWN] test_x (Build #42)"
-        assert event["alert_type"] == "info"
+        assert "alert_type" not in event
 
     def test_legacy_string_analysis_used_as_details(self):
         """Legacy plain-string analyses carry the diagnosis text (models.py)."""
@@ -223,7 +304,6 @@ class TestBuildEvent:
         }
         event = exporter._build_event(_context(), failure)
         assert event["title"] == "[UNKNOWN] test_x (Build #42)"
-        assert event["alert_type"] == "info"
         assert "Plain legacy diagnosis text." in event["text"]
         assert "**AI diagnosis:**" in event["text"]
 
@@ -237,6 +317,124 @@ class TestBuildEvent:
         event = exporter._build_event(_context(), failure)
         assert event["title"] == "[UNKNOWN] test_x (Build #42)"
         assert "AI diagnosis" not in event["text"]
+
+
+class TestContentToggles:
+    """dd_push_* content toggles — parity with the rp_push_* trio."""
+
+    def test_classifications_toggle_off(self):
+        exporter = _exporter(
+            push_classifications=False, alert_type_map="PRODUCT BUG=error"
+        )
+        event = exporter._build_event(_context(), _failure())
+        assert event["title"] == "test_login_flow (Build #42)"
+        assert "Classification" not in event["text"]
+        assert not any(t.startswith("tfa.classification:") for t in event["tags"])
+        # Even with a mapping configured, the toggle wins.
+        assert "alert_type" not in event
+        # Unrelated content survives.
+        assert "### test_login_flow" in event["text"]
+        assert "**Job:** e2e-suite (#42)" in event["text"]
+
+    def test_classifications_toggle_on_keeps_defaults(self):
+        event = _exporter()._build_event(_context(), _failure())
+        assert event["title"].startswith("[PRODUCT BUG]")
+        assert "**Classification:** PRODUCT BUG" in event["text"]
+        assert "tfa.classification:PRODUCT_BUG" in event["tags"]
+
+    def test_rootcoz_url_toggle_off(self):
+        exporter = _exporter(push_rootcoz_url=False)
+        text = exporter._build_event(_context(), _failure())["text"]
+        assert "RootCoz report" not in text
+        assert "https://rootcoz.example.com/results/job-123" not in text
+        # The CI build link is not part of this toggle.
+        assert "CI build" in text
+
+    def test_rootcoz_url_omitted_without_report_url(self):
+        """No PUBLIC_BASE_URL → no report URL in the context → no line."""
+        context = _context()
+        context.report_url = ""
+        text = _exporter()._build_event(context, _failure())["text"]
+        assert "RootCoz report" not in text
+
+    def test_tracker_links_included_when_present(self):
+        context = _context(
+            tracked_in_links={
+                "test_login_flow": [
+                    {
+                        "tracked_in_url": "https://jira.example.com/browse/PROJ-1",
+                        "tracked_in_type": "jira",
+                    },
+                    {
+                        "tracked_in_url": "https://github.com/org/repo/issues/2",
+                        "tracked_in_type": "github",
+                    },
+                ]
+            }
+        )
+        text = _exporter()._build_event(context, _failure())["text"]
+        assert (
+            "- **Tracked in:** [Jira](https://jira.example.com/browse/PROJ-1)" in text
+        )
+        assert (
+            "- **Tracked in:** [GitHub](https://github.com/org/repo/issues/2)" in text
+        )
+
+    def test_tracker_links_toggle_off(self):
+        context = _context(
+            tracked_in_links={
+                "test_login_flow": [
+                    {
+                        "tracked_in_url": "https://jira.example.com/browse/PROJ-1",
+                        "tracked_in_type": "jira",
+                    }
+                ]
+            }
+        )
+        exporter = _exporter(push_tracker_links=False)
+        text = exporter._build_event(context, _failure())["text"]
+        assert "Tracked in" not in text
+        assert "https://jira.example.com/browse/PROJ-1" not in text
+
+    def test_tracker_links_for_other_tests_ignored(self):
+        context = _context(
+            tracked_in_links={
+                "test_other": [
+                    {
+                        "tracked_in_url": "https://jira.example.com/browse/PROJ-1",
+                        "tracked_in_type": "jira",
+                    }
+                ]
+            }
+        )
+        text = _exporter()._build_event(context, _failure())["text"]
+        assert "Tracked in" not in text
+
+    def test_tracker_link_without_url_skipped(self):
+        context = _context(
+            tracked_in_links={
+                "test_login_flow": [
+                    {"tracked_in_url": "", "tracked_in_type": "jira"},
+                    {"tracked_in_type": "github"},
+                ]
+            }
+        )
+        text = _exporter()._build_event(context, _failure())["text"]
+        assert "Tracked in" not in text
+
+    def test_unknown_tracker_type_gets_generic_label(self):
+        context = _context(
+            tracked_in_links={
+                "test_login_flow": [
+                    {
+                        "tracked_in_url": "https://bugs.example.com/XYZ-1",
+                        "tracked_in_type": "bugzilla",
+                    }
+                ]
+            }
+        )
+        text = _exporter()._build_event(context, _failure())["text"]
+        assert "- **Tracked in:** [issue](https://bugs.example.com/XYZ-1)" in text
 
 
 class TestPush:
@@ -374,9 +572,17 @@ class TestFactory:
         settings.datadog_site = "datadoghq.eu"
         settings.datadog_service = None
         settings.datadog_env = None
+        settings.dd_push_classifications = True
+        settings.dd_push_rootcoz_url = False
+        settings.dd_push_tracker_links = True
+        settings.datadog_alert_type_map = "PRODUCT BUG=error"
 
         exporter = _create_exporter("datadog", settings)
         assert isinstance(exporter, DatadogExporter)
+        assert exporter._push_classifications is True
+        assert exporter._push_rootcoz_url is False
+        assert exporter._push_tracker_links is True
+        assert exporter._alert_type_map == {"PRODUCT BUG": "error"}
 
     def test_create_datadog_disabled_raises(self):
         from rootcoz.main import _create_exporter
@@ -418,6 +624,12 @@ class TestSettings:
         assert settings.datadog_env is None
         assert settings.enable_datadog is None
         assert settings.datadog_enabled is False  # no API key
+        # Content toggles default on, mapping ships EMPTY — no product
+        # default classification→alert_type mapping (#359).
+        assert settings.dd_push_classifications is True
+        assert settings.dd_push_rootcoz_url is True
+        assert settings.dd_push_tracker_links is True
+        assert settings.datadog_alert_type_map == ""
 
     def test_enabled_requires_api_key_and_site(self, monkeypatch):
         from rootcoz.config import Settings
@@ -467,11 +679,29 @@ class TestSettings:
         assert settings.datadog_enabled is False
 
     def test_settings_category_and_sensitive_registration(self):
-        from rootcoz.main import _FIELD_TO_CATEGORY, _SENSITIVE_SETTINGS
+        from rootcoz.main import (
+            _DEFAULTS_HIDDEN_SETTINGS,
+            _FIELD_TO_CATEGORY,
+            _RESTART_REQUIRED_SETTINGS,
+            _SENSITIVE_SETTINGS,
+        )
 
         assert "Datadog" == _FIELD_TO_CATEGORY["datadog_api_key"]
         assert _FIELD_TO_CATEGORY["enable_datadog"] == "Datadog"
         assert "datadog_api_key" in _SENSITIVE_SETTINGS
+        for field in (
+            "dd_push_classifications",
+            "dd_push_rootcoz_url",
+            "dd_push_tracker_links",
+            "datadog_alert_type_map",
+        ):
+            assert _FIELD_TO_CATEGORY[field] == "Datadog", field
+            # Same registries as the rp_push_* trio: hidden from the
+            # any-role defaults payload, not sensitive.
+            assert field in _DEFAULTS_HIDDEN_SETTINGS, field
+            assert field not in _SENSITIVE_SETTINGS, field
+            # Runtime-tunable: no restart needed.
+            assert field not in _RESTART_REQUIRED_SETTINGS, field
 
 
 class TestDateHappenedClamp:

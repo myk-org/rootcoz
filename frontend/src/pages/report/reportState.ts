@@ -23,6 +23,7 @@ export interface ReportState {
   jiraIssuesEnabled: boolean
   reportportalAvailable: boolean
   reportportalProject: string
+  datadogAvailable: boolean
   serverJiraProjectKey: string
   aiModels: Record<string, AiModel[]>
   loading: boolean
@@ -55,6 +56,7 @@ export type ReportAction =
   | { type: 'SET_JIRA_ISSUES_ENABLED'; payload: boolean }
   | { type: 'SET_REPORTPORTAL_AVAILABLE'; payload: boolean }
   | { type: 'SET_REPORTPORTAL_PROJECT'; payload: string }
+  | { type: 'SET_DATADOG_AVAILABLE'; payload: boolean }
   | { type: 'SET_SERVER_JIRA_PROJECT_KEY'; payload: string }
   | { type: 'SET_AI_MODELS'; payload: Record<string, AiModel[]> }
   | { type: 'SET_ENRICHMENTS'; payload: Record<string, CommentEnrichment[]> }
@@ -108,6 +110,7 @@ export const initialState: ReportState = {
   jiraIssuesEnabled: false,
   reportportalAvailable: false,
   reportportalProject: '',
+  datadogAvailable: false,
   serverJiraProjectKey: '',
   aiModels: {},
   loading: true,
@@ -174,6 +177,8 @@ export function reportReducer(state: ReportState, action: ReportAction): ReportS
       return { ...state, reportportalAvailable: action.payload }
     case 'SET_REPORTPORTAL_PROJECT':
       return { ...state, reportportalProject: action.payload }
+    case 'SET_DATADOG_AVAILABLE':
+      return { ...state, datadogAvailable: action.payload }
     case 'SET_SERVER_JIRA_PROJECT_KEY':
       return { ...state, serverJiraProjectKey: action.payload }
     case 'SET_AI_MODELS':

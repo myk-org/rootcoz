@@ -133,7 +133,11 @@ from rootcoz.engine.core import (
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
-from rootcoz.exporters.datadog import DatadogExporter, _normalize_site
+from rootcoz.exporters.datadog import (
+    DatadogExporter,
+    _normalize_site,
+    parse_alert_type_map,
+)
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
     ReportPortalClient,
@@ -372,6 +376,10 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
+        "dd_push_classifications",
+        "dd_push_rootcoz_url",
+        "dd_push_tracker_links",
+        "datadog_alert_type_map",
         "vapid_claim_email",
         "vapid_public_key",
         "smtp_host",
@@ -501,6 +509,10 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "datadog_service",
         "datadog_env",
         "enable_datadog",
+        "dd_push_classifications",
+        "dd_push_rootcoz_url",
+        "dd_push_tracker_links",
+        "datadog_alert_type_map",
     ],
     "Auth & Security": [
         "admin_key",
@@ -7574,6 +7586,7 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
         "server_jira_email": bool(settings.jira_email),
         "server_jira_project_key": settings.jira_project_key or "",
         "reportportal": settings.reportportal_enabled,
+        "datadog": settings.datadog_enabled,
         "exporters": _available_exporters(settings),
         "reportportal_project": settings.reportportal_project or "",
         "feedback_enabled": settings.feedback_enabled
@@ -8578,18 +8591,28 @@ def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool
     )
 
 
+# Exporter name → Settings field gating tracked-in link fetches: when the
+# exporter's tracker-links content toggle is off, the push pipeline skips
+# ``storage.get_tracked_in_for_scope`` for it.
+_TRACKED_IN_LINKS_TOGGLE_FIELDS: dict[str, str] = {
+    ReportPortalClient.NAME: "rp_push_tracker_links",
+    DatadogExporter.NAME: "dd_push_tracker_links",
+}
+
+
 def _exporter_needs_tracked_in_links(
     plugin_names: Iterable[str], settings: Settings
 ) -> bool:
     """Whether any named exporter consumes tracked-in link lookups.
 
     Lets the push pipeline skip ``storage.get_tracked_in_for_scope`` when no
-    target exporter will read ``ExportContext.tracked_in_links``.  Report
-    Portal additionally requires ``settings.rp.push_tracker_links``.
+    target exporter will read ``ExportContext.tracked_in_links``. Exporters
+    with a tracker-links content toggle additionally require it to be on
+    (``rp_push_tracker_links`` / ``dd_push_tracker_links``).
 
     Args:
         plugin_names: Exporter identifiers to check.
-        settings: Application settings (RP content toggles).
+        settings: Application settings (exporter content toggles).
 
     Returns:
         ``True`` if at least one target exporter needs tracked-in links.
@@ -8599,7 +8622,8 @@ def _exporter_needs_tracked_in_links(
             continue
         if not _EXPORTER_CLASSES[name].needs_tracked_in_links:
             continue
-        if name == "reportportal" and not settings.rp.push_tracker_links:
+        toggle_field = _TRACKED_IN_LINKS_TOGGLE_FIELDS.get(name)
+        if toggle_field and not getattr(settings, toggle_field):
             continue
         return True
     return False
@@ -8661,6 +8685,10 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
             site=settings.datadog_site,
             service=settings.datadog_service,
             env=settings.datadog_env,
+            push_classifications=settings.dd_push_classifications,
+            push_rootcoz_url=settings.dd_push_rootcoz_url,
+            push_tracker_links=settings.dd_push_tracker_links,
+            alert_type_map=settings.datadog_alert_type_map,
         )
     raise ValueError(f"Unknown exporter plugin: '{plugin_name}'")
 
@@ -13338,6 +13366,22 @@ def _log_level_error(value: object) -> str | None:
     return None
 
 
+def _datadog_alert_type_map_error(value: object) -> str | None:
+    """Validate the Datadog alert-type mapping; error message, or None.
+
+    Shared by the PUT allowlist and the env-persist path (#359): the
+    setting is a plain ``str`` in Settings, so both write paths must run
+    the exporter's parser to reject malformed mappings at save time.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        parse_alert_type_map(str(value))
+    except ValueError as exc:
+        return f"datadog_alert_type_map: {exc}"
+    return None
+
+
 def _settings_dotenv_values() -> dict[str, str]:
     """The dotenv values Settings merges (DotEnvSettingsSource), by field.
 
@@ -13434,6 +13478,12 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
         if value is None or value == "":
             continue
         if key == "log_level" and (message := _log_level_error(value)):
+            errors.append(message)
+        # The Datadog alert-type mapping is parsed by the exporter at push
+        # time; surface malformed values at save time instead (#359).
+        if key == "datadog_alert_type_map" and (
+            message := _datadog_alert_type_map_error(value)
+        ):
             errors.append(message)
         if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
@@ -13985,6 +14035,14 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}': {message}"
         )
+    # Same shared validation for the Datadog alert-type mapping (#359).
+    if (
+        key == "datadog_alert_type_map"
+        and (message := _datadog_alert_type_map_error(env_value)) is not None
+    ):
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}': {message}"
+        )
     # Same validation the PUT path applies to admin-typed values
     try:
         Settings.model_validate({key: env_value})
@@ -14396,7 +14454,7 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
     missing = [
         name
         for name, value in (
-            ("datadog_api_key", api_key),
+            ("datadog_api_key", api_key and api_key.get_secret_value()),
             ("datadog_site", settings.datadog_site),
         )
         if not value
@@ -14407,6 +14465,12 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
         )
     assert api_key is not None  # guaranteed by the missing-settings check above
     site = _normalize_site(settings.datadog_site)
+    if not site:
+        return _test_result(
+            False,
+            f"Datadog connection failed: invalid site {settings.datadog_site!r} "
+            "— set DATADOG_SITE to a Datadog hostname (e.g. datadoghq.eu)",
+        )
     try:
         data = await _integration_test_get_json(
             f"https://api.{site}/api/v1/validate",
@@ -14417,7 +14481,7 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
         if "authentication failed" in message:
             message = "API key rejected (invalid or unauthorized)"
         return _test_result(False, f"Datadog connection failed: {message}")
-    if data.get("valid") is not True:
+    if not isinstance(data, dict) or data.get("valid") is not True:
         return _test_result(
             False, "Datadog connection failed: API key rejected (invalid key)"
         )

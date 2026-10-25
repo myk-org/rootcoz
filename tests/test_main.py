@@ -11404,6 +11404,64 @@ class TestIntegrationConnectionEndpoints:
         assert "not configured" in data["message"]
         assert "datadog_api_key" in data["message"]
 
+    def test_datadog_empty_key_is_not_configured(self, test_client) -> None:
+        """An empty secret value counts as missing, not as a rejected key."""
+        with patch(
+            "rootcoz.main.get_settings",
+            return_value=Settings(
+                datadog_api_key=SecretStr(""),
+                datadog_site="datadoghq.eu",
+            ),
+        ):
+            response = test_client.post("/api/admin/settings/test/datadog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "not configured" in data["message"]
+        assert "datadog_api_key" in data["message"]
+
+    def test_datadog_invalid_site_rejected_before_request(self, test_client) -> None:
+        """A nonempty but invalid site fails fast — no https://api./ request."""
+        settings = Settings(
+            datadog_api_key=SecretStr("not-a-real-key"),
+            datadog_site="not a site!!",
+        )
+        mock_instance = AsyncMock()
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main.httpx.AsyncClient", mock_client_cls),
+        ):
+            response = test_client.post("/api/admin/settings/test/datadog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "invalid site" in data["message"]
+        mock_instance.get.assert_not_called()
+
+    def test_datadog_non_dict_json_body_tolerated(self, test_client) -> None:
+        """A 200 with a non-object JSON body is a rejected key, not a crash."""
+        settings = Settings(
+            datadog_api_key=SecretStr("not-a-real-key"),
+            datadog_site="datadoghq.eu",
+        )
+        response_payload = self._http_response(
+            200,
+            ["unexpected"],
+            "https://api.datadoghq.eu/api/v1/validate",
+        )
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._mock_async_client(response_payload)[0],
+        ):
+            response = test_client.post("/api/admin/settings/test/datadog")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "API key rejected" in data["message"]
+
     def test_crash_log_and_message_have_no_credentials(
         self, test_client, caplog
     ) -> None:

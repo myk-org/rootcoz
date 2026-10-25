@@ -32,6 +32,7 @@ import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, Ro
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
+import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
@@ -177,6 +178,7 @@ function ReportContent() {
           dispatch({ type: 'SET_JIRA_ISSUES_ENABLED', payload: resultRes.capabilities?.jira_issues_enabled ?? false })
           dispatch({ type: 'SET_REPORTPORTAL_AVAILABLE', payload: resultRes.capabilities?.reportportal ?? false })
           dispatch({ type: 'SET_REPORTPORTAL_PROJECT', payload: resultRes.capabilities?.reportportal_project ?? '' })
+          dispatch({ type: 'SET_DATADOG_AVAILABLE', payload: resultRes.capabilities?.datadog ?? false })
           dispatch({ type: 'SET_SERVER_JIRA_PROJECT_KEY', payload: resultRes.capabilities?.server_jira_project_key ?? '' })
         }
 
@@ -479,6 +481,9 @@ function ReportContent() {
           <div className="ml-auto flex items-center gap-3">
             {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
+            )}
+            {state.datadogAvailable && (result.child_job_analyses ?? []).length === 0 && (
+              <DatadogButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
             {!isViewer && (
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>

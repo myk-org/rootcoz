@@ -2,10 +2,14 @@
 
 Emits one Datadog event per failed test (1:N, ADR 0003) to
 ``POST https://api.{site}/api/v1/events`` with the ``DD-API-KEY`` header.
-Events carry the rootcoz classification as the alert type, a stable
-``aggregation_key`` per analysis/test pair, and a tag taxonomy
-(``service``, ``env``, ``tfa.stage``, ``tfa.classification``, job/build/test
-identity, and the push attribution).
+Events carry the rootcoz classification (when the ``dd_push_classifications``
+toggle is on) as a tag, title prefix, and — via the admin-configured
+``datadog_alert_type_map`` — the ``alert_type`` field. There is no shipped
+classification→alert_type mapping: with no mapping configured, no
+``alert_type`` field is emitted at all and Datadog applies its own default.
+Events carry a stable ``aggregation_key`` per analysis/test pair and a tag
+taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
+job/build/test identity, and the push attribution).
 
 Failures never raise: per-event HTTP/network errors are collected into the
 exporter result so a Datadog outage can never break the analysis pipeline.
@@ -58,16 +62,8 @@ _AUTH_FAILURE_STATUSES = frozenset({401, 403})
 #: Consecutive failed events (any error) before the push circuit-breaks.
 _CIRCUIT_BREAKER_THRESHOLD = 5
 
-#: rootcoz classification → Datadog ``alert_type``.
-_ALERT_TYPE_MAP: dict[str, str] = {
-    "PRODUCT BUG": "error",
-    "INFRASTRUCTURE": "warning",
-    "CODE ISSUE": "warning",
-    "AUTOMATION": "warning",
-}
-
-#: Fallback alert type for UNKNOWN / unmapped classifications.
-_DEFAULT_ALERT_TYPE = "info"
+#: Valid Datadog ``alert_type`` values (v1 Events API).
+_VALID_ALERT_TYPES = frozenset({"error", "warning", "info", "success"})
 
 #: Fallback classification label when a stored failure carries none.
 _UNKNOWN_CLASSIFICATION = "UNKNOWN"
@@ -146,6 +142,54 @@ def _circuit_breaker_message(skipped: int) -> str:
     )
 
 
+def parse_alert_type_map(raw: str | None) -> dict[str, str]:
+    """Parse an admin-configured classification→``alert_type`` mapping.
+
+    rootcoz ships NO default mapping: an empty value means the exporter
+    omits ``alert_type`` entirely and Datadog applies its own default.
+
+    Format: comma-separated ``classification=alert_type`` pairs,
+    whitespace-insensitive (e.g. ``PRODUCT BUG=error, INFRASTRUCTURE=warning``).
+    Empty segments (trailing commas) are tolerated.
+
+    Args:
+        raw: Raw configured value (``DATADOG_ALERT_TYPE_MAP``).
+
+    Returns:
+        Mapping of classification to ``alert_type``; ``{}`` when unset/empty.
+
+    Raises:
+        ValueError: A pair is malformed (no ``=``, empty classification) or
+            carries an ``alert_type`` that is not one of
+            :data:`_VALID_ALERT_TYPES`.
+    """
+    if not raw or not raw.strip():
+        return {}
+    mapping: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise ValueError(
+                f"invalid entry {pair!r} — expected 'classification=alert_type'",
+            )
+        # rsplit: classification text may contain '='; the alert_type never does.
+        classification, alert_type = (part.strip() for part in pair.rsplit("=", 1))
+        if not classification:
+            raise ValueError(
+                f"invalid entry {pair!r} — empty classification",
+            )
+        if alert_type not in _VALID_ALERT_TYPES:
+            raise ValueError(
+                f"invalid alert_type {alert_type!r} for classification "
+                f"{classification!r} — must be one of: "
+                + ", ".join(sorted(_VALID_ALERT_TYPES)),
+            )
+        mapping[classification] = alert_type
+    return mapping
+
+
 def sanitize_tag_value(value: str) -> str:
     """Sanitize a value for use inside a Datadog tag.
 
@@ -172,10 +216,24 @@ class DatadogExporter(Exporter):
         site: Datadog site, e.g. ``datadoghq.eu`` (default).
         service: Value of the ``service:`` tag.
         env: Value of the ``env:`` tag.
+        push_classifications: Include the classification (tag, title prefix,
+            text line, and ``alert_type``) in the event.
+        push_rootcoz_url: Include the RootCoz report link in the event text.
+        push_tracker_links: Include tracked-in Jira/GitHub issue links in
+            the event text.
+        alert_type_map: Raw admin-configured classification→``alert_type``
+            mapping (see :func:`parse_alert_type_map`). Empty/``None`` —
+            the shipped default — emits no ``alert_type`` field.
+
+    Raises:
+        ValueError: Invalid site or invalid ``alert_type_map``.
     """
 
     NAME = "datadog"
     DISPLAY_NAME = "Datadog"
+
+    #: Consumes tracked-in links from ``ExportContext.tracked_in_links``.
+    needs_tracked_in_links = True
 
     def __init__(
         self,
@@ -184,6 +242,10 @@ class DatadogExporter(Exporter):
         site: str,
         service: str | None = None,
         env: str | None = None,
+        push_classifications: bool = True,
+        push_rootcoz_url: bool = True,
+        push_tracker_links: bool = True,
+        alert_type_map: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._site = _normalize_site(site)
@@ -194,6 +256,10 @@ class DatadogExporter(Exporter):
             )
         self._service = service
         self._env = env
+        self._push_classifications = push_classifications
+        self._push_rootcoz_url = push_rootcoz_url
+        self._push_tracker_links = push_tracker_links
+        self._alert_type_map = parse_alert_type_map(alert_type_map)
 
     # -- Exporter ABC ---------------------------------------------------------
 
@@ -222,11 +288,13 @@ class DatadogExporter(Exporter):
         return f"https://api.{self._site}{_EVENTS_PATH}"
 
     def _build_tags(
-        self, context: ExportContext, classification: str, test_name: str
+        self, context: ExportContext, test_name: str, classification: str | None
     ) -> list[str]:
         """Build the tag list for one event.
 
         Tag order is stable so tests and consumers can rely on it.
+        ``classification`` is ``None`` when the ``dd_push_classifications``
+        toggle is off — the ``tfa.classification`` tag is then omitted.
         """
         tags: list[str] = []
         if self._service:
@@ -235,12 +303,13 @@ class DatadogExporter(Exporter):
             tags.append(f"env:{sanitize_tag_value(self._env)}")
         tags += [
             "tfa.stage:automated",
-            f"tfa.classification:{sanitize_tag_value(classification)}",
             f"job_name:{sanitize_tag_value(context.job_name)}",
             f"build_number:{sanitize_tag_value(context.build_number)}",
             f"test_name:{sanitize_tag_value(test_name)}",
             f"rootcoz.analysis_id:{sanitize_tag_value(context.job_id)}",
         ]
+        if classification:
+            tags.append(f"tfa.classification:{sanitize_tag_value(classification)}")
         if context.child_job_name:
             tags.append(f"child_job_name:{sanitize_tag_value(context.child_job_name)}")
         tags.append(
@@ -270,20 +339,28 @@ class DatadogExporter(Exporter):
             analysis = analysis_value
         else:
             analysis = {}
-        classification = str(analysis.get("classification", "") or "").strip()
-        if not classification:
-            classification = _UNKNOWN_CLASSIFICATION
+        raw_classification = str(analysis.get("classification", "") or "").strip()
+        if self._push_classifications:
+            classification = raw_classification or _UNKNOWN_CLASSIFICATION
+        else:
+            # Toggle off: no classification anywhere in the event — no
+            # tag, no title prefix, no text line, no alert_type.
+            classification = ""
         details = str(analysis.get("details", "") or "").strip()
 
-        title = f"[{classification}] {test_name} (Build #{context.build_number})"
+        if classification:
+            title = f"[{classification}] {test_name} (Build #{context.build_number})"
+        else:
+            title = f"{test_name} (Build #{context.build_number})"
 
         lines = [
             f"### {test_name}",
             "",
-            f"- **Classification:** {classification}",
-            f"- **Job:** {context.job_name} (#{context.build_number})",
         ]
-        if context.report_url:
+        if classification:
+            lines.append(f"- **Classification:** {classification}")
+        lines.append(f"- **Job:** {context.job_name} (#{context.build_number})")
+        if self._push_rootcoz_url and context.report_url:
             lines.append(
                 f"- **RootCoz report:** [analysis {context.job_id}]({context.report_url})"
             )
@@ -291,6 +368,16 @@ class DatadogExporter(Exporter):
             lines.append(
                 f"- **CI build:** [build #{context.build_number}]({context.jenkins_url})"
             )
+        if self._push_tracker_links:
+            for link in context.tracked_in_links.get(test_name, []):
+                url = str(link.get("tracked_in_url", "") or "")
+                if not url:
+                    continue
+                label = {
+                    "jira": "Jira",
+                    "github": "GitHub",
+                }.get(str(link.get("tracked_in_type", "") or ""), "issue")
+                lines.append(f"- **Tracked in:** [{label}]({url})")
         if details:
             lines += ["", "**AI diagnosis:**", "", details]
         text = "\n".join(lines)
@@ -300,16 +387,23 @@ class DatadogExporter(Exporter):
         if now - date_happened > _MAX_EVENT_AGE_SECONDS:
             date_happened = now
 
-        return {
+        event: dict[str, Any] = {
             "title": title,
             "text": text,
-            "alert_type": _ALERT_TYPE_MAP.get(classification, _DEFAULT_ALERT_TYPE),
             "priority": "normal",
             "date_happened": date_happened,
             "source_type_name": "rootcoz",
             "aggregation_key": _aggregation_key(context.job_id, test_name),
-            "tags": self._build_tags(context, classification, test_name),
+            "tags": self._build_tags(context, test_name, classification or None),
         }
+        # No shipped mapping: alert_type is emitted only when the admin's
+        # mapping covers this classification — otherwise Datadog applies
+        # its own default.
+        if classification:
+            alert_type = self._alert_type_map.get(classification)
+            if alert_type:
+                event["alert_type"] = alert_type
+        return event
 
     async def push(self, context: ExportContext) -> ExporterResult:
         """Push one Datadog event per failed test.

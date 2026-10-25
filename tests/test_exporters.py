@@ -600,25 +600,44 @@ class TestExporterNeedsTrackedInLinks:
 
         assert ReportPortalClient.needs_tracked_in_links is True
 
+    def test_datadog_needs_tracked_in(self):
+        from rootcoz.exporters.datadog import DatadogExporter
+
+        assert DatadogExporter.needs_tracked_in_links is True
+
     def test_helper_true_when_rp_toggle_on(self):
         from rootcoz.main import _exporter_needs_tracked_in_links
 
         settings = MagicMock()
-        settings.rp.push_tracker_links = True
+        settings.rp_push_tracker_links = True
         assert _exporter_needs_tracked_in_links(["reportportal"], settings) is True
 
     def test_helper_false_when_rp_toggle_off(self):
         from rootcoz.main import _exporter_needs_tracked_in_links
 
         settings = MagicMock()
-        settings.rp.push_tracker_links = False
+        settings.rp_push_tracker_links = False
         assert _exporter_needs_tracked_in_links(["reportportal"], settings) is False
+
+    def test_helper_true_when_dd_toggle_on(self):
+        from rootcoz.main import _exporter_needs_tracked_in_links
+
+        settings = MagicMock()
+        settings.dd_push_tracker_links = True
+        assert _exporter_needs_tracked_in_links(["datadog"], settings) is True
+
+    def test_helper_false_when_dd_toggle_off(self):
+        from rootcoz.main import _exporter_needs_tracked_in_links
+
+        settings = MagicMock()
+        settings.dd_push_tracker_links = False
+        assert _exporter_needs_tracked_in_links(["datadog"], settings) is False
 
     def test_helper_false_for_unknown(self):
         from rootcoz.main import _exporter_needs_tracked_in_links
 
         settings = MagicMock()
-        settings.rp.push_tracker_links = True
+        settings.rp_push_tracker_links = True
         assert _exporter_needs_tracked_in_links(["nonexistent"], settings) is False
 
 

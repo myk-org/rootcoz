@@ -78,11 +78,13 @@ function Injector({
   result,
   reviews,
   reportportalAvailable,
+  datadogAvailable,
   additionalReviews,
 }: {
   result: AnalysisResult
   reviews: Record<string, ReviewState>
   reportportalAvailable: boolean
+  datadogAvailable?: boolean
   additionalReviews?: Record<string, ReviewState>
 }) {
   const dispatch = useReportDispatch()
@@ -92,6 +94,7 @@ function Injector({
       payload: { result, createdAt: '', completedAt: '', analysisStartedAt: '' },
     })
     dispatch({ type: 'SET_REPORTPORTAL_AVAILABLE', payload: reportportalAvailable })
+    dispatch({ type: 'SET_DATADOG_AVAILABLE', payload: datadogAvailable ?? false })
     dispatch({ type: 'SET_COMMENTS_AND_REVIEWS', payload: { comments: [], reviews } })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -117,6 +120,7 @@ function renderPrompt(opts: {
   result?: AnalysisResult
   reviews?: Record<string, ReviewState>
   reportportalAvailable?: boolean
+  datadogAvailable?: boolean
   additionalReviews?: Record<string, ReviewState>
 }) {
   return render(
@@ -125,6 +129,7 @@ function renderPrompt(opts: {
         result={opts.result ?? makeResult()}
         reviews={opts.reviews ?? {}}
         reportportalAvailable={opts.reportportalAvailable ?? true}
+        datadogAvailable={opts.datadogAvailable}
         additionalReviews={opts.additionalReviews}
       />
     </ReportProvider>,
@@ -201,6 +206,22 @@ describe('AllReviewedPrompt', () => {
     expect(screen.queryByText('All failures reviewed. Update Report Portal?')).toBeNull()
   })
 
+  it('does not show dialog when neither reportportal nor datadog is available', async () => {
+    renderPrompt({
+      reportportalAvailable: false,
+      datadogAvailable: false,
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    // Wait a tick to ensure effects have run
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByText('All failures reviewed. Update Report Portal?')).toBeNull()
+    expect(screen.queryByText('All failures reviewed. Update Datadog?')).toBeNull()
+  })
+
   it('does not show dialog when not all failures are reviewed', async () => {
     renderPrompt({
       additionalReviews: {
@@ -229,6 +250,50 @@ describe('AllReviewedPrompt', () => {
 
     await waitFor(() => {
       expect(mockPost).toHaveBeenCalledWith('/results/job-1/push-reportportal')
+    })
+  })
+
+  it('calls push datadog API on confirm when only datadog is available', async () => {
+    renderPrompt({
+      reportportalAvailable: false,
+      datadogAvailable: true,
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Datadog?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith('/results/job-1/push/datadog')
+    })
+    expect(mockPost).not.toHaveBeenCalledWith('/results/job-1/push-reportportal')
+  })
+
+  it('pushes to both reportportal and datadog when both are available', async () => {
+    renderPrompt({
+      reportportalAvailable: true,
+      datadogAvailable: true,
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal and Datadog?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith('/results/job-1/push-reportportal')
+      expect(mockPost).toHaveBeenCalledWith('/results/job-1/push/datadog')
     })
   })
 

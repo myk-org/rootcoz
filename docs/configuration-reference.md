@@ -177,8 +177,22 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `DATADOG_SERVICE` | unset | string | no | no | yes |
    | `DATADOG_ENV` | unset | string | no | no | yes |
    | `ENABLE_DATADOG` | unset | boolean | no | no | yes |
+   | `DD_PUSH_CLASSIFICATIONS` | `true` | boolean | no | no | yes |
+   | `DD_PUSH_ROOTCOZ_URL` | `true` | boolean | no | no | yes |
+   | `DD_PUSH_TRACKER_LINKS` | `true` | boolean | no | no | yes |
+   | `DATADOG_ALERT_TYPE_MAP` | empty | string | no | no | yes |
 
    Same enable semantics as Report Portal: when `ENABLE_DATADOG` is unset, the exporter is enabled automatically once `DATADOG_API_KEY` **and** `DATADOG_SITE` are configured; set `ENABLE_DATADOG=false` to force it off. `DATADOG_SITE` is the Datadog site hostname for the Events API (`https://api.{site}/api/v1/events`, e.g. `datadoghq.eu` or `datadoghq.com`) — there is no built-in default, you choose your regional site. `DATADOG_SERVICE` and `DATADOG_ENV` optionally feed the `service:` and `env:` tags on emitted events; the tags are omitted when unset.
+
+   The three `DD_PUSH_*` toggles mirror the `RP_PUSH_*` trio and control what goes into each event: `DD_PUSH_CLASSIFICATIONS` adds the `tfa.classification` tag, the `[classification]` title prefix, the classification line in the event text, and the `alert_type` field (when a mapping is configured); `DD_PUSH_ROOTCOZ_URL` adds the RootCoz report link to the event text (only when `PUBLIC_BASE_URL` is set); `DD_PUSH_TRACKER_LINKS` adds the tracked-in Jira/GitHub issue links to the event text.
+
+   `DATADOG_ALERT_TYPE_MAP` maps RootCoz classifications to Datadog `alert_type` values. It is **empty by default — RootCoz ships no classification→alert_type mapping**, because severity is a deployment decision, not a product default. With no mapping configured, events carry no `alert_type` field at all and Datadog applies its own default. The format is comma-separated `classification=alert_type` pairs, whitespace-insensitive, where `alert_type` is one of `error`, `warning`, `info`, or `success`; classifications missing from the mapping get no `alert_type` field for those events. For example, an admin who decides that one classification should surface as an error and another as a warning might set (this is the admin's choice, not a default):
+
+   ```text
+   DATADOG_ALERT_TYPE_MAP="SOME CLASSIFICATION=error, ANOTHER CLASSIFICATION=warning"
+   ```
+
+   Malformed values (an unknown `alert_type`, a pair without `=`) are rejected when saving the setting in Server Settings.
 
 9. **Auth and Security category.**
 
@@ -331,6 +345,10 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `DATADOG_SERVICE` | `datadog_service` | Datadog | runtime |
 | `DATADOG_ENV` | `datadog_env` | Datadog | runtime |
 | `ENABLE_DATADOG` | `enable_datadog` | Datadog | runtime |
+| `DD_PUSH_CLASSIFICATIONS` | `dd_push_classifications` | Datadog | runtime |
+| `DD_PUSH_ROOTCOZ_URL` | `dd_push_rootcoz_url` | Datadog | runtime |
+| `DD_PUSH_TRACKER_LINKS` | `dd_push_tracker_links` | Datadog | runtime |
+| `DATADOG_ALERT_TYPE_MAP` | `datadog_alert_type_map` | Datadog | runtime |
 | `ADMIN_KEY` | `admin_key` | Auth & Security | env-only (read-only display) |
 | `SECURE_COOKIES` | `secure_cookies` | Auth & Security | restart |
 | `TRUST_PROXY_HEADERS` | `trust_proxy_headers` | Auth & Security | restart |

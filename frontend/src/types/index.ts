@@ -434,6 +434,7 @@ export interface ResultResponse {
     server_jira_project_key?: string
     reportportal?: boolean
     reportportal_project?: string
+    datadog?: boolean
     feedback_enabled?: boolean
   }
 }
@@ -445,6 +446,18 @@ export interface ReportPortalPushResult {
   unmatched: string[]
   errors: string[]
   launch_id: number | null
+}
+
+// -- Datadog -------------------------------------------------------
+
+/** Response of `POST /results/{jobId}/push/datadog` (generic exporter push). */
+export interface DatadogPushResult {
+  success: boolean
+  message: string
+  pushed: number
+  total: number
+  errors: string[]
+  skipped: number
 }
 
 // -- Comment enrichment ---------------------------------------------

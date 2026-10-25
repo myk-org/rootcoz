@@ -615,6 +615,35 @@ class Settings(BaseSettings):
             " When None, enabled if DATADOG_API_KEY is configured."
         ),
     )
+    dd_push_classifications: bool = Field(
+        default=True,
+        description=(
+            "Include classification in Datadog events. Adds the tfa.classification tag,"
+            " the [classification] title prefix, the classification line in the event text,"
+            " and the alert_type field (when a mapping is configured)."
+        ),
+    )
+    dd_push_rootcoz_url: bool = Field(
+        default=True,
+        description=(
+            "Include the rootcoz report link in Datadog event text"
+            " (only when PUBLIC_BASE_URL is set)."
+        ),
+    )
+    dd_push_tracker_links: bool = Field(
+        default=True,
+        description="Include tracked-in Jira/GitHub issue links in Datadog event text.",
+    )
+    datadog_alert_type_map: str = Field(
+        default="",
+        description=(
+            "Admin-configured mapping of rootcoz classification to Datadog alert_type,"
+            " as comma-separated 'classification=alert_type' pairs"
+            " (alert_type: error, warning, info, success)."
+            " Empty by default: no alert_type field is emitted and Datadog"
+            " applies its own default."
+        ),
+    )
 
     # Web Push (VAPID) configuration (optional, server-only)
     vapid_public_key: str = ""

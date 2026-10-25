@@ -101,11 +101,11 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Each event carries:
 
-   - A title like `[PRODUCT BUG] test_login_flow (Build #42)` — the classification stays verbatim in the title and body.
-   - A markdown body with the test name, classification, job and build, the RootCoz report link (when `PUBLIC_BASE_URL` is set), the CI build link when available, and the AI diagnosis.
-   - An alert type mapped from the classification: `PRODUCT BUG` → `error`; `INFRASTRUCTURE`, `CODE ISSUE`, and `AUTOMATION` → `warning`; anything else → `info`.
+   - A title like `[PRODUCT BUG] test_login_flow (Build #42)` — the classification stays verbatim in the title and body. When the `DD_PUSH_CLASSIFICATIONS` toggle (`false`) is off, the classification is left out entirely: plain title, no `tfa.classification` tag, no classification line, no `alert_type`.
+   - A markdown body with the test name, classification, job and build, the RootCoz report link (when `PUBLIC_BASE_URL` is set and `DD_PUSH_ROOTCOZ_URL` is on), the CI build link when available, the tracked-in Jira/GitHub issue links for the test (when `DD_PUSH_TRACKER_LINKS` is on — the same tracked-in data Report Portal consumes), and the AI diagnosis.
+   - An `alert_type` **only when the admin configured a mapping**. There is no built-in classification→alert_type mapping: with `DATADOG_ALERT_TYPE_MAP` empty (the shipped default) the field is omitted and Datadog applies its own default, and classifications the admin did not map get no `alert_type` either. The mapping is comma-separated `classification=alert_type` pairs with `alert_type` one of `error`, `warning`, `info`, `success` — see [Configuration Reference](configuration-reference.html).
    - An `aggregation_key` of `rootcoz-{analysis_id}-{test_name}` so reruns of the same test group in the Datadog event stream.
-   - A tag taxonomy: `service:{DATADOG_SERVICE}` and `env:{DATADOG_ENV}` (both optional — the tags are omitted when unset), `tfa.stage:automated`, `tfa.classification:{classification}`, `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
+   - A tag taxonomy: `service:{DATADOG_SERVICE}` and `env:{DATADOG_ENV}` (both optional — the tags are omitted when unset), `tfa.stage:automated`, `tfa.classification:{classification}` (when classifications are pushed), `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
 
    Push it like any other exporter:
 

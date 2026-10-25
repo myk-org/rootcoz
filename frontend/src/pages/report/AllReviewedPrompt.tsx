@@ -9,7 +9,7 @@ interface AllReviewedPromptProps {
 }
 
 export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
-  const { result, reviews, reportportalAvailable } = useReportState()
+  const { result, reviews, reportportalAvailable, datadogAvailable } = useReportState()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
 
@@ -31,6 +31,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   allKeysRef.current = allKeys
   const rpRef = useRef(reportportalAvailable)
   rpRef.current = reportportalAvailable
+  const datadogRef = useRef(datadogAvailable)
+  datadogRef.current = datadogAvailable
 
   useEffect(() => {
     function onReviewChanged(event: Event) {
@@ -40,7 +42,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       requestAnimationFrame(() => {
         const currentReviews = reviewsRef.current
         const currentKeys = allKeysRef.current
-        if (!rpRef.current || currentKeys.length === 0) return
+        if ((!rpRef.current && !datadogRef.current) || currentKeys.length === 0) return
         const allNowReviewed = currentKeys.every((k) => currentReviews[k]?.reviewed)
         if (allNowReviewed) {
           setDialogOpen(true)
@@ -60,23 +62,32 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const handleConfirm = async () => {
     setPushing(true)
     try {
-      await api.post(`/results/${jobId}/push-reportportal`)
-    } catch {
-      // Best-effort — errors are not surfaced here
+      // Best-effort per exporter — errors are not surfaced here
+      const pushes: Array<Promise<unknown>> = []
+      if (rpRef.current) pushes.push(api.post(`/results/${jobId}/push-reportportal`))
+      if (datadogRef.current) pushes.push(api.post(`/results/${jobId}/push/datadog`))
+      await Promise.allSettled(pushes)
     } finally {
       setPushing(false)
       setDialogOpen(false)
     }
   }
 
-  if (!reportportalAvailable) return null
+  if (!reportportalAvailable && !datadogAvailable) return null
+
+  const pushTargets =
+    reportportalAvailable && datadogAvailable
+      ? 'Report Portal and Datadog'
+      : reportportalAvailable
+        ? 'Report Portal'
+        : 'Datadog'
 
   return (
     <ConfirmDialog
       open={dialogOpen}
       onOpenChange={setDialogOpen}
       title="All failures reviewed"
-      description="All failures reviewed. Update Report Portal?"
+      description={`All failures reviewed. Update ${pushTargets}?`}
       confirmLabel="Yes"
       cancelLabel="No"
       onConfirm={handleConfirm}
