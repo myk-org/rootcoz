@@ -3036,6 +3036,10 @@ async def _auto_review_matching_failures(
             reviews = await storage.get_reviews_for_job(job_id)
             reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
             if reviewed_count >= total_failures:
+                # Auto-push must emit the same date_happened as the manual
+                # push endpoint: reuse the stored analysis timestamp instead
+                # of push time.
+                stored = await get_result(job_id)
                 context = await _build_export_context(
                     job_id=job_id,
                     result_data=result_data,
@@ -3046,6 +3050,9 @@ async def _auto_review_matching_failures(
                     ),
                     fetch_tracked_in_links=_exporter_needs_tracked_in_links(
                         auto_push_names, settings
+                    ),
+                    analysis_timestamp=(
+                        _stored_analysis_timestamp(stored) if stored else None
                     ),
                 )
                 for plugin_name in auto_push_names:

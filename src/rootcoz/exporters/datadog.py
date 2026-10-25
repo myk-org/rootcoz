@@ -9,13 +9,19 @@ identity, and the push attribution).
 
 Failures never raise: per-event HTTP/network errors are collected into the
 exporter result so a Datadog outage can never break the analysis pipeline.
+Two abort modes stop a doomed run early: an auth rejection (HTTP 401/403)
+aborts immediately — retrying with the same key cannot help — and a circuit
+breaker stops the push after 5 consecutive failed events, recording the
+remaining events as skipped.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -30,6 +36,30 @@ _EVENTS_PATH = "/api/v1/events"
 
 #: Per-request timeout (seconds) for event submission.
 _REQUEST_TIMEOUT = 30.0
+
+#: Datadog site used when the configured value is missing or invalid.
+_DEFAULT_SITE = "datadoghq.eu"
+
+#: Valid Datadog site hostname: lowercase alphanumerics, hyphens, and dots,
+#: with at least one dot (``datadoghq.eu``, ``ddog.us``, ``us3.datadoghq.com``).
+_SITE_HOSTNAME_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+)
+
+#: Datadog's v1 Events API rejects ``date_happened`` values older than its
+#: ~18-hour intake window, so a manual push after a day of human review
+#: would drop every event.  17 hours keeps a safety margin below that window:
+#: older stored timestamps fall back to push time.
+_MAX_EVENT_AGE_SECONDS = 17 * 3600
+
+#: Datadog caps ``aggregation_key`` at 100 characters.
+_AGGREGATION_KEY_MAX = 100
+
+#: HTTP statuses meaning the API key was rejected: retrying cannot help.
+_AUTH_FAILURE_STATUSES = frozenset({401, 403})
+
+#: Consecutive failed events (any error) before the push circuit-breaks.
+_CIRCUIT_BREAKER_THRESHOLD = 5
 
 #: rootcoz classification → Datadog ``alert_type``.
 _ALERT_TYPE_MAP: dict[str, str] = {
@@ -49,6 +79,72 @@ _UNKNOWN_CLASSIFICATION = "UNKNOWN"
 # minus. Every other character (spaces, most punctuation) is replaced
 # with an underscore.
 _TAG_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_.:-]")
+
+
+def _normalize_site(site: str) -> str:
+    """Normalize a configured Datadog site value to a bare hostname.
+
+    Accepts full URLs (``https://datadoghq.eu``), values with an ``api.``
+    prefix, and trailing slashes. Values that do not normalize to a valid
+    hostname fall back to :data:`_DEFAULT_SITE` with a warning — a crafted
+    value must never redirect the ``DD-API-KEY`` header to an arbitrary
+    host embedded in a scheme or path.
+
+    Args:
+        site: Raw configured site value.
+
+    Returns:
+        Bare lowercase hostname (e.g. ``datadoghq.eu``).
+    """
+    raw = (site or "").strip()
+    if not raw:
+        return _DEFAULT_SITE
+    candidate = raw.rstrip("/")
+    if "://" in candidate:
+        candidate = urlparse(candidate).hostname or ""
+    elif "/" in candidate:
+        candidate = urlparse(f"https://{candidate}").hostname or ""
+    candidate = candidate.lower()
+    candidate = candidate.removeprefix("api.")
+    if not _SITE_HOSTNAME_RE.fullmatch(candidate):
+        logger.warning(
+            "Invalid Datadog site %r, falling back to %r", raw, _DEFAULT_SITE
+        )
+        return _DEFAULT_SITE
+    return candidate
+
+
+def _aggregation_key(job_id: str, test_name: str) -> str:
+    """Build the aggregation key for one analysis/test pair.
+
+    Datadog caps ``aggregation_key`` at 100 characters, which long pytest
+    node IDs overflow. Keys that would exceed the cap keep the
+    ``rootcoz-{job_id}`` prefix, truncate the test name to fit, and append
+    the first 8 hex characters of the SHA-256 of the full test name so
+    distinct long names never collide and the key is guaranteed ≤100.
+
+    Args:
+        job_id: Analysis job identifier.
+        test_name: Failed test name.
+
+    Returns:
+        Aggregation key of at most :data:`_AGGREGATION_KEY_MAX` characters.
+    """
+    key = f"rootcoz-{job_id}-{test_name}"
+    if len(key) <= _AGGREGATION_KEY_MAX:
+        return key
+    prefix = f"rootcoz-{job_id}-"
+    digest = hashlib.sha256(test_name.encode("utf-8")).hexdigest()[:8]
+    room = _AGGREGATION_KEY_MAX - len(prefix) - len(digest) - 1
+    return f"{prefix}{test_name[: max(room, 0)]}-{digest}"
+
+
+def _circuit_breaker_message(skipped: int) -> str:
+    """Result message for a circuit-broken push."""
+    return (
+        f"Datadog push aborted after {_CIRCUIT_BREAKER_THRESHOLD} consecutive "
+        f"failed events; {skipped} event(s) skipped"
+    )
 
 
 def sanitize_tag_value(value: str) -> str:
@@ -91,7 +187,7 @@ class DatadogExporter(Exporter):
         env: str = "production",
     ) -> None:
         self._api_key = api_key
-        self._site = (site or "datadoghq.eu").strip().rstrip("/")
+        self._site = _normalize_site(site)
         self._service = service
         self._env = env
 
@@ -158,8 +254,15 @@ class DatadogExporter(Exporter):
             Datadog Events API payload.
         """
         test_name = str(failure.get("test_name", "") or "")
-        analysis = failure.get("analysis")
-        analysis = analysis if isinstance(analysis, dict) else {}
+        analysis_value = failure.get("analysis")
+        if isinstance(analysis_value, str):
+            # Legacy stored failures carry the diagnosis as a plain string
+            # (mirrors FailedTest._coerce_legacy_analysis in models.py).
+            analysis: dict[str, Any] = {"details": analysis_value}
+        elif isinstance(analysis_value, dict):
+            analysis = analysis_value
+        else:
+            analysis = {}
         classification = str(analysis.get("classification", "") or "").strip()
         if not classification:
             classification = _UNKNOWN_CLASSIFICATION
@@ -185,14 +288,19 @@ class DatadogExporter(Exporter):
             lines += ["", "**AI diagnosis:**", "", details]
         text = "\n".join(lines)
 
+        now = int(time.time())
+        date_happened = context.analysis_timestamp or now
+        if now - date_happened > _MAX_EVENT_AGE_SECONDS:
+            date_happened = now
+
         return {
             "title": title,
             "text": text,
             "alert_type": _ALERT_TYPE_MAP.get(classification, _DEFAULT_ALERT_TYPE),
             "priority": "normal",
-            "date_happened": context.analysis_timestamp or int(time.time()),
+            "date_happened": date_happened,
             "source_type_name": "rootcoz",
-            "aggregation_key": f"rootcoz-{context.job_id}-{test_name}",
+            "aggregation_key": _aggregation_key(context.job_id, test_name),
             "tags": self._build_tags(context, classification, test_name),
         }
 
@@ -201,18 +309,25 @@ class DatadogExporter(Exporter):
 
         Iterates failures, emits 1:N events, and collects per-event
         results. HTTP/network errors never raise — they are recorded as
-        per-event errors in the result details.
+        per-event errors in the result details. Two abort modes stop a
+        doomed run early: an auth rejection (HTTP 401/403) aborts the
+        whole push immediately, and after
+        :data:`_CIRCUIT_BREAKER_THRESHOLD` consecutive failed events the
+        remaining events are skipped and counted in the result details.
         """
         failures = context.failures
         if not failures:
             return ExporterResult(
                 success=False,
                 message="No failures to push to Datadog.",
-                details={"pushed": 0, "total": 0, "errors": []},
+                details={"pushed": 0, "total": 0, "errors": [], "skipped": 0},
             )
 
         pushed = 0
+        skipped = 0
         errors: list[str] = []
+        consecutive_failures = 0
+        abort_message: str | None = None
         headers = {"DD-API-KEY": self._api_key}
         logger.info(
             "Datadog push: emitting up to %d event(s) for job=%s to site=%s",
@@ -221,9 +336,14 @@ class DatadogExporter(Exporter):
             self._site,
         )
         async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT) as client:
-            for failure in failures:
+            for index, failure in enumerate(failures):
                 if not isinstance(failure, dict):
                     errors.append("Skipped non-dict failure entry")
+                    consecutive_failures += 1
+                    if consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+                        skipped = len(failures) - index - 1
+                        abort_message = _circuit_breaker_message(skipped)
+                        break
                     continue
                 test_name = failure.get("test_name", "") or "(unnamed test)"
                 event = self._build_event(context, failure)
@@ -233,13 +353,13 @@ class DatadogExporter(Exporter):
                     )
                     response.raise_for_status()
                     pushed += 1
+                    consecutive_failures = 0
                     logger.debug(
                         "Datadog event accepted for test='%s', job=%s",
                         test_name,
                         context.job_id,
                     )
                 except httpx.HTTPError as exc:
-                    # One failed event must not abort the remaining events.
                     status = getattr(
                         getattr(exc, "response", None), "status_code", None
                     )
@@ -253,17 +373,51 @@ class DatadogExporter(Exporter):
                         context.job_id,
                         exc,
                     )
+                    if status in _AUTH_FAILURE_STATUSES:
+                        # The key is bad — every remaining request would
+                        # fail identically, so abort the whole push now.
+                        skipped = len(failures) - index - 1
+                        abort_message = (
+                            f"Datadog rejected the API key (HTTP {status}) — "
+                            f"push aborted, {skipped} event(s) skipped"
+                        )
+                        logger.error(
+                            "Datadog push aborted: API key rejected (HTTP %s), job=%s",
+                            status,
+                            context.job_id,
+                        )
+                        break
+                    consecutive_failures += 1
+                    if consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
+                        # Outage: stop burning a 30s timeout per event.
+                        skipped = len(failures) - index - 1
+                        abort_message = _circuit_breaker_message(skipped)
+                        logger.warning(
+                            "Datadog push circuit-breaker tripped after %d "
+                            "consecutive failures, job=%s, skipped=%d",
+                            _CIRCUIT_BREAKER_THRESHOLD,
+                            context.job_id,
+                            skipped,
+                        )
+                        break
 
         success = pushed > 0 and not errors
-        if success:
-            message = f"Pushed {pushed} Datadog event(s)"
+        if abort_message:
+            message = abort_message
         elif errors:
             message = errors[0]
+        elif success:
+            message = f"Pushed {pushed} Datadog event(s)"
         else:
             message = "Push completed with no events"
 
         return ExporterResult(
             success=success,
             message=message,
-            details={"pushed": pushed, "total": len(failures), "errors": errors},
+            details={
+                "pushed": pushed,
+                "total": len(failures),
+                "errors": errors,
+                "skipped": skipped,
+            },
         )
