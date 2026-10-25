@@ -68,10 +68,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     && rm -rf /var/lib/apt/lists/*
 
-# Pinned to 22.22.3 — Node 22.23.0+ has a keep-alive regression that breaks
-# google-auth-library/gaxios/node-fetch@2 (https://github.com/nodejs/node/issues/63989)
-# TODO: unpin once nodejs/node#63989 is resolved and a fixed 22.x release lands in NodeSource
-ARG NODEJS_DEB_VERSION=22.22.3-1nodesource1
+# Keep current: the Node 22.23.0 keep-alive regression
+# (nodejs/node#63989, broke google-auth-library/gaxios/node-fetch@2) was fixed
+# and shipped in later 22.x releases — track the latest 22.x again.
+ARG NODEJS_DEB_VERSION=22.23.4-1nodesource1
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -e \
     && NODESOURCE_FPR=6F71F525282841EEDAF851B42F59B5F99B1BE0B4 \
@@ -90,6 +90,10 @@ RUN set -e \
     && rm -f /etc/apt/sources.list.d/nodesource.list /usr/share/keyrings/nodesource.gpg \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
+# Node 22.x bundles npm 10.x — upgrade to the current npm major so the
+# runtime stays current (the "new major version of npm available" notice
+# is npm telling us we're behind; being current is the fix, not silencing).
+RUN npm install -g npm@12.2.1 && npm --version
 SHELL ["/bin/sh", "-c"]
 
 # Create non-root user, data directory, and set permissions

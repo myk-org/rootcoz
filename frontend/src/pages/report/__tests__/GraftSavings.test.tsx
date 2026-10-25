@@ -107,6 +107,6 @@ describe('report Graft estimate', () => {
     const badge = await screen.findByText(/100 in \/ 50 out/)
     fireEvent.focus(badge)
     expect(screen.getAllByText(`Credential source: ${expected}`)[0]).toBeInTheDocument()
-    if (sources.length) expect(screen.getAllByText(/gemini\/test ·/)).toHaveLength(sources.length * 2)
+    if (sources.length) expect(screen.getAllByText(/gemini\/test ·/)).toHaveLength(sources.length)
   })
 })
