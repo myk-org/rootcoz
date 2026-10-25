@@ -3,10 +3,9 @@
 Emits one Datadog event per failed test (1:N, ADR 0003) to
 ``POST https://api.{site}/api/v1/events`` with the ``DD-API-KEY`` header.
 Events carry the rootcoz classification (when the ``dd_push_classifications``
-toggle is on) as a tag, title prefix, and — via the admin-configured
-``datadog_alert_type_map`` — the ``alert_type`` field. There is no shipped
-classification→alert_type mapping: with no mapping configured, no
-``alert_type`` field is emitted at all and Datadog applies its own default.
+toggle is on) as a tag, title prefix, and text line. The exporter never
+sets ``alert_type``: classification (root cause) and alert_type (severity)
+are unrelated axes, so Datadog applies its own default.
 Events carry a stable ``aggregation_key`` per analysis/test pair and a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
 job/build/test identity, and the push attribution).  Parity with Report
@@ -63,9 +62,6 @@ _AUTH_FAILURE_STATUSES = frozenset({401, 403})
 
 #: Consecutive failed events (any error) before the push circuit-breaks.
 _CIRCUIT_BREAKER_THRESHOLD = 5
-
-#: Valid Datadog ``alert_type`` values (v1 Events API).
-_VALID_ALERT_TYPES = frozenset({"error", "warning", "info", "success"})
 
 #: Fallback classification label when a stored failure carries none.
 _UNKNOWN_CLASSIFICATION = "UNKNOWN"
@@ -144,54 +140,6 @@ def _circuit_breaker_message(skipped: int) -> str:
     )
 
 
-def parse_alert_type_map(raw: str | None) -> dict[str, str]:
-    """Parse an admin-configured classification→``alert_type`` mapping.
-
-    rootcoz ships NO default mapping: an empty value means the exporter
-    omits ``alert_type`` entirely and Datadog applies its own default.
-
-    Format: comma-separated ``classification=alert_type`` pairs,
-    whitespace-insensitive (e.g. ``PRODUCT BUG=error, INFRASTRUCTURE=warning``).
-    Empty segments (trailing commas) are tolerated.
-
-    Args:
-        raw: Raw configured value (``DATADOG_ALERT_TYPE_MAP``).
-
-    Returns:
-        Mapping of classification to ``alert_type``; ``{}`` when unset/empty.
-
-    Raises:
-        ValueError: A pair is malformed (no ``=``, empty classification) or
-            carries an ``alert_type`` that is not one of
-            :data:`_VALID_ALERT_TYPES`.
-    """
-    if not raw or not raw.strip():
-        return {}
-    mapping: dict[str, str] = {}
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        if "=" not in pair:
-            raise ValueError(
-                f"invalid entry {pair!r} — expected 'classification=alert_type'",
-            )
-        # rsplit: classification text may contain '='; the alert_type never does.
-        classification, alert_type = (part.strip() for part in pair.rsplit("=", 1))
-        if not classification:
-            raise ValueError(
-                f"invalid entry {pair!r} — empty classification",
-            )
-        if alert_type not in _VALID_ALERT_TYPES:
-            raise ValueError(
-                f"invalid alert_type {alert_type!r} for classification "
-                f"{classification!r} — must be one of: "
-                + ", ".join(sorted(_VALID_ALERT_TYPES)),
-            )
-        mapping[classification] = alert_type
-    return mapping
-
-
 def sanitize_tag_value(value: str) -> str:
     """Sanitize a value for use inside a Datadog tag.
 
@@ -219,16 +167,13 @@ class DatadogExporter(Exporter):
         service: Value of the ``service:`` tag.
         env: Value of the ``env:`` tag.
         push_classifications: Include the classification (tag, title prefix,
-            text line, and ``alert_type``) in the event.
+            and text line) in the event.
         push_rootcoz_url: Include the RootCoz report link in the event text.
         push_tracker_links: Include tracked-in Jira/GitHub issue links in
             the event text.
-        alert_type_map: Raw admin-configured classification→``alert_type``
-            mapping (see :func:`parse_alert_type_map`). Empty/``None`` —
-            the shipped default — emits no ``alert_type`` field.
 
     Raises:
-        ValueError: Invalid site or invalid ``alert_type_map``.
+        ValueError: Invalid site.
     """
 
     NAME = "datadog"
@@ -251,7 +196,6 @@ class DatadogExporter(Exporter):
         push_classifications: bool = True,
         push_rootcoz_url: bool = True,
         push_tracker_links: bool = True,
-        alert_type_map: str | None = None,
     ) -> None:
         self._api_key = api_key
         self._site = _normalize_site(site)
@@ -265,13 +209,6 @@ class DatadogExporter(Exporter):
         self._push_classifications = push_classifications
         self._push_rootcoz_url = push_rootcoz_url
         self._push_tracker_links = push_tracker_links
-        self._alert_type_map = parse_alert_type_map(alert_type_map)
-        # Case-insensitive fallback: admins type classifications in any
-        # case ("product bug=error" must match a stored "PRODUCT BUG").
-        # Exact-case key wins; casefold collisions resolve last-wins here.
-        self._alert_type_map_ci = {
-            key.casefold(): value for key, value in self._alert_type_map.items()
-        }
 
     # -- Exporter ABC ---------------------------------------------------------
 
@@ -359,7 +296,7 @@ class DatadogExporter(Exporter):
             classification = raw_classification or _UNKNOWN_CLASSIFICATION
         else:
             # Toggle off: no classification anywhere in the event — no
-            # tag, no title prefix, no text line, no alert_type.
+            # tag, no title prefix, no text line.
             classification = ""
         details = str(analysis.get("details", "") or "").strip()
 
@@ -378,7 +315,7 @@ class DatadogExporter(Exporter):
         if history_classification:
             # Parity with Report Portal: the previous classification for
             # this test name, when history has one. Not toggle-gated.
-            lines.append(f"- **Previous classification:** {history_classification}")
+            lines.append(f"- **Failure pattern:** {history_classification}")
         lines.append(f"- **Job:** {context.job_name} (#{context.build_number})")
         if self._push_rootcoz_url and context.report_url:
             lines.append(
@@ -421,15 +358,6 @@ class DatadogExporter(Exporter):
             "aggregation_key": _aggregation_key(context.job_id, test_name),
             "tags": self._build_tags(context, test_name, classification or None),
         }
-        # No shipped mapping: alert_type is emitted only when the admin's
-        # mapping covers this classification — otherwise Datadog applies
-        # its own default.
-        if classification:
-            alert_type = self._alert_type_map.get(classification) or (
-                self._alert_type_map_ci.get(classification.casefold())
-            )
-            if alert_type:
-                event["alert_type"] = alert_type
         return event
 
     async def push(self, context: ExportContext) -> ExporterResult:

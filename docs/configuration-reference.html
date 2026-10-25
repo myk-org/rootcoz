@@ -865,22 +865,10 @@ SECURE_COOKIES=false
 <td>no</td>
 <td>yes</td>
 </tr>
-<tr>
-<td><code>DATADOG_ALERT_TYPE_MAP</code></td>
-<td>empty</td>
-<td>string</td>
-<td>no</td>
-<td>no</td>
-<td>yes</td>
-</tr>
 </tbody>
 </table></div>
 <p>Same enable semantics as Report Portal: when <code>ENABLE_DATADOG</code> is unset, the exporter is enabled automatically once <code>DATADOG_API_KEY</code> <strong>and</strong> <code>DATADOG_SITE</code> are configured; set <code>ENABLE_DATADOG=false</code> to force it off. <code>DATADOG_SITE</code> is the Datadog site hostname for the Events API (<code>https://api.{site}/api/v1/events</code>, e.g. <code>datadoghq.eu</code> or <code>datadoghq.com</code>) — there is no built-in default, you choose your regional site. <code>DATADOG_SERVICE</code> and <code>DATADOG_ENV</code> optionally feed the <code>service:</code> and <code>env:</code> tags on emitted events; the tags are omitted when unset.</p>
-<p>The three <code>DD_PUSH_*</code> toggles mirror the <code>RP_PUSH_*</code> trio and control what goes into each event: <code>DD_PUSH_CLASSIFICATIONS</code> adds the <code>tfa.classification</code> tag, the <code>[classification]</code> title prefix, the classification line in the event text, and the <code>alert_type</code> field (when a mapping is configured); <code>DD_PUSH_ROOTCOZ_URL</code> adds the RootCoz report link to the event text (only when <code>PUBLIC_BASE_URL</code> is set); <code>DD_PUSH_TRACKER_LINKS</code> adds the tracked-in Jira/GitHub issue links to the event text.</p>
-<p><code>DATADOG_ALERT_TYPE_MAP</code> maps RootCoz classifications to Datadog <code>alert_type</code> values. It is <strong>empty by default — RootCoz ships no classification→alert_type mapping</strong>, because severity is a deployment decision, not a product default. With no mapping configured, events carry no <code>alert_type</code> field at all and Datadog applies its own default. The format is comma-separated <code>classification=alert_type</code> pairs, whitespace-insensitive, where <code>alert_type</code> is one of <code>error</code>, <code>warning</code>, <code>info</code>, or <code>success</code>; classifications missing from the mapping get no <code>alert_type</code> field for those events. For example, an admin who decides that one classification should surface as an error and another as a warning might set (this is the admin's choice, not a default):</p>
-<p><code>text
-   DATADOG_ALERT_TYPE_MAP="SOME CLASSIFICATION=error, ANOTHER CLASSIFICATION=warning"</code></p>
-<p>Malformed values (an unknown <code>alert_type</code>, a pair without <code>=</code>) are rejected when saving the setting in Server Settings.</p>
+<p>The three <code>DD_PUSH_*</code> toggles mirror the <code>RP_PUSH_*</code> trio and control what goes into each event: <code>DD_PUSH_CLASSIFICATIONS</code> adds the <code>tfa.classification</code> tag, the <code>[classification]</code> title prefix, and the classification line in the event text; <code>DD_PUSH_ROOTCOZ_URL</code> adds the RootCoz report link to the event text (only when <code>PUBLIC_BASE_URL</code> is set); <code>DD_PUSH_TRACKER_LINKS</code> adds the tracked-in Jira/GitHub issue links to the event text. The exporter never sets the <code>alert_type</code> field — classification (root cause) and alert type (severity) are unrelated axes, and Datadog applies its own default.</p>
 <ol>
 <li><strong>Auth and Security category.</strong></li>
 </ol>
@@ -1637,12 +1625,6 @@ SECURE_COOKIES=false
 <tr>
 <td><code>DD_PUSH_TRACKER_LINKS</code></td>
 <td><code>dd_push_tracker_links</code></td>
-<td>Datadog</td>
-<td>runtime</td>
-</tr>
-<tr>
-<td><code>DATADOG_ALERT_TYPE_MAP</code></td>
-<td><code>datadog_alert_type_map</code></td>
 <td>Datadog</td>
 <td>runtime</td>
 </tr>

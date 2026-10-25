@@ -20,8 +20,16 @@ export function collectPushScopes(
   children: ChildJobAnalysis[],
 ): PushScope[] {
   const scopes: PushScope[] = []
+  const seen = new Set<string>()
   walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
     if (nodeFailures.length === 0) return
+    // Two child nodes can share the same (job name, build number) — e.g. the
+    // same child reported under two parents. They would produce identical
+    // push requests that the backend resolves to the first node, so an
+    // identical scope must never be sent twice.
+    const key = JSON.stringify([jobName ?? null, buildNumber ?? null])
+    if (seen.has(key)) return
+    seen.add(key)
     if (jobName === undefined) scopes.push({})
     else scopes.push({ childJobName: jobName, childBuildNumber: buildNumber })
   })

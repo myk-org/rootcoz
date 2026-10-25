@@ -209,44 +209,6 @@ def test_default_user_role_validation_on_save(client):
     assert good.status_code == 200
 
 
-def test_datadog_alert_type_map_validation_on_save(client):
-    """Malformed mappings are rejected at save time; empty resets to default."""
-    for bad_value in ("PRODUCT BUG=fatal", "PRODUCT BUG", "=error"):
-        response = client.put(
-            "/api/admin/settings",
-            headers=_admin_headers(),
-            json={"settings": {"datadog_alert_type_map": bad_value}},
-        )
-        assert response.status_code == 400, bad_value
-        assert "datadog_alert_type_map" in response.json()["detail"]
-    for good_value in (
-        "",  # reset to the empty default — no mapping, no alert_type
-        "PRODUCT BUG=error, INFRASTRUCTURE=warning",
-    ):
-        response = client.put(
-            "/api/admin/settings",
-            headers=_admin_headers(),
-            json={"settings": {"datadog_alert_type_map": good_value}},
-        )
-        assert response.status_code == 200, good_value
-
-
-def test_persist_rejects_invalid_datadog_alert_type_map(client, monkeypatch):
-    monkeypatch.setenv("DATADOG_ALERT_TYPE_MAP", "PRODUCT BUG=fatal")
-    response = client.post(
-        "/api/admin/settings/datadog_alert_type_map/persist",
-        headers=_admin_headers(),
-    )
-    assert response.status_code == 400
-    assert "datadog_alert_type_map" in response.json()["detail"]
-    monkeypatch.setenv("DATADOG_ALERT_TYPE_MAP", "PRODUCT BUG=error")
-    ok = client.post(
-        "/api/admin/settings/datadog_alert_type_map/persist",
-        headers=_admin_headers(),
-    )
-    assert ok.status_code == 200
-
-
 def test_apply_log_level_setting_levels_rootcoz_loggers():
     import logging
 

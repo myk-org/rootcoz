@@ -136,7 +136,6 @@ from rootcoz.exporters.base import ExportContext, Exporter
 from rootcoz.exporters.datadog import (
     DatadogExporter,
     _normalize_site,
-    parse_alert_type_map,
 )
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
@@ -379,7 +378,6 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "dd_push_classifications",
         "dd_push_rootcoz_url",
         "dd_push_tracker_links",
-        "datadog_alert_type_map",
         "vapid_claim_email",
         "vapid_public_key",
         "smtp_host",
@@ -512,7 +510,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "dd_push_classifications",
         "dd_push_rootcoz_url",
         "dd_push_tracker_links",
-        "datadog_alert_type_map",
     ],
     "Auth & Security": [
         "admin_key",
@@ -8688,7 +8685,6 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
             push_classifications=settings.dd_push_classifications,
             push_rootcoz_url=settings.dd_push_rootcoz_url,
             push_tracker_links=settings.dd_push_tracker_links,
-            alert_type_map=settings.datadog_alert_type_map,
         )
     raise ValueError(f"Unknown exporter plugin: '{plugin_name}'")
 
@@ -13366,22 +13362,6 @@ def _log_level_error(value: object) -> str | None:
     return None
 
 
-def _datadog_alert_type_map_error(value: object) -> str | None:
-    """Validate the Datadog alert-type mapping; error message, or None.
-
-    Shared by the PUT allowlist and the env-persist path (#359): the
-    setting is a plain ``str`` in Settings, so both write paths must run
-    the exporter's parser to reject malformed mappings at save time.
-    """
-    if value is None or value == "":
-        return None
-    try:
-        parse_alert_type_map(str(value))
-    except ValueError as exc:
-        return f"datadog_alert_type_map: {exc}"
-    return None
-
-
 def _settings_dotenv_values() -> dict[str, str]:
     """The dotenv values Settings merges (DotEnvSettingsSource), by field.
 
@@ -13478,12 +13458,6 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
         if value is None or value == "":
             continue
         if key == "log_level" and (message := _log_level_error(value)):
-            errors.append(message)
-        # The Datadog alert-type mapping is parsed by the exporter at push
-        # time; surface malformed values at save time instead (#359).
-        if key == "datadog_alert_type_map" and (
-            message := _datadog_alert_type_map_error(value)
-        ):
             errors.append(message)
         if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
@@ -14032,14 +14006,6 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
     # log_level has no Settings constraint — apply the shared PUT allowlist
     # so an invalid level cannot survive the persist path either.
     if key == "log_level" and (message := _log_level_error(env_value)) is not None:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid env value for '{key}': {message}"
-        )
-    # Same shared validation for the Datadog alert-type mapping (#359).
-    if (
-        key == "datadog_alert_type_map"
-        and (message := _datadog_alert_type_map_error(env_value)) is not None
-    ):
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}': {message}"
         )

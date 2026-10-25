@@ -619,8 +619,8 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "Include classification in Datadog events. Adds the tfa.classification tag,"
-            " the [classification] title prefix, the classification line in the event text,"
-            " and the alert_type field (when a mapping is configured)."
+            " the [classification] title prefix, and the classification line in the"
+            " event text."
         ),
     )
     dd_push_rootcoz_url: bool = Field(
@@ -633,16 +633,6 @@ class Settings(BaseSettings):
     dd_push_tracker_links: bool = Field(
         default=True,
         description="Include tracked-in Jira/GitHub issue links in Datadog event text.",
-    )
-    datadog_alert_type_map: str = Field(
-        default="",
-        description=(
-            "Admin-configured mapping of rootcoz classification to Datadog alert_type,"
-            " as comma-separated 'classification=alert_type' pairs"
-            " (alert_type: error, warning, info, success)."
-            " Empty by default: no alert_type field is emitted and Datadog"
-            " applies its own default."
-        ),
     )
 
     # Web Push (VAPID) configuration (optional, server-only)

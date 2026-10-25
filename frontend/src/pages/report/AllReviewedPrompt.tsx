@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '@/lib/api'
+import { api, extractApiDetail } from '@/lib/api'
 import { collectAllTestKeys } from '@/lib/failureKeys'
 import { collectPushScopes, pushScopeQuery } from '@/lib/pushScopes'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
@@ -15,19 +15,36 @@ interface PushResponse {
   success?: boolean
   message?: string
   errors?: string[]
+  unmatched?: string[]
 }
 
 /**
  * Extract a user-facing failure detail from a push response, or null when
  * the push succeeded. Covers the generic exporter response
- * (`success`/`message`) and the Report Portal response (`errors`).
+ * (`success`/`message`) and the Report Portal response (`errors`,
+ * `unmatched` — a push with unmatched tests recorded nothing, mirroring
+ * the ReportPortalButton noop semantics).
  */
 function pushFailureDetail(res: unknown): string | null {
   if (!res || typeof res !== 'object') return null
   const r = res as PushResponse
   if (r.success === false) return r.message || r.errors?.[0] || 'push failed'
   if (r.errors && r.errors.length > 0) return r.errors[0]
+  if (r.unmatched && r.unmatched.length > 0) {
+    return `${r.unmatched.length} test(s) could not be matched to Report Portal items`
+  }
   return null
+}
+
+/**
+ * User-facing reason a push request was rejected, so operators see WHY
+ * (e.g. 403, invalid key) instead of a generic "push request failed".
+ */
+function pushRejectionDetail(err: unknown): string {
+  const detail = extractApiDetail(err)
+  if (detail) return detail
+  if (err instanceof Error && err.message) return err.message
+  return 'push request failed'
 }
 
 export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
@@ -36,6 +53,14 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
+  // Push combinations (`exporter + scope query`) that already succeeded in
+  // the current dialog session — a retry must only re-push the failed ones,
+  // because Datadog events are created per POST.
+  const succeededRef = useRef<Set<string>>(new Set())
+  // Invalidates in-flight push runs: navigation resets the prompt, so a
+  // late completion from an old job must not write state (same guard the
+  // page uses for test-result generations).
+  const pushRunRef = useRef(0)
 
   const allKeys = useMemo(
     () =>
@@ -81,6 +106,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         if ((!rpRef.current && !datadogRef.current) || currentKeys.length === 0) return
         const allNowReviewed = currentKeys.every((k) => currentReviews[k]?.reviewed)
         if (allNowReviewed) {
+          // Fresh dialog session — previous push outcomes no longer apply
+          succeededRef.current = new Set()
           setDialogOpen(true)
         }
       })
@@ -94,43 +121,57 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     setDialogOpen(false)
     setPushing(false)
     setPushError(null)
+    succeededRef.current = new Set()
+    pushRunRef.current++
   }, [jobId])
 
+  const handleOpenChange = (open: boolean) => {
+    setDialogOpen(open)
+    // A closed dialog must not resurrect a stale error on reopen
+    if (!open) setPushError(null)
+  }
+
   const handleConfirm = async () => {
+    const runId = ++pushRunRef.current
     setPushing(true)
     setPushError(null)
     try {
       // One push per scope (parent + each child job with failures) per
       // available exporter — child scopes carry child_job_name +
       // child_build_number query params, same as the push buttons.
-      const pushes: Array<{ label: string; promise: Promise<unknown> }> = []
+      // Combos that already succeeded on an earlier attempt of this
+      // dialog session are skipped so a retry never duplicates events.
+      const exporters: Array<'reportportal' | 'datadog'> = []
+      if (rpRef.current) exporters.push('reportportal')
+      if (datadogRef.current) exporters.push('datadog')
+
+      const pushes: Array<{ key: string; label: string; promise: Promise<unknown> }> = []
       for (const scope of scopes) {
         const qs = pushScopeQuery(scope)
         const label = scope.childJobName
           ? `${scope.childJobName} #${scope.childBuildNumber}`
           : 'parent job'
-        if (rpRef.current) {
-          pushes.push({
-            label,
-            promise: api.post(`/results/${jobId}/push-reportportal${qs}`),
-          })
-        }
-        if (datadogRef.current) {
-          pushes.push({
-            label,
-            promise: api.post(`/results/${jobId}/push/datadog${qs}`),
-          })
+        for (const exporter of exporters) {
+          const key = `${exporter}${qs}`
+          if (succeededRef.current.has(key)) continue
+          const path =
+            exporter === 'reportportal'
+              ? `/results/${jobId}/push-reportportal${qs}`
+              : `/results/${jobId}/push/datadog${qs}`
+          pushes.push({ key, label, promise: api.post(path) })
         }
       }
       const settled = await Promise.allSettled(pushes.map((p) => p.promise))
+      if (runId !== pushRunRef.current) return
       const failures: string[] = []
       settled.forEach((outcome, i) => {
-        const { label } = pushes[i]
+        const { key, label } = pushes[i]
         if (outcome.status === 'rejected') {
-          failures.push(`${label}: push request failed`)
+          failures.push(`${label}: ${pushRejectionDetail(outcome.reason)}`)
         } else {
           const detail = pushFailureDetail(outcome.value)
           if (detail) failures.push(`${label}: ${detail}`)
+          else succeededRef.current.add(key)
         }
       })
       if (failures.length > 0) {
@@ -140,7 +181,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         setDialogOpen(false)
       }
     } finally {
-      setPushing(false)
+      if (runId === pushRunRef.current) setPushing(false)
     }
   }
 
@@ -157,7 +198,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   return (
     <ConfirmDialog
       open={dialogOpen}
-      onOpenChange={setDialogOpen}
+      onOpenChange={handleOpenChange}
       title="All failures reviewed"
       description={`All failures reviewed. Update ${pushTargets}?`}
       confirmLabel="Yes"
