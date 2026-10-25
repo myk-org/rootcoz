@@ -568,7 +568,19 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`).
 
-8. **Auth and Security category.**
+8. **Datadog category.**
+
+   | Variable | Default | Type | Secret | Restart | After login |
+   | --- | --- | --- | --- | --- | --- |
+   | `DATADOG_API_KEY` | unset | string | yes | no | yes |
+   | `DATADOG_SITE` | `datadoghq.eu` | string | no | no | yes |
+   | `DATADOG_SERVICE` | `cnv-qe-tests` | string | no | no | yes |
+   | `DATADOG_ENV` | `production` | string | no | no | yes |
+   | `ENABLE_DATADOG` | `false` | boolean | no | no | yes |
+
+   Unlike Report Portal there is no auto-detection: the Datadog Events exporter is enabled only when `ENABLE_DATADOG=true` **and** `DATADOG_API_KEY` is set. `DATADOG_SITE` selects the Events API host (`https://api.{site}/api/v1/events`) and defaults to the EU site (`datadoghq.eu`) — set `datadoghq.com` or your regional site as needed. `DATADOG_SERVICE` and `DATADOG_ENV` feed the `service:` and `env:` tags on every emitted event.
+
+9. **Auth and Security category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -586,7 +598,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `TRUST_PROXY_HEADERS=true` makes `X-Forwarded-User` a valid identity for every route, which means the proxy becomes the authentication boundary. Only enable it behind a proxy you control.
 
-9. **Prow category.**
+10. **Prow category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -595,7 +607,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Both are validated on load rather than transformed. `PROW_URL` must start with `https://`, must contain a hostname, and must not embed credentials (`prow_validation.normalize_prow_url`) — surrounding whitespace is trimmed, but a trailing slash is left in place, so `https://prow.example.com/` and `https://prow.example.com` are both accepted and stay as written. `GCS_BUCKET` must match `[a-z0-9][a-z0-9._-]*` after trimming (`normalize_gcs_bucket`), so a `gs://` prefix is **rejected** rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.
 
-10. **Server category.**
+11. **Server category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -620,7 +632,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `AMBIENT_AUTH_PROVIDERS` lists provider IDs that authenticate via ambient credentials (ADC, OAuth, CLI login) and never consume a per-session user API key. They are excluded from the user credential flow even when the sidecar reports them as key-capable — without this, users can store a key the provider ignores (and any garbage key passes verification, because the provider authenticates via ADC regardless). Their models remain available with server credentials. Set it to an empty string to trust the sidecar's capability reporting entirely.
 
-11. **Web Push category.**
+12. **Web Push category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -630,7 +642,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that changing the public key or claim email invalidates subscriptions already registered with browsers — they are restart-required and best managed at deployment time.
 
-12. **Notifications category** (added with #347).
+13. **Notifications category** (added with #347).
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -644,7 +656,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Email alerts need `SMTP_HOST` + `ALERT_EMAIL_TO` (from address defaults to `SMTP_USER`, then `rootcoz@<host>`); Slack alerts need `SLACK_WEBHOOK_URL`. The env var stays the deployment default — a saved setting overrides it.
 
-13. **Sidecar category** (added with #347 — restart required).
+14. **Sidecar category** (added with #347 — restart required).
 
     The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. An empty field means "no override": the deployment environment governs.
 
@@ -714,6 +726,11 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `RP_PUSH_CLASSIFICATIONS` | `rp_push_classifications` | Report Portal | runtime |
 | `RP_PUSH_ROOTCOZ_URL` | `rp_push_rootcoz_url` | Report Portal | runtime |
 | `RP_PUSH_TRACKER_LINKS` | `rp_push_tracker_links` | Report Portal | runtime |
+| `DATADOG_API_KEY` | `datadog_api_key` | Datadog | runtime (sensitive) |
+| `DATADOG_SITE` | `datadog_site` | Datadog | runtime |
+| `DATADOG_SERVICE` | `datadog_service` | Datadog | runtime |
+| `DATADOG_ENV` | `datadog_env` | Datadog | runtime |
+| `ENABLE_DATADOG` | `enable_datadog` | Datadog | runtime |
 | `ADMIN_KEY` | `admin_key` | Auth & Security | env-only (read-only display) |
 | `SECURE_COOKIES` | `secure_cookies` | Auth & Security | restart |
 | `TRUST_PROXY_HEADERS` | `trust_proxy_headers` | Auth & Security | restart |
@@ -971,9 +988,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only seven of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `REPORTPORTAL_API_TOKEN`, and `DATADOG_API_KEY`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.
@@ -1667,11 +1684,31 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    At least one of the three must be enabled or the push is refused.
 
+8. Push failure events to Datadog.
+
+   The Datadog exporter emits **one event per failed test** to the Datadog Events API (`https://api.{site}/api/v1/events`, default site `datadoghq.eu`), authenticated with the `DD-API-KEY` header. Enable it with `ENABLE_DATADOG=true` plus `DATADOG_API_KEY` — see [Configuration Reference](configuration-reference.html) for the `DATADOG_SITE`, `DATADOG_SERVICE`, and `DATADOG_ENV` settings.
+
+   Each event carries:
+
+   - A title like `[PRODUCT BUG] test_login_flow (Build #42)` — the classification stays verbatim in the title and body.
+   - A markdown body with the test name, classification, job and build, the RootCoz report link (when `PUBLIC_BASE_URL` is set), the CI build link when available, and the AI diagnosis.
+   - An alert type mapped from the classification: `PRODUCT BUG` → `error`; `INFRASTRUCTURE`, `CODE ISSUE`, and `AUTOMATION` → `warning`; anything else → `info`.
+   - An `aggregation_key` of `rootcoz-{analysis_id}-{test_name}` so reruns of the same test group in the Datadog event stream.
+   - A tag taxonomy: `service:{DATADOG_SERVICE}` (default `cnv-qe-tests`), `env:{DATADOG_ENV}` (default `production`), `tfa.stage:automated`, `tfa.classification:{classification}`, `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
+
+   Push it like any other exporter:
+
+   ```bash
+   rootcoz push JOB_ID --plugin datadog
+   ```
+
+   Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events.
+
 ## Advanced Usage
 
 Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
 
-Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
+Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list (for example `reportportal,datadog`) and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
 
 Create issues from the terminal, including for nested child-job failures:
 
@@ -2261,6 +2298,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Jira` | `jira_email`, `jira_api_token`, `jira_cloud_url`, `jira_cloud_ssl_verify`, `jira_pat`, `jira_server_url`, `jira_server_ssl_verify`, `jira_oauth_client_secret`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_atst_token`, `jira_oauth_ssl_verify`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
+   | `Datadog` | `datadog_api_key`, `datadog_site`, `datadog_service`, `datadog_env`, `enable_datadog` |
    | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
    | `Prow` | `prow_url`, `gcs_bucket` |
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
@@ -2553,7 +2591,7 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
 | GET | `/api/exporters` | viewer | Available exporter plugins and enabled state |
-| POST | `/results/{job_id}/push/{plugin_name}` | operator | Generic push; `child_job_name` and `child_build_number` optional |
+| POST | `/results/{job_id}/push/{plugin_name}` | operator | Generic push (e.g. `reportportal`, `datadog`); `child_job_name` and `child_build_number` optional |
 | POST | `/results/{job_id}/push-reportportal` | operator | Backward-compatible Report Portal push |
 
 > **Note:** All four issue preview and create endpoints call `_require_reviewer`, so a `viewer` receives `403` before the allow list is consulted. They additionally require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
@@ -2937,7 +2975,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz exporters` | — | Available exporter plugins and their enabled state. |
-| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number` | Push results through a named exporter plugin. |
+| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number` | Push results through a named exporter plugin (`reportportal`, `datadog`). |
 | `rootcoz push-reportportal JOB_ID` | `--child-job-name`, `--child-build-number` | Report Portal shortcut; `push-rp` is a hidden alias. |
 | `rootcoz release` | `--json` | Latest GitHub release, the running server version, and whether an update is available. |
 

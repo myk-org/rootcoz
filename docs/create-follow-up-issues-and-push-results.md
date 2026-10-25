@@ -95,11 +95,31 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    At least one of the three must be enabled or the push is refused.
 
+8. Push failure events to Datadog.
+
+   The Datadog exporter emits **one event per failed test** to the Datadog Events API (`https://api.{site}/api/v1/events`, default site `datadoghq.eu`), authenticated with the `DD-API-KEY` header. Enable it with `ENABLE_DATADOG=true` plus `DATADOG_API_KEY` — see [Configuration Reference](configuration-reference.html) for the `DATADOG_SITE`, `DATADOG_SERVICE`, and `DATADOG_ENV` settings.
+
+   Each event carries:
+
+   - A title like `[PRODUCT BUG] test_login_flow (Build #42)` — the classification stays verbatim in the title and body.
+   - A markdown body with the test name, classification, job and build, the RootCoz report link (when `PUBLIC_BASE_URL` is set), the CI build link when available, and the AI diagnosis.
+   - An alert type mapped from the classification: `PRODUCT BUG` → `error`; `INFRASTRUCTURE`, `CODE ISSUE`, and `AUTOMATION` → `warning`; anything else → `info`.
+   - An `aggregation_key` of `rootcoz-{analysis_id}-{test_name}` so reruns of the same test group in the Datadog event stream.
+   - A tag taxonomy: `service:{DATADOG_SERVICE}` (default `cnv-qe-tests`), `env:{DATADOG_ENV}` (default `production`), `tfa.stage:automated`, `tfa.classification:{classification}`, `job_name`, `build_number`, `test_name`, `rootcoz.analysis_id`, `child_job_name` when the push is scoped to a child job, and `pushed_by` (the triggering user, or `rootcoz-ai` for auto-push). Tag values are sanitized for Datadog — spaces and most punctuation become underscores, so `PRODUCT BUG` appears as `PRODUCT_BUG` in tags.
+
+   Push it like any other exporter:
+
+   ```bash
+   rootcoz push JOB_ID --plugin datadog
+   ```
+
+   Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events.
+
 ## Advanced Usage
 
 Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
 
-Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
+Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list (for example `reportportal,datadog`) and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
 
 Create issues from the terminal, including for nested child-job failures:
 

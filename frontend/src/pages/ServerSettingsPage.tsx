@@ -93,7 +93,7 @@ interface SettingsImportResult {
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
-  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Prow',
+  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
   'Auth & Security', 'Web Push', 'Notifications', 'Sidecar',
 ]
 

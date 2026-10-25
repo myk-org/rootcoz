@@ -590,6 +590,28 @@ class Settings(BaseSettings):
         description="Include Jira/GitHub issue links as external system issues on Report Portal test items.",
     )
 
+    # Datadog Events integration (optional). Emits one event per failed
+    # test when results are pushed to the 'datadog' exporter plugin.
+    datadog_api_key: SecretStr | None = None
+    datadog_site: str = Field(
+        default="datadoghq.eu",
+        description=(
+            "Datadog site for the Events API (https://api.{site}/api/v1/events)."
+        ),
+    )
+    datadog_service: str = Field(
+        default="cnv-qe-tests",
+        description="Value of the service: tag on emitted Datadog events.",
+    )
+    datadog_env: str = Field(
+        default="production",
+        description="Value of the env: tag on emitted Datadog events.",
+    )
+    enable_datadog: bool = Field(
+        default=False,
+        description=("Enable the Datadog Events exporter. Requires DATADOG_API_KEY."),
+    )
+
     # Web Push (VAPID) configuration (optional, server-only)
     vapid_public_key: str = ""
     vapid_private_key: str = Field(default="", repr=False)
@@ -857,6 +879,7 @@ class Settings(BaseSettings):
             "jira_oauth_client_secret",
             "jira_atst_token",
             "reportportal_api_token",
+            "datadog_api_key",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -1005,6 +1028,18 @@ class Settings(BaseSettings):
                 logger.warning(
                     "enable_reportportal is True but REPORTPORTAL_PROJECT is not configured"
                 )
+            return False
+        return True
+
+    @property
+    def datadog_enabled(self) -> bool:
+        """Check if the Datadog Events exporter is enabled and configured."""
+        if not self.enable_datadog:
+            return False
+        if not self.datadog_api_key or not self.datadog_api_key.get_secret_value():
+            logger.warning(
+                "enable_datadog is True but DATADOG_API_KEY is not configured"
+            )
             return False
         return True
 

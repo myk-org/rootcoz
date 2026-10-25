@@ -98,6 +98,8 @@ const baseSettings = (): TestSetting[] => [
   mk('jira_server_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('github_token', 'GitHub', 'gh_tok', { sensitive: true }),
   mk('reportportal_url', 'Report Portal', 'https://rp.example.com'),
+  mk('datadog_api_key', 'Datadog', '', { sensitive: true }),
+  mk('enable_datadog', 'Datadog', 'false', { type: 'boolean' }),
   mk('prow_url', 'Prow', 'https://prow.example.com'),
   mk('admin_key', 'Auth & Security', 'key', { sensitive: true }),
   mk('vapid_public_key', 'Web Push', 'vk'),
@@ -133,7 +135,7 @@ describe('ServerSettingsPage tabs and search', () => {
 
     const tabs = screen.getAllByRole('tab')
     expect(tabs.map((t) => t.textContent)).toEqual([
-      'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Prow',
+      'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
       'Auth & Security', 'Web Push',
     ])
 

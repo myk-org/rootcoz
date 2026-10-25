@@ -133,6 +133,7 @@ from rootcoz.engine.core import (
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
+from rootcoz.exporters.datadog import DatadogExporter
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
     ReportPortalClient,
@@ -318,6 +319,7 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "github_token",
         "tests_repo_token",
         "reportportal_api_token",
+        "datadog_api_key",
         "admin_key",
         "vapid_private_key",
         "smtp_password",
@@ -363,6 +365,7 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "metadata_rules_file",
         "enable_github_issues",
         "enable_reportportal",
+        "enable_datadog",
         "enable_auto_review",
         "auto_push_exporters",
         "public_base_url",
@@ -491,6 +494,13 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
+    ],
+    "Datadog": [
+        "datadog_api_key",
+        "datadog_site",
+        "datadog_service",
+        "datadog_env",
+        "enable_datadog",
     ],
     "Auth & Security": [
         "admin_key",
@@ -7527,6 +7537,11 @@ def _available_exporters(settings: Settings) -> list[ExporterInfo]:
             display_name=ReportPortalClient.DISPLAY_NAME,
             enabled=rp_enabled,
         ),
+        ExporterInfo(
+            name=DatadogExporter.NAME,
+            display_name=DatadogExporter.DISPLAY_NAME,
+            enabled=settings.datadog_enabled,
+        ),
     ]
 
 
@@ -8249,6 +8264,7 @@ async def push_to_exporter(
             fetch_tracked_in_links=_exporter_needs_tracked_in_links(
                 [plugin_name], settings
             ),
+            analysis_timestamp=_stored_analysis_timestamp(stored),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -8343,6 +8359,28 @@ def _rp_error_message(exc: Exception, operation: str) -> tuple[str, str]:
     return format_rp_error(exc, operation)
 
 
+def _stored_analysis_timestamp(stored: dict[str, Any]) -> int | None:
+    """Unix timestamp of a stored job's analysis, or ``None`` when unknown.
+
+    Prefers the completion time, then the analysis start, then job creation.
+    SQLite ``CURRENT_TIMESTAMP`` values are UTC; naive strings are parsed
+    as UTC so the timestamp is absolute.
+    """
+    for key in ("completed_at", "analysis_started_at", "created_at"):
+        value = stored.get(key)
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=UTC)
+            return int(dt.timestamp())
+        if isinstance(value, str) and value.strip():
+            try:
+                dt = datetime.fromisoformat(value.strip())
+            except ValueError:
+                continue
+            dt = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+            return int(dt.timestamp())
+    return None
+
+
 async def _build_export_context(
     *,
     job_id: str,
@@ -8353,6 +8391,7 @@ async def _build_export_context(
     pushed_by: str = "",
     fetch_history: bool = True,
     fetch_tracked_in_links: bool = True,
+    analysis_timestamp: int | None = None,
 ) -> ExportContext:
     """Build an ExportContext from stored result data.
 
@@ -8375,6 +8414,9 @@ async def _build_export_context(
             ``storage.get_tracked_in_for_scope``.  Set to ``False`` when no
             target exporter will read ``ExportContext.tracked_in_links`` —
             see :func:`_exporter_needs_tracked_in_links`.
+        analysis_timestamp: Unix timestamp of the analysis, when the caller
+            knows it (e.g. from the stored results row).  ``None`` lets
+            exporters fall back to push time.
 
     Returns:
         Populated ExportContext.
@@ -8494,6 +8536,7 @@ async def _build_export_context(
         history_classifications=history_classifications,
         tracked_in_links=tracked_in_data,
         reviewed_by=reviewed_by,
+        analysis_timestamp=analysis_timestamp,
     )
 
 
@@ -8503,6 +8546,7 @@ async def _build_export_context(
 # ``_create_exporter()``.
 _EXPORTER_CLASSES: dict[str, type[Exporter]] = {
     ReportPortalClient.NAME: ReportPortalClient,
+    DatadogExporter.NAME: DatadogExporter,
 }
 
 
@@ -8596,6 +8640,18 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
             push_classifications=rp.push_classifications,
             push_rootcoz_url=rp.push_rootcoz_url,
             push_tracker_links=rp.push_tracker_links,
+        )
+    if plugin_name == DatadogExporter.NAME:
+        if not settings.datadog_enabled:
+            raise ValueError("Datadog integration is disabled or not configured")
+        api_key = settings.datadog_api_key
+        if api_key is None or not api_key.get_secret_value():
+            raise ValueError("datadog_api_key is required")
+        return DatadogExporter(
+            api_key=api_key.get_secret_value(),
+            site=settings.datadog_site,
+            service=settings.datadog_service,
+            env=settings.datadog_env,
         )
     raise ValueError(f"Unknown exporter plugin: '{plugin_name}'")
 

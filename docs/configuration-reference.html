@@ -787,6 +787,64 @@ SECURE_COOKIES=false
 </table></div>
 <p>Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. <code>RP_PUSH_CLASSIFICATIONS</code> maps RootCoz classifications to Report Portal defect types (<code>PRODUCT_BUG</code>, <code>AUTOMATION_BUG</code>, <code>SYSTEM_ISSUE</code>).</p>
 <ol>
+<li><strong>Datadog category.</strong></li>
+</ol>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Type</th>
+<th>Secret</th>
+<th>Restart</th>
+<th>After login</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DATADOG_API_KEY</code></td>
+<td>unset</td>
+<td>string</td>
+<td>yes</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>DATADOG_SITE</code></td>
+<td><code>datadoghq.eu</code></td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>DATADOG_SERVICE</code></td>
+<td><code>cnv-qe-tests</code></td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>DATADOG_ENV</code></td>
+<td><code>production</code></td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>ENABLE_DATADOG</code></td>
+<td><code>false</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+</tbody>
+</table></div>
+<p>Unlike Report Portal there is no auto-detection: the Datadog Events exporter is enabled only when <code>ENABLE_DATADOG=true</code> <strong>and</strong> <code>DATADOG_API_KEY</code> is set. <code>DATADOG_SITE</code> selects the Events API host (<code>https://api.{site}/api/v1/events</code>) and defaults to the EU site (<code>datadoghq.eu</code>) — set <code>datadoghq.com</code> or your regional site as needed. <code>DATADOG_SERVICE</code> and <code>DATADOG_ENV</code> feed the <code>service:</code> and <code>env:</code> tags on every emitted event.</p>
+<ol>
 <li><strong>Auth and Security category.</strong></li>
 </ol>
 <div class="table-wrap"><table>
@@ -1498,6 +1556,36 @@ SECURE_COOKIES=false
 <td>runtime</td>
 </tr>
 <tr>
+<td><code>DATADOG_API_KEY</code></td>
+<td><code>datadog_api_key</code></td>
+<td>Datadog</td>
+<td>runtime (sensitive)</td>
+</tr>
+<tr>
+<td><code>DATADOG_SITE</code></td>
+<td><code>datadog_site</code></td>
+<td>Datadog</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>DATADOG_SERVICE</code></td>
+<td><code>datadog_service</code></td>
+<td>Datadog</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>DATADOG_ENV</code></td>
+<td><code>datadog_env</code></td>
+<td>Datadog</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>ENABLE_DATADOG</code></td>
+<td><code>enable_datadog</code></td>
+<td>Datadog</td>
+<td>runtime</td>
+</tr>
+<tr>
 <td><code>ADMIN_KEY</code></td>
 <td><code>admin_key</code></td>
 <td>Auth &amp; Security</td>
@@ -2157,8 +2245,8 @@ MYGATEWAY_API_KEY=your-gateway-api-key
 <h2 id="advanced-usage">Advanced Usage</h2>
 <p>Change settings after login without touching a restart. Open Server Settings, edit the field, and save. The value is validated against the same Pydantic constraints as the environment variable, encrypted if sensitive, and applied to the running process immediately. Setting a field to an empty string deletes the override.</p>
 <p>Sensitive values are returned masked as <code>••••••••</code>. <code>GET /api/admin/settings?reveal_key=ADMIN_KEY</code> unmasks one key, and <code>reveal_key=__all__</code> unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See <a href="api-reference.html">API Endpoint Reference</a>.</p>
-<p>Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code>, <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>ADMIN_KEY</code>, and <code>VAPID_PRIVATE_KEY</code>. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: <code>GET /api/admin/settings</code> decrypts them and masks them by default, but returns them in full when called with <code>reveal_key</code>. Treat that response as secret-bearing.</p>
-<p>Blank strings normalise consistently: optional strings become unset, <code>AI_PROVIDER</code> is lowercased and normalised, <code>DEFAULT_USER_ROLE</code> is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, and <code>REPORTPORTAL_API_TOKEN</code>. <code>ADMIN_KEY</code> and <code>VAPID_PRIVATE_KEY</code> are <strong>not</strong> trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or <code>echo</code> — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.</p>
+<p>Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code>, <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>DATADOG_API_KEY</code>, <code>ADMIN_KEY</code>, and <code>VAPID_PRIVATE_KEY</code>. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: <code>GET /api/admin/settings</code> decrypts them and masks them by default, but returns them in full when called with <code>reveal_key</code>. Treat that response as secret-bearing.</p>
+<p>Blank strings normalise consistently: optional strings become unset, <code>AI_PROVIDER</code> is lowercased and normalised, <code>DEFAULT_USER_ROLE</code> is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only seven of them: <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>REPORTPORTAL_API_TOKEN</code>, and <code>DATADOG_API_KEY</code>. <code>ADMIN_KEY</code> and <code>VAPID_PRIVATE_KEY</code> are <strong>not</strong> trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or <code>echo</code> — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.</p>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
 <li>

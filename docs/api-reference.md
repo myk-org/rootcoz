@@ -187,7 +187,7 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
 | GET | `/api/exporters` | viewer | Available exporter plugins and enabled state |
-| POST | `/results/{job_id}/push/{plugin_name}` | operator | Generic push; `child_job_name` and `child_build_number` optional |
+| POST | `/results/{job_id}/push/{plugin_name}` | operator | Generic push (e.g. `reportportal`, `datadog`); `child_job_name` and `child_build_number` optional |
 | POST | `/results/{job_id}/push-reportportal` | operator | Backward-compatible Report Portal push |
 
 > **Note:** All four issue preview and create endpoints call `_require_reviewer`, so a `viewer` receives `403` before the allow list is consulted. They additionally require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.

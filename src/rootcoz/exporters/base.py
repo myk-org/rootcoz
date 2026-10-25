@@ -31,6 +31,8 @@ class ExportContext:
         history_classifications: Mapping of test name to history classification.
         tracked_in_links: Mapping of test name to tracked-in link dicts.
         reviewed_by: Mapping of test name to reviewer username.
+        analysis_timestamp: Unix timestamp of the analysis (when known;
+            ``None`` lets exporters fall back to push time).
     """
 
     job_id: str
@@ -45,6 +47,7 @@ class ExportContext:
     history_classifications: dict[str, str] = field(default_factory=dict)
     tracked_in_links: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     reviewed_by: dict[str, str] = field(default_factory=dict)
+    analysis_timestamp: int | None = None
 
 
 @dataclass

@@ -27,7 +27,7 @@ spec:
       annotations:
         checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
         {{- /* Salt with Release.Name: constant across upgrades, unique per installation. */}}
-        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey (.Values.sidecar.agentDir.env | toJson) .Release.Name | sha256sum }}
+        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey .Values.datadog.apiKey (.Values.sidecar.agentDir.env | toJson) .Release.Name | sha256sum }}
         checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}

@@ -168,7 +168,19 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`).
 
-8. **Auth and Security category.**
+8. **Datadog category.**
+
+   | Variable | Default | Type | Secret | Restart | After login |
+   | --- | --- | --- | --- | --- | --- |
+   | `DATADOG_API_KEY` | unset | string | yes | no | yes |
+   | `DATADOG_SITE` | `datadoghq.eu` | string | no | no | yes |
+   | `DATADOG_SERVICE` | `cnv-qe-tests` | string | no | no | yes |
+   | `DATADOG_ENV` | `production` | string | no | no | yes |
+   | `ENABLE_DATADOG` | `false` | boolean | no | no | yes |
+
+   Unlike Report Portal there is no auto-detection: the Datadog Events exporter is enabled only when `ENABLE_DATADOG=true` **and** `DATADOG_API_KEY` is set. `DATADOG_SITE` selects the Events API host (`https://api.{site}/api/v1/events`) and defaults to the EU site (`datadoghq.eu`) — set `datadoghq.com` or your regional site as needed. `DATADOG_SERVICE` and `DATADOG_ENV` feed the `service:` and `env:` tags on every emitted event.
+
+9. **Auth and Security category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -186,7 +198,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `TRUST_PROXY_HEADERS=true` makes `X-Forwarded-User` a valid identity for every route, which means the proxy becomes the authentication boundary. Only enable it behind a proxy you control.
 
-9. **Prow category.**
+10. **Prow category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -195,7 +207,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Both are validated on load rather than transformed. `PROW_URL` must start with `https://`, must contain a hostname, and must not embed credentials (`prow_validation.normalize_prow_url`) — surrounding whitespace is trimmed, but a trailing slash is left in place, so `https://prow.example.com/` and `https://prow.example.com` are both accepted and stay as written. `GCS_BUCKET` must match `[a-z0-9][a-z0-9._-]*` after trimming (`normalize_gcs_bucket`), so a `gs://` prefix is **rejected** rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.
 
-10. **Server category.**
+11. **Server category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -220,7 +232,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `AMBIENT_AUTH_PROVIDERS` lists provider IDs that authenticate via ambient credentials (ADC, OAuth, CLI login) and never consume a per-session user API key. They are excluded from the user credential flow even when the sidecar reports them as key-capable — without this, users can store a key the provider ignores (and any garbage key passes verification, because the provider authenticates via ADC regardless). Their models remain available with server credentials. Set it to an empty string to trust the sidecar's capability reporting entirely.
 
-11. **Web Push category.**
+12. **Web Push category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -230,7 +242,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that changing the public key or claim email invalidates subscriptions already registered with browsers — they are restart-required and best managed at deployment time.
 
-12. **Notifications category** (added with #347).
+13. **Notifications category** (added with #347).
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -244,7 +256,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Email alerts need `SMTP_HOST` + `ALERT_EMAIL_TO` (from address defaults to `SMTP_USER`, then `rootcoz@<host>`); Slack alerts need `SLACK_WEBHOOK_URL`. The env var stays the deployment default — a saved setting overrides it.
 
-13. **Sidecar category** (added with #347 — restart required).
+14. **Sidecar category** (added with #347 — restart required).
 
     The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. An empty field means "no override": the deployment environment governs.
 
@@ -314,6 +326,11 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `RP_PUSH_CLASSIFICATIONS` | `rp_push_classifications` | Report Portal | runtime |
 | `RP_PUSH_ROOTCOZ_URL` | `rp_push_rootcoz_url` | Report Portal | runtime |
 | `RP_PUSH_TRACKER_LINKS` | `rp_push_tracker_links` | Report Portal | runtime |
+| `DATADOG_API_KEY` | `datadog_api_key` | Datadog | runtime (sensitive) |
+| `DATADOG_SITE` | `datadog_site` | Datadog | runtime |
+| `DATADOG_SERVICE` | `datadog_service` | Datadog | runtime |
+| `DATADOG_ENV` | `datadog_env` | Datadog | runtime |
+| `ENABLE_DATADOG` | `enable_datadog` | Datadog | runtime |
 | `ADMIN_KEY` | `admin_key` | Auth & Security | env-only (read-only display) |
 | `SECURE_COOKIES` | `secure_cookies` | Auth & Security | restart |
 | `TRUST_PROXY_HEADERS` | `trust_proxy_headers` | Auth & Security | restart |
@@ -571,9 +588,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only seven of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `REPORTPORTAL_API_TOKEN`, and `DATADOG_API_KEY`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.  

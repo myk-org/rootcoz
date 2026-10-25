@@ -77,6 +77,12 @@
         }
       }
     },
+    "datadog": {
+      "type": "object",
+      "properties": {
+        "apiKey": { "type": "string" }
+      }
+    },
     "sidecar": {
       "type": "object",
       "properties": {
