@@ -810,6 +810,50 @@ class TestAnalyzeEndpoint:
         )
         assert response.status_code == 422
 
+    def test_analyze_account_id_shaped_cloud_id_rejected(self, test_client) -> None:
+        """Account-ID-shaped (org:uuid) cloud IDs are rejected with a 422.
+
+        The shape is a frequent mistake (account ID pasted as cloud ID) —
+        without the check the analysis later fails with a confusing
+        HTTP 404 from the api.atlassian.com gateway (#365).
+        """
+        response = test_client.post(
+            "/analyze",
+            json={
+                "type": "jenkins",
+                "job_name": "test",
+                "build_number": 123,
+                "tests_repo_url": "https://github.com/example/repo",
+                "atlassian_oauth_cloud_id": (
+                    "712020:f0a60b32-1a2b-3c4d-5e6f-789012345678"
+                ),
+            },
+        )
+        assert response.status_code == 422
+        detail = str(response.json())
+        assert "atlassian_oauth_cloud_id" in detail
+        assert "account ID" in detail
+        assert "tenant_info" in detail
+
+    def test_analyze_plain_uuid_cloud_id_accepted(self, test_client) -> None:
+        """A plain-UUID cloud ID passes request validation."""
+        with patch("rootcoz.main._process_ci_source_analysis"):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test",
+                    "build_number": 123,
+                    "tests_repo_url": "https://github.com/example/repo",
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                    "atlassian_oauth_cloud_id": (
+                        "2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+                    ),
+                },
+            )
+            assert response.status_code == 202
+
     def test_analyze_accepts_tests_repo_url_with_ref(self, test_client) -> None:
         """Test that tests_repo_url with ':ref' suffix is accepted (no URL validation).
 
@@ -3576,12 +3620,12 @@ class TestIssueCreationRequiresUserCredentials:
                     "test_name": "test_cred",
                     "title": "Bug",
                     "body": "Details",
-                    "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
+                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                 },
             )
         assert response.status_code == 400
         detail = response.json()["detail"]
-        assert "OAuth 2.0" in detail
+        assert "not a recognized" in detail
         assert "client secret" in detail
         # The bug must NOT be created with the server's credentials
         mock_create.assert_not_called()
@@ -3597,38 +3641,39 @@ class TestIssueCreationRequiresUserCredentials:
                 "/results/job-jira-prev-legacy-sa/preview-jira-bug",
                 json={
                     "test_name": "test_cred",
-                    "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
+                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                 },
             )
         assert response.status_code == 400
-        assert "OAuth 2.0" in response.json()["detail"]
+        assert "not a recognized" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_jira_create_legacy_sa_token_ignored_with_regular_token(
+    async def test_jira_create_legacy_sa_token_rejected_with_regular_token(
         self, test_client
     ):
-        """A legacy SA secret alongside a regular token changes nothing."""
+        """A legacy SA secret alongside a regular token still 400s (fail closed)."""
         await storage.save_result(
             "job-jira-legacy-sa-plus-tok", "http://j", "completed", self._RESULT_DATA
         )
-        with patch("rootcoz.main.create_jira_bug") as mock_create:
-            mock_create.return_value = {
-                "key": "PROJ-1",
-                "url": "https://jira.example.com/browse/PROJ-1",
-            }
-            with _enable_feature("jira_enabled"):
-                response = test_client.post(
-                    "/results/job-jira-legacy-sa-plus-tok/create-jira-bug",
-                    json={
-                        "test_name": "test_cred",
-                        "title": "Bug",
-                        "body": "Details",
-                        "jira_token": "user_jira_pat",
-                        "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
-                    },
-                )
-        assert response.status_code == 201
-        mock_create.assert_called_once()
+        with (
+            patch("rootcoz.main.create_jira_bug") as mock_create,
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/results/job-jira-legacy-sa-plus-tok/create-jira-bug",
+                json={
+                    "test_name": "test_cred",
+                    "title": "Bug",
+                    "body": "Details",
+                    "jira_token": "user_jira_pat",
+                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
+                },
+            )
+        assert response.status_code == 400
+        assert "not a recognized" in response.json()["detail"]
+        # Invalid input is never silently dropped in favor of the regular
+        # token — no bug is created
+        mock_create.assert_not_called()
 
 
 class TestJiraMethodConfiguredUsesEffectiveSettings:
@@ -8297,6 +8342,91 @@ class TestReAnalyzeFailure:
         assert result.jira_email == "user@example.com"
         assert result.jira_pat is None
 
+    def test_user_atst_token_routes_to_atst_mode(self):
+        """An ATST-prefixed SA token pins the atst method, clearing the rest."""
+        from rootcoz.jira import resolve_jira_connection
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_server_url="https://jira.example.com",
+            jira_email="server@example.com",
+            jira_api_token=SecretStr("server-api-token"),
+            jira_pat=SecretStr("server-pat"),
+            jira_oauth_client_secret=SecretStr("ATOA-server-secret"),
+            atlassian_oauth_cloud_id="cloud-id",
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "", "", user_jira_sa_token="ATST-user-token"
+        )
+        assert result.jira_auth_mode == "atst"
+        assert result.jira_atst_token.get_secret_value() == "ATST-user-token"
+        assert result.jira_api_token is None
+        assert result.jira_pat is None
+        assert result.jira_email is None
+        assert result.jira_oauth_client_secret is None
+        # The effective settings resolve to a usable atst connection
+        connection = resolve_jira_connection(result)
+        assert connection.mode == "atst"
+        assert connection.headers["Authorization"] == "Bearer ATST-user-token"
+
+    def test_atst_in_regular_field_routes_to_atst_mode(self):
+        """An ATST token pasted into the regular field pins atst, not basic."""
+        from rootcoz.jira import resolve_jira_connection
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_cloud_url="https://jira.example.com",
+            jira_email="server@example.com",
+            jira_api_token=SecretStr("server-api-token"),
+            atlassian_oauth_cloud_id="cloud-id",
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "ATST-user-token", "user@example.com"
+        )
+        assert result.jira_auth_mode == "atst"
+        assert result.jira_atst_token.get_secret_value() == "ATST-user-token"
+        assert result.jira_api_token is None
+        assert result.jira_pat is None
+        assert result.jira_email is None
+        assert result.jira_oauth_client_secret is None
+        # Resolves to the gateway with the token as Bearer
+        connection = resolve_jira_connection(result)
+        assert connection.mode == "atst"
+        assert connection.api_base == "https://api.atlassian.com/ex/jira/cloud-id"
+        assert connection.headers["Authorization"] == "Bearer ATST-user-token"
+
+    def test_atst_in_regular_field_without_email_routes_to_atst(self):
+        """An ATST token without an email is atst — not a bearer PAT."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_server_url="https://jira.example.com",
+            jira_pat=SecretStr("server-pat"),
+            atlassian_oauth_cloud_id="cloud-id",
+        )
+        result = _build_effective_jira_settings(settings, "ATST-user-token", "")
+        assert result.jira_auth_mode == "atst"
+        assert result.jira_atst_token.get_secret_value() == "ATST-user-token"
+        # The no-email branch would have put it in jira_pat — it must not
+        assert result.jira_pat is None
+
+    def test_sa_field_classified_value_wins_over_regular_field(self):
+        """Both fields classified: the service-account field decides."""
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            atlassian_oauth_cloud_id="cloud-id",
+            atlassian_oauth_client_id="client-id",
+        )
+        result = _build_effective_jira_settings(
+            settings, "ATST-user-token", "", user_jira_sa_token="ATOA-user-secret"
+        )
+        assert result.jira_auth_mode == "oauth"
+        assert result.jira_oauth_client_secret.get_secret_value() == "ATOA-user-secret"
+        assert result.jira_atst_token is None
+
     def test_original_settings_not_mutated(self):
         """model_copy must not mutate the original Settings instance."""
         from rootcoz.main import _build_effective_jira_settings
@@ -8666,6 +8796,55 @@ class TestValidateToken:
             app.dependency_overrides.pop(get_settings, None)
             jira_module._cloud_id_cache.clear()
 
+    @pytest.mark.asyncio
+    async def test_jira_atst_token_validates_against_gateway(self, test_client):
+        """An ATST token is sent as Bearer to the gateway — no minting."""
+        import rootcoz.jira as jira_module
+        from rootcoz.main import app, get_settings
+
+        jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
+        scoped_settings = _build_wait_settings(
+            atlassian_oauth_cloud_id="cloud-id-123",
+            jira_site_url="https://myorg.atlassian.net",
+        )
+        app.dependency_overrides[get_settings] = lambda: scoped_settings
+        try:
+            with patch("rootcoz.main.httpx.AsyncClient") as mock_client_class:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.raise_for_status = MagicMock()
+                mock_resp.json.return_value = [{"key": "PROJ"}]
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client.post = AsyncMock()
+                mock_client_class.return_value = mock_client
+                response = test_client.post(
+                    "/api/validate-token",
+                    json={"token_type": "jira", "token": "ATST-user-token"},
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["valid"] is True
+            assert data["username"] == "service account"
+            assert "ATST" in data["message"]
+            # The probe is project visibility against the scoped gateway
+            requested_url = mock_client.get.call_args.args[0]
+            assert requested_url == (
+                "https://api.atlassian.com/ex/jira/cloud-id-123/rest/api/3/project"
+            )
+            # The ATST token itself is the Bearer — nothing is minted
+            sent_headers = mock_client.get.call_args.kwargs["headers"]
+            assert sent_headers["Authorization"] == "Bearer ATST-user-token"
+            assert mock_client.post.await_count == 0
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+            jira_module._cloud_id_cache.clear()
+            jira_module._sa_token_cache.clear()
+
 
 class TestJiraProjectsEndpoint:
     """Tests for POST /api/jira-projects."""
@@ -8682,11 +8861,144 @@ class TestJiraProjectsEndpoint:
         """A legacy (non-ATOA) SA secret is a clear 400, not a silent drop."""
         response = test_client.post(
             "/api/jira-projects",
-            json={"jira_sa_token": "ATST-legacy-token"},  # pragma: allowlist secret
+            json={"jira_sa_token": "legacy-secret-token"},  # pragma: allowlist secret
             headers=_ADMIN_AUTH_HEADERS,
         )
         assert response.status_code == 400
-        assert "OAuth 2.0" in response.json()["detail"]
+        assert "not a recognized" in response.json()["detail"]
+
+    def test_legacy_sa_token_rejected_with_regular_token(self, test_client):
+        """A legacy SA secret 400s even alongside a regular token (fail closed)."""
+        response = test_client.post(
+            "/api/jira-projects",
+            json={
+                "jira_token": "user-pat",
+                "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
+            },
+            headers=_ADMIN_AUTH_HEADERS,
+        )
+        assert response.status_code == 400
+        assert "not a recognized" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_atst_sa_token_routes_to_atst_mode(self, test_client):
+        """An ATST-prefixed SA token is accepted and pins the atst method."""
+        from rootcoz.main import app, get_settings
+
+        projects = [{"key": "PROJ", "name": "My Project"}]
+        jira_settings = _build_wait_settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://jira-cloud.example.com",
+            atlassian_oauth_cloud_id="cloud-id-123",
+        )
+        app.dependency_overrides[get_settings] = lambda: jira_settings
+        try:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
+                mock_client = AsyncMock()
+                mock_client.list_projects = AsyncMock(return_value=projects)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                MockJiraClient.return_value = mock_client
+                response = test_client.post(
+                    "/api/jira-projects",
+                    json={
+                        "jira_sa_token": "ATST-user-token"
+                    },  # pragma: allowlist secret
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            assert any(p["key"] == "PROJ" for p in response.json())
+            # The client was built from EFFECTIVE settings: mode atst with
+            # the user's token as the ATST credential
+            effective = MockJiraClient.call_args.args[0]
+            assert effective.jira_auth_mode == "atst"
+            assert (
+                effective.jira_atst_token.get_secret_value() == "ATST-user-token"
+            )  # pragma: allowlist secret
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+
+    @pytest.mark.asyncio
+    async def test_atst_sa_token_with_regular_token_unaffected(self, test_client):
+        """A recognized ATST SA token alongside a regular token is accepted."""
+        from rootcoz.main import app, get_settings
+
+        projects = [{"key": "PROJ", "name": "My Project"}]
+        jira_settings = _build_wait_settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://jira-cloud.example.com",
+            atlassian_oauth_cloud_id="cloud-id-123",
+        )
+        app.dependency_overrides[get_settings] = lambda: jira_settings
+        try:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
+                mock_client = AsyncMock()
+                mock_client.list_projects = AsyncMock(return_value=projects)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                MockJiraClient.return_value = mock_client
+                response = test_client.post(
+                    "/api/jira-projects",
+                    json={
+                        "jira_token": "user-pat",
+                        "jira_sa_token": "ATST-user-token",  # pragma: allowlist secret
+                    },
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            # The classified SA token wins over the regular token's field
+            # placement — effective mode atst, never basic/pat
+            effective = MockJiraClient.call_args.args[0]
+            assert effective.jira_auth_mode == "atst"
+            assert (
+                effective.jira_atst_token.get_secret_value() == "ATST-user-token"
+            )  # pragma: allowlist secret
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+
+    @pytest.mark.asyncio
+    async def test_atst_token_in_regular_field_routes_to_atst(self, test_client):
+        """An ATST token pasted into the regular jira_token field pins atst.
+
+        Validation recognizes the prefix in the regular field, so the
+        effective settings must route it the same way — otherwise a
+        token that validates fine breaks every saved-credential use.
+        """
+        from rootcoz.main import app, get_settings
+
+        projects = [{"key": "PROJ", "name": "My Project"}]
+        jira_settings = _build_wait_settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://jira-cloud.example.com",
+            atlassian_oauth_cloud_id="cloud-id-123",
+        )
+        app.dependency_overrides[get_settings] = lambda: jira_settings
+        try:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
+                mock_client = AsyncMock()
+                mock_client.list_projects = AsyncMock(return_value=projects)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                MockJiraClient.return_value = mock_client
+                response = test_client.post(
+                    "/api/jira-projects",
+                    json={
+                        "jira_token": "ATST-user-token",  # pragma: allowlist secret
+                        "jira_email": "user@example.com",
+                    },
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            # Prefix detection wins over field placement: atst mode with the
+            # gateway api_base, never basic with the email
+            effective = MockJiraClient.call_args.args[0]
+            assert effective.jira_auth_mode == "atst"
+            assert (
+                effective.jira_atst_token.get_secret_value() == "ATST-user-token"
+            )  # pragma: allowlist secret
+            assert effective.jira_email is None
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
 
     @pytest.mark.asyncio
     async def test_user_method_url_used_when_server_method_url_empty(self, test_client):
@@ -8813,12 +9125,12 @@ class TestJiraSecurityLevelsEndpoint:
             "/api/jira-security-levels",
             json={
                 "project_key": "PROJ",
-                "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
+                "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
             },
             headers=_ADMIN_AUTH_HEADERS,
         )
         assert response.status_code == 400
-        assert "OAuth 2.0" in response.json()["detail"]
+        assert "not a recognized" in response.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_user_method_url_used_when_server_method_url_empty(self, test_client):
@@ -9379,6 +9691,49 @@ class TestAdminSettingsEndpoints:
         assert "db_path" in response.json()["detail"]
         assert "debug" in response.json()["detail"]
 
+    def test_put_settings_account_id_shaped_cloud_id_rejected(
+        self, test_client
+    ) -> None:
+        """PUT rejects account-ID-shaped (org:uuid) cloud IDs with a 422 (#365).
+
+        The account ID is a frequent mistaken value for the cloud ID; without
+        the check the connection later fails with a confusing HTTP 404 from
+        the api.atlassian.com gateway.
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "atlassian_oauth_cloud_id": (
+                        "712020:f0a60b32-1a2b-3c4d-5e6f-789012345678"
+                    )
+                }
+            },
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "atlassian_oauth_cloud_id" in detail
+        assert "account ID" in detail
+        assert "tenant_info" in detail
+
+    def test_put_settings_plain_uuid_cloud_id_accepted(self, test_client) -> None:
+        """PUT accepts a plain-UUID cloud ID and it round-trips."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "atlassian_oauth_cloud_id": ("2b9e35e3-6bd3-4cec-b838-f4249ee02432")
+                }
+            },
+        )
+        assert response.status_code == 200
+        item = next(
+            s
+            for s in test_client.get("/api/admin/settings").json()
+            if s["key"] == "atlassian_oauth_cloud_id"
+        )
+        assert item["value"] == "2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+
     def test_put_settings_previously_blocked_now_settable(self, test_client) -> None:
         """#347: the former _SERVER_ONLY_SETTINGS are admin-settable now."""
         response = test_client.put(
@@ -9675,6 +10030,627 @@ class TestAdminSettingsEndpoints:
             headers={"Authorization": ""},
         )
         assert response.status_code in (401, 403)
+
+
+class TestAdminSettingsExportImport:
+    """Tests for GET /api/admin/settings/export and POST /api/admin/settings/import."""
+
+    _NO_ADMIN_HEADERS: ClassVar[dict[str, str]] = {"Authorization": ""}
+
+    def test_export_contains_only_db_stored_settings(self, test_client) -> None:
+        """Export holds DB overrides only — env/default values stay out."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_url": "https://db.jenkins.com"}},
+        )
+        response = test_client.get("/api/admin/settings/export")
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        doc = response.json()
+        assert doc["version"] == 1
+        assert "exported_at" in doc
+        # jenkins_url has a DB override; ai_call_timeout does not (env/default)
+        assert doc["settings"] == {"jenkins_url": "https://db.jenkins.com"}
+
+    def test_export_excludes_sensitive_by_default(self, test_client) -> None:
+        """Sensitive settings are omitted unless include_sensitive is set."""
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"github_token": "gh-secret"}
+            },  # pragma: allowlist secret
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "github_token" not in doc["settings"]
+        assert "warning" not in doc
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == "gh-secret"
+        assert "secrets" in doc["warning"]
+
+    def test_export_skips_internal_rows(self, test_client) -> None:
+        """Internal bookkeeping rows (jira_verified_method) never export."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jira_auth_mode": "basic"}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "jira_verified_method" not in doc["settings"]
+        assert doc["settings"]["jira_auth_mode"] == "basic"
+
+    def test_export_non_admin_forbidden(self, test_client) -> None:
+        response = test_client.get(
+            "/api/admin/settings/export", headers=self._NO_ADMIN_HEADERS
+        )
+        assert response.status_code in (401, 403)
+
+    def test_import_applies_and_reports_diff(self, test_client) -> None:
+        """A valid document applies and returns per-setting diff."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10", "log_level": "INFO"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "ai_call_timeout": "25",
+                    "log_level": "INFO",
+                    "public_base_url": "https://rootcoz.example.com",
+                },
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["applied"] == {
+            "ai_call_timeout": {"from": "10", "to": "25"},
+            "public_base_url": {"from": None, "to": "https://rootcoz.example.com"},
+        }
+        assert data["unchanged"] == ["log_level"]
+        # log_level changed nothing; public_base_url needs no restart
+        assert data["restart_required"] == []
+        # Values actually applied
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "25"
+
+    def test_import_reports_restart_required(self, test_client) -> None:
+        """Changed restart-required settings are listed in the response."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"log_level": "DEBUG", "vapid_claim_email": "a@b.c"},
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["restart_required"] == ["log_level", "vapid_claim_email"]
+
+    def test_import_masks_sensitive_values_in_diff(self, test_client) -> None:
+        """Sensitive values never appear in the diff — masked as ***."""
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"github_token": "old-secret"}
+            },  # pragma: allowlist secret
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"github_token": "new-secret"},
+            },  # pragma: allowlist secret
+        )
+        assert response.status_code == 200
+        assert response.json()["applied"]["github_token"] == {
+            "from": "***",
+            "to": "***",
+        }
+        # The value itself round-trips: re-export with sensitive included
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == "new-secret"
+
+    def test_import_invalid_value_is_atomic(self, test_client) -> None:
+        """One invalid entry rejects the whole import — nothing is applied."""
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"ai_call_timeout": "30", "jenkins_timeout": "abc"},
+            },
+        )
+        assert response.status_code == 422
+        assert "jenkins_timeout" in response.json()["detail"]
+        # The valid entry was NOT applied
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "10"
+
+    def test_import_unknown_key_rejected(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"nonexistent_key": "x"}},
+        )
+        assert response.status_code == 422
+        assert "Unknown settings" in response.json()["detail"]
+
+    def test_import_server_only_key_rejected(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"admin_key": "new-key"},
+            },  # pragma: allowlist secret
+        )
+        assert response.status_code == 422
+        assert "Server-only" in response.json()["detail"]
+
+    def test_export_omits_derived_settings(self, test_client) -> None:
+        """Derived settings are instance-computed, not user data — a DB row
+        for one never ships in either export mode, so a transferred document
+        cannot pin a stale sidecar_url on another instance.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"sidecar_url": "http://127.0.0.1:9100"}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "sidecar_url" not in doc["settings"]
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert "sidecar_url" not in doc["settings"]
+
+    def test_import_derived_key_rejected(self, test_client) -> None:
+        """A stale export carrying sidecar_url must not pin the derived URL
+        on this instance — 422 naming the key, nothing applied.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ai_call_timeout": "10"}},
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "sidecar_url": "http://127.0.0.1:9100",
+                    "ai_call_timeout": "30",
+                },
+            },
+        )
+        assert response.status_code == 422
+        assert "sidecar_url" in response.json()["detail"]
+        # Atomic rejection — the valid entry was NOT applied either
+        assert _settings_item(test_client, "ai_call_timeout")["value"] == "10"
+        assert _settings_item(test_client, "sidecar_url")["source"] != "db"
+
+    def test_import_rejects_wrong_version_and_empty(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 2, "settings": {"ai_call_timeout": "30"}},
+        )
+        assert response.status_code == 422
+        assert "version" in response.json()["detail"]
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {}},
+        )
+        assert response.status_code == 422
+
+    def test_import_dry_run_validates_without_applying(self, test_client) -> None:
+        """dry_run reports the diff but writes nothing."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "dry_run": True,
+                "settings": {"ai_call_timeout": "40"},
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["dry_run"] is True
+        assert data["applied"] == {"ai_call_timeout": {"from": None, "to": "40"}}
+        # Nothing was written — no DB override exists
+        assert _settings_item(test_client, "ai_call_timeout")["source"] != "db"
+
+    def test_import_non_admin_forbidden(self, test_client) -> None:
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"ai_call_timeout": "30"}},
+            headers=self._NO_ADMIN_HEADERS,
+        )
+        assert response.status_code in (401, 403)
+
+    def test_import_invalid_boolean_value_rejected(self, test_client) -> None:
+        """A value its Settings field rejects never reaches the DB — once
+        stored, get_settings() cannot validate the merged overrides and
+        silently falls back to the base env settings (all-or-nothing loss).
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"secure_cookies": "not-a-bool"}},
+        )
+        assert response.status_code == 422
+        assert "secure_cookies" in response.json()["detail"]
+        assert _settings_item(test_client, "secure_cookies")["source"] != "db"
+
+    def test_put_invalid_boolean_value_rejected(self, test_client) -> None:
+        """The shared validator covers the PUT path too."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"secure_cookies": "not-a-bool"}},
+        )
+        assert response.status_code == 400
+        assert "secure_cookies" in response.json()["detail"]
+
+    def test_import_sidecar_host_stored_stripped(self, test_client) -> None:
+        """The validated (stripped) host is what gets stored — padding would
+        pass through the env bridge to pi-config's listen host on restart.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"sidecar_host": " 127.0.0.1 "}},
+        )
+        assert response.status_code == 200
+        assert _settings_item(test_client, "sidecar_host")["value"] == "127.0.0.1"
+
+    @pytest.mark.parametrize("empty_value", [None, ""])
+    def test_import_unknown_key_with_empty_value(
+        self, test_client, empty_value
+    ) -> None:
+        """Unknown keys with empty values return the collected 422, not a
+        KeyError-turned-500 from _empty_override_error.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"bogus": empty_value}},
+        )
+        assert response.status_code == 422
+        assert "Unknown settings" in response.json()["detail"]
+
+    def test_export_sanitizes_embedded_credentials_by_default(
+        self, test_client
+    ) -> None:
+        """Default exports strip repo tokens and URL userinfo — credentials
+        leave only with the include_sensitive opt-in.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "additional_repos": (
+                        "main:https://user:pass@github.com/org/repo@secret-token"  # pragma: allowlist secret
+                    ),
+                    "tests_repo_url": "https://user:pass@github.com/org/tests",  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["additional_repos"] == "main:https://github.com/org/repo"
+        assert doc["settings"]["tests_repo_url"] == "https://github.com/org/tests"
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert (
+            doc["settings"]["additional_repos"]
+            == (
+                "main:https://user:pass@github.com/org/repo@secret-token"  # pragma: allowlist secret
+            )
+        )
+        assert doc["settings"]["tests_repo_url"] == (
+            "https://user:pass@github.com/org/tests"  # pragma: allowlist secret
+        )
+
+    def test_import_diff_masks_embedded_credentials(self, test_client) -> None:
+        """Credential substrings in non-sensitive values are masked in the
+        import diff display.
+        """
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "additional_repos": "main:https://github.com/org/repo@secret-token",  # pragma: allowlist secret
+                    "tests_repo_url": "https://user:pass@github.com/org/tests",  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert (
+            applied["additional_repos"]["to"] == "main:https://github.com/org/repo@***"
+        )
+        assert applied["tests_repo_url"]["to"] == "https://***@github.com/org/tests"
+        assert "secret-token" not in response.text
+        assert "user:pass" not in response.text
+
+    def test_export_includes_empty_sensitive_override(self, test_client) -> None:
+        """An explicit empty sensitive override (which deliberately beats the
+        env value) round-trips through a sensitive export as "".
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"github_token": ""}},
+        )
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["github_token"] == ""
+
+    def test_export_skips_malformed_additional_repos(self, test_client) -> None:
+        """An unparseable additional_repos value never ships in a default
+        export — its credentials could sit anywhere a parser cannot find
+        (#361 Qodo r2: fail closed, skip).
+        """
+        raw = (
+            "main:https://github.com/org/repo@secret-token,"  # pragma: allowlist secret
+            "other:https://user:pass@github.com/org/other,"  # trailing comma: unparseable  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"additional_repos": raw}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert "additional_repos" not in doc["settings"]
+        assert "secret-token" not in json.dumps(doc)
+        assert "user:pass" not in json.dumps(doc)
+        # The secrets opt-in still exports the raw value verbatim
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["additional_repos"] == raw
+
+    def test_import_diff_masks_malformed_additional_repos(self, test_client) -> None:
+        """Malformed additional_repos values are masked whole in the import
+        diff — on both the from and to side (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "additional_repos": (
+                        "main:https://user:pass@github.com/org/repo,"  # trailing comma  # pragma: allowlist secret
+                    )
+                }
+            },
+        )
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "additional_repos": (
+                        "other:https://github.com/org/other@secret-token"  # trailing comma makes it malformed too  # pragma: allowlist secret
+                        ","
+                    )
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert applied["additional_repos"] == {"from": "***", "to": "***"}
+        assert "secret-token" not in response.text
+        assert "user:pass" not in response.text
+
+    def test_export_strips_git_url_userinfo(self, test_client) -> None:
+        """git:// is a supported clone scheme — its URL userinfo is a
+        credential and must not leave a default export (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "git://user:pass@host/repo"  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["tests_repo_url"] == "git://host/repo"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "tests_repo_url": "git://user:pass@other/repo"  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["applied"]["tests_repo_url"]["to"] == (
+            "git://***@other/repo"
+        )
+        assert "user:pass" not in response.text
+
+    def test_export_survives_malformed_stored_url(self, test_client) -> None:
+        """A stored URL urlparse rejects must not raise from export — the
+        sanitizer fails safe and still drops the userinfo (#361 Qodo r2).
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "https://user:pass@[broken"  # pragma: allowlist secret
+                }
+            },
+        )
+        response = test_client.get("/api/admin/settings/export")
+        assert response.status_code == 200
+        doc = response.json()
+        assert doc["settings"]["tests_repo_url"] == "https://[broken"
+        assert "user:pass" not in response.text
+
+        diff = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"tests_repo_url": "https://other/repo"},
+            },
+        ).json()
+        assert diff["applied"]["tests_repo_url"]["from"] == "https://***@[broken"
+        assert "user:pass" not in json.dumps(diff)
+
+    def test_import_default_export_preserves_tokenized_repos(self, test_client) -> None:
+        """Importing a default (sanitized) export must not wipe target repo
+        tokens — a key whose imported value matches the sanitized form of
+        the current value is skipped and reported as unchanged (#361 r2).
+        """
+        tokenized = (
+            "main:https://github.com/org/repo@secret-token"  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"additional_repos": tokenized}},
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["additional_repos"] == "main:https://github.com/org/repo"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": doc["settings"]},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "additional_repos" in data["unchanged"]
+        assert "additional_repos" not in data["applied"]
+        # The token survived — the target's credential-bearing value wins
+        assert _settings_item(test_client, "additional_repos")["value"] == (tokenized)
+
+    def test_export_strips_url_query_tokens_by_default(self, test_client) -> None:
+        """A query or fragment can carry a token (``?token=SECRET``) —
+        default exports strip it from URL settings and additional_repos
+        entries (fail closed); the base URL stays importable and the
+        secrets opt-in keeps the value verbatim.
+        """
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": "https://git.example/repo?token=SECRET#frag",  # pragma: allowlist secret
+                    "additional_repos": "infra:https://git.example/infra?token=SECRET",  # pragma: allowlist secret
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["tests_repo_url"] == "https://git.example/repo"
+        assert doc["settings"]["additional_repos"] == "infra:https://git.example/infra"
+        assert "SECRET" not in json.dumps(doc)
+
+        doc = test_client.get(
+            "/api/admin/settings/export", params={"include_sensitive": "true"}
+        ).json()
+        assert doc["settings"]["tests_repo_url"] == (
+            "https://git.example/repo?token=SECRET#frag"  # pragma: allowlist secret
+        )
+        assert doc["settings"]["additional_repos"] == (
+            "infra:https://git.example/infra?token=SECRET"  # pragma: allowlist secret
+        )
+
+    def test_import_diff_masks_url_query_tokens(self, test_client) -> None:
+        """Query/fragment tokens are masked in the import diff display."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {
+                    "tests_repo_url": "https://git.example/repo?token=SECRET",  # pragma: allowlist secret
+                    "additional_repos": "infra:https://git.example/infra?token=SECRET",  # pragma: allowlist secret
+                },
+            },
+        )
+        assert response.status_code == 200
+        applied = response.json()["applied"]
+        assert applied["tests_repo_url"]["to"] == "https://git.example/repo?***"
+        assert (
+            applied["additional_repos"]["to"] == "infra:https://git.example/infra?***"
+        )
+        assert "SECRET" not in response.text
+
+    def test_import_default_export_preserves_query_tokenized_urls(
+        self, test_client
+    ) -> None:
+        """Importing a default (sanitized) export must not wipe target query
+        tokens — the skip compares against _sanitize_export_value, which now
+        strips queries, so the credential-bearing target value wins.
+        """
+        tokenized_url = (
+            "https://git.example/repo?token=SECRET"  # pragma: allowlist secret
+        )
+        tokenized_repos = (
+            "infra:https://git.example/infra?token=SECRET"  # pragma: allowlist secret
+        )
+        test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "tests_repo_url": tokenized_url,
+                    "additional_repos": tokenized_repos,
+                }
+            },
+        )
+        doc = test_client.get("/api/admin/settings/export").json()
+        assert doc["settings"]["tests_repo_url"] == "https://git.example/repo"
+        assert doc["settings"]["additional_repos"] == "infra:https://git.example/infra"
+
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": doc["settings"]},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "tests_repo_url" in data["unchanged"]
+        assert "additional_repos" in data["unchanged"]
+        assert "tests_repo_url" not in data["applied"]
+        assert "additional_repos" not in data["applied"]
+        # The query tokens survived — the target's credential-bearing values win
+        assert _settings_item(test_client, "tests_repo_url")["value"] == tokenized_url
+        assert (
+            _settings_item(test_client, "additional_repos")["value"] == tokenized_repos
+        )
+
+    def test_put_bad_integer_reports_single_error(self, test_client) -> None:
+        """Each integer violation produces exactly one message — the manual
+        pre-checks duplicated pydantic's (#361 Qodo r2).
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"peer_analysis_max_rounds": "0"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail.count("peer_analysis_max_rounds") == 1
+        assert "must be >= 1" in detail
+
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jenkins_timeout": "abc"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail.count("jenkins_timeout") == 1
+        assert "must be an integer" in detail
+
+    def test_import_bad_integer_reports_single_error(self, test_client) -> None:
+        """Same dedupe guarantee on the import (422) path."""
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={
+                "version": 1,
+                "settings": {"peer_analysis_max_rounds": "0"},
+            },
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail.count("peer_analysis_max_rounds") == 1
+        assert "must be >= 1" in detail
 
 
 class TestIntegrationConnectionEndpoints:

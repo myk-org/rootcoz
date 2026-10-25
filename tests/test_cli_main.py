@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import ClassVar
+from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -5155,6 +5155,228 @@ class TestAdminSettingsCommand:
         parsed = json.loads(result.output)
         assert parsed["reset"] == "jenkins_url"
 
+    def test_admin_settings_export_stdout(self, mock_client):
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "exported_at": "2025-01-01T00:00:00+00:00",
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        result = runner.invoke(app, ["admin", "settings", "export"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["settings"] == {"jenkins_url": "http://jenkins"}
+        mock_client.admin_export_settings.assert_called_once_with(
+            include_sensitive=False
+        )
+
+    def test_admin_settings_export_file_and_sensitive(self, mock_client, tmp_path):
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "exported_at": "2025-01-01T00:00:00+00:00",
+            "settings": {"github_token": "gh-secret"},  # pragma: allowlist secret
+            "warning": "This export contains decrypted secrets in plaintext.",
+        }
+        out = tmp_path / "settings.json"
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "settings",
+                "export",
+                "--include-sensitive",
+                "--output",
+                str(out),
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Exported 1 settings" in result.output
+        assert "secrets" in result.output
+        mock_client.admin_export_settings.assert_called_once_with(
+            include_sensitive=True
+        )
+        written = json.loads(out.read_text())
+        assert written["settings"] == {"github_token": "gh-secret"}
+        # The file can hold decrypted secrets — it must be owner-only
+        assert out.stat().st_mode & 0o777 == 0o600
+
+    def test_admin_settings_export_unwritable_output(self, mock_client, tmp_path):
+        """Filesystem errors surface as a controlled CLI error, not a traceback."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {},
+        }
+        out = tmp_path / "missing-dir" / "settings.json"
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        assert not out.exists()
+
+    def test_admin_settings_export_refuses_symlink_output(self, mock_client, tmp_path):
+        """A symlink output is refused — following it would chmod whatever the
+        link points at (#361 Qodo r2)."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {},
+        }
+        target = tmp_path / "group-readable.json"
+        target.write_text("keep")
+        target.chmod(0o640)
+        link = tmp_path / "link.json"
+        link.symlink_to(target)
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(link)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        # The symlink target keeps its content and its group-read mode
+        assert target.read_text() == "keep"
+        assert target.stat().st_mode & 0o777 == 0o640
+
+    def test_admin_settings_export_replaces_existing_file(self, mock_client, tmp_path):
+        """Exporting over an existing file replaces it atomically (0600, no
+        leftovers) instead of truncating it in place."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        out = tmp_path / "settings.json"
+        out.write_text('{"old": true}')
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 0
+        assert json.loads(out.read_text())["settings"] == {
+            "jenkins_url": "http://jenkins"
+        }
+        assert out.stat().st_mode & 0o777 == 0o600
+        # No temp file survives a successful export
+        assert list(tmp_path.iterdir()) == [out]
+
+    def test_admin_settings_export_mid_write_failure_preserves_existing(
+        self, mock_client, tmp_path, monkeypatch
+    ):
+        """A failed write leaves the pre-existing export byte-identical and
+        cleans up the temp file (PR #362 Qodo finding)."""
+        mock_client.admin_export_settings.return_value = {
+            "version": 1,
+            "settings": {"jenkins_url": "http://jenkins"},
+        }
+        out = tmp_path / "settings.json"
+        out.write_text('{"original": true}')
+        original_bytes = out.read_bytes()
+
+        class _FailingFile:
+            def __init__(self, fd: int) -> None:
+                self._fd = fd
+
+            def write(self, data: str) -> int:
+                raise OSError(28, "No space left on device")
+
+            def __enter__(self) -> Self:
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                os.close(self._fd)
+
+        monkeypatch.setattr(
+            "rootcoz.cli.main.os.fdopen", lambda fd, *a, **kw: _FailingFile(fd)
+        )
+        result = runner.invoke(
+            app, ["admin", "settings", "export", "--output", str(out)]
+        )
+        assert result.exit_code == 1
+        assert "Error writing" in result.output
+        assert out.read_bytes() == original_bytes
+        # No temp file survives a failed export
+        assert list(tmp_path.iterdir()) == [out]
+
+    def test_admin_settings_import(self, mock_client, tmp_path):
+        mock_client.admin_import_settings.return_value = {
+            "applied": {"jenkins_url": {"from": "http://old", "to": "http://new"}},
+            "unchanged": ["ai_call_timeout"],
+            "restart_required": ["log_level"],
+        }
+        doc = tmp_path / "export.json"
+        doc.write_text(
+            json.dumps({"version": 1, "settings": {"jenkins_url": "http://new"}})
+        )
+        result = runner.invoke(
+            app, ["admin", "settings", "import", "--input", str(doc)]
+        )
+        assert result.exit_code == 0
+        assert "http://old" in result.output
+        assert "1 setting(s) applied, 1 unchanged" in result.output
+        assert "Restart required for: log_level" in result.output
+        mock_client.admin_import_settings.assert_called_once_with(
+            {"version": 1, "settings": {"jenkins_url": "http://new"}},
+            dry_run=False,
+        )
+
+    def test_admin_settings_import_dry_run(self, mock_client, tmp_path):
+        mock_client.admin_import_settings.return_value = {
+            "applied": {"jenkins_url": {"from": None, "to": "http://new"}},
+            "unchanged": [],
+            "restart_required": [],
+            "dry_run": True,
+        }
+        doc = tmp_path / "export.json"
+        doc.write_text(json.dumps({"version": 1, "settings": {}}))
+        result = runner.invoke(
+            app,
+            ["admin", "settings", "import", "--input", str(doc), "--dry-run"],
+        )
+        assert result.exit_code == 0
+        assert "would be applied" in result.output
+        mock_client.admin_import_settings.assert_called_once_with(
+            {"version": 1, "settings": {}}, dry_run=True
+        )
+
+    def test_admin_settings_import_missing_file(self, mock_client, tmp_path):
+        result = runner.invoke(
+            app,
+            ["admin", "settings", "import", "--input", str(tmp_path / "nope.json")],
+        )
+        assert result.exit_code == 1
+        assert "Error reading" in result.output
+
+    def test_admin_settings_import_invalid_utf8(self, mock_client, tmp_path):
+        """Invalid encoding surfaces as a controlled CLI error (a
+        UnicodeDecodeError is a ValueError, not an OSError)."""
+        doc = tmp_path / "export.json"
+        doc.write_bytes(b"\xff\xfe not utf-8")
+        result = runner.invoke(
+            app,
+            ["admin", "settings", "import", "--input", str(doc)],
+        )
+        assert result.exit_code == 1
+        assert "Error reading" in result.output
+        mock_client.admin_import_settings.assert_not_called()
+
+    @pytest.mark.parametrize("content", ["[]", "null", '"a string"'])
+    def test_admin_settings_import_non_object_document(
+        self, mock_client, tmp_path, content
+    ):
+        """A non-object document is a controlled CLI error, not a crash in
+        the client's mapping expansion."""
+        doc = tmp_path / "export.json"
+        doc.write_text(content)
+
+        def handler(request):
+            raise AssertionError("request must not be sent")
+
+        # A real client (mock transport): the mocked admin_import_settings
+        # would happily accept a list — the guard lives in the client.
+        real_client = make_test_client(handler)
+        with patch("rootcoz.cli.main._get_client", return_value=real_client):
+            result = runner.invoke(
+                app,
+                ["admin", "settings", "import", "--input", str(doc)],
+            )
+        assert result.exit_code == 1
+        assert "JSON object" in result.output
+
     def test_admin_settings_test(self, mock_client):
         mock_client.test_integration.return_value = {
             "ok": True,
@@ -6862,20 +7084,31 @@ class TestAdminServerProvidersCommands:
                     "provider": "google",
                     "has_key": True,
                     "verified": True,
+                    "key_scoped": True,
+                    "key_scoped_status": "supported",
                     "models": [
                         {"id": "gemini-2.5-pro", "included": True, "free": True},
                         {"id": "gemini-2.5-flash", "included": False, "free": False},
                     ],
                 },
-                {"provider": "openai", "has_key": False, "verified": False},
+                {
+                    "provider": "openai",
+                    "has_key": False,
+                    "verified": False,
+                    "key_scoped": False,
+                },
             ]
         }
         result = runner.invoke(app, ["admin", "server-providers", "list"])
         assert result.exit_code == 0
-        assert "google: key=yes verified=yes models=2 included=1 free=1" in (
-            result.output
+        assert (
+            "google: key=yes verified=yes key-scoped=yes key-scoped-status=supported"
+            " models=2 included=1 free=1" in result.output
         )
-        assert "openai: key=no verified=no models=0 included=0 free=0" in result.output
+        assert (
+            "openai: key=no verified=no key-scoped=no key-scoped-status=-"
+            " models=0 included=0 free=0" in result.output
+        )
         mock_client.admin_list_server_providers.assert_called_once()
 
     def test_server_providers_list_json(self, mock_client):
@@ -7019,6 +7252,57 @@ class TestAdminServerProvidersCommands:
             "google",
             "g-key-3",
             "gemini-2.5-pro",  # pragma: allowlist secret
+        )
+
+    def test_server_providers_refresh_models(self, mock_client):
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "supported",
+            "model_count": 22,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "EnMaaS"],
+        )
+        assert result.exit_code == 0
+        assert "Refreshed key-scoped models for EnMaaS: 22 model(s)" in result.output
+        mock_client.admin_refresh_server_provider_models.assert_called_once_with(
+            "EnMaaS"
+        )
+
+    def test_server_providers_refresh_models_unavailable(self, mock_client):
+        """An unavailable listing reports the kept snapshot, not a failure."""
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "unavailable",
+            "model_count": 0,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "google"],
+        )
+        assert result.exit_code == 0
+        assert (
+            "Key-scoped model listing unavailable for google;"
+            " the previous captured listing is still in use"
+            " (static catalog when none exists)" in result.output
+        )
+
+    def test_server_providers_refresh_models_superseded(self, mock_client):
+        """A superseded refresh reports the concurrent change, not fallback."""
+        mock_client.admin_refresh_server_provider_models.return_value = {
+            "ok": True,
+            "status": "superseded",
+            "model_count": 0,
+        }
+        result = runner.invoke(
+            app,
+            ["admin", "server-providers", "refresh-models", "--provider", "google"],
+        )
+        assert result.exit_code == 0
+        assert (
+            "Key-scoped model listing superseded for google;"
+            " a concurrent credential change owns the stored listing" in result.output
         )
 
     def test_server_providers_rotate_key_prompts_hidden_when_flag_omitted(
@@ -7170,3 +7454,138 @@ class TestAdminServerProvidersCommands:
         )
         assert result.exit_code == 1
         assert "not configured" in result.output
+
+
+class TestConfigFilterPresets:
+    """Tests for 'rootcoz config filter-presets' commands (#179)."""
+
+    _PRESET: ClassVar[dict] = {
+        "id": 3,
+        "name": "Storage unreviewed",
+        "page": "dashboard",
+        "scope": "user",
+        "filters": {"team": ["storage"], "review_status": "unreviewed"},
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+    }
+
+    def test_list_human(self, mock_client):
+        mock_client.list_filter_presets.return_value = [self._PRESET]
+        result = runner.invoke(app, ["config", "filter-presets", "list"])
+        assert result.exit_code == 0
+        assert "Storage unreviewed" in result.output
+        mock_client.list_filter_presets.assert_called_once_with("dashboard")
+
+    def test_list_reports_page(self, mock_client):
+        mock_client.list_filter_presets.return_value = []
+        result = runner.invoke(
+            app, ["config", "filter-presets", "list", "--page", "reports"]
+        )
+        assert result.exit_code == 0
+        mock_client.list_filter_presets.assert_called_once_with("reports")
+
+    def test_list_invalid_page(self, mock_client):
+        result = runner.invoke(
+            app, ["config", "filter-presets", "list", "--page", "bogus"]
+        )
+        assert result.exit_code == 1
+        assert "dashboard" in result.output
+
+    def test_list_json(self, mock_client):
+        mock_client.list_filter_presets.return_value = [self._PRESET]
+        result = runner.invoke(app, ["config", "filter-presets", "list", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed[0]["name"] == "Storage unreviewed"
+
+    def test_add(self, mock_client):
+        mock_client.create_filter_preset.return_value = self._PRESET
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "filter-presets",
+                "add",
+                "Storage unreviewed",
+                '{"team": ["storage"]}',
+                "--scope",
+                "server",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.create_filter_preset.assert_called_once_with(
+            "Storage unreviewed", "dashboard", {"team": ["storage"]}, "server"
+        )
+
+    def test_add_invalid_json(self, mock_client):
+        result = runner.invoke(
+            app, ["config", "filter-presets", "add", "X", "{not json}"]
+        )
+        assert result.exit_code == 1
+        assert "Invalid JSON" in result.output
+
+    def test_add_invalid_scope(self, mock_client):
+        result = runner.invoke(
+            app,
+            ["config", "filter-presets", "add", "X", "{}", "--scope", "bogus"],
+        )
+        assert result.exit_code == 1
+        assert "Scope" in result.output
+
+    def test_update_rename(self, mock_client):
+        mock_client.update_filter_preset.return_value = {
+            **self._PRESET,
+            "name": "Renamed",
+        }
+        result = runner.invoke(
+            app, ["config", "filter-presets", "update", "3", "--name", "Renamed"]
+        )
+        assert result.exit_code == 0
+        mock_client.update_filter_preset.assert_called_once_with(3, "Renamed", None)
+
+    def test_update_filters(self, mock_client):
+        mock_client.update_filter_preset.return_value = self._PRESET
+        result = runner.invoke(
+            app,
+            [
+                "config",
+                "filter-presets",
+                "update",
+                "3",
+                "--filters",
+                '{"tier": ["2"]}',
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.update_filter_preset.assert_called_once_with(
+            3, None, {"tier": ["2"]}
+        )
+
+    def test_update_nothing(self, mock_client):
+        result = runner.invoke(app, ["config", "filter-presets", "update", "3"])
+        assert result.exit_code == 1
+        assert "Nothing to update" in result.output
+
+    def test_delete(self, mock_client):
+        mock_client.delete_filter_preset.return_value = None
+        result = runner.invoke(app, ["config", "filter-presets", "delete", "3"])
+        assert result.exit_code == 0
+        assert "deleted" in result.output
+        mock_client.delete_filter_preset.assert_called_once_with(3)
+
+    def test_delete_json_output(self, mock_client):
+        mock_client.delete_filter_preset.return_value = None
+        result = runner.invoke(
+            app, ["config", "filter-presets", "delete", "3", "--json"]
+        )
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed == {"deleted": 3}
+        mock_client.delete_filter_preset.assert_called_once_with(3)
+
+    def test_delete_error(self, mock_client):
+        mock_client.delete_filter_preset.side_effect = RootCozError(
+            status_code=404, detail="Preset not found"
+        )
+        result = runner.invoke(app, ["config", "filter-presets", "delete", "3"])
+        assert result.exit_code == 1

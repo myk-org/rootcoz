@@ -66,6 +66,10 @@ Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin
 | `rootcoz config servers` | List servers; supports `--json`. |
 | `rootcoz config completion [bash\|zsh]` | Print the rc-file snippet that wires up completion. |
 | `rootcoz config defaults` | Server-side analysis defaults (non-sensitive). Requires a server. |
+| `rootcoz config filter-presets list [--page dashboard\|reports]` | Saved filter presets (yours + server) for a page; supports `--json`. Requires a server. |
+| `rootcoz config filter-presets add NAME FILTERS_JSON [--page ...] [--scope user\|server]` | Save a preset from a JSON filter object, e.g. `'{"team": ["storage"]}'`. `--scope server` (operator+) shares it with every user. Requires a server. |
+| `rootcoz config filter-presets update ID [--name NAME] [--filters FILTERS_JSON]` | Rename a preset and/or replace its filters. Requires a server. |
+| `rootcoz config filter-presets delete ID` | Delete a preset you own (personal) or any server preset (operator+). Requires a server. |
 
 Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. See [Configuration Reference](configuration-reference.html) for the full list.
 
@@ -188,7 +192,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
 | `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
-| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`. |
+| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 
 12. **Push to exporters.**
@@ -254,13 +258,16 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `settings set KEY VALUE` | — | Persist a server setting. |
 | `settings history` | `--key`/`-k`, `--limit`/`-l` (50) | Change log. |
 | `settings reset KEY` | — | Drop the DB override and fall back to env or default. |
+| `settings export` | `--include-sensitive`, `--output`/`-o` | Write the DB-stored settings to a JSON document (stdout without `--output`). Secrets are excluded unless `--include-sensitive`; without it, embedded credentials (repo `@token`s, URL userinfo) are stripped from the export. An `--output` file is written with owner-only `0600` permissions. |
+| `settings import` | `--input`/`-i` (required), `--dry-run` | Apply an export document. Validated and atomic (single transaction); prints a per-setting diff with credentials masked. `--dry-run` validates and shows the diff without applying. |
 | `models refresh` | — | Re-read the model list from the sidecar. |
 | `models free-list` | — | List admin-declared free provider+model pairs. |
 | `models free-add` | `--provider`, `--model` | Declare one provider+model pair as free (validated against the catalog). |
 | `models free-remove` | `--provider`, `--model` | Remove one pair from the free list. |
-| `server-providers list` | — | Server provider key state and per-model selection. |
-| `server-providers add` | `--provider`, `--api-key`, `--verification-model` | Add a server provider key (verified with a real sidecar turn before storing). |
-| `server-providers rotate-key` | `--provider`, `--api-key`, `--verification-model` | Replace a key (re-verified first). |
+| `server-providers list` | — | Server provider key state, key-scoped flag, and per-model selection. |
+| `server-providers add` | `--provider`, `--api-key`, `--verification-model` | Add a server provider key (verified with a real sidecar turn before storing; the key-scoped model listing is captured). |
+| `server-providers rotate-key` | `--provider`, `--api-key`, `--verification-model` | Replace a key (re-verified first; the key-scoped listing is re-captured). |
+| `server-providers refresh-models` | `--provider` | Re-run key-scoped discovery with the stored key — picks up permission drift without re-entering the key. |
 | `server-providers models` | `--provider`, `--models`, `--free` | Set the provider's exposed models; comma-separated ids passed verbatim (real ids may end in `:free`). `--free` lists the free subset (free implies included; entries not in `--models` are auto-included). Models not listed are deselected. |
 | `server-providers remove` | `--provider` | Remove the key, selection, and free pairs. |
 

@@ -241,7 +241,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
                         aria-label="Delete comment"
                         onClick={() => setDeleteTarget(c.id)}
                         disabled={deletingIds.has(c.id)}
-                        className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal-blue disabled:opacity-50"
+                        className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent disabled:opacity-50"
                       >
                         <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
                       </button>

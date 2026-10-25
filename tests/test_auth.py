@@ -599,6 +599,18 @@ class TestUserTokens:
         assert data["jira_sa_token"] == ""
         assert data["jira_token"] == "jira_tok"
 
+    def test_save_atst_sa_token(self, client):
+        """An ATST-prefixed scoped token is a valid SA token value."""
+        cookies = _register_user(client, "atstuser")
+        resp = client.put(
+            "/api/user/tokens",
+            json={"jira_sa_token": "ATST-user-token"},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200
+        resp = client.get("/api/user/tokens", cookies=cookies)
+        assert resp.json()["jira_sa_token"] == "ATST-user-token"
+
     def test_get_tokens_no_user(self, client):
         resp = client.get("/api/user/tokens")
         assert resp.status_code == 401

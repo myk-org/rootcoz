@@ -1,9 +1,12 @@
 """rootcoz -- CLI tool for the rootcoz REST API."""
 
 import csv
+import errno
 import json as json_mod
 import logging
+import os
 import sys
+import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,6 +45,10 @@ classifications_app = typer.Typer(
     help="List test classifications.", no_args_is_help=True
 )
 config_app = typer.Typer(help="Manage rootcoz configuration.")
+filter_presets_app = typer.Typer(
+    help="Manage saved filter presets (personal and server).",
+    no_args_is_help=True,
+)
 auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
 ai_keys_app = typer.Typer(help="Manage your AI provider keys.", no_args_is_help=True)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
@@ -71,6 +78,7 @@ app.add_typer(failure_app, name="failure")
 app.add_typer(chat_app, name="chat")
 app.add_typer(reports_app, name="reports")
 app.add_typer(config_app, name="config")
+config_app.add_typer(filter_presets_app, name="filter-presets")
 app.add_typer(auth_app, name="auth")
 auth_app.add_typer(ai_keys_app, name="ai-keys")
 app.add_typer(admin_app, name="admin")
@@ -87,8 +95,17 @@ _state: dict[str, Any] = {}
 # both globally (before the subcommand) and per-command (after it).
 _JSON_OPTION = typer.Option(False, "--json", help="Output as JSON instead of table.")
 
+# Settings export/import options (#361) — module-level singletons so ruff's
+# B008 accepts them as argument defaults (None/... defaults get flagged).
+_EXPORT_OUTPUT_OPTION = typer.Option(
+    None, "--output", "-o", help="Write the JSON document to a file instead of stdout."
+)
+_IMPORT_INPUT_OPTION = typer.Option(
+    ..., "--input", "-i", help="Settings export JSON file to import."
+)
+
 # Config subcommands that require a server connection (all others are local-only).
-_SERVER_CONFIG_SUBCOMMANDS = frozenset({"defaults"})
+_SERVER_CONFIG_SUBCOMMANDS = frozenset({"defaults", "filter-presets"})
 
 
 def _split_csv(value: str) -> list[str]:
@@ -3537,6 +3554,96 @@ def admin_settings_persist(
         typer.echo(f"Persisted to DB: {key}")
 
 
+@admin_settings_app.command("export")
+def admin_settings_export(
+    include_sensitive: bool = typer.Option(
+        False,
+        "--include-sensitive",
+        help="Include decrypted sensitive settings (the file will contain secrets).",
+    ),
+    output: Path = _EXPORT_OUTPUT_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Export DB-stored server settings to a JSON document."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_export_settings(include_sensitive=include_sensitive),
+        emit_output=False,
+        quiet=bool(output),
+    )
+    if output:
+        payload = json_mod.dumps(data, indent=2) + "\n"
+        try:
+            # 0600: the file can hold decrypted secrets (--include-sensitive)
+            # and must not be readable by other local users. The temp file is
+            # created 0600 by mkstemp and os.replace carries that mode onto
+            # the destination, so a pre-existing group-readable file is
+            # tightened too.
+            # A symlink output is refused up front — following it would write
+            # through the link (#361 Qodo r2); os.replace itself never follows
+            # symlinks either.
+            if output.is_symlink():
+                raise OSError(errno.ELOOP, "output is a symlink", str(output))
+            # Atomic write: a failed write must leave an existing export
+            # untouched, not truncated (PR #362 Qodo finding).
+            fd, tmp_name = tempfile.mkstemp(
+                dir=output.parent, prefix=f"{output.name}.", suffix=".tmp"
+            )
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(payload)
+                os.replace(tmp_path, output)
+            except BaseException:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        except OSError as exc:
+            typer.echo(f"Error writing {output}: {exc}", err=True)
+            raise typer.Exit(1)
+        if not _state.get("json", False):
+            typer.echo(f"Exported {len(data.get('settings', {}))} settings to {output}")
+            if data.get("warning"):
+                typer.echo(f"Warning: {data['warning']}")
+    elif not _state.get("json", False):
+        typer.echo(json_mod.dumps(data, indent=2))
+
+
+@admin_settings_app.command("import")
+def admin_settings_import(
+    input: Path = _IMPORT_INPUT_OPTION,
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate and show the diff without applying anything.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Import a settings export document (validated, atomic, with a diff)."""
+    try:
+        document = json_mod.loads(input.read_text())
+    except (OSError, UnicodeDecodeError, json_mod.JSONDecodeError) as exc:
+        typer.echo(f"Error reading {input}: {exc}", err=True)
+        raise typer.Exit(1)
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_import_settings(document, dry_run=dry_run),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        applied = data.get("applied", {})
+        unchanged = data.get("unchanged", [])
+        for key, diff in sorted(applied.items()):
+            typer.echo(f"  {key}: {diff.get('from')!r} -> {diff.get('to')!r}")
+        typer.echo(
+            f"{len(applied)} setting(s) "
+            f"{'would be ' if dry_run else ''}applied, {len(unchanged)} unchanged"
+        )
+        if data.get("restart_required"):
+            typer.echo(f"Restart required for: {', '.join(data['restart_required'])}")
+        for warning in data.get("warnings", []):
+            typer.echo(f"Warning: {warning}")
+
+
 @admin_settings_app.command("test")
 def admin_settings_test(
     integration: str = typer.Argument(
@@ -3706,6 +3813,9 @@ def admin_server_providers_list(json_output: bool = _JSON_OPTION) -> None:
         typer.echo(
             f"{provider['provider']}: key={'yes' if provider.get('has_key') else 'no'}"
             f" verified={'yes' if provider.get('verified') else 'no'}"
+            f" key-scoped={'yes' if provider.get('key_scoped') else 'no'}"
+            # Older servers lack the field; '-' keeps the line parseable.
+            f" key-scoped-status={provider.get('key_scoped_status') or '-'}"
             f" models={len(models)} included={len(included)} free={len(free)}"
         )
 
@@ -3779,6 +3889,45 @@ def admin_server_providers_rotate(
             f"Key NOT rotated ({data.get('outcome')}): {data.get('message', '')}"
         )
     raise typer.Exit(code=1)
+
+
+@admin_server_providers_app.command("refresh-models")
+def admin_server_providers_refresh_models(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Re-run key-scoped model discovery with the stored key (#350)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_refresh_server_provider_models(provider),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        status = data.get("status")
+        if status == "supported":
+            typer.echo(
+                f"Refreshed key-scoped models for {provider}:"
+                f" {data.get('model_count', 0)} model(s)"
+            )
+        elif status == "unavailable":
+            # A failed refresh keeps the last captured listing (#350 r3) —
+            # the notice must not imply a static-catalog fallback when a
+            # snapshot is still in use.
+            typer.echo(
+                f"Key-scoped model listing unavailable for {provider};"
+                " the previous captured listing is still in use"
+                " (static catalog when none exists)"
+            )
+        elif status == "superseded":
+            typer.echo(
+                f"Key-scoped model listing superseded for {provider};"
+                " a concurrent credential change owns the stored listing"
+            )
+        else:
+            typer.echo(
+                f"Key-scoped model listing {status} for {provider};"
+                " selection falls back to the static catalog"
+            )
 
 
 @admin_server_providers_app.command("models")
@@ -5004,3 +5153,111 @@ def config_defaults(
                         typer.echo(f"    - {item}")
         else:
             typer.echo(f"  {key}: {value}")
+
+
+# ─── Filter presets (config filter-presets) ─────────────────────────
+
+
+@filter_presets_app.command("list")
+def filter_presets_list(
+    page: str = typer.Option(
+        "dashboard", "--page", help="Preset page: dashboard or reports."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List saved filter presets (yours + server) for a page."""
+    if page not in ("dashboard", "reports"):
+        typer.echo("Page must be 'dashboard' or 'reports'.")
+        raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.list_filter_presets(page),
+        columns=["id", "name", "scope", "page", "created_at"],
+        labels={"created_at": "CREATED"},
+    )
+
+
+@filter_presets_app.command("add")
+def filter_presets_add(
+    name: str = typer.Argument(..., help="Preset name (unique per page)."),
+    page: str = typer.Option(
+        "dashboard", "--page", help="Preset page: dashboard or reports."
+    ),
+    scope: str = typer.Option(
+        "user", "--scope", help="Preset scope: user (personal) or server (operator+)."
+    ),
+    filters_json: str = typer.Argument(
+        ..., help='Filters as JSON, e.g. \'{"team": ["storage"], "tier": ["2"]}\''
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Save a filter preset from a JSON filter object."""
+    if page not in ("dashboard", "reports"):
+        typer.echo("Page must be 'dashboard' or 'reports'.")
+        raise typer.Exit(1)
+    if scope not in ("user", "server"):
+        typer.echo("Scope must be 'user' or 'server'.")
+        raise typer.Exit(1)
+    try:
+        filters = json_mod.loads(filters_json)
+    except ValueError as exc:
+        typer.echo(f"Invalid JSON filters: {exc}")
+        raise typer.Exit(1) from exc
+    if not isinstance(filters, dict):
+        typer.echo("Filters must be a JSON object of key to string or list of strings.")
+        raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.create_filter_preset(name, page, filters, scope),
+        columns=["id", "name", "scope", "page"],
+    )
+
+
+@filter_presets_app.command("update")
+def filter_presets_update(
+    preset_id: int = typer.Argument(..., help="Preset ID."),
+    name: str = typer.Option(None, "--name", help="New preset name."),
+    filters_json: str = typer.Option(
+        None, "--filters", help="Replacement filters as JSON object."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Rename a preset and/or replace its filters."""
+    filters = None
+    if filters_json is not None:
+        try:
+            filters = json_mod.loads(filters_json)
+        except ValueError as exc:
+            typer.echo(f"Invalid JSON filters: {exc}")
+            raise typer.Exit(1) from exc
+        if not isinstance(filters, dict):
+            typer.echo(
+                "Filters must be a JSON object of key to string or list of strings."
+            )
+            raise typer.Exit(1)
+    if name is None and filters is None:
+        typer.echo("Nothing to update — pass --name and/or --filters.")
+        raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.update_filter_preset(preset_id, name, filters),
+        columns=["id", "name", "scope", "page"],
+    )
+
+
+@filter_presets_app.command("delete")
+def filter_presets_delete(
+    preset_id: int = typer.Argument(..., help="Preset ID."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Delete a preset you own (personal) or any server preset (operator+)."""
+    _set_json(json_output)
+    _run_client_command(
+        False,
+        lambda c: c.delete_filter_preset(preset_id),
+        quiet=True,
+    )
+    if _state.get("json", False):
+        print_output({"deleted": preset_id}, columns=[], as_json=True)
+    else:
+        typer.echo(f"Preset {preset_id} deleted.")

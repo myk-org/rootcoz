@@ -39,6 +39,7 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "jira_token",
         "jira_sa_token",
         "jira_oauth_client_secret",
+        "jira_atst_token",
         # Pre-rename key: request_params stored before the
         # jira_oauth_access_token → jira_oauth_client_secret rename still
         # carry secrets under the old name and must stay encrypted/stripped.

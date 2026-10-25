@@ -422,13 +422,13 @@
 <td>PUT</td>
 <td><code>/api/user/tokens</code></td>
 <td>reviewer</td>
-<td>Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, <code>""</code> or <code>null</code> clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are <code>github_token</code>, <code>jira_email</code>, <code>jira_token</code>, and <code>jira_sa_token</code> (an ATOA-prefixed Atlassian OAuth 2.0 credential client secret, which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns <code>saved: false</code>; anything other than a string or <code>null</code> is rejected with <code>400</code></td>
+<td>Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, <code>""</code> or <code>null</code> clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are <code>github_token</code>, <code>jira_email</code>, <code>jira_token</code>, and <code>jira_sa_token</code> (an Atlassian service-account credential — an ATOA-prefixed OAuth 2.0 client secret or an ATST-prefixed scoped token — which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns <code>saved: false</code>; anything other than a string or <code>null</code> is rejected with <code>400</code></td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/api/validate-token</code></td>
 <td>viewer</td>
-<td>Validate a GitHub or Jira token before saving. Jira tokens are validated against the selected method's server URL (<code>jira_cloud_url</code> with an email, <code>jira_server_url</code> without); an ATOA-prefixed value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side and the server must have <code>atlassian_oauth_client_id</code> configured</td>
+<td>Validate a GitHub or Jira token before saving. Jira tokens are validated against the selected method's server URL (<code>jira_cloud_url</code> with an email, <code>jira_server_url</code> without); an ATOA-prefixed value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side and the server must have <code>atlassian_oauth_client_id</code> configured; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange</td>
 </tr>
 <tr>
 <td>POST</td>
@@ -441,6 +441,30 @@
 <td><code>/api/jira-security-levels</code></td>
 <td>viewer</td>
 <td>List Jira security levels for a project</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/user/filter-presets?page={dashboard\|reports}</code></td>
+<td>viewer</td>
+<td>Saved filter presets for a page: your personal presets plus every server preset, newest first. Each entry carries <code>id</code>, <code>name</code>, <code>page</code>, <code>scope</code> (<code>user</code> or <code>server</code>), <code>filters</code> (URL query param names as-is; dashboard uses <code>date_from</code>/<code>date_to</code>, reports uses <code>from</code>/<code>to</code>), <code>created_at</code>, <code>updated_at</code></td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/user/filter-presets</code></td>
+<td>viewer</td>
+<td>Save the current filter combination as a named preset. Body is <code>{name, page, scope, filters}</code> — <code>scope</code> defaults to <code>user</code>; <code>scope=server</code> requires operator+ (<code>403</code> below that). Name is 1–100 chars, stripped; <code>filters</code> accepts at most 50 known keys per page (unknown keys → <code>422</code>). <code>409</code> when the name already exists in the same scope+page; <code>422</code> at 20 presets per page per scope</td>
+</tr>
+<tr>
+<td>PUT</td>
+<td><code>/api/user/filter-presets/{preset_id}</code></td>
+<td>viewer</td>
+<td>Rename and/or replace a preset's filters (<code>{name}</code>, <code>{filters}</code>, both optional). Personal presets: only the owner, <code>404</code> otherwise (existence is never leaked). Server presets: operator+ (<code>403</code> below that). <code>409</code> on a name conflict in the same scope+page</td>
+</tr>
+<tr>
+<td>DELETE</td>
+<td><code>/api/user/filter-presets/{preset_id}</code></td>
+<td>viewer</td>
+<td>Delete a preset. Same rules as PUT: own personal preset (<code>404</code> for anyone else's), server preset operator+ (<code>403</code> below that). Returns <code>204</code></td>
 </tr>
 </tbody>
 </table></div>
@@ -546,7 +570,7 @@
 </tr>
 <tr>
 <td><code>atlassian_oauth_cloud_id</code>, <code>jira_site_url</code>, <code>jira_project_key</code>, <code>jira_max_results</code>, <code>enable_jira</code></td>
-<td>Jira search during analysis. Jira credentials and per-method URLs (<code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_client_secret</code>, <code>jira_cloud_url</code>, <code>jira_server_url</code>, and the three <code>jira_*_ssl_verify</code> flags) are <strong>Server Settings only</strong> — analysis requests cannot carry them; the server-selected <code>jira_auth_mode</code> and its credentials always apply</td>
+<td>Jira search during analysis. Jira credentials and per-method URLs (<code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_client_secret</code>, <code>jira_atst_token</code>, <code>jira_cloud_url</code>, <code>jira_server_url</code>, and the three <code>jira_*_ssl_verify</code> flags) are <strong>Server Settings only</strong> — analysis requests cannot carry them; the server-selected <code>jira_auth_mode</code> and its credentials always apply</td>
 </tr>
 <tr>
 <td><code>github_token</code></td>
@@ -1224,17 +1248,22 @@
 <tr>
 <td>GET</td>
 <td><code>/api/admin/server-providers</code></td>
-<td>Per provider: key presence, verification state, and its models with <code>included</code> + <code>free</code> flags — never the keys</td>
+<td>Per provider: key presence, verification state, <code>key_scoped</code> flag, <code>key_scoped_status</code> (last capture outcome: <code>supported</code>/<code>unsupported</code>/<code>unavailable</code>, null when no capture ran), and its models with <code>included</code> + <code>free</code> flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/api/admin/server-providers</code></td>
-<td>Add a server provider key: <code>provider</code>, <code>api_key</code>, <code>verification_model</code> — verified with a real sidecar turn before storing; <code>409</code> when a key is already stored</td>
+<td>Add a server provider key: <code>provider</code>, <code>api_key</code>, <code>verification_model</code> — verified with a real sidecar turn before storing, then the key-scoped model listing is captured; <code>409</code> when a key is already stored</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/api/admin/server-providers/{provider}/rotate-key</code></td>
-<td>Replace the key (re-verified first); <code>404</code> when none is stored</td>
+<td>Replace the key (re-verified first); <code>404</code> when none is stored; the key-scoped listing is re-captured</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/server-providers/{provider}/refresh-models</code></td>
+<td>Re-run key-scoped discovery with the stored key (no re-entry, no LLM call); reports <code>status</code> (<code>supported</code>/<code>unsupported</code>/<code>unavailable</code>) and <code>model_count</code>; <code>404</code> when no key is stored</td>
 </tr>
 <tr>
 <td>PUT</td>

@@ -2062,6 +2062,10 @@ class TestRootCozClientAdminUsers:
                         "warnings": {"selected_models": [], "free_models": []},
                     },
                 )
+            if path.endswith("/refresh-models"):
+                return httpx.Response(
+                    200, json={"ok": True, "status": "supported", "model_count": 2}
+                )
             return httpx.Response(200, json={"outcome": "accepted", "ok": True})
 
         client = _make_client(handler)
@@ -2081,6 +2085,12 @@ class TestRootCozClientAdminUsers:
         )
         assert (
             state["seen"]["POST"][0] == "/api/admin/server-providers/google/rotate-key"
+        )
+        refreshed = client.admin_refresh_server_provider_models("google")
+        assert refreshed == {"ok": True, "status": "supported", "model_count": 2}
+        assert (
+            state["seen"]["POST"][0]
+            == "/api/admin/server-providers/google/refresh-models"
         )
         client.admin_set_server_provider_models(
             "google", [{"id": "gemini-2.5-pro", "included": True, "free": False}]
@@ -2204,6 +2214,62 @@ class TestAdminSettings:
         client = _make_client(handler)
         result = client.admin_persist_setting("jenkins_url")
         assert result == {"key": "jenkins_url", "source": "db"}
+
+    def test_admin_export_settings(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/settings/export"
+            assert "include_sensitive=true" in str(request.url)
+            return httpx.Response(
+                200,
+                json={
+                    "version": 1,
+                    "exported_at": "2025-01-01T00:00:00+00:00",
+                    "settings": {"jenkins_url": "http://jenkins"},
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.admin_export_settings(include_sensitive=True)
+        assert result["settings"] == {"jenkins_url": "http://jenkins"}
+
+    def test_admin_export_settings_default_excludes_sensitive(self):
+        def handler(request):
+            assert "include_sensitive" not in str(request.url)
+            return httpx.Response(200, json={"version": 1, "settings": {}})
+
+        client = _make_client(handler)
+        client.admin_export_settings()
+
+    def test_admin_import_settings(self):
+        document = {"version": 1, "settings": {"jenkins_url": "http://new"}}
+
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/admin/settings/import"
+            body = json.loads(request.content)
+            assert body == {**document, "dry_run": True}
+            return httpx.Response(
+                200,
+                json={
+                    "applied": {"jenkins_url": {"from": None, "to": "http://new"}},
+                    "unchanged": [],
+                    "restart_required": [],
+                    "dry_run": True,
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.admin_import_settings(document, dry_run=True)
+        assert result["dry_run"] is True
+
+    @pytest.mark.parametrize("document", [[], None, "not an object"])
+    def test_admin_import_settings_rejects_non_object(self, document):
+        """Non-object documents fail before the mapping expansion — a
+        controlled client error, never a TypeError."""
+        client = _make_client(lambda request: None)
+        with pytest.raises(RootCozError, match="import document must be a JSON object"):
+            client.admin_import_settings(document)
 
     def test_test_integration(self):
         def handler(request):
@@ -3280,3 +3346,102 @@ class TestRootCozClientTranscripts:
         assert result["update_available"] is True
         # The new #341 releases array passes through without breaking the CLI
         assert result["releases"][0]["version"] == "4.6.1"
+
+
+class TestRootCozClientFilterPresets:
+    """Tests for filter preset client methods (#179)."""
+
+    def test_list_filter_presets(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/user/filter-presets"
+            assert request.url.params["page"] == "dashboard"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 1,
+                        "name": "Storage",
+                        "page": "dashboard",
+                        "scope": "user",
+                        "filters": {"team": ["storage"]},
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-01T00:00:00",
+                    }
+                ],
+            )
+
+        client = _make_client(handler)
+        result = client.list_filter_presets("dashboard")
+        assert result[0]["name"] == "Storage"
+
+    def test_create_filter_preset(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/user/filter-presets"
+            body = json.loads(request.content)
+            assert body == {
+                "name": "My preset",
+                "page": "dashboard",
+                "scope": "server",
+                "filters": {"team": ["storage"]},
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "id": 7,
+                    "name": "My preset",
+                    "page": "dashboard",
+                    "scope": "server",
+                    "filters": {"team": ["storage"]},
+                    "created_at": "2026-01-01T00:00:00",
+                    "updated_at": "2026-01-01T00:00:00",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.create_filter_preset(
+            "My preset", "dashboard", {"team": ["storage"]}, scope="server"
+        )
+        assert result["id"] == 7
+
+    def test_update_filter_preset(self):
+        def handler(request):
+            assert request.method == "PUT"
+            assert request.url.path == "/api/user/filter-presets/7"
+            body = json.loads(request.content)
+            assert body == {"name": "Renamed"}
+            return httpx.Response(
+                200,
+                json={
+                    "id": 7,
+                    "name": "Renamed",
+                    "page": "dashboard",
+                    "scope": "user",
+                    "filters": {},
+                    "created_at": "2026-01-01T00:00:00",
+                    "updated_at": "2026-01-02T00:00:00",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.update_filter_preset(7, name="Renamed")
+        assert result["name"] == "Renamed"
+
+    def test_update_filter_preset_omits_unset_fields(self):
+        def handler(request):
+            body = json.loads(request.content)
+            assert body == {"name": "Renamed"}
+            return httpx.Response(200, json={})
+
+        client = _make_client(handler)
+        client.update_filter_preset(7, name="Renamed")
+
+    def test_delete_filter_preset_204(self):
+        def handler(request):
+            assert request.method == "DELETE"
+            assert request.url.path == "/api/user/filter-presets/7"
+            return httpx.Response(204)
+
+        client = _make_client(handler)
+        assert client.delete_filter_preset(7) is None

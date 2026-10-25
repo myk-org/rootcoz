@@ -390,6 +390,22 @@
 <td><code>rootcoz config defaults</code></td>
 <td>Server-side analysis defaults (non-sensitive). Requires a server.</td>
 </tr>
+<tr>
+<td><code>rootcoz config filter-presets list [--page dashboard\|reports]</code></td>
+<td>Saved filter presets (yours + server) for a page; supports <code>--json</code>. Requires a server.</td>
+</tr>
+<tr>
+<td><code>rootcoz config filter-presets add NAME FILTERS_JSON [--page ...] [--scope user\|server]</code></td>
+<td>Save a preset from a JSON filter object, e.g. <code>'{"team": ["storage"]}'</code>. <code>--scope server</code> (operator+) shares it with every user. Requires a server.</td>
+</tr>
+<tr>
+<td><code>rootcoz config filter-presets update ID [--name NAME] [--filters FILTERS_JSON]</code></td>
+<td>Rename a preset and/or replace its filters. Requires a server.</td>
+</tr>
+<tr>
+<td><code>rootcoz config filter-presets delete ID</code></td>
+<td>Delete a preset you own (personal) or any server preset (operator+). Requires a server.</td>
+</tr>
 </tbody>
 </table></div>
 <p>Config keys are grouped as <code>[default] server = "NAME"</code>, <code>[servers.NAME]</code> entries, and a shared <code>[defaults]</code> table merged into every server. Per-server keys include <code>url</code>, <code>username</code>, <code>api_key</code>, <code>no_verify_ssl</code>, <code>ai_provider</code>, <code>ai_model</code>, <code>jenkins_*</code>, <code>jira_*</code>, <code>github_token</code>, <code>peers</code>, <code>additional_repos</code>, <code>labels</code>, <code>prow_url</code>, and <code>gcs_bucket</code>. See <a href="configuration-reference.html">Configuration Reference</a> for the full list.</p>
@@ -843,7 +859,7 @@
 <tr>
 <td><code>rootcoz validate-token github\|jira</code></td>
 <td><code>--token</code> (hidden prompt), <code>--email</code></td>
-<td>Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's <code>atlassian_oauth_client_id</code>.</td>
+<td>Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's <code>atlassian_oauth_client_id</code>; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange.</td>
 </tr>
 <tr>
 <td><code>rootcoz ai-models</code></td>
@@ -1102,6 +1118,16 @@
 <td>Drop the DB override and fall back to env or default.</td>
 </tr>
 <tr>
+<td><code>settings export</code></td>
+<td><code>--include-sensitive</code>, <code>--output</code>/<code>-o</code></td>
+<td>Write the DB-stored settings to a JSON document (stdout without <code>--output</code>). Secrets are excluded unless <code>--include-sensitive</code>; without it, embedded credentials (repo <code>@token</code>s, URL userinfo) are stripped from the export. An <code>--output</code> file is written with owner-only <code>0600</code> permissions.</td>
+</tr>
+<tr>
+<td><code>settings import</code></td>
+<td><code>--input</code>/<code>-i</code> (required), <code>--dry-run</code></td>
+<td>Apply an export document. Validated and atomic (single transaction); prints a per-setting diff with credentials masked. <code>--dry-run</code> validates and shows the diff without applying.</td>
+</tr>
+<tr>
 <td><code>models refresh</code></td>
 <td>—</td>
 <td>Re-read the model list from the sidecar.</td>
@@ -1124,17 +1150,22 @@
 <tr>
 <td><code>server-providers list</code></td>
 <td>—</td>
-<td>Server provider key state and per-model selection.</td>
+<td>Server provider key state, key-scoped flag, and per-model selection.</td>
 </tr>
 <tr>
 <td><code>server-providers add</code></td>
 <td><code>--provider</code>, <code>--api-key</code>, <code>--verification-model</code></td>
-<td>Add a server provider key (verified with a real sidecar turn before storing).</td>
+<td>Add a server provider key (verified with a real sidecar turn before storing; the key-scoped model listing is captured).</td>
 </tr>
 <tr>
 <td><code>server-providers rotate-key</code></td>
 <td><code>--provider</code>, <code>--api-key</code>, <code>--verification-model</code></td>
-<td>Replace a key (re-verified first).</td>
+<td>Replace a key (re-verified first; the key-scoped listing is re-captured).</td>
+</tr>
+<tr>
+<td><code>server-providers refresh-models</code></td>
+<td><code>--provider</code></td>
+<td>Re-run key-scoped discovery with the stored key — picks up permission drift without re-entering the key.</td>
 </tr>
 <tr>
 <td><code>server-providers models</code></td>

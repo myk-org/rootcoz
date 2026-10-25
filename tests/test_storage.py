@@ -1,6 +1,7 @@
 """Tests for SQLite storage."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2593,6 +2594,56 @@ class TestJiraOauthSecretRenameMigration:
             await storage.init_db()
             new = await storage.get_server_setting("jira_oauth_client_secret")
         assert new is None
+
+
+class TestServerSettingsBatchWrite:
+    """Atomic multi-key server settings writes (settings import, #361)."""
+
+    async def test_batch_write_is_atomic_on_mid_batch_failure(
+        self, setup_test_db: Path
+    ) -> None:
+        """A write that fails mid-batch leaves nothing applied."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_server_settings_batch(
+                {"ai_call_timeout": "25", "log_level": "DEBUG"}, updated_by="admin"
+            )
+            original_connect = storage._connect_db
+
+            @asynccontextmanager
+            async def failing_connect():
+                async with original_connect() as db:
+                    real_execute = db.execute
+
+                    async def execute(sql, parameters=()):
+                        # Fail on the second key's very first statement
+                        if parameters and parameters[0] == "log_level":
+                            raise RuntimeError("boom")
+                        return await real_execute(sql, parameters)
+
+                    db.execute = execute
+                    yield db
+
+            with (
+                patch.object(storage, "_connect_db", failing_connect),
+                pytest.raises(RuntimeError, match="boom"),
+            ):
+                await storage.set_server_settings_batch(
+                    {"jenkins_url": "https://x", "log_level": "INFO"},
+                    updated_by="admin",
+                )
+
+            # Neither key of the failed batch was applied (no commit →
+            # rollback); the earlier successful batch is untouched.
+            settings = await storage.get_server_settings()
+            assert set(settings) == {"ai_call_timeout", "log_level"}
+            assert settings["log_level"]["value"] == "DEBUG"
+
+            async with aiosqlite.connect(setup_test_db) as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM server_settings_history "
+                    "WHERE key IN ('jenkins_url', 'log_level') AND value = 'INFO'"
+                )
+                assert await cursor.fetchone() == (0,)
 
 
 class TestJiraUrlPerMethodSplitMigration:

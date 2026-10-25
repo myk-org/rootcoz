@@ -426,6 +426,12 @@ class TestJiraAuthMode:
                 ["jira_api_token", "jira_cloud_url"],
             ),
             ("pat", {}, ["jira_pat", "jira_server_url"]),
+            ("atst", {}, ["jira_atst_token", "atlassian_oauth_cloud_id"]),
+            (
+                "atst",
+                {"jira_atst_token": SecretStr("ATST-tok")},  # pragma: allowlist secret
+                ["atlassian_oauth_cloud_id"],
+            ),
         ]
         for mode, extra, expected in cases:
             with patch.dict(os.environ, _build_env(), clear=True):
@@ -518,6 +524,23 @@ class TestJiraAuthMode:
         ):
             settings = Settings(_env_file=None, jira_auth_mode="pat")
             assert settings.jira_enabled
+
+    def test_atst_mode_accepted_and_enabled(self) -> None:
+        """'atst' is a valid jira_auth_mode and enables Jira when complete."""
+        with patch.dict(
+            os.environ,
+            _build_env(JIRA_PROJECT_KEY="TEST"),
+            clear=True,
+        ):
+            settings = Settings(
+                _env_file=None,
+                jira_auth_mode="atst",
+                jira_atst_token=SecretStr("ATST-tok"),  # pragma: allowlist secret
+                atlassian_oauth_cloud_id="cloud-id",
+            )
+            assert settings.jira_auth_mode == "atst"
+            assert settings.jira_enabled
+            assert resolve_jira_connection(settings).mode == "atst"
 
 
 class TestGitHubIssuesSettings:

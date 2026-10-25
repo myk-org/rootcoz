@@ -99,6 +99,7 @@ from rootcoz.comment_enrichment import (
 )
 from rootcoz.config import (
     Settings,
+    atlassian_cloud_id_error,
     get_settings,
     jira_method_missing_fields,
     normalize_jira_auth_mode,
@@ -111,6 +112,7 @@ from rootcoz.config import (
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
     decrypt_sensitive_fields,
+    decrypt_value_or_none,
     encrypt_sensitive_fields,
     get_hmac_secret,
     strip_sensitive_from_response,
@@ -146,6 +148,7 @@ from rootcoz.jira import (
     JiraClient,
     JiraConnection,
     JiraOAuthMintError,
+    classify_jira_secret,
     complete_jira_connection,
     enrich_with_jira_matches,
     filter_matches_with_ai,
@@ -169,6 +172,7 @@ from rootcoz.models import (
     ChatMessageRequest,
     ChildJobAnalysis,
     ClassifyTestRequest,
+    CreateFilterPresetRequest,
     CreateIssueRequest,
     CrossFailurePattern,
     ExporterInfo,
@@ -179,6 +183,7 @@ from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
     FeedbackResponse,
+    FilterPresetResponse,
     JobMetadataInput,
     OverrideClassificationRequest,
     OverridePatternRequest,
@@ -197,6 +202,7 @@ from rootcoz.models import (
     SetTrackedInRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
+    UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
 )
 from rootcoz.monitoring import (
@@ -279,7 +285,12 @@ from rootcoz.transcripts import (
     transcript_summary,
     write_sidecar_env_bridge,
 )
-from rootcoz.url_utils import redact_urls_in_text
+from rootcoz.url_utils import (
+    mask_url_credentials_in_text,
+    redact_urls_in_text,
+    strip_url_credentials,
+    strip_url_userinfo,
+)
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
@@ -302,6 +313,7 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "jira_api_token",
         "jira_pat",
         "jira_oauth_client_secret",
+        "jira_atst_token",
         "jira_email",
         "github_token",
         "tests_repo_token",
@@ -409,6 +421,7 @@ _JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
         "jira_api_token",
         "jira_pat",
         "jira_oauth_client_secret",
+        "jira_atst_token",
         "atlassian_oauth_client_id",
         "atlassian_oauth_cloud_id",
         "jira_cloud_url",
@@ -455,6 +468,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "jira_oauth_client_secret",
         "atlassian_oauth_cloud_id",
         "atlassian_oauth_client_id",
+        "jira_atst_token",
         "jira_oauth_ssl_verify",
         "jira_site_url",
         "jira_project_key",
@@ -1373,6 +1387,10 @@ def _reconstruct_from_params(
     if params.get("jira_pat") is not None:
         overrides["jira_pat"] = (
             SecretStr(params["jira_pat"]) if params["jira_pat"] else None
+        )
+    if params.get("jira_atst_token") is not None:
+        overrides["jira_atst_token"] = (
+            SecretStr(params["jira_atst_token"]) if params["jira_atst_token"] else None
         )
     # New key wins; the old jira_oauth_access_token key is accepted so
     # request_params stored before the rename still replay exactly.
@@ -2729,8 +2747,8 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
     #   ai_model         - resolved + validated by _resolve_ai_config()
     #   additional_repos - list vs str type mismatch; resolved by resolve_additional_repos()
     # Jira credentials (jira_email/jira_api_token/jira_pat/
-    # jira_oauth_client_secret) are intentionally absent: they are Server
-    # Settings only and can never be supplied per request.
+    # jira_oauth_client_secret/jira_atst_token) are intentionally absent: they
+    # are Server Settings only and can never be supplied per request.
     direct_fields = [
         "jira_project_key",
         "jira_max_results",
@@ -3549,6 +3567,9 @@ def _apply_base_analysis_overrides(
         merged.jira_oauth_client_secret.get_secret_value()
         if merged.jira_oauth_client_secret
         else ""
+    )
+    params["jira_atst_token"] = (
+        merged.jira_atst_token.get_secret_value() if merged.jira_atst_token else ""
     )
     params["atlassian_oauth_cloud_id"] = (
         body.atlassian_oauth_cloud_id
@@ -6902,17 +6923,18 @@ async def enrich_comments(
 
     # Jira connection resolution (single source of truth): the selected
     # `jira_auth_mode` decides oauth (scoped gateway) / basic (Cloud) /
-    # pat (Server/DC Bearer). Unset mode → jira_enabled is False and the
-    # connection is skipped entirely.
+    # pat (Server/DC Bearer) / atst (scoped gateway, raw Bearer). Unset
+    # mode → jira_enabled is False and the connection is skipped entirely.
     jira_connection: JiraConnection | None = (
         resolve_jira_connection(settings) if settings.jira_enabled else None
     )
     if jira_connection is not None and jira_connection.mode == "none":
         jira_connection = None
-    if jira_connection is not None and jira_connection.mode == "sa":
+    if jira_connection is not None and jira_connection.mode in ("sa", "atst"):
         # Complete the cloud ID and mint the access token ONCE here —
         # otherwise every per-key status task would fire its own
-        # tenant_info lookup / token mint on a cold cache.
+        # tenant_info lookup / token mint on a cold cache. (ATST needs no
+        # minting — only the cloud-ID resolution.)
         try:
             jira_connection = await complete_jira_connection(jira_connection)
         except JiraOAuthMintError as exc:
@@ -6920,7 +6942,7 @@ async def enrich_comments(
             jira_connection = None
         if jira_connection is not None and not jira_connection.api_base:
             logger.warning(
-                "Comment enrichment: SA cloud ID unresolvable; skipping Jira keys"
+                "Comment enrichment: gateway cloud ID unresolvable; skipping Jira keys"
             )
             jira_connection = None
 
@@ -7523,6 +7545,9 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
                 settings.jira_oauth_client_secret
                 and settings.jira_oauth_client_secret.get_secret_value()
             )
+            or (
+                settings.jira_atst_token and settings.jira_atst_token.get_secret_value()
+            )
         ),
         "server_jira_email": bool(settings.jira_email),
         "server_jira_project_key": settings.jira_project_key or "",
@@ -7572,14 +7597,22 @@ def _build_effective_jira_settings(
     Uses ``model_copy()`` to follow the same pattern as ``_merge_settings()``.
 
     The auth mode is pinned to the user's credential choice (which field
-    they filled in the credentials UI) — no inference from values:
+    they filled in the credentials UI), with one exception:
 
-    Service account mode: a user OAuth 2.0 credential client secret
-    (ATOA-prefixed) replaces the server's secret and clears the other
-    credentials so the effective credentials are unambiguous;
-    ``jira_auth_mode`` is set to ``oauth``. The client ID stays whatever
-    the server configures (``atlassian_oauth_client_id``) — the ID and
-    secret must belong to the same Atlassian OAuth 2.0 credential.
+    Prefix detection wins over field placement: an ATOA-prefixed value
+    (OAuth 2.0 credential client secret) routes to ``oauth`` mode and an
+    ATST-prefixed scoped token routes to ``atst`` mode (Bearer against
+    the api.atlassian.com gateway, no minting) — whichever field they
+    arrived in, so validation (which detects the prefixes) and actual
+    use agree. The service-account field takes precedence when both
+    fields carry classified values.
+
+    A service-account OAuth 2.0 credential client secret replaces the
+    server's secret and clears the other credentials so the effective
+    credentials are unambiguous; ``jira_auth_mode`` is set to ``oauth``.
+    The client ID stays whatever the server configures
+    (``atlassian_oauth_client_id``) — the ID and secret must belong to
+    the same Atlassian OAuth 2.0 credential.
 
     Regular token mode: with an email, ``jira_auth_mode`` is ``basic`` and
     the token goes to ``jira_api_token``; without an email the token is a
@@ -7597,46 +7630,56 @@ def _build_effective_jira_settings(
     so that duplicate searches and bug creation target the user's chosen project.
     """
     overrides: dict[str, Any] = {}
-    if user_jira_sa_token and user_jira_sa_token.strip().startswith("ATOA"):
+    sa_value = (user_jira_sa_token or "").strip()
+    token_value = (user_jira_token or "").strip()
+    sa_kind = classify_jira_secret(sa_value)
+    token_kind = classify_jira_secret(token_value)
+    if sa_kind:
+        kind, value = sa_kind, sa_value
+    elif token_kind:
+        kind, value = token_kind, token_value
+    else:
+        kind, value = "", ""
+    if kind == "oauth":
         # OAuth 2.0 credential override — only an ATOA-prefixed client
-        # secret selects oauth mode; anything else would be ignored by the
-        # resolver and silently disable Jira, so it falls through to the
-        # regular-token branch.
-        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_sa_token.strip())
+        # secret selects oauth mode; the client ID stays whatever the
+        # server configures (the ID and secret must belong to the same
+        # Atlassian OAuth 2.0 credential).
+        overrides["jira_oauth_client_secret"] = SecretStr(value)
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
-        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
-            oauth_token=user_jira_sa_token
-        )
-    elif user_jira_token and user_jira_token.strip().startswith("ATOA"):
-        # An ATOA client secret supplied in the regular field: route it to
-        # oauth mode so validation (which detects the prefix) and actual
-        # use agree.
-        overrides["jira_oauth_client_secret"] = SecretStr(user_jira_token.strip())
+        overrides["jira_atst_token"] = None
+        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(oauth_token=value)
+    elif kind == "atst":
+        # ATST scoped-token override — an already-minted access token sent
+        # as Bearer against the api.atlassian.com gateway (atst mode). No
+        # minting, so no client ID is needed; the cloud ID and site URL
+        # stay whatever the server configures.
+        overrides["jira_atst_token"] = SecretStr(value)
         overrides["jira_api_token"] = None
         overrides["jira_pat"] = None
         overrides["jira_email"] = None
-        overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
-            oauth_token=user_jira_token
-        )
-    elif user_jira_token and user_jira_token.strip():
+        overrides["jira_oauth_client_secret"] = None
+        overrides["jira_auth_mode"] = "atst"
+    elif token_value:
         email = (
             user_jira_email.strip()
             if user_jira_email and user_jira_email.strip()
             else None
         )
         if email:
-            overrides["jira_api_token"] = SecretStr(user_jira_token.strip())
+            overrides["jira_api_token"] = SecretStr(token_value)
             overrides["jira_pat"] = None
         else:
             # No email: the user token is a bearer PAT, not a basic-auth pair.
-            overrides["jira_pat"] = SecretStr(user_jira_token.strip())
+            overrides["jira_pat"] = SecretStr(token_value)
             overrides["jira_api_token"] = None
         overrides["jira_auth_mode"] = _jira_auth_mode_for_credentials(
-            api_token=user_jira_token, email=email
+            api_token=token_value, email=email
         )
         overrides["jira_oauth_client_secret"] = None
+        overrides["jira_atst_token"] = None
         overrides["jira_email"] = email
     if user_jira_project_key and user_jira_project_key.strip():
         overrides["jira_project_key"] = user_jira_project_key.strip()
@@ -7646,31 +7689,35 @@ def _build_effective_jira_settings(
 
 
 def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
-    """400 when a legacy (non-ATOA) SA secret is the only Jira credential.
+    """400 when an unrecognized SA token is supplied — fail closed.
 
-    A non-ATOA ``jira_sa_token`` (e.g. a legacy ATST access token) adds no
-    overrides in ``_build_effective_jira_settings`` — without this check
-    the request would silently run with the SERVER's Jira credentials
-    instead of the user's. Shared by every endpoint that consumes
-    ``jira_sa_token`` from a request body.
+    The service-account field accepts exactly two token kinds: an ATOA
+    OAuth 2.0 credential client secret (routes to the oauth method) and
+    an ATST scoped access token (routes to the atst method). Any other
+    value is ALWAYS rejected, even when a regular ``jira_token`` is also
+    supplied: invalid input is never silently dropped in favor of the
+    other credential (which could mask the mistake and run with a
+    credential the user did not verify). Shared by every endpoint that
+    consumes ``jira_sa_token`` from a request body.
 
     Raises:
-        HTTPException: 400 when the SA secret is set but not ATOA-prefixed
-            and no regular ``jira_token`` is supplied.
+        HTTPException: 400 when the SA token is set but neither
+            ATOA- nor ATST-prefixed, regardless of any regular token.
     """
     token = (jira_token or "").strip()
     sa_token = (jira_sa_token or "").strip()
-    if sa_token and not sa_token.startswith("ATOA") and not token:
+    if sa_token and classify_jira_secret(sa_token) is None:
         logger.info(
-            "Rejecting request with a legacy (non-ATOA) Jira service account "
-            "secret and no regular token"
+            "Rejecting request with an unrecognized Jira service account token%s",
+            " alongside a regular token" if token else "",
         )
         raise HTTPException(
             status_code=400,
             detail=(
-                "The saved Jira service account token is not an OAuth 2.0 "
-                "client secret (Atlassian client secrets start with 'ATOA'). "
-                "Re-enter your OAuth 2.0 client secret in Profile Settings."
+                "The saved Jira service account token is not a recognized "
+                "Atlassian service-account credential (client secrets start "
+                "with 'ATOA', scoped tokens with 'ATST'). Re-enter your "
+                "token in Profile Settings."
             ),
         )
 
@@ -9624,8 +9671,6 @@ async def get_capabilities(settings: Settings = _SETTINGS_DEP) -> dict[str, Any]
 
 def _strip_url_userinfo(url: str) -> str:
     """Remove userinfo (username/password) from a URL for safe API responses."""
-    from rootcoz.url_utils import strip_url_userinfo
-
     return strip_url_userinfo(url)
 
 
@@ -9749,9 +9794,9 @@ def _jira_client_from_body(
     token is present.
 
     Raises:
-        HTTPException: 400 when a legacy (non-ATOA) service-account secret is
-            the only supplied credential — it must be rejected, not silently
-            dropped in favor of the server's credentials.
+        HTTPException: 400 when a service-account secret with an
+            unrecognized prefix is supplied — it must be rejected, not
+            silently dropped in favor of another credential.
     """
     _require_usable_jira_sa_token(jira_token, jira_sa_token)
     token = jira_token.strip() if jira_token else ""
@@ -9907,20 +9952,25 @@ async def validate_token(
     elif body.token_type == "jira":
         # ATOA-prefixed values are OAuth 2.0 credential client secrets —
         # they authenticate (via a minted access token) against the scoped
-        # api.atlassian.com gateway (REST v3); other tokens follow the
-        # email → Cloud basic / no-email → Server Bearer split. Each method
-        # reads its own server-configured URL and TLS verification.
+        # api.atlassian.com gateway (REST v3); ATST-prefixed values are
+        # already-minted service-account scoped tokens sent as Bearer to
+        # the same gateway; other tokens follow the email → Cloud basic /
+        # no-email → Server Bearer split. Each method reads its own
+        # server-configured URL and TLS verification.
         email = body.email.strip()
-        is_sa_secret = token.startswith("ATOA")
+        kind = classify_jira_secret(token)
+        is_sa_secret = kind == "oauth"
+        is_atst_token = kind == "atst"
         connection = resolve_jira_connection_from_params(
             jira_cloud_url=settings.jira_cloud_url,
             jira_server_url=settings.jira_server_url,
             jira_email=email,
-            jira_token="" if is_sa_secret else token,
+            jira_token="" if is_sa_secret or is_atst_token else token,
             jira_oauth_client_secret=token if is_sa_secret else "",
             atlassian_oauth_client_id=settings.atlassian_oauth_client_id or "",
             atlassian_oauth_cloud_id=settings.atlassian_oauth_cloud_id or "",
             jira_site_url=settings.jira_site_url or "",
+            jira_atst_token=token if is_atst_token else "",
             jira_cloud_ssl_verify=settings.jira_cloud_ssl_verify,
             jira_server_ssl_verify=settings.jira_server_ssl_verify,
             jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
@@ -9941,6 +9991,16 @@ async def validate_token(
                     "2.0 credential (set atlassian_oauth_cloud_id or "
                     "jira_site_url on the server)"
                 )
+        elif is_atst_token:
+            # No minting — the ATST token is already an access token; only
+            # the cloud ID may still need resolving from the site URL.
+            connection = await complete_jira_connection(connection)
+            if not connection.api_base:
+                return _invalid(
+                    "Could not resolve the Atlassian cloud ID for the ATST "
+                    "token (set atlassian_oauth_cloud_id or jira_site_url "
+                    "on the server)"
+                )
         elif not connection.api_base:
             if email:
                 return _invalid(
@@ -9951,8 +10011,9 @@ async def validate_token(
             )
         # OAuth 2.0 credentials carry read:jira-work only — /myself needs
         # read:jira-users and 401s — so SA connections probe project
-        # visibility instead of the current-user endpoint.
-        if connection.mode == "sa":
+        # visibility instead of the current-user endpoint. ATST scoped
+        # tokens get the same probe: their scopes are admin-chosen.
+        if connection.mode in ("sa", "atst"):
             probe_path = "/rest/api/3/project"
             probe_params = {"maxResults": 1}
         else:
@@ -9979,6 +10040,14 @@ async def validate_token(
                         "valid": True,
                         "username": "service account",
                         "message": "OAuth 2.0 credential valid (service account)",
+                    }
+                if connection.mode == "atst":
+                    if not isinstance(data, list):
+                        return _invalid("Tracker API returned an unexpected response")
+                    return {
+                        "valid": True,
+                        "username": "service account",
+                        "message": "ATST service-account token valid",
                     }
                 display = data.get("displayName", data.get("name", ""))
                 return {
@@ -11448,6 +11517,165 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
 
 
+# --- Filter presets (#179) ---
+
+# URL query param names each page's presets may carry (validated on save).
+_FILTER_PRESET_KEYS: dict[str, set[str]] = {
+    "dashboard": {
+        "team",
+        "tier",
+        "version",
+        "label",
+        "exclude_label",
+        "status",
+        "review_status",
+        "analysis_state",
+        "date_from",
+        "date_to",
+    },
+    "reports": {
+        "team",
+        "tier",
+        "version",
+        "label",
+        "exclude_label",
+        "status",
+        "review_status",
+        "from",
+        "to",
+    },
+}
+
+
+def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
+    """Reject unknown filter keys for the page with 422 (never silently drop)."""
+    unknown = set(filters) - _FILTER_PRESET_KEYS[page]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
+        )
+
+
+# SQLite integers are signed 64-bit; an out-of-range preset id cannot exist.
+_SQLITE_INT_MAX = 2**63 - 1
+
+
+def _validate_preset_id(preset_id: int) -> None:
+    """Reject ids SQLite cannot store (404) instead of raising OverflowError."""
+    if preset_id < 1 or preset_id > _SQLITE_INT_MAX:
+        raise HTTPException(status_code=404, detail="Preset not found")
+
+
+@app.get(
+    "/api/user/filter-presets",
+    operation_id="listFilterPresets",
+    response_model=list[FilterPresetResponse],
+)
+async def list_filter_presets(
+    page: str, request: Request, response: Response
+) -> list[FilterPresetResponse]:
+    """List the user's personal presets plus all server presets for a page."""
+    _require_authenticated(request)
+    if page not in storage.FILTER_PRESET_PAGES:
+        raise HTTPException(
+            status_code=422,
+            detail="page must be one of: " + ", ".join(storage.FILTER_PRESET_PAGES),
+        )
+    presets = await storage.list_filter_presets(request.state.username, page)
+    response.headers["Cache-Control"] = "no-store"
+    return [FilterPresetResponse(**preset) for preset in presets]
+
+
+@app.post(
+    "/api/user/filter-presets",
+    operation_id="createFilterPreset",
+    response_model=FilterPresetResponse,
+    status_code=201,
+)
+async def create_filter_preset(
+    body: CreateFilterPresetRequest, request: Request
+) -> FilterPresetResponse:
+    """Save a filter combination as a named preset (server scope: operator+)."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    if body.scope == "server":
+        _require_operator(request)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Preset name cannot be empty")
+    _validate_filter_preset_filters(body.page, body.filters)
+    try:
+        preset = await storage.create_filter_preset(
+            request.state.username, body.page, body.scope, name, body.filters
+        )
+    except storage.FilterPresetLimitExceeded as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except storage.FilterPresetNameConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FilterPresetResponse(**preset)
+
+
+@app.put(
+    "/api/user/filter-presets/{preset_id}",
+    operation_id="updateFilterPresetEndpoint",
+    response_model=FilterPresetResponse,
+)
+async def update_filter_preset_endpoint(
+    preset_id: int, body: UpdateFilterPresetRequest, request: Request
+) -> FilterPresetResponse:
+    """Rename and/or replace the filters of a preset the user may manage."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    _validate_preset_id(preset_id)
+    # Ownership-scoped fetch: another user's personal preset is
+    # indistinguishable from a missing one, before any body validation.
+    existing = await storage.get_manageable_filter_preset(
+        preset_id, request.state.username
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if existing["scope"] == "server":
+        _require_operator(request)
+    name = body.name.strip() if body.name is not None else None
+    if name == "":
+        raise HTTPException(status_code=422, detail="Preset name cannot be empty")
+    if body.filters is not None:
+        _validate_filter_preset_filters(existing["page"], body.filters)
+    try:
+        preset = await storage.update_filter_preset(
+            preset_id, request.state.username, name, body.filters
+        )
+    except storage.FilterPresetNotFound as exc:
+        raise HTTPException(status_code=404, detail="Preset not found") from exc
+    except storage.FilterPresetNameConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return FilterPresetResponse(**preset)
+
+
+@app.delete(
+    "/api/user/filter-presets/{preset_id}",
+    operation_id="deleteFilterPresetEndpoint",
+    status_code=204,
+)
+async def delete_filter_preset_endpoint(preset_id: int, request: Request) -> None:
+    """Delete a preset the user may manage (own personal or server)."""
+    _require_authenticated(request)
+    _check_allow_list(request)
+    _validate_preset_id(preset_id)
+    existing = await storage.get_manageable_filter_preset(
+        preset_id, request.state.username
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    if existing["scope"] == "server":
+        _require_operator(request)
+    try:
+        await storage.delete_filter_preset(preset_id, request.state.username)
+    except storage.FilterPresetNotFound as exc:
+        raise HTTPException(status_code=404, detail="Preset not found") from exc
+
+
 # --- User token endpoints ---
 
 
@@ -11513,13 +11741,14 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
         if (
             field == "jira_sa_token"
             and kwargs[field]
-            and not kwargs[field].startswith("ATOA")
+            and classify_jira_secret(kwargs[field]) is None
         ):
             raise HTTPException(
                 status_code=400,
                 detail=(
                     "jira_sa_token must be an ATOA-prefixed Atlassian OAuth "
-                    "2.0 credential client secret — use jira_token for "
+                    "2.0 credential client secret or an ATST-prefixed "
+                    "service-account scoped token — use jira_token for "
                     "regular credentials"
                 ),
             )
@@ -12094,11 +12323,20 @@ async def set_free_ai_models_endpoint(
         (str(entry.get("provider") or "").lower(), str(entry.get("id") or ""))
         for entry in catalog
     }
+    # Key-scoped pairs (#350): a keyed provider's captured listing is a
+    # valid free-model target even for models the static catalog lacks.
+    key_scoped_pairs = {
+        (row["provider"].lower(), row["model"])
+        for row in await storage.list_server_provider_key_models()
+    }
     unknown: list[dict[str, str]] = []
     for entry in body.models:
         if (entry.provider.lower(), entry.model) in existing:
             continue
-        if (entry.provider.lower(), entry.model) not in catalog_pairs:
+        if (entry.provider.lower(), entry.model) not in catalog_pairs and (
+            entry.provider.lower(),
+            entry.model,
+        ) not in key_scoped_pairs:
             unknown.append({"provider": entry.provider, "model": entry.model})
     if unknown:
         raise HTTPException(
@@ -12156,18 +12394,18 @@ async def set_free_ai_models_endpoint(
 
 
 async def _seed_server_provider_selection(provider: str, updated_by: str) -> None:
-    """Seed a full-catalog selection for a newly-keyed provider (#347 r4).
+    """Seed a selection for a newly-keyed provider (#347 r4, #350).
 
     A stored key makes a provider *managed* (see
     ``ai_client._load_server_pool_selection``), and a managed provider with
     no selection rows exposes nothing — so adding a verified key to a
     provider that served its whole catalog via deployment credentials
     would silently withdraw every model from discovery and
-    ``require_selected_server_pair``. Seeding one row per current catalog
-    model (free flags preserved) keeps the exposure exactly as it was.
-    An existing admin selection stays authoritative — a restriction must
-    survive a key add — and the rotate path never reseeds for the same
-    reason.
+    ``require_selected_server_pair``. Seeding one row per model keeps the
+    exposure exactly as it was: the key-scoped listing when the last
+    add/rotate captured one (#350), the full catalog otherwise. An existing
+    admin selection stays authoritative — a restriction must survive a key
+    add — and the rotate path never reseeds for the same reason.
     """
     if any(
         row["provider"].lower() == provider.lower()
@@ -12179,21 +12417,32 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
         for row in await storage.list_free_ai_models()
         if row["provider"].lower() == provider.lower()
     }
-    catalog_models = [
-        entry["id"]
-        for entry in await _get_model_catalog()
-        if isinstance(entry.get("provider"), str)
-        and entry["provider"].lower() == provider.lower()
-        and isinstance(entry.get("id"), str)
-        and entry["id"]
+    key_scoped_rows = [
+        row
+        for row in await storage.list_server_provider_key_models()
+        if row["provider"].lower() == provider.lower()
     ]
-    entries = [{"id": model, "free": model in free_models} for model in catalog_models]
+    if key_scoped_rows:
+        # Key-scoped (#350): seed exactly what the key can access — the
+        # static catalog may list models this key cannot use, and may lack
+        # models it can. A sentinel-only listing (verified empty) seeds
+        # nothing: the key can access no models at all.
+        base_models = [row["model"] for row in key_scoped_rows if row["model"]]
+    else:
+        base_models = [
+            entry["id"]
+            for entry in await _get_model_catalog()
+            if isinstance(entry.get("provider"), str)
+            and entry["provider"].lower() == provider.lower()
+            and isinstance(entry.get("id"), str)
+            and entry["id"]
+        ]
+    entries = [{"id": model, "free": model in free_models} for model in base_models]
     # Free pairs whose model left the catalog survive the seeding (stale
     # pairs are ignored at runtime) so a key add never rewrites unrelated
     # free-model state.
     entries.extend(
-        {"id": model, "free": True}
-        for model in sorted(free_models - set(catalog_models))
+        {"id": model, "free": True} for model in sorted(free_models - set(base_models))
     )
     if entries:
         await storage.set_server_provider_models(provider, entries, updated_by)
@@ -12203,6 +12452,123 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
             provider,
             len(entries),
         )
+
+
+async def _key_scoped_capture_superseded(
+    provider: str, key: str, generation: int | None
+) -> bool:
+    """Whether the credential moved on from the one a discovery used (#350 r2).
+
+    A capture is superseded when the stored key no longer equals the key
+    the discovery ran with (unreadable counts as moved on), or when the
+    credential generation changed — which also covers a rotation to the
+    same key value and a concurrent removal.
+    """
+    try:
+        current_key = await storage.get_server_ai_credential(provider)
+    except storage.UnreadableAiCredentialsError:
+        return True
+    if current_key != key:
+        return True
+    return await storage.get_server_credential_generation(provider) != generation
+
+
+async def _capture_key_scoped_models(
+    provider: str,
+    key: str,
+    *,
+    keep_on_failure: bool,
+    generation: int | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Run key-scoped discovery and persist its result (#350).
+
+    Returns ``(models, status)`` where status is ``"supported"`` (rows
+    stored), ``"unsupported"`` (no listing endpoint — rows cleared),
+    ``"unavailable"`` (discovery failed — rows kept on refresh
+    (``keep_on_failure=True``, key unchanged) so a sidecar hiccup never
+    reverts the provider to the static catalog; cleared after add/rotate
+    (``keep_on_failure=False``) so the previous key's listing is never
+    exposed as the new key's), or ``"superseded"`` (the credential changed
+    during discovery — the capture is discarded so one key never wears
+    another key's listing; a rotation to the same key value still bumps
+    the generation and supersedes). Every row write is bound to
+    ``generation`` — the credential generation this discovery ran against —
+    so a capture that loses the race to a concurrent add/rotate/remove
+    writes nothing — and a rotation landing between the superseded check
+    and the write makes the conditional write itself return ``False``, which
+    this function reports as ``"superseded"`` too (#350 r3): a skipped
+    write is never reported as a stored capture. Only ``source: "listing"`` models are stored:
+    manifest-only models are not key-verified. A supported listing with
+    zero accessible models is stored as a sentinel row — "verified empty"
+    — so the pool exposes nothing instead of falling back to the catalog.
+    """
+    try:
+        from rootcoz.ai_client import models_for_api_key
+
+        discovery = await models_for_api_key(provider, key)
+    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+        logger.warning(
+            "Key-scoped model discovery unavailable for provider=%s", provider
+        )
+        # A failed capture after add/rotate must not leave the previous
+        # key's rows exposed as the new key's verified listing; a failed
+        # refresh (same key) keeps the last captured listing instead.
+        if not await _key_scoped_capture_superseded(provider, key, generation):
+            if keep_on_failure:
+                stored = await storage.set_server_provider_key_capture_status(
+                    provider, "unavailable", expected_generation=generation
+                )
+            else:
+                stored = await storage.set_server_provider_key_models(
+                    provider,
+                    [],
+                    status="unavailable",
+                    expected_generation=generation,
+                )
+            # A skipped write (rotation landed between the superseded check
+            # and the conditional write) is a superseded capture, never a
+            # success — nothing was stored (#350 r3).
+            if not stored:
+                return [], "superseded"
+        return [], "unavailable"
+    if await _key_scoped_capture_superseded(provider, key, generation):
+        logger.warning(
+            "Key-scoped capture superseded for provider=%s (credential changed"
+            " during discovery); discarding",
+            provider,
+        )
+        return [], "superseded"
+    if not discovery["modelListingSupported"]:
+        stored = await storage.set_server_provider_key_models(
+            provider,
+            [],
+            status="unsupported",
+            expected_generation=generation,
+        )
+        return ([], "unsupported") if stored else ([], "superseded")
+    # Manifest-only models are the provider manifest's, not the key's — a
+    # restricted key must never see them as verified (#350 r1).
+    listing_models = [
+        entry for entry in discovery["models"] if entry.get("source") != "manifest"
+    ]
+    if listing_models:
+        stored = await storage.set_server_provider_key_models(
+            provider,
+            listing_models,
+            status="supported",
+            expected_generation=generation,
+        )
+        return (listing_models, "supported") if stored else ([], "superseded")
+    # Supported listing, zero key-accessible models: the sentinel row keeps
+    # "verified empty" distinct from "no listing" so the pool exposes
+    # nothing instead of falling back to the static catalog (#350 r1).
+    stored = await storage.set_server_provider_key_models(
+        provider,
+        [{"id": "", "sentinel": True}],
+        status="supported",
+        expected_generation=generation,
+    )
+    return ([], "supported") if stored else ([], "superseded")
 
 
 async def _verify_and_store_server_provider_key(
@@ -12264,17 +12630,38 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
-    await storage.set_server_ai_credential(
+    # The generation this write assigned, returned from inside the upsert's
+    # transaction — never re-read: an overlapping rotation (even to the same
+    # key) landing before a separate read would hand this capture the newer
+    # credential's generation and let its stale snapshot through (#350 r3).
+    generation = await storage.set_server_ai_credential(
         provider, key, request.state.username or "admin"
+    )
+    # Key-scoped capture (#350): after a successful verification, record the
+    # models this key can actually access. A listing-unsupported provider or
+    # a transient discovery failure never blocks the add — a failed
+    # discovery clears any previous key's rows (this key's listing is
+    # unknown, never the old key's), and the server pool falls back to the
+    # static catalog for this provider. The capture is bound to the
+    # credential generation just written (#350 r2): a concurrent rotate
+    # bumps it and this capture's writes are skipped.
+    key_models, capture_status = await _capture_key_scoped_models(
+        provider,
+        key,
+        keep_on_failure=False,
+        generation=generation,
     )
     if not replacing:
         await _seed_server_provider_selection(
             provider, request.state.username or "admin"
         )
     logger.info(
-        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified)",
+        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified%s)",
         request.state.username,
         provider,
+        f", {len(key_models)} key-scoped models"
+        if capture_status == "supported"
+        else "",
     )
     return JSONResponse(
         content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
@@ -12309,6 +12696,18 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     for row in await storage.list_free_ai_models():
         free_by_provider.setdefault(row["provider"].lower(), set()).add(row["model"])
     supported = {p.lower() for p in await supported_key_providers()}
+    # Key-scoped listings captured at add/rotate (#350): for a keyed
+    # provider these replace the static catalog as the offered model set —
+    # a restricted key must not offer models it cannot use. Providers with
+    # no rows (listing unsupported / discovery failed) keep the catalog.
+    key_scoped: dict[str, dict[str, dict[str, Any]]] = {}
+    # Stored spelling per lowercase join key (#350 r2): fallback entries for
+    # providers the catalog no longer lists must keep the stored casing —
+    # pi-config matches session providers by their exact id.
+    key_scoped_ids: dict[str, str] = {}
+    for row in await storage.list_server_provider_key_models():
+        key_scoped.setdefault(row["provider"].lower(), {})[row["model"]] = row
+        key_scoped_ids.setdefault(row["provider"].lower(), row["provider"])
 
     models_by_provider: dict[str, list[dict[str, Any]]] = {}
     for entry in catalog:
@@ -12316,11 +12715,31 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         model = entry.get("id")
         if not isinstance(provider, str) or not isinstance(model, str) or not model:
             continue
+        scoped_rows = key_scoped.get(provider.lower())
+        if scoped_rows is not None and model not in scoped_rows:
+            # Key-scoped (#350): the catalog model is not accessible to the
+            # stored key — do not offer it.
+            continue
         models_by_provider.setdefault(provider, []).append(
             {"id": model, "name": entry.get("name") or model}
         )
-    # Stored selections whose model left the catalog stay visible so the UI
-    # can render and clear them (stale pairs are ignored at runtime).
+    # Key-scoped models the static catalog lacks still belong to the offered
+    # set (#350) — the listing is the source of truth for a keyed provider.
+    # The empty-string sentinel (verified-empty listing) contributes no
+    # offered model but still marks the provider key-scoped.
+    for provider_lower, scoped_rows in key_scoped.items():
+        provider = next(
+            (p for p in models_by_provider if p.lower() == provider_lower),
+            key_scoped_ids.get(provider_lower, provider_lower),
+        )
+        known = {m["id"] for m in models_by_provider.get(provider, [])}
+        for model, row in sorted(scoped_rows.items()):
+            if model and model not in known:
+                models_by_provider.setdefault(provider, []).append(
+                    {"id": model, "name": row.get("name") or model}
+                )
+    # Stored selections whose model left the offered set stay visible so
+    # the UI can render and clear them (stale pairs are ignored at runtime).
     for provider_lower, selected in selections.items():
         provider = next(
             (p for p in models_by_provider if p.lower() == provider_lower),
@@ -12367,6 +12786,19 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 "verified": record is not None,
                 "verified_at": record.get("verified_at", "") if record else "",
                 "supports_key": provider.lower() in supported,
+                # True when the last add/rotate captured a key-scoped listing
+                # (#350) — the models above are exactly what the key can
+                # access. A keyed provider without it falls back to the
+                # static catalog (no listing endpoint / failed discovery).
+                "key_scoped": provider_lower in key_scoped,
+                # Outcome of the last key-scoped capture (#350 r2):
+                # supported / unsupported / unavailable. "unavailable" can
+                # coexist with key_scoped true — a failed refresh kept the
+                # last snapshot — telling the admin the listed models are
+                # stale, not that no listing endpoint exists.
+                "key_scoped_status": record.get("key_capture_status")
+                if record
+                else None,
                 "models": models,
             }
         )
@@ -12416,6 +12848,73 @@ async def rotate_server_provider_key(
     )
 
 
+@app.post(
+    "/api/admin/server-providers/{provider:path}/refresh-models",
+    operation_id="refreshServerProviderModels",
+)
+async def refresh_server_provider_models(
+    provider: str, request: Request
+) -> JSONResponse:
+    """Re-run key-scoped discovery with the stored key (admin only).
+
+    Captures permission drift since add/rotate without re-entering the key:
+    the refreshed listing replaces the stored rows, existing admin
+    selections survive (runtime filtering withdraws newly inaccessible
+    models), and the selection is NEVER reseeded — a deliberately empty
+    selection (an admin who deselected every model) must survive a
+    refresh instead of quietly re-including the whole listing. Never
+    re-verifies with an LLM call; a dead key simply reports
+    ``unavailable`` and keeps the last captured listing.
+    """
+    _require_admin(request)
+    canonical = await _canonical_key_provider_id(provider)
+    if canonical is None:
+        raise HTTPException(
+            status_code=400, detail="Provider does not support session API keys"
+        )
+    provider = canonical
+    try:
+        key = await storage.get_server_ai_credential(provider)
+    except storage.UnreadableAiCredentialsError:
+        raise HTTPException(
+            status_code=500, detail="Stored server AI credentials are unreadable"
+        ) from None
+    if key is None:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    # A None generation means the provider was removed between the key read
+    # and this read — never bind a capture to "no credential" (#350 r3): an
+    # unbound write would re-insert the rows the removal just deleted.
+    generation = await storage.get_server_credential_generation(provider)
+    if generation is None:
+        raise HTTPException(
+            status_code=404, detail=f"Provider '{provider}' has no stored key"
+        )
+    # Same key, so a failed discovery keeps the last captured listing
+    # (#350 r2); the generation binding still discards the refresh when a
+    # concurrent rotation moves the credential on.
+    models, status = await _capture_key_scoped_models(
+        provider,
+        key,
+        keep_on_failure=True,
+        generation=generation,
+    )
+    logger.info(
+        "[AUDIT] Admin '%s' refreshed key-scoped models for '%s' (%s, %d models)",
+        request.state.username,
+        provider,
+        status,
+        len(models),
+    )
+    return JSONResponse(
+        content=strip_sensitive_from_response(
+            {"ok": True, "status": status, "model_count": len(models)}
+        ),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.put(
     "/api/admin/server-providers/{provider:path}/models",
     operation_id="setServerProviderModelsEndpoint",
@@ -12462,10 +12961,18 @@ async def set_server_provider_models_endpoint(
         )
         for entry in await _get_model_catalog()
     }
+    # Key-scoped pairs (#350): a keyed provider's captured listing is a
+    # valid selection target even for models the static catalog lacks.
+    key_scoped_pairs = {
+        (row["provider"].lower(), row["model"])
+        for row in await storage.list_server_provider_key_models()
+    }
     unknown = [
         {"provider": provider, "model": e["id"]}
         for e in entries
-        if e["id"] not in existing and (provider.lower(), e["id"]) not in catalog_pairs
+        if e["id"] not in existing
+        and (provider.lower(), e["id"]) not in catalog_pairs
+        and (provider.lower(), e["id"]) not in key_scoped_pairs
     ]
     if unknown:
         raise HTTPException(
@@ -12807,35 +13314,29 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
-@app.put("/api/admin/settings", operation_id="updateAdminSettings")
-async def update_admin_settings(request: Request) -> JSONResponse:
-    """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
-    _require_admin(request)
-    body = await request.json()
-    settings_updates = body.get("settings", {})
+def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
+    """Validate admin settings updates; return per-entry error messages.
 
-    if not settings_updates:
-        raise HTTPException(status_code=400, detail="No settings provided")
+    Shared by the PUT update and the settings import endpoints so every
+    write path applies the same rules. Mutates *settings_updates* the same
+    way the PUT path always has: fields with model-level validators are
+    normalized in place.
+    """
+    errors: list[str] = []
 
     # Validate keys exist in Settings model
     valid_keys = set(Settings.model_fields.keys())
     invalid_keys = set(settings_updates.keys()) - valid_keys
     if invalid_keys:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown settings: {', '.join(sorted(invalid_keys))}",
-        )
+        errors.append(f"Unknown settings: {', '.join(sorted(invalid_keys))}")
 
     # Block writes to server-only settings — these are env-only toggles
     server_only_keys = set(settings_updates.keys()) & _SERVER_ONLY_SETTINGS
     if server_only_keys:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Server-only settings (env var only): {', '.join(sorted(server_only_keys))}",
+        errors.append(
+            f"Server-only settings (env var only): "
+            f"{', '.join(sorted(server_only_keys))}"
         )
-
-    # Validate values against Settings field types and constraints
-    errors = []
 
     # Pre-validate fields with Pydantic model-level validators
     for key in ("prow_url", "gcs_bucket", "jira_auth_mode", "default_user_role"):
@@ -12852,7 +13353,17 @@ async def update_admin_settings(request: Request) -> JSONResponse:
                 ctx_err = err.get("ctx", {}).get("error")
                 errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
 
+    # An account-ID-shaped cloud ID is rejected with a direct 422 — the
+    # same status and clear message the per-request model validator
+    # produces, on every write path (PUT and settings import) that shares
+    # this function.
+    cloud_id = settings_updates.get("atlassian_oauth_cloud_id")
+    if cloud_id and (cloud_id_error := atlassian_cloud_id_error(str(cloud_id))):
+        raise HTTPException(status_code=422, detail=cloud_id_error)
+
     for key, value in settings_updates.items():
+        if key not in valid_keys:
+            continue
         field_info = Settings.model_fields[key]
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
@@ -12880,12 +13391,21 @@ async def update_admin_settings(request: Request) -> JSONResponse:
                     "health probe (startup would fail on every restart) — use "
                     "127.0.0.1, 0.0.0.0, or leave it empty"
                 )
-        # Check integer fields
+            # Save the stripped host — the env bridge exports the stored
+            # value verbatim, so padding would reach pi-config's listen host.
+            settings_updates[key] = host
+        # Integer fields get explicit bounds first — some clamp in
+        # mode="before" validators (session_ttl_hours), so model_validate
+        # alone would accept out-of-range values. When this check already
+        # flagged the key, model_validate is skipped: a violation must
+        # produce exactly one message, not the manual one plus pydantic's
+        # duplicate (#361 Qodo r2).
         annotation = field_info.annotation
         is_int = annotation is int or (
             hasattr(annotation, "__args__")
             and int in getattr(annotation, "__args__", ())
         )
+        int_error = False
         if is_int:
             try:
                 int_val = int(value)
@@ -12898,20 +13418,52 @@ async def update_admin_settings(request: Request) -> JSONResponse:
                         and int_val <= meta.gt
                     ):
                         errors.append(f"{key}: must be > {meta.gt}")
+                        int_error = True
                     if (
                         hasattr(meta, "ge")
                         and meta.ge is not None
                         and int_val < meta.ge
                     ):
                         errors.append(f"{key}: must be >= {meta.ge}")
+                        int_error = True
                     if (
                         hasattr(meta, "le")
                         and meta.le is not None
                         and int_val > meta.le
                     ):
                         errors.append(f"{key}: must be <= {meta.le}")
+                        int_error = True
             except ValueError, TypeError:
                 errors.append(f"{key}: must be an integer")
+                int_error = True
+        if int_error:
+            continue
+        # Type-check every remaining value against its Settings field — an
+        # invalid value (e.g. "not-a-bool" for a bool field) would otherwise
+        # be persisted, and once get_settings() cannot validate the merged
+        # overrides it silently falls back to the base env settings.
+        try:
+            Settings.model_validate({key: value})
+        except ValidationError as exc:
+            for err in exc.errors():
+                ctx_err = err.get("ctx", {}).get("error")
+                errors.append(
+                    f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
+                )
+    return errors
+
+
+@app.put("/api/admin/settings", operation_id="updateAdminSettings")
+async def update_admin_settings(request: Request) -> JSONResponse:
+    """Update one or more server settings. Body: {"settings": {"key": "value", ...}}"""
+    _require_admin(request)
+    body = await request.json()
+    settings_updates = body.get("settings", {})
+
+    if not settings_updates:
+        raise HTTPException(status_code=400, detail="No settings provided")
+
+    errors = _validate_settings_updates(settings_updates)
     if errors:
         raise HTTPException(
             status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
@@ -12935,6 +13487,266 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     )
 
 
+# Schema version of the settings export document — bumped on breaking
+# changes to the export shape so imports can reject mismatched documents.
+_SETTINGS_EXPORT_VERSION = 1
+
+# Warning shown when an export includes decrypted sensitive values.
+_SETTINGS_EXPORT_SECRETS_WARNING = (
+    "This export contains decrypted secrets in plaintext — store and "
+    "transfer it securely and delete it once imported."
+)
+
+
+def _transform_additional_repos(
+    raw: str, url_fn: Callable[[str], str], token_suffix: str
+) -> str | None:
+    """Rebuild an ``additional_repos`` value, transforming each repo URL.
+
+    ``url_fn`` is applied to every URL (strip or mask credentials). An
+    embedded ``@token`` is replaced by ``token_suffix`` — empty drops the
+    credential entirely, ``"***"`` masks it for display. Returns None for
+    a malformed stored value: its credentials could sit anywhere a parser
+    cannot find, so callers must skip (export) or mask it whole (diff).
+    """
+    try:
+        repos = parse_additional_repos(raw)
+    except ValueError:
+        return None
+    parts = []
+    for repo in repos:
+        part = f"{repo['name']}:{url_fn(repo['url'])}"
+        if repo.get("ref"):
+            part += f":{repo['ref']}"
+        if repo.get("token") and token_suffix:
+            part += f"@{token_suffix}"
+        parts.append(part)
+    return ",".join(parts)
+
+
+def _sanitize_export_value(key: str, value: str) -> str | None:
+    """Strip credentials from a non-sensitive value on default exports.
+
+    ``additional_repos`` entries can carry an embedded ``@token`` and repo
+    URLs can carry userinfo or a query/fragment token — those must not
+    leave without the ``include_sensitive`` opt-in. Returns None when the
+    stored value is too malformed to sanitize (fail closed: the key is
+    skipped).
+    """
+    if key == "additional_repos":
+        return _transform_additional_repos(value, strip_url_credentials, "")
+    return redact_urls_in_text(value)
+
+
+def _mask_diff_value(key: str, value: str | None) -> str | None:
+    """Mask credential substrings (URL userinfo, repo tokens) in diff display."""
+    if value is None:
+        return None
+    if key == "additional_repos":
+        masked = _transform_additional_repos(value, mask_url_credentials_in_text, "***")
+        # A malformed value is masked whole — its credentials could sit
+        # anywhere a parser cannot find (#361 Qodo r2).
+        return "***" if masked is None else masked
+    return mask_url_credentials_in_text(value)
+
+
+def _diff_import_updates(
+    updates: dict[str, str], db_settings: dict[str, dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+    """Diff import values against current DB overrides.
+
+    Returns ``(applied, unchanged, restart_required)`` — sensitive values
+    are masked as ``"***"`` and never appear in the diff.
+    """
+    applied: dict[str, dict[str, Any]] = {}
+    unchanged: list[str] = []
+    restart_required: list[str] = []
+    for key, value in updates.items():
+        old = db_settings[key]["value"] if key in db_settings else None
+        if old and key in _SENSITIVE_SETTINGS:
+            # Compare against decrypted plaintext; an undecryptable value
+            # (key rotation) counts as changed so the import overwrites it.
+            old = decrypt_value_or_none(old)
+        if old == value or (
+            old is not None
+            and key not in _SENSITIVE_SETTINGS
+            # A default (sanitized) export drops credentials; importing it
+            # must not wipe them from the target — when the document carries
+            # nothing new for a key, the target's credential-bearing value
+            # wins (#361 Qodo r2).
+            and value == _sanitize_export_value(key, old)
+        ):
+            unchanged.append(key)
+            continue
+        masked = key in _SENSITIVE_SETTINGS
+        applied[key] = {
+            "from": "***" if masked else _mask_diff_value(key, old),
+            "to": "***" if masked else _mask_diff_value(key, value),
+        }
+        if key in _RESTART_REQUIRED_SETTINGS:
+            restart_required.append(key)
+    return applied, unchanged, restart_required
+
+
+@app.get("/api/admin/settings/export", operation_id="exportServerSettings")
+async def export_server_settings(
+    request: Request,
+    include_sensitive: bool = Query(
+        False, description="Include decrypted sensitive settings in the export"
+    ),
+) -> JSONResponse:
+    """Export all DB-stored server settings as a JSON document.
+
+    Only database overrides are exported — env-only values are deployment
+    config, not server settings. Sensitive settings are excluded unless
+    ``include_sensitive`` is set; when included they are decrypted plaintext
+    (re-encrypted values would only be usable with the same
+    ``ROOTCOZ_ENCRYPTION_KEY``), and the response carries a warning.
+    """
+    _require_admin(request)
+
+    settings: dict[str, str] = {}
+    sensitive_included = False
+    for key, row in sorted((await storage.get_server_settings()).items()):
+        # Internal bookkeeping rows (e.g. jira_verified_method), server-only
+        # bootstrap values, and derived settings are not transferable
+        # settings — a derived value (e.g. sidecar_url from sidecar_port) is
+        # instance-computed, and shipping it would pin a stale URL on
+        # another instance (same rule the persist endpoint enforces).
+        if (
+            key not in _FIELD_TO_CATEGORY
+            or key in _SERVER_ONLY_SETTINGS
+            or key in _DERIVED_SETTINGS
+        ):
+            continue
+        value = row["value"]
+        if key in _SENSITIVE_SETTINGS:
+            if not include_sensitive:
+                continue
+            if value == "":
+                # An explicit empty override is meaningful (it deliberately
+                # beats the env value) — export it as-is; there is nothing
+                # to decrypt.
+                settings[key] = ""
+                continue
+            sensitive_included = True
+            decrypted = decrypt_value_or_none(value)
+            if decrypted is None:
+                # Undecryptable ciphertext (key rotation) is useless in an
+                # export — skip rather than ship garbage.
+                logger.debug("Cannot decrypt setting %s for export; skipping", key)
+                continue
+            value = decrypted
+        elif not include_sensitive:
+            # Default exports must not leak embedded credentials — repo
+            # tokens and URL userinfo leave only with the opt-in. A value
+            # too malformed to sanitize is skipped, never shipped raw.
+            sanitized = _sanitize_export_value(key, value)
+            if sanitized is None:
+                logger.warning(
+                    "Skipping setting %s from default export: unparseable stored value",
+                    key,
+                )
+                continue
+            value = sanitized
+        settings[key] = value
+
+    content: dict[str, Any] = {
+        "version": _SETTINGS_EXPORT_VERSION,
+        "exported_at": datetime.now(UTC).isoformat(),
+        "settings": settings,
+    }
+    if sensitive_included:
+        content["warning"] = _SETTINGS_EXPORT_SECRETS_WARNING
+
+    logger.info(
+        "Admin settings exported: keys=%d, include_sensitive=%s, by=%s",
+        len(settings),
+        include_sensitive,
+        request.state.username,
+    )
+    return JSONResponse(content=content, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/admin/settings/import", operation_id="importServerSettings")
+async def import_server_settings(request: Request) -> JSONResponse:
+    """Import a settings export document (validated, atomic, with a diff).
+
+    Body: an export document, optionally with ``"dry_run": true`` to
+    validate and report the diff without applying anything. Every key and
+    value is validated before anything is written — one invalid entry
+    rejects the whole import (422 with the offending entries listed).
+    """
+    _require_admin(request)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="Body must be a JSON settings export document"
+        )
+    if not isinstance(body, dict) or body.get("version") != _SETTINGS_EXPORT_VERSION:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Unsupported export document: expected version "
+                f"{_SETTINGS_EXPORT_VERSION}"
+            ),
+        )
+    raw_settings = body.get("settings")
+    if not isinstance(raw_settings, dict) or not raw_settings:
+        raise HTTPException(status_code=422, detail="No settings in export document")
+    updates = {str(k): "" if v is None else str(v) for k, v in raw_settings.items()}
+
+    # Validate the whole batch before anything is applied — the same
+    # rules the per-setting PUT enforces, plus the empty-override gates
+    # the shared save path applies (checked here so a rejection is a 422
+    # before any DB write, keeping the import atomic).
+    errors = _validate_settings_updates(updates)
+    for key, value in updates.items():
+        if key in _DERIVED_SETTINGS:
+            # Same rule the persist endpoint enforces: a derived value is
+            # computed from sidecar_port at boot — importing one would pin
+            # a stale URL from the exporting instance.
+            errors.append(
+                f"{key} is derived from sidecar_port — set sidecar_port instead"
+            )
+        if not value and (error := _empty_override_error(key)):
+            errors.append(error)
+    if errors:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid settings: {'; '.join(errors)}"
+        )
+
+    applied, unchanged, restart_required = _diff_import_updates(
+        updates, await storage.get_server_settings()
+    )
+    content: dict[str, Any] = {
+        "applied": applied,
+        "unchanged": unchanged,
+        "restart_required": restart_required,
+    }
+    if body.get("dry_run"):
+        content["dry_run"] = True
+        return JSONResponse(content=content)
+
+    username = request.state.username or "admin"
+    # Only keys the diff marked as applied are written — unchanged keys
+    # (including sanitized-equal ones whose credentials the target keeps)
+    # must not be overwritten (#361 Qodo r2).
+    warnings = await _save_settings_to_db(
+        {key: value for key, value in updates.items() if key in applied}, username
+    )
+    if warnings:
+        content["warnings"] = warnings
+    logger.info(
+        "Admin settings imported: applied=%d, unchanged=%d, by=%s",
+        len(applied),
+        len(unchanged),
+        username,
+    )
+    return JSONResponse(content=content)
+
+
 # Settings where an explicit empty override is unsafe regardless of type:
 # the sidecar env bridge would export SIDECAR_HOST=''/SIDECAR_PORT='' and
 # pi-config's nullish coalescing selects the empty string over its loopback/
@@ -12955,6 +13767,10 @@ def _empty_override_error(key: str) -> str | None:
     validator rejects ""), and infrastructure settings with unsafe empty
     semantics are denied outright.
     """
+    if key not in Settings.model_fields:
+        # Unknown keys are already reported by the shared validator —
+        # indexing model_fields here would turn a 422 into a 500.
+        return None
     if key in _EMPTY_OVERRIDE_FORBIDDEN:
         return (
             f"Setting '{key}' cannot be empty — the sidecar bridge would "
@@ -13001,6 +13817,7 @@ async def _save_settings_to_db(
             if error:
                 raise HTTPException(status_code=400, detail=error)
 
+    db_values: dict[str, str] = {}
     for key, value in settings_updates.items():
         str_value = str(value) if value is not None else ""
         # Upsert (empty allowed — an explicit empty override beats env).
@@ -13009,10 +13826,12 @@ async def _save_settings_to_db(
         if str_value and key in _SENSITIVE_SETTINGS:
             from rootcoz.encryption import encrypt_value
 
-            db_value = encrypt_value(str_value)
+            db_values[key] = encrypt_value(str_value)
         else:
-            db_value = str_value
-        await storage.set_server_setting(key, db_value, updated_by=username)
+            db_values[key] = str_value
+    # One atomic batch write — a mid-batch failure must not leave earlier
+    # keys applied while later ones are missing (half-applied import).
+    await storage.set_server_settings_batch(db_values, updated_by=username)
 
     # Changed Jira credentials or auth mode invalidate the verified-method
     # record — it reflects the last successful test of the previous setup.
@@ -13332,6 +14151,10 @@ def _jira_settings_fingerprint(settings: Settings) -> str:
         parts.append(_secret(settings.jira_pat))
         parts.append(settings.jira_server_url.strip())
         parts.append(str(settings.jira_server_ssl_verify))
+    elif mode == "atst":
+        parts.append(_secret(settings.jira_atst_token))
+        parts.append((settings.atlassian_oauth_cloud_id or "").strip())
+        parts.append(str(settings.jira_oauth_ssl_verify))
     return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
 
@@ -13364,10 +14187,12 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
             "Jira service account mode could not resolve the Atlassian "
             "cloud ID (set atlassian_oauth_cloud_id or jira_site_url)",
         )
-    if connection.mode == "sa":
+    if connection.mode in ("sa", "atst"):
         # OAuth 2.0 credentials carry read:jira-work only — /myself needs
         # read:jira-users and 401s with "scope does not match" — so probe
         # project visibility instead (any 200 proves auth + gateway access).
+        # ATST scoped tokens get the same treatment: their scopes are
+        # admin-chosen and must not be assumed to include read:jira-users.
         try:
             data = await _integration_test_get_json(
                 f"{connection.api_base}{connection.api_path}/project",
@@ -13402,7 +14227,9 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
         user = str(
             data.get("displayName") or data.get("name") or data.get("accountId") or ""
         )
-    auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat"}[connection.mode]
+    auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat", "atst": "atst"}[
+        connection.mode
+    ]
     # A method counts as configured only once its test succeeded — record
     # the tested (selected) method as an internal DB row. Not cleared on
     # failure: the record reflects the last success, not the latest attempt.
@@ -14671,14 +15498,26 @@ async def _resolve_chat_credentials(
         # reuse for user-scoped secret resolution (the user secret +
         # server client ID must belong to the same Atlassian OAuth 2.0
         # credential). The user's field choice pins the method; each
-        # method then reads its own URL. An ATOA-prefixed secret saved in
-        # the regular jira_token field is an OAuth 2.0 client secret —
-        # route it to the oauth path so chat agrees with validation and
-        # preview (which detect the prefix).
+        # method then reads its own URL. Prefix detection wins over field
+        # placement (#327 semantics): an ATOA-prefixed secret or an
+        # ATST-prefixed scoped token saved in the regular jira_token field
+        # routes to the oauth/atst path so chat agrees with validation and
+        # effective settings (which detect the prefixes). The
+        # service-account field wins when both fields carry classified
+        # values.
         regular_token = jira_token.strip()
         sa_secret = jira_sa_token.strip()
-        if not sa_secret and regular_token.startswith("ATOA"):
-            sa_secret = regular_token
+        atst_token = ""
+        sa_kind = classify_jira_secret(sa_secret)
+        token_kind = classify_jira_secret(regular_token)
+        if sa_kind == "atst":
+            atst_token = sa_secret
+            sa_secret = ""
+        elif not sa_kind and token_kind:
+            if token_kind == "oauth":
+                sa_secret = regular_token
+            else:
+                atst_token = regular_token
             regular_token = ""
         jira_connection = resolve_jira_connection_from_params(
             jira_cloud_url=settings.jira_cloud_url,
@@ -14689,6 +15528,7 @@ async def _resolve_chat_credentials(
             atlassian_oauth_client_id=str(settings.atlassian_oauth_client_id or ""),
             atlassian_oauth_cloud_id=str(settings.atlassian_oauth_cloud_id or ""),
             jira_site_url=str(settings.jira_site_url or ""),
+            jira_atst_token=atst_token,
             jira_cloud_ssl_verify=settings.jira_cloud_ssl_verify,
             jira_server_ssl_verify=settings.jira_server_ssl_verify,
             jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
@@ -14699,10 +15539,11 @@ async def _resolve_chat_credentials(
             # selection, not an absent one.
             jira_connection = _JIRA_CHAT_SELECTION_FAILED
         else:
-            if jira_connection.mode == "sa":
+            if jira_connection.mode in ("sa", "atst"):
                 # Complete BEFORE treating an empty api_base as unusable:
                 # complete_jira_connection resolves the cloud ID from the
-                # site URL (tenant_info) when none is configured.
+                # site URL (tenant_info) when none is configured (and mints
+                # the access token for oauth-mode SA connections).
                 try:
                     jira_connection = await complete_jira_connection(jira_connection)
                 except JiraOAuthMintError as exc:

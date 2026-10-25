@@ -739,6 +739,11 @@ async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
                 "id": m["id"],
                 "name": m.get("name") or m["id"],
                 "provider": provider,
+                # "listing" models come from the key's live listing;
+                # "manifest" models only exist in the provider manifest
+                # and are NOT key-verified (#350 r1: manifest-only models
+                # must not enter the server pool as verified).
+                "source": m.get("source") or "listing",
                 # Keep only the metadata the sidecar uses to construct unknown models.
                 "capabilities": {
                     field: m.get("capabilities", {}).get(field)
@@ -749,6 +754,28 @@ async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
             for m in models
         ],
     }
+
+
+def _listing_entry_usable(entry: dict[str, Any]) -> bool:
+    """A discovered entry is usable unless it declares broken capability limits.
+
+    pi-sidecar reports no capabilities for key-scoped discovery, so absence
+    must stay usable. A limit that is declared but partial, non-integer, or
+    beyond the safe range breaks token math and must not reach the pool.
+    """
+    limits = entry.get("capabilities") or {}
+    declared = [limits.get(field) for field in ("inputTokenLimit", "outputTokenLimit")]
+    present = [value for value in declared if value is not None]
+    return not (
+        bool(present)
+        and (
+            len(present) != 2
+            or any(
+                type(value) is not int or not 0 < value <= 2**53 - 1
+                for value in present
+            )
+        )
+    )
 
 
 async def scoped_models() -> dict[str, list[dict[str, Any]]]:
@@ -778,16 +805,86 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     if selection is None:
         selection = (set(), set())
     selected_providers, selected_pairs = selection
+    # Key-scoped listings captured at add/rotate (#350): for a keyed provider
+    # the stored listing replaces the static catalog as the server pool's
+    # model set — a restricted key must not expose models it cannot use, and
+    # may offer models the catalog lacks. Providers with no rows (listing
+    # unsupported, discovery failed, or pre-#350 rows) keep the catalog.
+    key_scoped: dict[str, dict[str, dict[str, Any]]] = {}
+    # Stored spelling per lowercase join key (#350 r2): fallback entries for
+    # providers the catalog no longer lists must keep the stored casing —
+    # pi-config looks up session providers by their exact id, so emitting
+    # ``mygateway`` for a stored ``MyGateway`` breaks session creation.
+    key_scoped_ids: dict[str, str] = {}
+    try:
+        from rootcoz.storage import list_server_provider_key_models
+
+        for row in await list_server_provider_key_models():
+            key_scoped.setdefault(row["provider"].lower(), {})[row["model"]] = row
+            key_scoped_ids.setdefault(row["provider"].lower(), row["provider"])
+    except sqlite3.Error, OSError:
+        logger.warning("Unable to load key-scoped server provider models")
+
+    def _key_scoped_entries(
+        provider: str, scoped_rows: dict[str, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Server-pool entries for one provider's captured key-scoped listing.
+
+        The empty-string sentinel row (a supported listing with zero
+        #350-accessible models) yields no entries — the provider exposes
+        nothing on server credentials rather than falling back to the
+        catalog. Entries with declared-but-broken capability limits are
+        skipped, the same rule the user-key path applies.
+        """
+        return [
+            {
+                "id": model,
+                "name": row.get("name") or model,
+                "provider": provider,
+                "source": _source_for_sidecar(provider),
+                "capabilities": row.get("capabilities") or {},
+            }
+            for model, row in sorted(scoped_rows.items())
+            if model and _listing_entry_usable(row)
+        ]
+
+    seen_catalog_providers: set[str] = set()
     for provider, entries in build_friendly_catalog(catalog).items():
+        seen_catalog_providers.add(provider.lower())
         if active is not None and not is_server_provider_active(provider):
             # Server credential source withdrawn; user-key discovery below
             # can still surface this provider's models with 'user' only.
             continue
         has_selection = provider.lower() in selected_providers
+        scoped_rows = key_scoped.get(provider.lower())
+        if scoped_rows is not None:
+            entries = _key_scoped_entries(provider, scoped_rows)
         for entry in entries:
             if has_selection and (provider.lower(), entry["id"]) not in selected_pairs:
                 # Admin deselected this model from server exposure; user-key
                 # discovery below can still surface it with 'user' only.
+                continue
+            pairs[(provider, entry["id"])] = {
+                **entry,
+                "credential_sources": ["server"],
+                "can_use_server_providers": allowed,
+                "verified": True,
+            }
+    # A captured listing for a provider the static catalog no longer lists
+    # still defines its server pool — the admin API offers those models, so
+    # discovery must not silently drop the provider (#350 r1).
+    # The stored spelling is the provider id (#350 r2): the catalog join
+    # key is lowercase, but the emitted entries must carry the exact id
+    # pi-config resolves sessions with.
+    for provider_lower, scoped_rows in key_scoped.items():
+        if provider_lower in seen_catalog_providers:
+            continue
+        provider = key_scoped_ids.get(provider_lower, provider_lower)
+        if active is not None and not is_server_provider_active(provider):
+            continue
+        has_selection = provider_lower in selected_providers
+        for entry in _key_scoped_entries(provider, scoped_rows):
+            if has_selection and (provider_lower, entry["id"]) not in selected_pairs:
                 continue
             pairs[(provider, entry["id"])] = {
                 **entry,
@@ -841,22 +938,10 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             usable: set[tuple[str, str]] = set()
             for entry in entries:
                 pair = (provider, entry["id"])
-                limits = entry.get("capabilities") or {}
-                declared = [
-                    limits.get(field)
-                    for field in ("inputTokenLimit", "outputTokenLimit")
-                ]
-                present = [value for value in declared if value is not None]
                 # pi-sidecar reports no capabilities for key-scoped discovery, so
                 # absence must stay usable. A limit that is declared but partial,
                 # non-integer, or beyond the safe range still breaks token math.
-                unusable = bool(present) and (
-                    len(present) != 2
-                    or any(
-                        type(value) is not int or not 0 < value <= 2**53 - 1
-                        for value in present
-                    )
-                )
+                unusable = not _listing_entry_usable(entry)
                 if listing and not (pair in pairs or not unusable):
                     continue
                 if pair in pairs:

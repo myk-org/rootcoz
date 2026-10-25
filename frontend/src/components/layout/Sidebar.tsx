@@ -15,6 +15,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { NavBadge } from '@/components/shared/NavBadge'
+import { SavedFiltersSection } from '@/components/layout/SavedFiltersSection'
 import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
@@ -227,6 +228,10 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const sidebarContent = (
     <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-2 py-3">
       {userItems.map(renderItem)}
+
+      {!loading && authenticated && (
+        <SavedFiltersSection collapsed={collapsed} onNavigate={onMobileClose} />
+      )}
 
       {!loading && (canViewReports || isAdmin) && (
         <>
