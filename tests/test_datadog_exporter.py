@@ -437,6 +437,70 @@ class TestContentToggles:
         assert "- **Tracked in:** [issue](https://bugs.example.com/XYZ-1)" in text
 
 
+class TestHistoryClassificationsAndReviewers:
+    """Report Portal parity: ExportContext history + reviewer fields.
+
+    Neither is toggle-gated — Report Portal is not either.
+    """
+
+    def test_needs_history_classifications_flag(self):
+        assert DatadogExporter.needs_history_classifications is True
+
+    def test_history_classification_in_text_when_present(self):
+        event = self._event(
+            history_classifications={"test_login_flow": "INFRASTRUCTURE"}
+        )
+        assert "**Previous classification:** INFRASTRUCTURE" in event["text"]
+        # After the Classification line, before the links.
+        text = event["text"]
+        assert text.index("**Classification:**") < text.index(
+            "**Previous classification:**"
+        )
+        assert text.index("**Previous classification:**") < text.index("RootCoz report")
+
+    def test_history_classification_uses_the_test_own_entry(self):
+        event = self._event(history_classifications={"test_other": "CODE ISSUE"})
+        assert "Previous classification" not in event["text"]
+
+    def test_history_classification_absent_when_dict_empty(self):
+        event = self._event()
+        assert "Previous classification" not in event["text"]
+
+    def test_history_classification_not_toggle_gated(self):
+        """The dd_push_classifications toggle covers the current classification
+        only — history parity with Report Portal is unconditional."""
+        exporter = _exporter(push_classifications=False)
+        context = _context(
+            history_classifications={"test_login_flow": "INFRASTRUCTURE"}
+        )
+        text = exporter._build_event(context, _failure())["text"]
+        assert "**Previous classification:** INFRASTRUCTURE" in text
+        assert "Classification:**" not in text  # current one still toggled off
+
+    def test_reviewer_line_and_tag_when_present(self):
+        event = self._event(reviewed_by={"test_login_flow": "bob"})
+        assert "**Reviewed by:** bob" in event["text"]
+        assert "reviewed_by:bob" in event["tags"]
+        # Tag comes right after the pushed_by attribution tag.
+        tags = event["tags"]
+        assert tags.index("pushed_by:alice") < tags.index("reviewed_by:bob")
+
+    def test_reviewer_absent_when_no_entry(self):
+        event = self._event(reviewed_by={"test_other": "bob"})
+        assert "Reviewed by" not in event["text"]
+        assert not any(t.startswith("reviewed_by:") for t in event["tags"])
+
+    def test_reviewer_username_sanitized_in_tag_only(self):
+        """Tag values must be tag-safe; the text line keeps the raw username."""
+        event = self._event(reviewed_by={"test_login_flow": "Bob Smith!"})
+        assert "reviewed_by:Bob_Smith" in event["tags"]
+        assert "**Reviewed by:** Bob Smith!" in event["text"]
+
+    def _event(self, **ctx_overrides: Any) -> dict[str, Any]:
+        exporter = _exporter()
+        return exporter._build_event(_context(**ctx_overrides), _failure())
+
+
 class TestPush:
     async def test_empty_failures(self):
         result = await _exporter().push(_context())
@@ -1024,3 +1088,31 @@ class TestAutoPushAnalysisTimestamp:
             )
 
         assert mock_build_context.call_args.kwargs["analysis_timestamp"] is None
+
+
+class TestCaseInsensitiveAlertTypeMap:
+    """Mapping keys must match stored classifications case-insensitively."""
+
+    def test_lowercase_mapping_matches_uppercase_classification(self):
+        event = _exporter(alert_type_map="product bug=error")._build_event(
+            _context(), _failure()
+        )
+        assert event["alert_type"] == "error"
+
+    def test_mixed_case_mapping_matches(self):
+        event = _exporter(alert_type_map="Product Bug=warning")._build_event(
+            _context(), _failure()
+        )
+        assert event["alert_type"] == "warning"
+
+    def test_exact_case_still_wins(self):
+        event = _exporter(
+            alert_type_map="PRODUCT BUG=error, product bug=info"
+        )._build_event(_context(), _failure())
+        assert event["alert_type"] == "error"
+
+    def test_unmapped_classification_still_omits_alert_type(self):
+        event = _exporter(alert_type_map="something else=error")._build_event(
+            _context(), _failure()
+        )
+        assert "alert_type" not in event

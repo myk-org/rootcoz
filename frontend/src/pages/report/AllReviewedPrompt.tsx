@@ -1,17 +1,41 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/lib/api'
 import { collectAllTestKeys } from '@/lib/failureKeys'
+import { collectPushScopes, pushScopeQuery } from '@/lib/pushScopes'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import { useAuth } from '@/lib/auth'
 import { useReportState } from '@/pages/report/reportState'
 
 interface AllReviewedPromptProps {
   jobId: string
 }
 
+/** Minimal shape of a push response, used to detect failed pushes. */
+interface PushResponse {
+  success?: boolean
+  message?: string
+  errors?: string[]
+}
+
+/**
+ * Extract a user-facing failure detail from a push response, or null when
+ * the push succeeded. Covers the generic exporter response
+ * (`success`/`message`) and the Report Portal response (`errors`).
+ */
+function pushFailureDetail(res: unknown): string | null {
+  if (!res || typeof res !== 'object') return null
+  const r = res as PushResponse
+  if (r.success === false) return r.message || r.errors?.[0] || 'push failed'
+  if (r.errors && r.errors.length > 0) return r.errors[0]
+  return null
+}
+
 export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const { result, reviews, reportportalAvailable, datadogAvailable } = useReportState()
+  const { isOperator } = useAuth()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
+  const [pushError, setPushError] = useState<string | null>(null)
 
   const allKeys = useMemo(
     () =>
@@ -20,6 +44,15 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
             result.failures ?? [],
             result.child_job_analyses ?? [],
           )
+        : [],
+    [result],
+  )
+
+  /** Push targets: the parent scope plus every child scope with failures. */
+  const scopes = useMemo(
+    () =>
+      result
+        ? collectPushScopes(result.failures ?? [], result.child_job_analyses ?? [])
         : [],
     [result],
   )
@@ -33,6 +66,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   rpRef.current = reportportalAvailable
   const datadogRef = useRef(datadogAvailable)
   datadogRef.current = datadogAvailable
+  const isOperatorRef = useRef(isOperator)
+  isOperatorRef.current = isOperator
 
   useEffect(() => {
     function onReviewChanged(event: Event) {
@@ -42,6 +77,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       requestAnimationFrame(() => {
         const currentReviews = reviewsRef.current
         const currentKeys = allKeysRef.current
+        if (!isOperatorRef.current) return
         if ((!rpRef.current && !datadogRef.current) || currentKeys.length === 0) return
         const allNowReviewed = currentKeys.every((k) => currentReviews[k]?.reviewed)
         if (allNowReviewed) {
@@ -57,23 +93,59 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   useEffect(() => {
     setDialogOpen(false)
     setPushing(false)
+    setPushError(null)
   }, [jobId])
 
   const handleConfirm = async () => {
     setPushing(true)
+    setPushError(null)
     try {
-      // Best-effort per exporter — errors are not surfaced here
-      const pushes: Array<Promise<unknown>> = []
-      if (rpRef.current) pushes.push(api.post(`/results/${jobId}/push-reportportal`))
-      if (datadogRef.current) pushes.push(api.post(`/results/${jobId}/push/datadog`))
-      await Promise.allSettled(pushes)
+      // One push per scope (parent + each child job with failures) per
+      // available exporter — child scopes carry child_job_name +
+      // child_build_number query params, same as the push buttons.
+      const pushes: Array<{ label: string; promise: Promise<unknown> }> = []
+      for (const scope of scopes) {
+        const qs = pushScopeQuery(scope)
+        const label = scope.childJobName
+          ? `${scope.childJobName} #${scope.childBuildNumber}`
+          : 'parent job'
+        if (rpRef.current) {
+          pushes.push({
+            label,
+            promise: api.post(`/results/${jobId}/push-reportportal${qs}`),
+          })
+        }
+        if (datadogRef.current) {
+          pushes.push({
+            label,
+            promise: api.post(`/results/${jobId}/push/datadog${qs}`),
+          })
+        }
+      }
+      const settled = await Promise.allSettled(pushes.map((p) => p.promise))
+      const failures: string[] = []
+      settled.forEach((outcome, i) => {
+        const { label } = pushes[i]
+        if (outcome.status === 'rejected') {
+          failures.push(`${label}: push request failed`)
+        } else {
+          const detail = pushFailureDetail(outcome.value)
+          if (detail) failures.push(`${label}: ${detail}`)
+        }
+      })
+      if (failures.length > 0) {
+        // Keep the dialog open so the user sees what failed
+        setPushError(failures.join('; '))
+      } else {
+        setDialogOpen(false)
+      }
     } finally {
       setPushing(false)
-      setDialogOpen(false)
     }
   }
 
-  if (!reportportalAvailable && !datadogAvailable) return null
+  // Push endpoints are operator-only — never prompt other roles
+  if (!isOperator || (!reportportalAvailable && !datadogAvailable)) return null
 
   const pushTargets =
     reportportalAvailable && datadogAvailable
@@ -92,6 +164,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       cancelLabel="No"
       onConfirm={handleConfirm}
       loading={pushing}
+      error={pushError}
     />
   )
 }

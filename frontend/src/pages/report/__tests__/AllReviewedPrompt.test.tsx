@@ -4,7 +4,7 @@ import { useEffect, useImperativeHandle, forwardRef, createRef } from 'react'
 import { AllReviewedPrompt } from '../AllReviewedPrompt'
 import { useReportDispatch } from '@/pages/report/reportState'
 import { ReportProvider } from '../ReportContext'
-import type { AnalysisResult, ReviewState } from '@/types'
+import type { AnalysisResult, ChildJobAnalysis, ReviewState } from '@/types'
 
 /* ------------------------------------------------------------------ */
 /*  Mocks                                                              */
@@ -16,6 +16,25 @@ vi.mock('@/lib/api', () => ({
   api: {
     post: (...args: unknown[]) => mockPost(...args),
   },
+}))
+
+const mockAuth = {
+  username: 'testuser',
+  isAdmin: false,
+  isOperator: true,
+  canViewReports: true,
+  canUseServerProviders: false,
+  canUseFreeProviders: false,
+  role: 'operator',
+  loading: false,
+  authenticated: true,
+  login: vi.fn(),
+  logout: vi.fn(),
+  refreshAuth: vi.fn(),
+}
+
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => mockAuth,
 }))
 
 /* ------------------------------------------------------------------ */
@@ -68,6 +87,28 @@ function makeResult(overrides: Partial<AnalysisResult> = {}): AnalysisResult {
 
 function makeReview(reviewed: boolean): ReviewState {
   return { reviewed, username: 'user', updated_at: '2025-01-01T00:00:00Z' }
+}
+
+function makeChildJob(overrides: Partial<ChildJobAnalysis> = {}): ChildJobAnalysis {
+  return {
+    id: 'child-1',
+    job_name: 'child-job',
+    build_number: 42,
+    jenkins_url: null,
+    summary: null,
+    failures: [
+      {
+        id: 'f-child',
+        test_name: 'child-test',
+        error: 'err',
+        analysis: makeAnalysis('CODE ISSUE', ['child-test']),
+        error_signature: 'sig-c',
+      },
+    ],
+    failed_children: [],
+    note: null,
+    ...overrides,
+  }
 }
 
 /**
@@ -175,6 +216,7 @@ const DynamicInjector = forwardRef<DynamicInjectorHandle, {
 beforeEach(() => {
   vi.clearAllMocks()
   mockPost.mockResolvedValue({})
+  mockAuth.isOperator = true
 })
 
 describe('AllReviewedPrompt', () => {
@@ -251,6 +293,107 @@ describe('AllReviewedPrompt', () => {
     await waitFor(() => {
       expect(mockPost).toHaveBeenCalledWith('/results/job-1/push-reportportal')
     })
+  })
+
+  it('pushes the parent scope and each child scope when child jobs have failures', async () => {
+    renderPrompt({
+      result: makeResult({
+        failures: [
+          {
+            id: 'f-parent',
+            test_name: 'parent-test',
+            error: 'err',
+            analysis: makeAnalysis('PRODUCT BUG', ['parent-test']),
+            error_signature: 'sig-p',
+          },
+        ],
+        child_job_analyses: [makeChildJob()],
+      }),
+      additionalReviews: {
+        'parent-test': makeReview(true),
+        'child-job#42::child-test': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith('/results/job-1/push-reportportal')
+      expect(mockPost).toHaveBeenCalledWith(
+        '/results/job-1/push-reportportal?child_job_name=child-job&child_build_number=42',
+      )
+    })
+  })
+
+  it('pushes only child scopes when failures exist only in child jobs', async () => {
+    renderPrompt({
+      result: makeResult({
+        failures: [],
+        child_job_analyses: [makeChildJob()],
+      }),
+      additionalReviews: {
+        'child-job#42::child-test': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledTimes(1)
+      expect(mockPost).toHaveBeenCalledWith(
+        '/results/job-1/push-reportportal?child_job_name=child-job&child_build_number=42',
+      )
+    })
+    expect(mockPost).not.toHaveBeenCalledWith('/results/job-1/push-reportportal')
+  })
+
+  it('pushes child scopes to datadog too when both exporters are available', async () => {
+    renderPrompt({
+      result: makeResult({
+        failures: [],
+        child_job_analyses: [makeChildJob()],
+      }),
+      reportportalAvailable: true,
+      datadogAvailable: true,
+      additionalReviews: {
+        'child-job#42::child-test': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal and Datadog?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    const childQuery = '?child_job_name=child-job&child_build_number=42'
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(`/results/job-1/push-reportportal${childQuery}`)
+      expect(mockPost).toHaveBeenCalledWith(`/results/job-1/push/datadog${childQuery}`)
+    })
+  })
+
+  it('does not show the dialog for non-operators even when all failures are reviewed', async () => {
+    mockAuth.isOperator = false
+
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await new Promise((r) => setTimeout(r, 50))
+    expect(screen.queryByText('All failures reviewed. Update Report Portal?')).toBeNull()
+    expect(mockPost).not.toHaveBeenCalled()
   })
 
   it('calls push datadog API on confirm when only datadog is available', async () => {
@@ -452,7 +595,7 @@ describe('AllReviewedPrompt', () => {
     })
   })
 
-  it('dialog closes after API error (best-effort)', async () => {
+  it('surfaces push request errors and keeps the dialog open', async () => {
     mockPost.mockRejectedValueOnce(new Error('Network error'))
 
     renderPrompt({
@@ -469,7 +612,62 @@ describe('AllReviewedPrompt', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
 
     await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeDefined()
+    })
+    expect(screen.getByRole('alert').textContent).toContain('push request failed')
+    // Dialog stays open so the failure is not silently discarded
+    expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+  })
+
+  it('surfaces failed (success=false) push responses and keeps the dialog open', async () => {
+    mockPost.mockResolvedValueOnce({
+      success: false,
+      message: 'Datadog API key rejected',
+      pushed: 0,
+      total: 0,
+      errors: [],
+      skipped: 0,
+    })
+
+    renderPrompt({
+      reportportalAvailable: false,
+      datadogAvailable: true,
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Datadog?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeDefined()
+    })
+    expect(screen.getByRole('alert').textContent).toContain('Datadog API key rejected')
+    expect(screen.getByText('All failures reviewed. Update Datadog?')).toBeDefined()
+  })
+
+  it('closes the dialog only when all pushes succeed', async () => {
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
       expect(screen.queryByText('All failures reviewed. Update Report Portal?')).toBeNull()
     })
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

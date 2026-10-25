@@ -97,6 +97,29 @@ describe('DatadogButton', () => {
     expect(screen.getByText('1 event skipped')).toBeDefined()
   })
 
+  it('shows a failure dialog with the abort message when success=false and nothing was pushed', async () => {
+    mockPost.mockResolvedValue(
+      makeResult({
+        success: false,
+        pushed: 0,
+        total: 0,
+        errors: [],
+        skipped: 0,
+        message: 'Datadog API key rejected',
+      }),
+    )
+
+    renderButton(true)
+    await confirmPush()
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to push events to Datadog.')).toBeDefined()
+    })
+    expect(screen.getByText('Datadog API key rejected')).toBeDefined()
+    // Must not render the green zero-count success message
+    expect(screen.queryByText('Pushed 0 events to Datadog.')).toBeNull()
+  })
+
   it('shows a full-failure result dialog when the request fails', async () => {
     mockPost.mockRejectedValue(new Error('Network error'))
 

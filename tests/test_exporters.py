@@ -508,10 +508,20 @@ class TestExporterNeedsHistory:
 
         assert ReportPortalClient.needs_history_classifications is True
 
+    def test_datadog_needs_history(self):
+        from rootcoz.exporters.datadog import DatadogExporter
+
+        assert DatadogExporter.needs_history_classifications is True
+
     def test_helper_true_for_reportportal(self):
         from rootcoz.main import _exporter_needs_history_classifications
 
         assert _exporter_needs_history_classifications(["reportportal"]) is True
+
+    def test_helper_true_for_datadog(self):
+        from rootcoz.main import _exporter_needs_history_classifications
+
+        assert _exporter_needs_history_classifications(["datadog"]) is True
 
     def test_helper_false_for_unknown(self):
         from rootcoz.main import _exporter_needs_history_classifications
@@ -587,6 +597,70 @@ class TestBuildExportContextFetchHistory:
         ctx, mock_hist = self._run_build(False)
         assert mock_hist.await_count == 0
         assert ctx.history_classifications == {}
+
+
+class TestBuildExportContextReviewedBy:
+    """_build_export_context populates reviewed_by for every exporter.
+
+    Reviewer attribution is fetched unconditionally (both Report Portal and
+    Datadog consume it) — no fetch flag, unlike history/tracked-in links.
+    """
+
+    @staticmethod
+    def _run_build(reviews):
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        result_data = {
+            "job_name": "j",
+            "jenkins_url": "https://jenkins.example.com/job/j/1/",
+            "failures": [{"test_name": "t1"}, {"test_name": "t2"}],
+        }
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc.example.com",
+            ),
+            patch(
+                "rootcoz.main.get_history_classification",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch(
+                "rootcoz.main.storage.get_tracked_in_for_scope",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "rootcoz.main.storage.get_reviews_for_job",
+                new_callable=AsyncMock,
+                return_value=reviews,
+            ),
+        ):
+            return asyncio.run(
+                _build_export_context(
+                    job_id="job-1",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    fetch_history=False,
+                )
+            )
+
+    def test_reviewed_tests_populate_reviewed_by(self):
+        reviews = {
+            "t1": {"reviewed": True, "username": "bob"},
+            "t2": {"reviewed": True, "username": "alice"},
+        }
+        ctx = self._run_build(reviews)
+        assert ctx.reviewed_by == {"t1": "bob", "t2": "alice"}
+
+    def test_unreviewed_tests_omitted(self):
+        reviews = {
+            "t1": {"reviewed": False, "username": ""},
+        }
+        ctx = self._run_build(reviews)
+        assert ctx.reviewed_by == {}
 
 
 class TestExporterNeedsTrackedInLinks:

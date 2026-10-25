@@ -14,6 +14,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
+import { pushScopeQuery } from '@/lib/pushScopes'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { DatadogPushResult } from '@/types'
 
@@ -74,11 +75,8 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
     setPushFailed(false)
     setPushResult(null)
     try {
-      const params = new URLSearchParams()
-      if (childJobName) params.set('child_job_name', childJobName)
-      if (childBuildNumber != null) params.set('child_build_number', String(childBuildNumber))
-      const qs = params.toString()
-      const result = await api.post<DatadogPushResult>(`/results/${jobId}/push/datadog${qs ? `?${qs}` : ''}`)
+      const qs = pushScopeQuery({ childJobName, childBuildNumber })
+      const result = await api.post<DatadogPushResult>(`/results/${jobId}/push/datadog${qs}`)
       setPushResult(result)
       setResultDialogOpen(true)
     } catch {
@@ -95,8 +93,11 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
 
   const hasResultErrors = !!(pushResult && pushResult.errors.length > 0)
   const hasSkipped = !!(pushResult && pushResult.skipped > 0)
-  const isFullFailure = pushFailed || (pushResult && pushResult.pushed === 0 && hasResultErrors)
-  const isPartialSuccess = pushResult && pushResult.pushed > 0 && (hasResultErrors || hasSkipped)
+  // `success=false` with nothing pushed is a failure even without per-event
+  // errors (e.g. the exporter aborted: API-key rejection, no failures) —
+  // it must never render as a green "Pushed 0 events".
+  const isFullFailure = pushFailed || !!(pushResult && pushResult.pushed === 0 && (!pushResult.success || hasResultErrors))
+  const isPartialSuccess = !!pushResult && pushResult.pushed > 0 && (!pushResult.success || hasResultErrors || hasSkipped)
 
   return (
     <>
@@ -167,6 +168,9 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
                 buildNumber={displayBuildNumber}
                 className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-text-tertiary"
               />
+              {pushResult?.message && (
+                <p className="text-xs text-text-secondary" data-testid="datadog-push-message">{pushResult.message}</p>
+              )}
               {pushResult && pushResult.errors.length > 0 && (
                 <ul className="space-y-1 text-xs text-text-tertiary" data-testid="datadog-push-errors">
                   {pushResult.errors.map((err, i) => (

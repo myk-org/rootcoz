@@ -9,7 +9,9 @@ classification→alert_type mapping: with no mapping configured, no
 ``alert_type`` field is emitted at all and Datadog applies its own default.
 Events carry a stable ``aggregation_key`` per analysis/test pair and a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
-job/build/test identity, and the push attribution).
+job/build/test identity, and the push attribution).  Parity with Report
+Portal: events also carry per-test history classifications and reviewer
+attribution from the shared ``ExportContext``.
 
 Failures never raise: per-event HTTP/network errors are collected into the
 exporter result so a Datadog outage can never break the analysis pipeline.
@@ -235,6 +237,10 @@ class DatadogExporter(Exporter):
     #: Consumes tracked-in links from ``ExportContext.tracked_in_links``.
     needs_tracked_in_links = True
 
+    #: Consumes per-test history classifications from
+    #: ``ExportContext.history_classifications`` (same as Report Portal).
+    needs_history_classifications = True
+
     def __init__(
         self,
         *,
@@ -260,6 +266,12 @@ class DatadogExporter(Exporter):
         self._push_rootcoz_url = push_rootcoz_url
         self._push_tracker_links = push_tracker_links
         self._alert_type_map = parse_alert_type_map(alert_type_map)
+        # Case-insensitive fallback: admins type classifications in any
+        # case ("product bug=error" must match a stored "PRODUCT BUG").
+        # Exact-case key wins; casefold collisions resolve last-wins here.
+        self._alert_type_map_ci = {
+            key.casefold(): value for key, value in self._alert_type_map.items()
+        }
 
     # -- Exporter ABC ---------------------------------------------------------
 
@@ -315,6 +327,9 @@ class DatadogExporter(Exporter):
         tags.append(
             f"pushed_by:{sanitize_tag_value(context.pushed_by or AI_SYSTEM_USERNAME)}"
         )
+        reviewer = context.reviewed_by.get(test_name, "")
+        if reviewer:
+            tags.append(f"reviewed_by:{sanitize_tag_value(reviewer)}")
         return tags
 
     def _build_event(
@@ -359,6 +374,11 @@ class DatadogExporter(Exporter):
         ]
         if classification:
             lines.append(f"- **Classification:** {classification}")
+        history_classification = context.history_classifications.get(test_name, "")
+        if history_classification:
+            # Parity with Report Portal: the previous classification for
+            # this test name, when history has one. Not toggle-gated.
+            lines.append(f"- **Previous classification:** {history_classification}")
         lines.append(f"- **Job:** {context.job_name} (#{context.build_number})")
         if self._push_rootcoz_url and context.report_url:
             lines.append(
@@ -378,6 +398,11 @@ class DatadogExporter(Exporter):
                     "github": "GitHub",
                 }.get(str(link.get("tracked_in_type", "") or ""), "issue")
                 lines.append(f"- **Tracked in:** [{label}]({url})")
+        reviewer = context.reviewed_by.get(test_name, "")
+        if reviewer:
+            # Parity with Report Portal: reviewer attribution, when the
+            # test was human-reviewed. Not toggle-gated.
+            lines.append(f"- **Reviewed by:** {reviewer}")
         if details:
             lines += ["", "**AI diagnosis:**", "", details]
         text = "\n".join(lines)
@@ -400,7 +425,9 @@ class DatadogExporter(Exporter):
         # mapping covers this classification — otherwise Datadog applies
         # its own default.
         if classification:
-            alert_type = self._alert_type_map.get(classification)
+            alert_type = self._alert_type_map.get(classification) or (
+                self._alert_type_map_ci.get(classification.casefold())
+            )
             if alert_type:
                 event["alert_type"] = alert_type
         return event

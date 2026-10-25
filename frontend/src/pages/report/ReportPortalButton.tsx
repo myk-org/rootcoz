@@ -14,6 +14,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
+import { pushScopeQuery } from '@/lib/pushScopes'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { ReportPortalPushResult } from '@/types'
 import { useReportState } from '@/pages/report/reportState'
@@ -93,11 +94,8 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
     setPushFailed(false)
     setPushResult(null)
     try {
-      const params = new URLSearchParams()
-      if (childJobName) params.set('child_job_name', childJobName)
-      if (childBuildNumber != null) params.set('child_build_number', String(childBuildNumber))
-      const qs = params.toString()
-      const result = await api.post<ReportPortalPushResult>(`/results/${jobId}/push-reportportal${qs ? `?${qs}` : ''}`)
+      const qs = pushScopeQuery({ childJobName, childBuildNumber })
+      const result = await api.post<ReportPortalPushResult>(`/results/${jobId}/push-reportportal${qs}`)
       setPushResult(result)
       setResultDialogOpen(true)
     } catch {

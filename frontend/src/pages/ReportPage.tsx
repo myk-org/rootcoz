@@ -479,10 +479,10 @@ function ReportContent() {
             <TokenUsageBadge graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
           ) : null}
           <div className="ml-auto flex items-center gap-3">
-            {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
+            {isOperator && state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
-            {state.datadogAvailable && (result.child_job_analyses ?? []).length === 0 && (
+            {isOperator && state.datadogAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <DatadogButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
             {!isViewer && (
