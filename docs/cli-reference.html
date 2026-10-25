@@ -859,7 +859,7 @@
 <tr>
 <td><code>rootcoz validate-token github\|jira</code></td>
 <td><code>--token</code> (hidden prompt), <code>--email</code></td>
-<td>Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's <code>atlassian_oauth_client_id</code>.</td>
+<td>Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's <code>atlassian_oauth_client_id</code>; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange.</td>
 </tr>
 <tr>
 <td><code>rootcoz ai-models</code></td>

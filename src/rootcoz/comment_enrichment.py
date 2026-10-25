@@ -239,9 +239,9 @@ async def fetch_jira_ticket_status(
     }
 
     # Endpoints to try in order: Cloud v3 first, then Server/DC v2
-    # (SA mode: the scoped gateway only serves v3)
+    # (gateway connections — SA and ATST: the scoped gateway only serves v3)
     endpoints = [f"{base}/rest/api/3/search/jql"]
-    if connection.mode != "sa":
+    if connection.mode not in ("sa", "atst"):
         endpoints.append(f"{base}/rest/api/2/search")
 
     try:

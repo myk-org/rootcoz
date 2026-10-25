@@ -93,6 +93,7 @@ const baseSettings = (): TestSetting[] => [
   mk('jira_cloud_url', 'Jira', 'https://rootcoz.atlassian.net'),
   mk('jira_cloud_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('jira_pat', 'Jira', '', { sensitive: true }),
+  mk('jira_atst_token', 'Jira', '', { sensitive: true }),
   mk('jira_server_url', 'Jira', 'https://jira.example.com'),
   mk('jira_server_ssl_verify', 'Jira', 'true', { type: 'boolean' }),
   mk('github_token', 'GitHub', 'gh_tok', { sensitive: true }),
@@ -342,6 +343,47 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     expect(screen.getByText('ATLASSIAN_OAUTH_CLOUD_ID')).toBeInTheDocument()
     expect(screen.getByText('ATLASSIAN_OAUTH_CLIENT_ID')).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).toBeInTheDocument()
+    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+
+    // Shared fields carry a hint that they are shared with the atst method
+    expect(
+      screen.getAllByText(
+        'Shared with the Atlassian service account token (ATST, Bearer) method — both target the same Atlassian gateway tenant.',
+      ),
+    ).toHaveLength(2)
+    // Non-shared rows (e.g. the oauth client secret) do not carry the hint
+    expect(screen.getByText('JIRA_OAUTH_CLIENT_SECRET').closest('div.py-3')).not.toHaveTextContent(/Shared with the/)
+  })
+
+  it('selecting the atst method shows its fields and hides the other methods\' credentials', async () => {
+    mockJiraModeSettings('')
+    await openJiraTab()
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Atlassian service account token (ATST, Bearer)' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'atst' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('checkbox', { name: 'Atlassian service account token (ATST, Bearer)' })).toBeChecked(),
+    )
+    expect(screen.getByText('JIRA_ATST_TOKEN')).toBeInTheDocument()
+    // Shared locator/TLS fields stay visible for atst (same gateway as oauth)
+    expect(screen.getByText('ATLASSIAN_OAUTH_CLOUD_ID')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).toBeInTheDocument()
+    // Shared fields carry a hint that they are shared with the oauth method
+    expect(
+      screen.getAllByText(
+        'Shared with the Atlassian OAuth (client secret / cloud ID) method — both target the same Atlassian gateway tenant.',
+      ),
+    ).toHaveLength(2)
+    // Non-shared rows (e.g. the ATST token) do not carry the hint
+    expect(screen.getByText('JIRA_ATST_TOKEN').closest('div.py-3')).not.toHaveTextContent(/Shared with the/)
+    // Other methods' credentials are hidden
+    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
+    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
     expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
     expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
   })

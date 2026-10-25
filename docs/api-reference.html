@@ -422,13 +422,13 @@
 <td>PUT</td>
 <td><code>/api/user/tokens</code></td>
 <td>reviewer</td>
-<td>Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, <code>""</code> or <code>null</code> clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are <code>github_token</code>, <code>jira_email</code>, <code>jira_token</code>, and <code>jira_sa_token</code> (an ATOA-prefixed Atlassian OAuth 2.0 credential client secret, which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns <code>saved: false</code>; anything other than a string or <code>null</code> is rejected with <code>400</code></td>
+<td>Save Jira and GitHub tracker tokens. Each field is independent: a string sets it, <code>""</code> or <code>null</code> clears just that field, and an omitted field keeps its stored value, so clearing one credential leaves the others intact. Fields are <code>github_token</code>, <code>jira_email</code>, <code>jira_token</code>, and <code>jira_sa_token</code> (an Atlassian service-account credential — an ATOA-prefixed OAuth 2.0 client secret or an ATST-prefixed scoped token — which takes precedence over the regular Jira credentials). A body with none of the fields writes nothing and returns <code>saved: false</code>; anything other than a string or <code>null</code> is rejected with <code>400</code></td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/api/validate-token</code></td>
 <td>viewer</td>
-<td>Validate a GitHub or Jira token before saving. Jira tokens are validated against the selected method's server URL (<code>jira_cloud_url</code> with an email, <code>jira_server_url</code> without); an ATOA-prefixed value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side and the server must have <code>atlassian_oauth_client_id</code> configured</td>
+<td>Validate a GitHub or Jira token before saving. Jira tokens are validated against the selected method's server URL (<code>jira_cloud_url</code> with an email, <code>jira_server_url</code> without); an ATOA-prefixed value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, so its cloud ID must be resolvable server-side and the server must have <code>atlassian_oauth_client_id</code> configured; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange</td>
 </tr>
 <tr>
 <td>POST</td>
@@ -570,7 +570,7 @@
 </tr>
 <tr>
 <td><code>atlassian_oauth_cloud_id</code>, <code>jira_site_url</code>, <code>jira_project_key</code>, <code>jira_max_results</code>, <code>enable_jira</code></td>
-<td>Jira search during analysis. Jira credentials and per-method URLs (<code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_client_secret</code>, <code>jira_cloud_url</code>, <code>jira_server_url</code>, and the three <code>jira_*_ssl_verify</code> flags) are <strong>Server Settings only</strong> — analysis requests cannot carry them; the server-selected <code>jira_auth_mode</code> and its credentials always apply</td>
+<td>Jira search during analysis. Jira credentials and per-method URLs (<code>jira_email</code>, <code>jira_api_token</code>, <code>jira_pat</code>, <code>jira_oauth_client_secret</code>, <code>jira_atst_token</code>, <code>jira_cloud_url</code>, <code>jira_server_url</code>, and the three <code>jira_*_ssl_verify</code> flags) are <strong>Server Settings only</strong> — analysis requests cannot carry them; the server-selected <code>jira_auth_mode</code> and its credentials always apply</td>
 </tr>
 <tr>
 <td><code>github_token</code></td>

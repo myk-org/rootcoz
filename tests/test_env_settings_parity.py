@@ -155,6 +155,29 @@ def test_sidecar_settings_metadata_category_and_restart(client):
         assert by_key[key]["restart_required"] is True, key
 
 
+def test_jira_atst_setting_registration(client):
+    """jira_atst_token is registered like every Jira method credential."""
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    by_key = {item["key"]: item for item in response.json()}
+    assert by_key["jira_atst_token"]["category"] == "Jira"
+    assert by_key["jira_atst_token"]["sensitive"] is True
+    assert by_key["jira_atst_token"]["env_var"] == "JIRA_ATST_TOKEN"
+    # 'atst' is an accepted jira_auth_mode value on the admin write path
+    good = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"jira_auth_mode": "atst"}},
+    )
+    assert good.status_code == 200
+    bad = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"jira_auth_mode": "kerberos"}},
+    )
+    assert bad.status_code == 400
+
+
 def test_log_level_validation(client):
     bad = client.put(
         "/api/admin/settings",

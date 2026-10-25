@@ -20,6 +20,7 @@ from pydantic import (
 )
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
+from rootcoz.config import atlassian_cloud_id_error
 from rootcoz.prow_validation import (
     normalize_gcs_bucket,
     normalize_gcs_prefix,
@@ -265,6 +266,14 @@ class BaseAnalysisRequest(BaseModel):
         if isinstance(data, dict) and "metadata_labels" in data:
             data.setdefault("labels", data.pop("metadata_labels"))
         return data
+
+    @field_validator("atlassian_oauth_cloud_id")
+    @classmethod
+    def _cloud_id_not_account_id(cls, v: str | None) -> str | None:
+        """Reject account-ID-shaped (org:uuid) cloud IDs with a 422."""
+        if (error := atlassian_cloud_id_error(v)) is not None:
+            raise ValueError(error)
+        return v
 
     @field_validator("tests_repo_token")
     @classmethod
@@ -1060,8 +1069,9 @@ class _TrackerCredentialsMixin(BaseModel):
     jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
     jira_sa_token: str = Field(
         default="",
-        description="User's Atlassian OAuth 2.0 credential client secret "
-        "(ATOA) — takes precedence over jira_token/jira_email",
+        description="User's Atlassian service-account credential — an OAuth "
+        "2.0 client secret (ATOA) or a scoped token (ATST) — takes "
+        "precedence over jira_token/jira_email",
     )
     jira_project_key: str = Field(
         default="", description="Override Jira project key for bug creation"

@@ -47,12 +47,15 @@ class JiraConnection:
 
     Every Jira call site (client, bug creation, comment enrichment, chat
     tools, health check) resolves its connection through this instead of
-    rebuilding the auth/base-URL/api-version logic locally. Three additive
+    rebuilding the auth/base-URL/api-version logic locally. Four additive
     modes, detected from the configured credentials:
 
     - ``sa``: Atlassian "OAuth 2.0 credential for service accounts"
       (client ID + secret; a short-lived access token is minted and sent
       as Bearer against the scoped ``api.atlassian.com`` gateway, REST v3)
+    - ``atst``: Atlassian service-account scoped token (ATST) — an
+      already-minted access token sent as Bearer directly against the
+      same scoped gateway, REST v3 (no minting)
     - ``cloud``: Cloud basic auth (email + token, REST v3)
     - ``server``: Server/DC Bearer PAT (REST v2)
     """
@@ -104,9 +107,12 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
     Each method is fully self-contained — its own URL and TLS
     verification: ``basic`` uses ``jira_cloud_url``/
     ``jira_cloud_ssl_verify``, ``pat`` uses ``jira_server_url``/
-    ``jira_server_ssl_verify``, and ``oauth`` derives its API base solely
+    ``jira_server_ssl_verify``, ``oauth`` derives its API base solely
     from ``atlassian_oauth_cloud_id`` (the scoped api.atlassian.com
-    gateway) with ``jira_oauth_ssl_verify`` for minting and gateway calls.
+    gateway) with ``jira_oauth_ssl_verify`` for minting and gateway calls,
+    and ``atst`` sends the stored ATST token as Bearer against the same
+    gateway (``atlassian_oauth_cloud_id`` locator,
+    ``jira_oauth_ssl_verify``).
 
     In ``oauth`` mode the connection carries the OAuth 2.0 credential's
     client ID and secret; the actual ``Authorization`` header is minted
@@ -118,6 +124,7 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
     sa_secret = ""
     sa_client_id = ""
     token_value = ""
+    atst_token = ""
     if mode == "oauth":
         # Both halves of the OAuth 2.0 credential are required — a secret
         # without a client ID cannot mint an access token.
@@ -129,6 +136,8 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
             token_value = settings.jira_api_token.get_secret_value()
     elif mode == "pat" and settings.jira_pat:
         token_value = settings.jira_pat.get_secret_value()
+    elif mode == "atst" and settings.jira_atst_token:
+        atst_token = settings.jira_atst_token.get_secret_value()
 
     if sa_secret and sa_client_id:
         # SA mode: the cloud ID is the sole API locator — REST calls go to
@@ -153,6 +162,27 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
             search_path="/rest/api/3/search/jql",
             sa_client_id=sa_client_id,
             sa_client_secret=sa_secret,
+            ssl_verify=settings.jira_oauth_ssl_verify,
+        )
+
+    if atst_token:
+        # ATST mode: the token is an already-minted scoped access token —
+        # Bearer straight to the gateway, nothing to exchange. Like SA
+        # mode the cloud ID is the sole API locator and browse links come
+        # from the shared JIRA_SITE_URL (not derivable from the gateway).
+        site = (settings.jira_site_url or "").rstrip("/")
+        if not site:
+            logger.warning("JIRA_SITE_URL is unset — Jira browse links cannot be built")
+        cloud_id = (settings.atlassian_oauth_cloud_id or "").strip()
+        return JiraConnection(
+            mode="atst",
+            api_base=f"{ATLASSIAN_API_GATEWAY}/{cloud_id}" if cloud_id else "",
+            browse_base=site,
+            site_url=site,
+            auth=None,
+            headers={"Authorization": f"Bearer {atst_token}"},
+            api_path="/rest/api/3",
+            search_path="/rest/api/3/search/jql",
             ssl_verify=settings.jira_oauth_ssl_verify,
         )
 
@@ -211,11 +241,12 @@ def jira_method_url(settings: Settings) -> str:
     """API base URL of the selected Jira auth method ("" when unusable).
 
     ``oauth`` → the scoped gateway URL derived from the cloud ID;
-    ``basic`` → ``jira_cloud_url``; ``pat`` → ``jira_server_url``.
+    ``basic`` → ``jira_cloud_url``; ``pat`` → ``jira_server_url``;
+    ``atst`` → the scoped gateway URL derived from the cloud ID.
     Empty when no method is selected or the method's locator is unset.
     """
     mode = normalize_jira_auth_mode(settings.jira_auth_mode)
-    if mode == "oauth":
+    if mode in ("oauth", "atst"):
         cloud_id = (settings.atlassian_oauth_cloud_id or "").strip()
         return f"{ATLASSIAN_API_GATEWAY}/{cloud_id}" if cloud_id else ""
     if mode == "basic":
@@ -223,6 +254,24 @@ def jira_method_url(settings: Settings) -> str:
     if mode == "pat":
         return settings.jira_server_url.strip()
     return ""
+
+
+def classify_jira_secret(value: str) -> str | None:
+    """Classify a user-supplied Jira secret by its Atlassian prefix.
+
+    Returns ``"oauth"`` for an ATOA-prefixed OAuth 2.0 credential client
+    secret, ``"atst"`` for an ATST-prefixed scoped access token, and
+    ``None`` for anything else (regular api tokens / PATs carry no known
+    prefix). Shared by every consumer that must let prefix detection win
+    over field placement — validation, effective settings, chat
+    resolution, and the SA-token save gate — so they all agree.
+    """
+    v = (value or "").strip()
+    if v.startswith("ATOA"):
+        return "oauth"
+    if v.startswith("ATST"):
+        return "atst"
+    return None
 
 
 def resolve_jira_connection_from_params(
@@ -235,6 +284,7 @@ def resolve_jira_connection_from_params(
     atlassian_oauth_client_id: str = "",
     atlassian_oauth_cloud_id: str = "",
     jira_site_url: str = "",
+    jira_atst_token: str = "",
     jira_cloud_ssl_verify: bool = True,
     jira_server_ssl_verify: bool = True,
     jira_oauth_ssl_verify: bool = True,
@@ -247,12 +297,13 @@ def resolve_jira_connection_from_params(
     server deployment secrets must not leak into user-scoped resolution.
 
     These are per-user credentials whose fields the user chose explicitly:
-    the supplied field(s) pin the auth method (OAuth 2.0 credential secret
-    + client ID → oauth, token+email → basic, bare token/PAT → pat) — the
-    same choice the user made in the credentials UI. No fallback across
-    methods. A client secret without a client ID cannot mint an access
-    token, so it does not select oauth. Each method reads its own URL and
-    TLS verification, mirroring :func:`resolve_jira_connection`.
+    the supplied field(s) pin the auth method (an ATST scoped token →
+    atst, OAuth 2.0 credential secret + client ID → oauth, token+email →
+    basic, bare token/PAT → pat) — the same choice the user made in the
+    credentials UI. No fallback across methods. A client secret without
+    a client ID cannot mint an access token, so it does not select oauth.
+    Each method reads its own URL and TLS verification, mirroring
+    :func:`resolve_jira_connection`.
     """
     from pydantic import SecretStr
 
@@ -261,7 +312,10 @@ def resolve_jira_connection_from_params(
     pat = jira_pat.strip()
     sa_secret = jira_oauth_client_secret.strip()
     sa_client_id = atlassian_oauth_client_id.strip()
-    if sa_secret and sa_client_id:
+    atst_token = jira_atst_token.strip()
+    if atst_token:
+        auth_mode = "atst"
+    elif sa_secret and sa_client_id:
         auth_mode = "oauth"
     elif email and (token or pat):
         # Email + token is the Cloud basic-auth pair the user entered.
@@ -287,6 +341,7 @@ def resolve_jira_connection_from_params(
         atlassian_oauth_client_id=sa_client_id or None,
         atlassian_oauth_cloud_id=atlassian_oauth_cloud_id.strip() or None,
         jira_site_url=jira_site_url.strip() or None,
+        jira_atst_token=SecretStr(atst_token) if atst_token else None,
         jira_cloud_ssl_verify=jira_cloud_ssl_verify,
         jira_server_ssl_verify=jira_server_ssl_verify,
         jira_oauth_ssl_verify=jira_oauth_ssl_verify,
@@ -307,6 +362,11 @@ def jira_missing_api_base_error(connection: JiraConnection) -> ValueError:
         return ValueError(
             "Jira service account mode could not resolve the Atlassian cloud "
             "ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL"
+        )
+    if connection.mode == "atst":
+        return ValueError(
+            "Jira atst mode could not resolve the Atlassian cloud ID: "
+            "set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL"
         )
     if connection.mode == "cloud":
         return ValueError("jira_cloud_url is not configured for the basic auth method")
@@ -425,22 +485,24 @@ async def resolve_jira_cloud_id(site_url: str, ssl_verify: bool = True) -> str |
 async def complete_jira_connection(
     connection: JiraConnection,
 ) -> JiraConnection:
-    """Complete an SA connection: resolve the cloud ID and mint the token.
+    """Complete a gateway connection: resolve the cloud ID, mint if needed.
 
-    Idempotent: non-SA connections pass through unchanged. For SA (OAuth
-    2.0 credential) connections, first the API base is resolved when the
-    cloud ID is unknown (anonymous tenant_info lookup against the site
-    URL), then a short-lived access token is minted from the credential
-    (module-level cache) and installed as the Bearer header — the client
-    secret itself is never sent to the API gateway. Both network calls
-    use the connection's own ``ssl_verify`` flag (the oauth method's).
+    Idempotent: connections that need nothing pass through unchanged. For
+    SA (OAuth 2.0 credential) and ATST connections, the API base is
+    resolved when the cloud ID is unknown (anonymous tenant_info lookup
+    against the site URL). SA connections additionally get a short-lived
+    access token minted from the credential (module-level cache) and
+    installed as the Bearer header — the client secret itself is never
+    sent to the API gateway. ATST tokens are already access tokens — no
+    minting. Both network calls use the connection's own ``ssl_verify``
+    flag (the oauth method's).
 
     Returns the input unchanged when the cloud ID cannot be resolved —
     callers surface the configuration error at request time (no token is
     minted for an unusable connection). Minting failures raise
     :class:`JiraOAuthMintError`.
     """
-    if connection.mode != "sa":
+    if connection.mode not in ("sa", "atst"):
         return connection
     result = connection
     if not result.api_base and result.site_url:
@@ -474,13 +536,16 @@ class JiraClient:
     """HTTP client for Jira REST API.
 
     Resolves its connection through :func:`resolve_jira_connection` — the
-    shared single source of truth for all Jira call sites. Three
+    shared single source of truth for all Jira call sites. Four
     connection methods, selected by the required ``jira_auth_mode``:
 
     - Atlassian "OAuth 2.0 credential for service accounts" (``oauth``):
       Bearer against the scoped ``api.atlassian.com`` gateway, REST v3.
       The cloud ID is resolved and the access token minted on entry
       (``__aenter__``) when not already done.
+    - Atlassian service-account scoped token (``atst``): the stored ATST
+      token as Bearer against the same scoped gateway, REST v3 — no
+      minting; the cloud ID is resolved on entry when not already done.
     - Cloud (``basic``): basic auth with email + API token, REST v3.
     - Server/DC (``pat``): Bearer PAT, REST v2 (v3 on Atlassian Cloud hosts).
     """
@@ -527,7 +592,7 @@ class JiraClient:
             # Minting replaced the Authorization header — sync the client
             self._headers = dict(connection.headers)
             self._client.headers.update(connection.headers)
-        if connection.mode == "sa" and not connection.api_base:
+        if connection.mode in ("sa", "atst") and not connection.api_base:
             # __aexit__ never runs when __aenter__ raises — close the client
             # created in __init__ before surfacing the configuration error.
             await self._client.aclose()

@@ -296,7 +296,7 @@ When multiple tests fail with the same error:
 
 ### Jira Integration (Optional)
 
-When configured, searches Jira for existing bugs matching PRODUCT BUG failures. Each auth method (`oauth`, `basic`, `pat` — selected via the DB-only `jira_auth_mode` Server Setting) is fully self-contained with its own URL and TLS verification: `basic` → `jira_email`/`jira_api_token`/`jira_cloud_url`/`jira_cloud_ssl_verify`, `pat` → `jira_pat`/`jira_server_url`/`jira_server_ssl_verify`, `oauth` → `jira_oauth_client_secret`/`atlassian_oauth_client_id`/`atlassian_oauth_cloud_id`/`jira_oauth_ssl_verify`. Only `jira_project_key`, `jira_max_results`, `jira_site_url`, `enable_jira`, and `enable_jira_issues` are shared. The removed shared `jira_url`/`jira_ssl_verify` settings have deprecated env aliases (`JIRA_URL` feeds both per-method URLs, `JIRA_SSL_VERIFY` feeds all three verify flags — canonical names win) and a one-time DB migration (see `docs/configuration-reference.md`).
+When configured, searches Jira for existing bugs matching PRODUCT BUG failures. Each auth method (`oauth`, `basic`, `pat`, `atst` — selected via the DB-only `jira_auth_mode` Server Setting) is fully self-contained with its own URL and TLS verification: `basic` → `jira_email`/`jira_api_token`/`jira_cloud_url`/`jira_cloud_ssl_verify`, `pat` → `jira_pat`/`jira_server_url`/`jira_server_ssl_verify`, `oauth` → `jira_oauth_client_secret`/`atlassian_oauth_client_id`/`atlassian_oauth_cloud_id`/`jira_oauth_ssl_verify`, `atst` → `jira_atst_token` (Bearer against the scoped `api.atlassian.com/ex/jira/{cloudId}` gateway, reusing `atlassian_oauth_cloud_id` and `jira_oauth_ssl_verify`). Only `jira_project_key`, `jira_max_results`, `jira_site_url`, `enable_jira`, and `enable_jira_issues` are shared. The removed shared `jira_url`/`jira_ssl_verify` settings have deprecated env aliases (`JIRA_URL` feeds both per-method URLs, `JIRA_SSL_VERIFY` feeds all three verify flags — canonical names win) and a one-time DB migration (see `docs/configuration-reference.md`).
 
 1. AI generates search keywords during analysis
 2. Keywords search Jira (configurable issue type, summary search)
@@ -451,7 +451,7 @@ Sensitive data (passwords, API tokens, credentials) must be:
 2. **Stripped from responses** — use `strip_sensitive_from_response()` before returning to API consumers
 3. **Never logged** — do not log passwords, tokens, or credentials at any log level
 
-Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_email`, `jira_sa_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `vapid_private_key`
+Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_atst_token`, `jira_email`, `jira_sa_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `vapid_private_key`
 
 Encryption uses Fernet (AES-128-CBC + HMAC-SHA256). Set `ROOTCOZ_ENCRYPTION_KEY` env var for production; falls back to an auto-generated file-based key under `$XDG_DATA_HOME/rootcoz/.encryption_key` (default: `~/.local/share/rootcoz/.encryption_key`) for development.
 

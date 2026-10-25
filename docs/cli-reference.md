@@ -192,7 +192,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
 | `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
-| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`. |
+| `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 
 12. **Push to exporters.**

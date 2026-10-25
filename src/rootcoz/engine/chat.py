@@ -26,7 +26,11 @@ from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
     install_http_tools_mcp_best_effort_async,
 )
-from rootcoz.jira import JiraConnection, resolve_jira_connection_from_params
+from rootcoz.jira import (
+    JiraConnection,
+    classify_jira_secret,
+    resolve_jira_connection_from_params,
+)
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
 logger = get_child_logger(__name__)
@@ -607,18 +611,22 @@ def build_chat_custom_tools(
         # so chat never silently switches to the user's OTHER stored
         # credential (e.g. basic after the selected OAuth failed).
         #
-        # An ATOA OAuth 2.0 client secret supplied in the regular field
-        # routes to oauth mode so validation and actual use agree — but
-        # this sync fallback cannot mint an access token (async), so such
-        # connections stay unusable here; async callers pass a completed
-        # connection via jira_connection.
-        sa_fallback = jira_token if jira_token.startswith("ATOA") else ""
+        # Prefix detection wins over field placement: an ATOA secret or
+        # ATST scoped token in the regular field routes to its method so
+        # validation and actual use agree — but this sync fallback cannot
+        # mint an access token (async), and it has no cloud ID to build
+        # the gateway URL, so such connections stay unusable here; async
+        # callers pass a completed connection via jira_connection.
+        kind = classify_jira_secret(jira_token)
+        sa_fallback = jira_token if kind == "oauth" else ""
+        atst_fallback = jira_token if kind == "atst" else ""
         jira_conn = resolve_jira_connection_from_params(
             jira_cloud_url=jira_cloud_url,
             jira_server_url=jira_server_url,
             jira_email=jira_email,
-            jira_token="" if sa_fallback else jira_token,
+            jira_token="" if sa_fallback or atst_fallback else jira_token,
             jira_oauth_client_secret=sa_fallback,
+            jira_atst_token=atst_fallback,
         )
     if jira_conn and jira_conn.api_base and jira_conn.mode != "none":
         # Basic auth (cloud) must be embedded as a header — tool HTTP
