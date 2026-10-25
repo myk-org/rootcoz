@@ -119,7 +119,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | --- | --- |
    | `Jenkins` | `jenkins_url`, `jenkins_user`, `jenkins_password`, `jenkins_ssl_verify`, `jenkins_timeout`, `jenkins_artifacts_max_size_mb`, `get_job_artifacts` |
    | `AI` | `ai_provider`, `ai_model`, `force_server_credentials`, `ai_call_timeout`, `max_concurrent_ai_calls`, `peer_ai_configs`, `peer_analysis_max_rounds` |
-   | `Jira` | `jira_email`, `jira_api_token`, `jira_cloud_url`, `jira_cloud_ssl_verify`, `jira_pat`, `jira_server_url`, `jira_server_ssl_verify`, `jira_oauth_client_secret`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_oauth_ssl_verify`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
+   | `Jira` | `jira_email`, `jira_api_token`, `jira_cloud_url`, `jira_cloud_ssl_verify`, `jira_pat`, `jira_server_url`, `jira_server_ssl_verify`, `jira_oauth_client_secret`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_atst_token`, `jira_oauth_ssl_verify`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
    | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
@@ -143,7 +143,7 @@ That creates an active operator who can submit analyses, and one server setting 
 
    | Group | Settings |
    | --- | --- |
-   | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
+   | Masked and encrypted (`_SENSITIVE_SETTINGS`) | `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_email`, `jira_oauth_client_secret`, `jira_atst_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `admin_key`, `vapid_private_key` |
    | Requires a restart (`_RESTART_REQUIRED_SETTINGS`) | `default_user_role`, `secure_cookies`, `trust_proxy_headers`, `metadata_rules_file`, `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
 
    Masked settings are stored encrypted when you save them from this page. The one exception is `admin_key`: it displays masked but is read-only — it is a server-only bootstrap secret, and every write path rejects it.

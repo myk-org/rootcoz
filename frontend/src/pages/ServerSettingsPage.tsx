@@ -107,7 +107,7 @@ const TEST_INTEGRATIONS: Record<string, string> = {
 }
 
 // Jira auth methods (exactly one is selected in Server Settings; none = Jira disabled)
-type JiraMethod = 'oauth' | 'basic' | 'pat'
+type JiraMethod = 'oauth' | 'basic' | 'pat' | 'atst'
 const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
   {
     id: 'oauth',
@@ -124,12 +124,26 @@ const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
     label: 'PAT (Bearer)',
     fields: ['jira_pat', 'jira_server_url', 'jira_server_ssl_verify'],
   },
+  {
+    id: 'atst',
+    label: 'Atlassian service account token (ATST, Bearer)',
+    fields: ['jira_atst_token', 'atlassian_oauth_cloud_id', 'jira_oauth_ssl_verify'],
+  },
 ]
 
 const jiraMethodLabel = (id: JiraMethod) => JIRA_METHODS.find(m => m.id === id)!.label
 
 function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
-  return new Set(JIRA_METHODS.filter(m => m.id !== method).flatMap(m => m.fields))
+  // oauth and atst share locator/TLS fields (atlassian_oauth_cloud_id,
+  // jira_oauth_ssl_verify) — a shared field stays visible for either of
+  // its methods, so subtract the SELECTED method's fields instead of
+  // unioning every other method's.
+  const selected = new Set(JIRA_METHODS.find(m => m.id === method)!.fields)
+  return new Set(
+    JIRA_METHODS.filter(m => m.id !== method)
+      .flatMap(m => m.fields)
+      .filter(f => !selected.has(f)),
+  )
 }
 
 // Server-only settings (env/CLI-owned, never persistable to the DB) — the
@@ -138,7 +152,7 @@ const SERVER_ONLY_SETTING_KEYS = new Set(['admin_key', 'db_path', 'debug'])
 
 // Valid Jira auth method ids ('' / anything else = unset: Jira disabled).
 function parseJiraMethod(value?: string): JiraMethod | null {
-  return value === 'oauth' || value === 'basic' || value === 'pat' ? value : null
+  return value === 'oauth' || value === 'basic' || value === 'pat' || value === 'atst' ? value : null
 }
 
 // ---------------------------------------------------------------------------
@@ -1106,7 +1120,7 @@ export function ServerSettingsPage() {
                 }}
               />
             )}
-            {category === 'Jira' && persistedJiraMethod === 'oauth' && (
+            {category === 'Jira' && (persistedJiraMethod === 'oauth' || persistedJiraMethod === 'atst') && (
               <JiraOauthUrlRow
                 cloudId={state.settings.find(s => s.key === 'atlassian_oauth_cloud_id')?.value ?? ''}
               />
@@ -2221,7 +2235,8 @@ function JiraOauthUrlRow({ cloudId }: { cloudId: string }) {
       )}
       <p className="text-xs text-text-quaternary">
         Built from ATLASSIAN_OAUTH_CLOUD_ID — the scoped Atlassian gateway is the
-        only valid base for OAuth 2.0 credentials, so it is not settable.
+        only valid base for gateway credentials (OAuth 2.0 credentials and ATST
+        tokens), so it is not settable.
       </p>
     </div>
   )

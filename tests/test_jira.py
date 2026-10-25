@@ -1034,6 +1034,158 @@ class TestExplicitJiraAuthMode:
         conn = resolve_jira_connection(settings)
         assert conn.mode == "none"
 
+    def test_atst_mode_uses_gateway_bearer_and_v3(self):
+        """atst sends the stored ATST token as Bearer to the scoped gateway."""
+        settings = self._settings(
+            JIRA_AUTH_MODE="atst",
+            JIRA_ATST_TOKEN="ATST-test-token",  # pragma: allowlist secret
+            ATLASSIAN_OAUTH_CLOUD_ID="2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+            JIRA_SITE_URL="https://myorg.atlassian.net",
+            JIRA_OAUTH_SSL_VERIFY="false",
+            JIRA_EMAIL="user@example.com",
+            JIRA_API_TOKEN="regular-token",
+            JIRA_PAT="a-pat",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "atst"
+        assert (
+            conn.api_base
+            == "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        )
+        # Browse links come from JIRA_SITE_URL — never the scoped gateway
+        assert conn.browse_base == "https://myorg.atlassian.net"
+        # The ATST token is already an access token — Bearer, no minting
+        assert conn.headers["Authorization"] == "Bearer ATST-test-token"
+        assert conn.sa_client_id == ""
+        assert conn.sa_client_secret == ""
+        assert conn.api_path == "/rest/api/3"
+        assert conn.search_path == "/rest/api/3/search/jql"
+        assert conn.ssl_verify is False
+        assert conn.auth is None
+
+    def test_atst_mode_missing_token_is_none(self):
+        """Explicit atst without a token resolves to no connection."""
+        settings = self._settings(
+            JIRA_AUTH_MODE="atst",
+            ATLASSIAN_OAUTH_CLOUD_ID="cloud-id",
+        )
+        assert resolve_jira_connection(settings).mode == "none"
+
+    def test_atst_mode_without_cloud_id_defers_to_completion(self):
+        """No cloud ID: the connection carries the Bearer but an empty base."""
+        settings = self._settings(
+            JIRA_AUTH_MODE="atst",
+            JIRA_ATST_TOKEN="ATST-test-token",  # pragma: allowlist secret
+            JIRA_SITE_URL="https://myorg.atlassian.net",
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == "atst"
+        assert conn.api_base == ""
+        assert conn.headers["Authorization"] == "Bearer ATST-test-token"
+
+
+class TestJiraClientAtst:
+    """JiraClient behavior with an ATST service-account scoped token."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_caches(self):
+        import rootcoz.jira as jira_module
+
+        jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
+        yield
+        jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
+
+    @pytest.fixture
+    def atst_settings(self) -> Generator[Settings]:
+        yield from _jira_settings_from_env(
+            {
+                "ATLASSIAN_OAUTH_CLOUD_ID": "2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+                "JIRA_SITE_URL": "https://myorg.atlassian.net",
+                "JIRA_AUTH_MODE": "atst",
+                "JIRA_ATST_TOKEN": "ATST-test-token",  # pragma: allowlist secret
+                "JIRA_PROJECT_KEY": "PROJ",
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_atst_mode_detection(self, atst_settings) -> None:
+        """No minting on entry — the ATST token itself is the Bearer."""
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            async with JiraClient(atst_settings) as client:
+                assert client._api_path == "/rest/api/3"
+                assert client._search_path == "/rest/api/3/search/jql"
+                assert client._headers.get("Authorization") == "Bearer ATST-test-token"
+                assert (
+                    client._base_url
+                    == "https://api.atlassian.com/ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+                )
+                assert client._browse_base == "https://myorg.atlassian.net"
+            # An ATST token is an already-minted access token — the
+            # client_credentials endpoint is never called
+            assert mock_instance.post.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_atst_search_hits_gateway_v3_path(self, atst_settings) -> None:
+        """Search requests use the gateway's v3 JQL path with the Bearer."""
+        mock_response = httpx.Response(
+            200,
+            json={"issues": []},
+            request=httpx.Request("GET", "https://api.atlassian.com"),
+        )
+        client = JiraClient(atst_settings)
+        with patch.object(
+            client._client, "get", new_callable=AsyncMock, return_value=mock_response
+        ) as mock_get:
+            await client.search(["login"])
+        assert mock_get.call_args.args[0] == "/rest/api/3/search/jql"
+        assert (
+            client._headers["Authorization"] == "Bearer ATST-test-token"
+        )  # pragma: allowlist secret
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_atst_complete_resolves_cloud_id_without_minting(self) -> None:
+        """complete_jira_connection resolves the cloud ID for atst, no mint."""
+        settings = next(
+            _jira_settings_from_env(
+                {
+                    "JIRA_SITE_URL": "https://myorg.atlassian.net",
+                    "JIRA_AUTH_MODE": "atst",
+                    "JIRA_ATST_TOKEN": "ATST-test-token",  # pragma: allowlist secret
+                }
+            )
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.api_base == ""
+        tenant_response = httpx.Response(
+            200,
+            json={"cloudId": "resolved-cloud-id"},
+            request=httpx.Request(
+                "GET", "https://myorg.atlassian.net/_edge/tenant_info"
+            ),
+        )
+        with patch("rootcoz.jira.httpx.AsyncClient") as mock_client:
+            mock_instance = AsyncMock()
+            mock_instance.get.return_value = tenant_response
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client.return_value = mock_instance
+
+            completed = await complete_jira_connection(conn)
+            assert completed.api_base == (
+                "https://api.atlassian.com/ex/jira/resolved-cloud-id"
+            )
+            # The Bearer survives completion unchanged; nothing is minted
+            assert completed.headers["Authorization"] == "Bearer ATST-test-token"
+            assert mock_instance.post.await_count == 0
+
 
 class TestJiraClientServiceAccount:
     """JiraClient behavior in service account (OAuth 2.0 credential) mode."""
@@ -1292,3 +1444,13 @@ class TestAtlassianTokenMinting:
         assert conn.mode == "sa"
         assert "Authorization" not in conn.headers
         assert conn.sa_client_id == "test-client-id"
+
+    def test_resolve_from_params_atst_token(self) -> None:
+        """A per-user ATST token selects atst mode — no client ID needed."""
+        conn = resolve_jira_connection_from_params(
+            "https://myorg.atlassian.net",
+            jira_atst_token="ATST-test-token",  # pragma: allowlist secret
+            atlassian_oauth_cloud_id="some-cloud-id",
+        )
+        assert conn.mode == "atst"
+        assert conn.headers["Authorization"] == "Bearer ATST-test-token"

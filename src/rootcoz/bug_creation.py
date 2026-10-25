@@ -882,7 +882,7 @@ async def create_jira_bug(
 
     Resolves the connection through :func:`resolve_jira_connection` — the
     shared single source of truth for all Jira call sites (service account,
-    Cloud basic auth, or Server/DC Bearer).
+    ATST scoped token, Cloud basic auth, or Server/DC Bearer).
     Returns dict with key, url, and title keys.
 
     Raises httpx.HTTPStatusError on failure.
@@ -901,9 +901,12 @@ async def create_jira_bug(
     effective_project_key = project_key or settings.jira_project_key or ""
 
     headers: dict[str, str] = {"Content-Type": "application/json", **connection.headers}
-    # Issue creation: existing modes keep REST v2; service account must use
-    # v3 — the scoped api.atlassian.com gateway only serves v3.
-    api_path = connection.api_path if connection.mode == "sa" else "/rest/api/2"
+    # Issue creation: existing modes keep REST v2; gateway connections
+    # (service account, ATST) must use v3 — the scoped api.atlassian.com
+    # gateway only serves v3.
+    api_path = (
+        connection.api_path if connection.mode in ("sa", "atst") else "/rest/api/2"
+    )
 
     effective_issue_type = issue_type.strip() if issue_type else "Bug"
     if not effective_issue_type:
@@ -920,7 +923,9 @@ async def create_jira_bug(
             # REST v3 requires an Atlassian Document Format document for the
             # description; v2 (Cloud basic auth, Server/DC) keeps the plain
             # string that has always worked there.
-            "description": _text_to_adf(body) if connection.mode == "sa" else body,
+            "description": (
+                _text_to_adf(body) if connection.mode in ("sa", "atst") else body
+            ),
             "issuetype": {"name": effective_issue_type},
         }
     }

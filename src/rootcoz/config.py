@@ -27,7 +27,7 @@ PROW_ARTIFACT_MAX_FILE_SIZE_MB = 10
 PROW_ARTIFACTS_MAX_OBJECTS = 5_000
 
 # Valid values for the explicit ``jira_auth_mode`` setting.
-JIRA_AUTH_MODES = ("oauth", "basic", "pat")
+JIRA_AUTH_MODES = ("oauth", "basic", "pat", "atst")
 
 
 def _split_outside_brackets(raw: str) -> list[str]:
@@ -287,6 +287,19 @@ class Settings(BaseSettings):
     # Client ID of the OAuth 2.0 credential — required together with the
     # client secret to mint access tokens for the oauth auth method.
     atlassian_oauth_client_id: str | None = None
+    # atst method (Atlassian service-account scoped token, ATST-prefixed):
+    # an already-minted access token sent as Bearer directly against the
+    # scoped api.atlassian.com gateway — no token minting, unlike the
+    # oauth method's ATOA client secret. Reuses atlassian_oauth_cloud_id
+    # as the API locator and jira_oauth_ssl_verify for TLS.
+    jira_atst_token: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Atlassian service-account scoped token (ATST) for the atst "
+            "auth method — sent as Bearer against the scoped "
+            "api.atlassian.com gateway."
+        ),
+    )
     # Site URL for browse links (shared across methods; the scoped
     # api.atlassian.com gateway URL of the oauth method cannot yield one).
     jira_site_url: str | None = None
@@ -298,7 +311,7 @@ class Settings(BaseSettings):
     jira_auth_mode: str | None = Field(
         default=None,
         description=(
-            "Explicit Jira auth method: 'oauth', 'basic', or 'pat' "
+            "Explicit Jira auth method: 'oauth', 'basic', 'pat', or 'atst' "
             "(Server Settings only). Unset disables the Jira integration "
             "(no auto-detection)."
         ),
@@ -492,11 +505,12 @@ class Settings(BaseSettings):
     @field_validator("jira_auth_mode")
     @classmethod
     def _validate_jira_auth_mode(cls, value: str | None) -> str | None:
-        """Accept only the three known methods (or empty — Jira disabled)."""
+        """Accept only the four known methods (or empty — Jira disabled)."""
         mode = (value or "").strip().lower()
         if mode and mode not in JIRA_AUTH_MODES:
             raise ValueError(
-                f"jira_auth_mode must be one of 'oauth', 'basic', 'pat' (got {value!r})"
+                f"jira_auth_mode must be one of {', '.join(JIRA_AUTH_MODES)} "
+                f"(got {value!r})"
             )
         return mode or None
 
@@ -840,6 +854,7 @@ class Settings(BaseSettings):
             "jira_api_token",
             "jira_pat",
             "jira_oauth_client_secret",
+            "jira_atst_token",
             "reportportal_api_token",
         ):
             secret = getattr(self, field_name)
@@ -1049,6 +1064,10 @@ def jira_method_missing_fields(settings: Settings) -> list[str]:
         "pat": [
             ("jira_pat", settings.jira_pat),
             ("jira_server_url", settings.jira_server_url),
+        ],
+        "atst": [
+            ("jira_atst_token", settings.jira_atst_token),
+            ("atlassian_oauth_cloud_id", settings.atlassian_oauth_cloud_id),
         ],
     }
     return [name for name, value in required[mode] if not value]

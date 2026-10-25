@@ -3576,12 +3576,12 @@ class TestIssueCreationRequiresUserCredentials:
                     "test_name": "test_cred",
                     "title": "Bug",
                     "body": "Details",
-                    "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
+                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                 },
             )
         assert response.status_code == 400
         detail = response.json()["detail"]
-        assert "OAuth 2.0" in detail
+        assert "not a recognized" in detail
         assert "client secret" in detail
         # The bug must NOT be created with the server's credentials
         mock_create.assert_not_called()
@@ -3597,11 +3597,11 @@ class TestIssueCreationRequiresUserCredentials:
                 "/results/job-jira-prev-legacy-sa/preview-jira-bug",
                 json={
                     "test_name": "test_cred",
-                    "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
+                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                 },
             )
         assert response.status_code == 400
-        assert "OAuth 2.0" in response.json()["detail"]
+        assert "not a recognized" in response.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_jira_create_legacy_sa_token_ignored_with_regular_token(
@@ -3624,7 +3624,7 @@ class TestIssueCreationRequiresUserCredentials:
                         "title": "Bug",
                         "body": "Details",
                         "jira_token": "user_jira_pat",
-                        "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
+                        "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                     },
                 )
         assert response.status_code == 201
@@ -8297,6 +8297,34 @@ class TestReAnalyzeFailure:
         assert result.jira_email == "user@example.com"
         assert result.jira_pat is None
 
+    def test_user_atst_token_routes_to_atst_mode(self):
+        """An ATST-prefixed SA token pins the atst method, clearing the rest."""
+        from rootcoz.jira import resolve_jira_connection
+        from rootcoz.main import _build_effective_jira_settings
+
+        settings = Settings(
+            jira_server_url="https://jira.example.com",
+            jira_email="server@example.com",
+            jira_api_token=SecretStr("server-api-token"),
+            jira_pat=SecretStr("server-pat"),
+            jira_oauth_client_secret=SecretStr("ATOA-server-secret"),
+            atlassian_oauth_cloud_id="cloud-id",
+            jira_project_key="TEST",
+        )
+        result = _build_effective_jira_settings(
+            settings, "", "", user_jira_sa_token="ATST-user-token"
+        )
+        assert result.jira_auth_mode == "atst"
+        assert result.jira_atst_token.get_secret_value() == "ATST-user-token"
+        assert result.jira_api_token is None
+        assert result.jira_pat is None
+        assert result.jira_email is None
+        assert result.jira_oauth_client_secret is None
+        # The effective settings resolve to a usable atst connection
+        connection = resolve_jira_connection(result)
+        assert connection.mode == "atst"
+        assert connection.headers["Authorization"] == "Bearer ATST-user-token"
+
     def test_original_settings_not_mutated(self):
         """model_copy must not mutate the original Settings instance."""
         from rootcoz.main import _build_effective_jira_settings
@@ -8666,6 +8694,55 @@ class TestValidateToken:
             app.dependency_overrides.pop(get_settings, None)
             jira_module._cloud_id_cache.clear()
 
+    @pytest.mark.asyncio
+    async def test_jira_atst_token_validates_against_gateway(self, test_client):
+        """An ATST token is sent as Bearer to the gateway — no minting."""
+        import rootcoz.jira as jira_module
+        from rootcoz.main import app, get_settings
+
+        jira_module._cloud_id_cache.clear()
+        jira_module._sa_token_cache.clear()
+        scoped_settings = _build_wait_settings(
+            atlassian_oauth_cloud_id="cloud-id-123",
+            jira_site_url="https://myorg.atlassian.net",
+        )
+        app.dependency_overrides[get_settings] = lambda: scoped_settings
+        try:
+            with patch("rootcoz.main.httpx.AsyncClient") as mock_client_class:
+                mock_resp = MagicMock()
+                mock_resp.status_code = 200
+                mock_resp.raise_for_status = MagicMock()
+                mock_resp.json.return_value = [{"key": "PROJ"}]
+                mock_client = AsyncMock()
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                mock_client.post = AsyncMock()
+                mock_client_class.return_value = mock_client
+                response = test_client.post(
+                    "/api/validate-token",
+                    json={"token_type": "jira", "token": "ATST-user-token"},
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["valid"] is True
+            assert data["username"] == "service account"
+            assert "ATST" in data["message"]
+            # The probe is project visibility against the scoped gateway
+            requested_url = mock_client.get.call_args.args[0]
+            assert requested_url == (
+                "https://api.atlassian.com/ex/jira/cloud-id-123/rest/api/3/project"
+            )
+            # The ATST token itself is the Bearer — nothing is minted
+            sent_headers = mock_client.get.call_args.kwargs["headers"]
+            assert sent_headers["Authorization"] == "Bearer ATST-user-token"
+            assert mock_client.post.await_count == 0
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+            jira_module._cloud_id_cache.clear()
+            jira_module._sa_token_cache.clear()
+
 
 class TestJiraProjectsEndpoint:
     """Tests for POST /api/jira-projects."""
@@ -8682,11 +8759,49 @@ class TestJiraProjectsEndpoint:
         """A legacy (non-ATOA) SA secret is a clear 400, not a silent drop."""
         response = test_client.post(
             "/api/jira-projects",
-            json={"jira_sa_token": "ATST-legacy-token"},  # pragma: allowlist secret
+            json={"jira_sa_token": "legacy-secret-token"},  # pragma: allowlist secret
             headers=_ADMIN_AUTH_HEADERS,
         )
         assert response.status_code == 400
-        assert "OAuth 2.0" in response.json()["detail"]
+        assert "not a recognized" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_atst_sa_token_routes_to_atst_mode(self, test_client):
+        """An ATST-prefixed SA token is accepted and pins the atst method."""
+        from rootcoz.main import app, get_settings
+
+        projects = [{"key": "PROJ", "name": "My Project"}]
+        jira_settings = _build_wait_settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://jira-cloud.example.com",
+            atlassian_oauth_cloud_id="cloud-id-123",
+        )
+        app.dependency_overrides[get_settings] = lambda: jira_settings
+        try:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
+                mock_client = AsyncMock()
+                mock_client.list_projects = AsyncMock(return_value=projects)
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                MockJiraClient.return_value = mock_client
+                response = test_client.post(
+                    "/api/jira-projects",
+                    json={
+                        "jira_sa_token": "ATST-user-token"
+                    },  # pragma: allowlist secret
+                    headers=_ADMIN_AUTH_HEADERS,
+                )
+            assert response.status_code == 200
+            assert any(p["key"] == "PROJ" for p in response.json())
+            # The client was built from EFFECTIVE settings: mode atst with
+            # the user's token as the ATST credential
+            effective = MockJiraClient.call_args.args[0]
+            assert effective.jira_auth_mode == "atst"
+            assert (
+                effective.jira_atst_token.get_secret_value() == "ATST-user-token"
+            )  # pragma: allowlist secret
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
 
     @pytest.mark.asyncio
     async def test_user_method_url_used_when_server_method_url_empty(self, test_client):
@@ -8813,12 +8928,12 @@ class TestJiraSecurityLevelsEndpoint:
             "/api/jira-security-levels",
             json={
                 "project_key": "PROJ",
-                "jira_sa_token": "ATST-legacy-token",  # pragma: allowlist secret
+                "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
             },
             headers=_ADMIN_AUTH_HEADERS,
         )
         assert response.status_code == 400
-        assert "OAuth 2.0" in response.json()["detail"]
+        assert "not a recognized" in response.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_user_method_url_used_when_server_method_url_empty(self, test_client):
