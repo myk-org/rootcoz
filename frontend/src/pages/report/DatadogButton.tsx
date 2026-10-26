@@ -20,8 +20,8 @@ import {
   pushRejectionDetail,
   unreviewedPushRejectionMessage,
   unreviewedPushTooltip,
-  useUnreviewedPushGate,
-} from './pushGate'
+} from '@/lib/pushGate'
+import { useUnreviewedPushGate } from './pushGate'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { DatadogPushResult } from '@/types'
 

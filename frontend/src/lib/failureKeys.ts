@@ -57,12 +57,37 @@ export function unreviewedKeyCount(
   return keys.length - reviewedKeyCount(keys, reviews)
 }
 
-/** Job-wide unreviewed failure count (parent + nested children) — the same
- *  key set AllReviewedPrompt uses to decide "all failures reviewed". */
+/** Resolve whether a single failure is reviewed, mirroring the server's
+ *  `resolve_failure_review` precedence: for a child-scoped test the exact-build
+ *  key wins, with the wildcard (build 0) key as fallback — a review stored
+ *  without a build number covers any build of that child job. A child-scoped
+ *  test never matches a bare top-level review and vice versa. */
+function isFailureReviewed(
+  testName: string,
+  childJobName: string | undefined,
+  childBuildNumber: number | undefined,
+  reviews: Record<string, ReviewState>,
+): boolean {
+  if (!childJobName) return !!reviews[testName]?.reviewed
+  if (reviews[reviewKey(testName, childJobName, childBuildNumber)]?.reviewed) return true
+  // Build 0 IS the wildcard key — the lookup above already covered it.
+  if (childBuildNumber === 0) return false
+  return !!reviews[reviewKey(testName, childJobName, 0)]?.reviewed
+}
+
+/** Job-wide unreviewed failure count (parent + nested children), resolving
+ *  each child failure through the same exact-then-wildcard precedence the
+ *  server's push gate uses (`resolve_failure_review`). */
 export function countUnreviewedFailures(
   failures: { test_name: string }[],
   children: ChildJobAnalysis[],
   reviews: Record<string, ReviewState>,
 ): number {
-  return unreviewedKeyCount(collectAllTestKeys(failures, children), reviews)
+  let unreviewed = 0
+  walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
+    for (const f of nodeFailures) {
+      if (!isFailureReviewed(f.test_name, jobName, buildNumber, reviews)) unreviewed += 1
+    }
+  })
+  return unreviewed
 }

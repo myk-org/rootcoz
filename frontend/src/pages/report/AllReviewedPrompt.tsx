@@ -5,7 +5,7 @@ import { collectPushScopes, pushScopeQuery } from '@/lib/pushScopes'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useAuth } from '@/lib/auth'
 import { useReportState } from '@/pages/report/reportState'
-import { pushRejectionDetail } from './pushGate'
+import { pushRejectionDetail } from '@/lib/pushGate'
 
 interface AllReviewedPromptProps {
   jobId: string
