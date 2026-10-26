@@ -1,12 +1,13 @@
 """Datadog Events exporter: one event per failed test.
 
 Emits one Datadog event per failed test (1:N, ADR 0003) to
-``POST https://api.{site}/api/v1/events``. Credentials are either a
-Datadog API key (32 hex chars, ``DD-API-KEY`` header) or a Service
-Access Token (``ddsat_…`` prefix, ``Authorization: Bearer`` header,
-no API-key header) — Datadog's recommended integration credential.
-Application keys (``ddapp_…`` or exactly 40 hex chars) are read-only
-and cannot post events, so the constructor fails fast on them.
+``POST https://api.{site}/api/v1/events``. Credentials are API keys
+only (32 hex chars, ``DD-API-KEY`` header): event submission is data
+intake, which Datadog authenticates exclusively with API keys. Service
+Access Tokens (``ddsat_…``) have no ``events_write`` scope — Bearer-auth
+SATs get HTTP 403 on every event endpoint — and application keys
+(``ddapp_…`` or exactly 40 hex chars) are read-only, so the constructor
+fails fast on both with distinct explanatory messages.
 Events carry the rootcoz classification (when the ``dd_push_classifications``
 toggle is on) as a tag, title prefix, and text line. The exporter never
 sets ``alert_type``: classification (root cause) and alert_type (severity)
@@ -89,8 +90,17 @@ _CREDENTIAL_APPLICATION_KEY = "application_key"
 #: the exporter constructor and the connection-test integration so both
 #: surface the same explanation instead of a bare HTTP 403.
 APPLICATION_KEY_ERROR = (
-    "Datadog application keys cannot post events — use an API key or a "
-    "Service Access Token (ddsat...)"
+    "Datadog application keys cannot post events — use an API key (32 hex characters)"
+)
+
+#: Fail-fast message for Service Access Tokens: they have no
+#: ``events_write`` scope, so Datadog rejects them (HTTP 403) on every
+#: event endpoint — event submission is data intake, authenticated
+#: exclusively with API keys. Shared by the exporter constructor and
+#: the connection-test integration.
+SERVICE_ACCESS_TOKEN_ERROR = (
+    "Datadog service access tokens cannot post events — use an API key "
+    "(32 hex characters)"
 )
 
 
@@ -106,9 +116,9 @@ def classify_datadog_credential(credential: str) -> str:
 
     Returns:
         ``"api_key"`` (32 hex chars or any unrecognized value),
-        ``"service_token"`` (``ddsat_…`` Service Access Token), or
-        ``"application_key"`` (``ddapp_…`` prefix or exactly 40 hex
-        chars — read-only, cannot post events).
+        ``"service_token"`` (``ddsat_…`` Service Access Token — cannot
+        post events), or ``"application_key"`` (``ddapp_…`` prefix or
+        exactly 40 hex chars — read-only, cannot post events).
     """
     value = (credential or "").strip()
     if value.startswith("ddsat_"):
@@ -121,10 +131,12 @@ def classify_datadog_credential(credential: str) -> str:
 def _auth_headers(credential: str) -> dict[str, str]:
     """Build the auth headers for Datadog Events API calls.
 
-    API keys authenticate with the ``DD-API-KEY`` header; Service Access
-    Tokens (``ddsat_…``) with ``Authorization: Bearer`` and no API-key
-    header. Whitespace is stripped. Shared by the event POST and the
-    connection-test integration so both authenticate identically.
+    API keys only: event submission is data intake, which Datadog
+    authenticates exclusively with API keys (``DD-API-KEY`` header).
+    Service Access Tokens and application keys never reach this helper —
+    they are rejected earlier with their explanatory errors. Whitespace
+    is stripped. Shared by the event POST and the connection-test
+    integration so both authenticate identically.
 
     Args:
         credential: Raw credential value.
@@ -132,10 +144,7 @@ def _auth_headers(credential: str) -> dict[str, str]:
     Returns:
         Header dict for ``httpx`` requests.
     """
-    value = (credential or "").strip()
-    if classify_datadog_credential(value) == _CREDENTIAL_SERVICE_TOKEN:
-        return {"Authorization": f"Bearer {value}"}
-    return {"DD-API-KEY": value}
+    return {"DD-API-KEY": (credential or "").strip()}
 
 
 def _normalize_site(site: str | None) -> str:
@@ -228,10 +237,9 @@ class DatadogExporter(Exporter):
     """Exporter that pushes one Datadog event per failed test.
 
     Args:
-        api_key: Datadog credential — an API key (32 hex chars,
-            ``DD-API-KEY`` header) or a Service Access Token
-            (``ddsat_…``, ``Authorization: Bearer`` header).
-            Application keys are rejected.
+        api_key: Datadog API key (32 hex chars, ``DD-API-KEY`` header) —
+            the only credential that can post events. Service Access
+            Tokens (``ddsat_…``) and application keys are rejected.
         site: Datadog site, e.g. ``datadoghq.eu`` (default).
         service: Value of the ``service:`` tag.
         env: Value of the ``env:`` tag.
@@ -242,8 +250,9 @@ class DatadogExporter(Exporter):
             the event text.
 
     Raises:
-        ValueError: Invalid site, or an application key credential
-            (read-only — cannot post events).
+        ValueError: Invalid site, an application key credential
+            (read-only — cannot post events), or a Service Access Token
+            (no ``events_write`` scope — cannot post events).
     """
 
     NAME = "datadog"
@@ -268,8 +277,11 @@ class DatadogExporter(Exporter):
         push_tracker_links: bool = True,
     ) -> None:
         self._api_key = (api_key or "").strip()
-        if classify_datadog_credential(self._api_key) == _CREDENTIAL_APPLICATION_KEY:
+        _credential_kind = classify_datadog_credential(self._api_key)
+        if _credential_kind == _CREDENTIAL_APPLICATION_KEY:
             raise ValueError(APPLICATION_KEY_ERROR)
+        if _credential_kind == _CREDENTIAL_SERVICE_TOKEN:
+            raise ValueError(SERVICE_ACCESS_TOKEN_ERROR)
         self._site = _normalize_site(site)
         if not self._site:
             raise ValueError(

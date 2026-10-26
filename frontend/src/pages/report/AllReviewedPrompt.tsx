@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, extractApiDetail } from '@/lib/api'
-import { collectAllTestKeys } from '@/lib/failureKeys'
+import { api } from '@/lib/api'
+import { collectAllTestKeys, unreviewedKeyCount } from '@/lib/failureKeys'
 import { collectPushScopes, pushScopeQuery } from '@/lib/pushScopes'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useAuth } from '@/lib/auth'
 import { useReportState } from '@/pages/report/reportState'
+import { pushRejectionDetail } from './pushGate'
 
 interface AllReviewedPromptProps {
   jobId: string
@@ -34,17 +35,6 @@ function pushFailureDetail(res: unknown): string | null {
     return `${r.unmatched.length} test(s) could not be matched to Report Portal items`
   }
   return null
-}
-
-/**
- * User-facing reason a push request was rejected, so operators see WHY
- * (e.g. 403, invalid key) instead of a generic "push request failed".
- */
-function pushRejectionDetail(err: unknown): string {
-  const detail = extractApiDetail(err)
-  if (detail) return detail
-  if (err instanceof Error && err.message) return err.message
-  return 'push request failed'
 }
 
 export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
@@ -104,7 +94,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         const currentKeys = allKeysRef.current
         if (!isOperatorRef.current) return
         if ((!rpRef.current && !datadogRef.current) || currentKeys.length === 0) return
-        const allNowReviewed = currentKeys.every((k) => currentReviews[k]?.reviewed)
+        const allNowReviewed = unreviewedKeyCount(currentKeys, currentReviews) === 0
         if (allNowReviewed) {
           // Fresh dialog session — previous push outcomes no longer apply
           succeededRef.current = new Set()

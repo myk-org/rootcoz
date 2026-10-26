@@ -1295,6 +1295,12 @@ class ExporterInfo(BaseModel):
     name: str = Field(description="Machine-readable exporter identifier")
     display_name: str = Field(description="Human-readable exporter name")
     enabled: bool = Field(description="Whether this exporter is configured and ready")
+    allow_unreviewed_push: bool = Field(
+        description=(
+            "Whether this exporter's per-plugin toggle allows pushing jobs "
+            "with unreviewed failures (false when the exporter has no toggle)"
+        )
+    )
 
 
 class _PushEndpointMixin(BaseModel):

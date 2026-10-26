@@ -1,5 +1,5 @@
 import { reviewKey } from '@/lib/reviewKey'
-import type { ChildJobAnalysis } from '@/types'
+import type { ChildJobAnalysis, ReviewState } from '@/types'
 
 /** Walk the child-job tree once, calling `visitor` at each node.
  *  Centralises the recursion so every consumer stays in sync. */
@@ -39,4 +39,30 @@ export function countAllFailures(failures: { test_name: string }[], children: Ch
     count += nodeFailures.length
   })
   return count
+}
+
+/** How many of the given review keys are marked reviewed. */
+export function reviewedKeyCount(
+  keys: string[],
+  reviews: Record<string, ReviewState>,
+): number {
+  return keys.filter((k) => reviews[k]?.reviewed).length
+}
+
+/** How many of the given review keys are NOT yet reviewed. */
+export function unreviewedKeyCount(
+  keys: string[],
+  reviews: Record<string, ReviewState>,
+): number {
+  return keys.length - reviewedKeyCount(keys, reviews)
+}
+
+/** Job-wide unreviewed failure count (parent + nested children) — the same
+ *  key set AllReviewedPrompt uses to decide "all failures reviewed". */
+export function countUnreviewedFailures(
+  failures: { test_name: string }[],
+  children: ChildJobAnalysis[],
+  reviews: Record<string, ReviewState>,
+): number {
+  return unreviewedKeyCount(collectAllTestKeys(failures, children), reviews)
 }

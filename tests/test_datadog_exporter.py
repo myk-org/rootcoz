@@ -18,6 +18,7 @@ from rootcoz.config import Settings
 from rootcoz.exporters.base import ExportContext
 from rootcoz.exporters.datadog import (
     APPLICATION_KEY_ERROR,
+    SERVICE_ACCESS_TOKEN_ERROR,
     DatadogExporter,
     _auth_headers,
     classify_datadog_credential,
@@ -443,14 +444,11 @@ class TestCredentialClassification:
         assert classify_datadog_credential("  ddsat_tok \n") == "service_token"
         assert classify_datadog_credential("\t" + "c" * 40 + " ") == "application_key"
 
-    def test_auth_headers_api_key(self):
+    def test_auth_headers_api_key_only(self):
+        """API keys are the only authenticator — always DD-API-KEY."""
         assert _auth_headers(f"  {_API_KEY} ") == {"DD-API-KEY": _API_KEY}
-
-    def test_auth_headers_service_token_bearer(self):
-        assert _auth_headers(f"  {_SAT} ") == {"Authorization": f"Bearer {_SAT}"}
-
-    def test_auth_headers_service_token_has_no_api_key_header(self):
-        assert "DD-API-KEY" not in _auth_headers(_SAT)
+        assert _auth_headers(_API_KEY) == {"DD-API-KEY": _API_KEY}
+        assert set(_auth_headers(_API_KEY)) == {"DD-API-KEY"}  # no Bearer header
 
 
 class TestApplicationKeyFailFast:
@@ -469,9 +467,9 @@ class TestApplicationKeyFailFast:
         with pytest.raises(ValueError, match="application keys cannot post events"):
             _exporter(api_key=credential)
 
-    def test_error_message_names_the_alternatives(self):
+    def test_error_message_names_the_alternative(self):
         assert "API key" in APPLICATION_KEY_ERROR
-        assert "Service Access Token (ddsat" in APPLICATION_KEY_ERROR
+        assert "application keys cannot post events" in APPLICATION_KEY_ERROR
 
     def test_site_check_not_reached_for_application_key(self):
         """The credential check fires before the site validation."""
@@ -479,23 +477,48 @@ class TestApplicationKeyFailFast:
             _exporter(api_key="f" * 40, site="not a site!!")
 
 
-class TestServiceTokenPush:
-    """Service Access Tokens authenticate with Bearer, not DD-API-KEY."""
+class TestServiceTokenFailFast:
+    """Service Access Tokens have no events_write scope — they cannot
+    post events (Datadog authenticates event intake exclusively with API
+    keys), so both the constructor and the connection test fail fast
+    with a message distinct from the application-key error."""
 
-    async def test_bearer_header_on_event_post(self):
+    @pytest.mark.parametrize(
+        "credential",
+        [
+            "ddsat_" + "t" * 30,
+            "  ddsat_tok \n",  # whitespace-stripped before classifying
+        ],
+        ids=["ddsat-prefix", "whitespace-stripped"],
+    )
+    def test_constructor_rejects_service_tokens(self, credential):
+        with pytest.raises(ValueError) as exc_info:
+            _exporter(api_key=credential)
+        assert str(exc_info.value) == SERVICE_ACCESS_TOKEN_ERROR
+
+    def test_site_check_not_reached_for_service_token(self):
+        """The credential check fires before the site validation."""
+        with pytest.raises(ValueError, match="service access tokens"):
+            _exporter(
+                api_key="ddsat_tok",  # pragma: allowlist secret
+                site="not a site!!",
+            )
+
+    async def test_service_token_never_reaches_the_events_api(self):
+        """No Bearer-auth POST can be attempted with a rejected credential."""
         mock_class, posts = _mock_http_client()
-        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
-            await _exporter(api_key=f"  {_SAT} ").push(_context(failures=[_failure()]))
+        with (
+            patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class),
+            # The constructor itself raises — no push, no HTTP client.
+            pytest.raises(ValueError, match="service access tokens"),
+        ):
+            _exporter(api_key=_SAT)
+        assert posts == []
 
-        assert posts[0]["url"] == _EVENTS_URL
-        assert posts[0]["headers"] == {"Authorization": f"Bearer {_SAT}"}
-
-    async def test_api_key_header_unchanged_for_api_keys(self):
-        mock_class, posts = _mock_http_client()
-        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
-            await _exporter().push(_context(failures=[_failure()]))
-
-        assert posts[0]["headers"] == {"DD-API-KEY": _API_KEY}
+    def test_sat_error_message_distinct_from_application_key(self):
+        assert SERVICE_ACCESS_TOKEN_ERROR != APPLICATION_KEY_ERROR
+        assert "service access tokens cannot post events" in SERVICE_ACCESS_TOKEN_ERROR
+        assert "API key (32 hex characters)" in SERVICE_ACCESS_TOKEN_ERROR
 
 
 class TestMarkdownWrapper:
@@ -570,19 +593,24 @@ class TestConnectionTester:
         assert result["ok"] is False
         assert result["message"] == APPLICATION_KEY_ERROR
 
-    async def test_service_token_uses_bearer_header(self):
+    async def test_service_token_fails_fast_with_explanatory_message(self):
         from rootcoz.main import _test_datadog_connection
 
         with patch(
             "rootcoz.main._integration_test_get_json", new_callable=AsyncMock
         ) as mock_get:
-            mock_get.return_value = {"valid": True}
             result = await _test_datadog_connection(self._settings(_SAT))
 
-        assert result["ok"] is True
-        assert mock_get.call_args.kwargs["headers"] == {
-            "Authorization": f"Bearer {_SAT}"
-        }
+        assert result["ok"] is False
+        assert result["message"] == SERVICE_ACCESS_TOKEN_ERROR
+        mock_get.assert_not_awaited()  # no request with a token that cannot write
+
+    async def test_service_token_error_distinct_from_application_key(self):
+        from rootcoz.main import _test_datadog_connection
+
+        sat = await _test_datadog_connection(self._settings(_SAT))
+        app = await _test_datadog_connection(self._settings("ddapp_tok"))
+        assert sat["message"] != app["message"]
 
     async def test_api_key_uses_dd_api_key_header(self):
         from rootcoz.main import _test_datadog_connection

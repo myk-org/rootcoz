@@ -135,7 +135,9 @@ from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
 from rootcoz.exporters.datadog import (
     _CREDENTIAL_APPLICATION_KEY,
+    _CREDENTIAL_SERVICE_TOKEN,
     APPLICATION_KEY_ERROR,
+    SERVICE_ACCESS_TOKEN_ERROR,
     DatadogExporter,
     _auth_headers,
     _normalize_site,
@@ -7559,11 +7561,17 @@ def _available_exporters(settings: Settings) -> list[ExporterInfo]:
             name=ReportPortalClient.NAME,
             display_name=ReportPortalClient.DISPLAY_NAME,
             enabled=rp_enabled,
+            allow_unreviewed_push=_allows_unreviewed_push(
+                ReportPortalClient.NAME, settings
+            ),
         ),
         ExporterInfo(
             name=DatadogExporter.NAME,
             display_name=DatadogExporter.DISPLAY_NAME,
             enabled=settings.datadog_enabled,
+            allow_unreviewed_push=_allows_unreviewed_push(
+                DatadogExporter.NAME, settings
+            ),
         ),
     ]
 
@@ -14516,8 +14524,10 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
     events push path relies on — a 200 with ``{"valid": true}`` proves
     both reachability of the configured site and the credential.
     Credentials are classified exactly like the push path (API key vs
-    Service Access Token vs read-only application key): application keys
-    fail fast with the shared explanatory message instead of a bare 403.
+    Service Access Token vs read-only application key): Service Access
+    Tokens (no ``events_write`` scope) and application keys (read-only)
+    both fail fast with their shared explanatory messages instead of a
+    bare 403.
     """
     api_key = settings.datadog_api_key
     missing = [
@@ -14534,8 +14544,11 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
         )
     assert api_key is not None  # guaranteed by the missing-settings check above
     credential = api_key.get_secret_value()
-    if classify_datadog_credential(credential) == _CREDENTIAL_APPLICATION_KEY:
+    _credential_kind = classify_datadog_credential(credential)
+    if _credential_kind == _CREDENTIAL_APPLICATION_KEY:
         return _test_result(False, APPLICATION_KEY_ERROR)
+    if _credential_kind == _CREDENTIAL_SERVICE_TOKEN:
+        return _test_result(False, SERVICE_ACCESS_TOKEN_ERROR)
     site = _normalize_site(settings.datadog_site)
     if not site:
         return _test_result(

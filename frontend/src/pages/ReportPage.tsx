@@ -21,7 +21,7 @@ import { CrossFailurePatterns } from './report/CrossFailurePatterns'
 import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
 import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
-import { collectAllTestKeys, countAllFailures } from '@/lib/failureKeys'
+import { collectAllTestKeys, countAllFailures, reviewedKeyCount } from '@/lib/failureKeys'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -180,6 +180,15 @@ function ReportContent() {
           dispatch({ type: 'SET_REPORTPORTAL_PROJECT', payload: resultRes.capabilities?.reportportal_project ?? '' })
           dispatch({ type: 'SET_DATADOG_AVAILABLE', payload: resultRes.capabilities?.datadog ?? false })
           dispatch({ type: 'SET_SERVER_JIRA_PROJECT_KEY', payload: resultRes.capabilities?.server_jira_project_key ?? '' })
+          // Per-exporter escape hatches for the unreviewed-failure push gate
+          const exporters = resultRes.capabilities?.exporters ?? []
+          dispatch({
+            type: 'SET_EXPORTER_ALLOW_UNREVIEWED',
+            payload: {
+              reportportal: exporters.find((e) => e.name === 'reportportal')?.allow_unreviewed_push ?? false,
+              datadog: exporters.find((e) => e.name === 'datadog')?.allow_unreviewed_push ?? false,
+            },
+          })
         }
 
         // Initial comment fetch via the shared single-flight helper
@@ -372,7 +381,7 @@ function ReportContent() {
   const failedClones = [...cloneStates]
     .filter(([repo, status]) => status === 'failed' && !repo.includes('://') && !repo.includes('@'))
     .map(([repo]) => repo)
-  const reviewedCount = allTestKeys.filter((k) => state.reviews[k]?.reviewed).length
+  const reviewedCount = reviewedKeyCount(allTestKeys, state.reviews)
 
   /** Format the AI provider/model label for display. */
   const formatAiLabel = (provider: string | undefined, model: string | undefined): string =>

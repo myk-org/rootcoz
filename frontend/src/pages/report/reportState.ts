@@ -24,6 +24,10 @@ export interface ReportState {
   reportportalAvailable: boolean
   reportportalProject: string
   datadogAvailable: boolean
+  /** Escape hatches allowing pushes of jobs with unreviewed failures
+   *  (RP_ALLOW_UNREVIEWED_PUSH / DD_ALLOW_UNREVIEWED_PUSH server settings). */
+  rpAllowUnreviewedPush: boolean
+  ddAllowUnreviewedPush: boolean
   serverJiraProjectKey: string
   aiModels: Record<string, AiModel[]>
   loading: boolean
@@ -57,6 +61,7 @@ export type ReportAction =
   | { type: 'SET_REPORTPORTAL_AVAILABLE'; payload: boolean }
   | { type: 'SET_REPORTPORTAL_PROJECT'; payload: string }
   | { type: 'SET_DATADOG_AVAILABLE'; payload: boolean }
+  | { type: 'SET_EXPORTER_ALLOW_UNREVIEWED'; payload: { reportportal: boolean; datadog: boolean } }
   | { type: 'SET_SERVER_JIRA_PROJECT_KEY'; payload: string }
   | { type: 'SET_AI_MODELS'; payload: Record<string, AiModel[]> }
   | { type: 'SET_ENRICHMENTS'; payload: Record<string, CommentEnrichment[]> }
@@ -111,6 +116,8 @@ export const initialState: ReportState = {
   reportportalAvailable: false,
   reportportalProject: '',
   datadogAvailable: false,
+  rpAllowUnreviewedPush: false,
+  ddAllowUnreviewedPush: false,
   serverJiraProjectKey: '',
   aiModels: {},
   loading: true,
@@ -179,6 +186,8 @@ export function reportReducer(state: ReportState, action: ReportAction): ReportS
       return { ...state, reportportalProject: action.payload }
     case 'SET_DATADOG_AVAILABLE':
       return { ...state, datadogAvailable: action.payload }
+    case 'SET_EXPORTER_ALLOW_UNREVIEWED':
+      return { ...state, rpAllowUnreviewedPush: action.payload.reportportal, ddAllowUnreviewedPush: action.payload.datadog }
     case 'SET_SERVER_JIRA_PROJECT_KEY':
       return { ...state, serverJiraProjectKey: action.payload }
     case 'SET_AI_MODELS':

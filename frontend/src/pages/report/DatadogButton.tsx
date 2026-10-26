@@ -15,6 +15,13 @@ import {
 } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { pushScopeQuery } from '@/lib/pushScopes'
+import {
+  isUnreviewedPushRejection,
+  pushRejectionDetail,
+  unreviewedPushRejectionMessage,
+  unreviewedPushTooltip,
+  useUnreviewedPushGate,
+} from './pushGate'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { DatadogPushResult } from '@/types'
 
@@ -63,24 +70,39 @@ interface DatadogButtonProps {
 export function DatadogButton({ jobId, jobName, buildNumber, childJobName, childBuildNumber, hasFailures }: DatadogButtonProps) {
   const displayJobName = childJobName ?? jobName
   const displayBuildNumber = childBuildNumber ?? buildNumber
+  const { unreviewedCount, allowUnreviewedPush } = useUnreviewedPushGate('datadog')
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
   const [resultDialogOpen, setResultDialogOpen] = useState(false)
   const [pushResult, setPushResult] = useState<DatadogPushResult | null>(null)
   const [pushFailed, setPushFailed] = useState(false)
+  // Actionable 409 message from the unreviewed-failure push gate
+  const [gateMessage, setGateMessage] = useState<string | null>(null)
+  // Rejection detail (403, invalid key, …) for generic push failures
+  const [pushErrorDetail, setPushErrorDetail] = useState<string | null>(null)
+  // The gate blocks the push up front (server would 409 anyway): the job has
+  // unreviewed failures and DD_ALLOW_UNREVIEWED_PUSH is off.
+  const gateBlocked = unreviewedCount > 0 && !allowUnreviewedPush
 
   const handlePush = useCallback(async () => {
     setConfirmOpen(false)
     setPushing(true)
     setPushFailed(false)
+    setGateMessage(null)
+    setPushErrorDetail(null)
     setPushResult(null)
     try {
       const qs = pushScopeQuery({ childJobName, childBuildNumber })
       const result = await api.post<DatadogPushResult>(`/results/${jobId}/push/datadog${qs}`)
       setPushResult(result)
       setResultDialogOpen(true)
-    } catch {
-      setPushFailed(true)
+    } catch (err) {
+      if (isUnreviewedPushRejection(err)) {
+        setGateMessage(unreviewedPushRejectionMessage(err, 'datadog'))
+      } else {
+        setPushFailed(true)
+        setPushErrorDetail(pushRejectionDetail(err))
+      }
       setResultDialogOpen(true)
     } finally {
       setPushing(false)
@@ -110,7 +132,7 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
                 size="sm"
                 className="gap-1.5 text-xs"
                 onClick={() => setConfirmOpen(true)}
-                disabled={pushing || !hasFailures}
+                disabled={pushing || !hasFailures || gateBlocked}
               >
                 {pushing ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -121,9 +143,13 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
               </Button>
             </span>
           </TooltipTrigger>
-          {!hasFailures && (
+          {!hasFailures ? (
             <TooltipContent>No failures to push</TooltipContent>
-          )}
+          ) : gateBlocked ? (
+            <TooltipContent data-testid="datadog-push-gate-tooltip">
+              {unreviewedPushTooltip(unreviewedCount, 'datadog')}
+            </TooltipContent>
+          ) : null}
         </Tooltip>
       </TooltipProvider>
 
@@ -151,7 +177,9 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
         <DialogContent className="sm:max-w-[520px] bg-surface-card border-border-default overflow-hidden">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              {isFullFailure ? (
+              {gateMessage ? (
+                <><AlertTriangle className="h-5 w-5 text-signal-orange" /> Push blocked — unreviewed failures.</>
+              ) : isFullFailure ? (
                 <><XCircle className="h-5 w-5 text-signal-red" /> Failed to push events to Datadog.</>
               ) : isPartialSuccess ? (
                 <><AlertTriangle className="h-5 w-5 text-signal-orange" /> Some events could not be pushed.</>
@@ -161,13 +189,19 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
             </DialogTitle>
           </DialogHeader>
 
-          {(isFullFailure || isPartialSuccess) && (
+          {(gateMessage || isFullFailure || isPartialSuccess) && (
             <div className="space-y-3 py-2 min-w-0">
               <DatadogPushMetadata
                 jobName={displayJobName}
                 buildNumber={displayBuildNumber}
                 className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs text-text-tertiary"
               />
+              {gateMessage && (
+                <p className="text-xs text-text-secondary" data-testid="datadog-push-gate-message">{gateMessage}</p>
+              )}
+              {pushErrorDetail && (
+                <p className="text-xs text-text-secondary" data-testid="datadog-push-message">{pushErrorDetail}</p>
+              )}
               {pushResult?.message && (
                 <p className="text-xs text-text-secondary" data-testid="datadog-push-message">{pushResult.message}</p>
               )}

@@ -339,6 +339,58 @@ class TestExporterEndpoints:
             assert rp["display_name"] == "Report Portal"
             assert "enabled" in rp
 
+    def test_list_exporters_allow_unreviewed_push_default_false(
+        self, _init_db, temp_db_path
+    ):
+        """Every entry carries allow_unreviewed_push, false with toggles unset."""
+        from tests.conftest import admin_login, make_app_client
+
+        for client in make_app_client(temp_db_path):
+            admin_login(client)
+            data = client.get("/api/exporters").json()
+            assert data, "at least one exporter is always listed"
+            for entry in data:
+                assert entry["allow_unreviewed_push"] is False
+
+    def test_list_exporters_allow_unreviewed_push_per_plugin(
+        self, _init_db, temp_db_path
+    ):
+        """Each entry reflects its own toggle, not the other exporter's."""
+        from tests.conftest import admin_login, make_app_client
+
+        for client in make_app_client(
+            temp_db_path, env_overrides={"RP_ALLOW_UNREVIEWED_PUSH": "true"}
+        ):
+            admin_login(client)
+            data = client.get("/api/exporters").json()
+            rp = next(e for e in data if e["name"] == "reportportal")
+            dd = next(e for e in data if e["name"] == "datadog")
+            assert rp["allow_unreviewed_push"] is True
+            assert dd["allow_unreviewed_push"] is False
+
+        for client in make_app_client(
+            temp_db_path, env_overrides={"DD_ALLOW_UNREVIEWED_PUSH": "true"}
+        ):
+            admin_login(client)
+            data = client.get("/api/exporters").json()
+            rp = next(e for e in data if e["name"] == "reportportal")
+            dd = next(e for e in data if e["name"] == "datadog")
+            assert rp["allow_unreviewed_push"] is False
+            assert dd["allow_unreviewed_push"] is True
+
+    def test_unknown_plugin_has_no_unreviewed_push_escape_hatch(self):
+        """Plugins without a toggle entry are gated (false), never open."""
+        from rootcoz.config import Settings
+        from rootcoz.main import _allows_unreviewed_push
+
+        settings = Settings(
+            rp_allow_unreviewed_push=True, dd_allow_unreviewed_push=True
+        )
+        assert _allows_unreviewed_push("unknown-exporter", settings) is False
+        # Known plugins still resolve through their toggles.
+        assert _allows_unreviewed_push("reportportal", settings) is True
+        assert _allows_unreviewed_push("datadog", settings) is True
+
     def test_push_to_exporter_unknown_plugin(self, _init_db, temp_db_path):
         """POST /push/{plugin_name} returns 400 for unknown plugin."""
         from tests.conftest import admin_login, make_app_client
@@ -1081,11 +1133,16 @@ class TestExporterModel:
         from rootcoz.models import ExporterInfo
 
         info = ExporterInfo(
-            name="reportportal", display_name="Report Portal", enabled=True
+            name="reportportal",
+            display_name="Report Portal",
+            enabled=True,
+            allow_unreviewed_push=False,
         )
         d = info.model_dump()
         assert d == {
             "name": "reportportal",
             "display_name": "Report Portal",
             "enabled": True,
+            "allow_unreviewed_push": False,
         }
+        assert isinstance(d["allow_unreviewed_push"], bool)
