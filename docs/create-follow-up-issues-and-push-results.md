@@ -95,9 +95,16 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    At least one of the three must be enabled or the push is refused.
 
+   Manual pushes are also gated on review completion: until every failure in the job is reviewed, the push is refused with `409 job has N unreviewed failure(s) — review them before pushing`. Each exporter has its own server-level escape hatch, and they are independent — enabling one does not ungate the other exporter:
+
+   | Toggle | Effect when enabled |
+   | --- | --- |
+   | `RP_ALLOW_UNREVIEWED_PUSH` | Allows Report Portal pushes of jobs that still have unreviewed failures |
+   | `DD_ALLOW_UNREVIEWED_PUSH` | Allows Datadog pushes of jobs that still have unreviewed failures |
+
 8. Push failure events to Datadog.
 
-   The Datadog exporter emits **one event per failed test** to the Datadog Events API (`https://api.{site}/api/v1/events`, default site `datadoghq.eu`), authenticated with the `DD-API-KEY` header. Enable it with `ENABLE_DATADOG=true` plus `DATADOG_API_KEY` — see [Configuration Reference](configuration-reference.html) for the `DATADOG_SITE`, `DATADOG_SERVICE`, and `DATADOG_ENV` settings.
+   The Datadog exporter emits **one event per failed test** to the Datadog Events API (`https://api.{site}/api/v1/events`, default site `datadoghq.eu`). Authentication depends on the credential type: an API key (32 hex characters) is sent as the `DD-API-KEY` header, and a Service Access Token (`ddsat…` prefix, Datadog's recommended integration credential) is sent as an `Authorization: Bearer` header. Application keys (`ddapp…` or exactly 40 hex characters) are rejected with an explanatory error — they are read-only and cannot post events. Enable it with `ENABLE_DATADOG=true` plus `DATADOG_API_KEY` — see [Configuration Reference](configuration-reference.html) for the `DATADOG_SITE`, `DATADOG_SERVICE`, and `DATADOG_ENV` settings.
 
    Each event carries:
 
@@ -112,7 +119,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
    rootcoz push JOB_ID --plugin datadog
    ```
 
-   Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events.
+   Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events. Manual Datadog pushes obey the same review gate as Report Portal — the `DD_ALLOW_UNREVIEWED_PUSH` row in the toggle table above is their escape hatch.
 
 ## Advanced Usage
 

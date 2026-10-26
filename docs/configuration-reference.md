@@ -165,8 +165,9 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `RP_PUSH_CLASSIFICATIONS` | `true` | boolean | no | no | yes |
    | `RP_PUSH_ROOTCOZ_URL` | `true` | boolean | no | no | yes |
    | `RP_PUSH_TRACKER_LINKS` | `true` | boolean | no | no | yes |
+   | `RP_ALLOW_UNREVIEWED_PUSH` | `false` | boolean | no | no | yes |
 
-   Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`).
+   Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`). `RP_ALLOW_UNREVIEWED_PUSH` is the escape hatch for the manual-push review gate: by default a manual push is refused with `409 job has N unreviewed failure(s) — review them before pushing` until every failure in the job is reviewed; set it to `true` to let Report Portal pushes through regardless. It is a server-level toggle (env var or Server Settings) with no request-payload or CLI equivalent.
 
 8. **Datadog category.**
 
@@ -180,10 +181,11 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `DD_PUSH_CLASSIFICATIONS` | `true` | boolean | no | no | yes |
    | `DD_PUSH_ROOTCOZ_URL` | `true` | boolean | no | no | yes |
    | `DD_PUSH_TRACKER_LINKS` | `true` | boolean | no | no | yes |
+   | `DD_ALLOW_UNREVIEWED_PUSH` | `false` | boolean | no | no | yes |
 
-   Same enable semantics as Report Portal: when `ENABLE_DATADOG` is unset, the exporter is enabled automatically once `DATADOG_API_KEY` **and** `DATADOG_SITE` are configured; set `ENABLE_DATADOG=false` to force it off. `DATADOG_SITE` is the Datadog site hostname for the Events API (`https://api.{site}/api/v1/events`, e.g. `datadoghq.eu` or `datadoghq.com`) — there is no built-in default, you choose your regional site. `DATADOG_SERVICE` and `DATADOG_ENV` optionally feed the `service:` and `env:` tags on emitted events; the tags are omitted when unset.
+   Same enable semantics as Report Portal: when `ENABLE_DATADOG` is unset, the exporter is enabled automatically once `DATADOG_API_KEY` **and** `DATADOG_SITE` are configured; set `ENABLE_DATADOG=false` to force it off. `DATADOG_API_KEY` accepts either an API key (32 hex characters, sent as the `DD-API-KEY` header) or a Service Access Token (`ddsat…` prefix, sent as an `Authorization: Bearer` header — Datadog's recommended integration credential). Application keys (`ddapp…` prefix or exactly 40 hex characters) are rejected with an explanatory error: they are read-only and cannot post events even when paired with an API key. `DATADOG_SITE` is the Datadog site hostname for the Events API (`https://api.{site}/api/v1/events`, e.g. `datadoghq.eu` or `datadoghq.com`) — there is no built-in default, you choose your regional site. `DATADOG_SERVICE` and `DATADOG_ENV` optionally feed the `service:` and `env:` tags on emitted events; the tags are omitted when unset.
 
-   The three `DD_PUSH_*` toggles mirror the `RP_PUSH_*` trio and control what goes into each event: `DD_PUSH_CLASSIFICATIONS` adds the `tfa.classification` tag, the `[classification]` title prefix, and the classification line in the event text; `DD_PUSH_ROOTCOZ_URL` adds the RootCoz report link to the event text (only when `PUBLIC_BASE_URL` is set); `DD_PUSH_TRACKER_LINKS` adds the tracked-in Jira/GitHub issue links to the event text. The exporter never sets the `alert_type` field — classification (root cause) and alert type (severity) are unrelated axes, and Datadog applies its own default.
+   The three `DD_PUSH_*` toggles mirror the `RP_PUSH_*` trio and control what goes into each event: `DD_PUSH_CLASSIFICATIONS` adds the `tfa.classification` tag, the `[classification]` title prefix, and the classification line in the event text; `DD_PUSH_ROOTCOZ_URL` adds the RootCoz report link to the event text (only when `PUBLIC_BASE_URL` is set); `DD_PUSH_TRACKER_LINKS` adds the tracked-in Jira/GitHub issue links to the event text. The exporter never sets the `alert_type` field — classification (root cause) and alert type (severity) are unrelated axes, and Datadog applies its own default. `DD_ALLOW_UNREVIEWED_PUSH` is the Datadog-side escape hatch for the manual-push review gate: by default a manual push is refused with `409 job has N unreviewed failure(s) — review them before pushing` until every failure in the job is reviewed; set it to `true` to let Datadog pushes through regardless. Each exporter's toggle is independent — enabling the Report Portal one does not ungate Datadog, and unknown/future exporters have no toggle and stay gated.
 
 9. **Auth and Security category.**
 
@@ -331,6 +333,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `RP_PUSH_CLASSIFICATIONS` | `rp_push_classifications` | Report Portal | runtime |
 | `RP_PUSH_ROOTCOZ_URL` | `rp_push_rootcoz_url` | Report Portal | runtime |
 | `RP_PUSH_TRACKER_LINKS` | `rp_push_tracker_links` | Report Portal | runtime |
+| `RP_ALLOW_UNREVIEWED_PUSH` | `rp_allow_unreviewed_push` | Report Portal | runtime |
 | `DATADOG_API_KEY` | `datadog_api_key` | Datadog | runtime (sensitive) |
 | `DATADOG_SITE` | `datadog_site` | Datadog | runtime |
 | `DATADOG_SERVICE` | `datadog_service` | Datadog | runtime |
@@ -339,6 +342,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `DD_PUSH_CLASSIFICATIONS` | `dd_push_classifications` | Datadog | runtime |
 | `DD_PUSH_ROOTCOZ_URL` | `dd_push_rootcoz_url` | Datadog | runtime |
 | `DD_PUSH_TRACKER_LINKS` | `dd_push_tracker_links` | Datadog | runtime |
+| `DD_ALLOW_UNREVIEWED_PUSH` | `dd_allow_unreviewed_push` | Datadog | runtime |
 | `ADMIN_KEY` | `admin_key` | Auth & Security | env-only (read-only display) |
 | `SECURE_COOKIES` | `secure_cookies` | Auth & Security | restart |
 | `TRUST_PROXY_HEADERS` | `trust_proxy_headers` | Auth & Security | restart |

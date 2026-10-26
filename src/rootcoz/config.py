@@ -589,6 +589,13 @@ class Settings(BaseSettings):
         default=True,
         description="Include Jira/GitHub issue links as external system issues on Report Portal test items.",
     )
+    rp_allow_unreviewed_push: bool = Field(
+        default=False,
+        description=(
+            "Allow manual Report Portal pushes of jobs that still have unreviewed"
+            " failures. By default all failures must be reviewed before a manual push."
+        ),
+    )
 
     # Datadog Events integration (optional). Emits one event per failed
     # test when results are pushed to the 'datadog' exporter plugin.
@@ -633,6 +640,13 @@ class Settings(BaseSettings):
     dd_push_tracker_links: bool = Field(
         default=True,
         description="Include tracked-in Jira/GitHub issue links in Datadog event text.",
+    )
+    dd_allow_unreviewed_push: bool = Field(
+        default=False,
+        description=(
+            "Allow manual Datadog pushes of jobs that still have unreviewed"
+            " failures. By default all failures must be reviewed before a manual push."
+        ),
     )
 
     # Web Push (VAPID) configuration (optional, server-only)

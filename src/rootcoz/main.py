@@ -134,8 +134,12 @@ from rootcoz.engine.core import (
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
 from rootcoz.exporters.datadog import (
+    _CREDENTIAL_APPLICATION_KEY,
+    APPLICATION_KEY_ERROR,
     DatadogExporter,
+    _auth_headers,
     _normalize_site,
+    classify_datadog_credential,
 )
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
@@ -375,9 +379,11 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
+        "rp_allow_unreviewed_push",
         "dd_push_classifications",
         "dd_push_rootcoz_url",
         "dd_push_tracker_links",
+        "dd_allow_unreviewed_push",
         "vapid_claim_email",
         "vapid_public_key",
         "smtp_host",
@@ -500,6 +506,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "rp_push_classifications",
         "rp_push_rootcoz_url",
         "rp_push_tracker_links",
+        "rp_allow_unreviewed_push",
     ],
     "Datadog": [
         "datadog_api_key",
@@ -510,6 +517,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "dd_push_classifications",
         "dd_push_rootcoz_url",
         "dd_push_tracker_links",
+        "dd_allow_unreviewed_push",
     ],
     "Auth & Security": [
         "admin_key",
@@ -3041,70 +3049,69 @@ async def _auto_review_matching_failures(
         auto_push_names = list(
             dict.fromkeys(n for n in _raw_names if n and n in _EXPORTER_CLASSES)
         )
-        if auto_push_names and total_failures > 0:
-            reviews = await storage.get_reviews_for_job(job_id)
-            reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
-            if reviewed_count >= total_failures:
-                # Auto-push must emit the same date_happened as the manual
-                # push endpoint: reuse the stored analysis timestamp instead
-                # of push time.
-                stored = await get_result(job_id)
-                context = await _build_export_context(
-                    job_id=job_id,
-                    result_data=result_data,
-                    settings=settings,
-                    pushed_by=AI_SYSTEM_USERNAME,
-                    fetch_history=_exporter_needs_history_classifications(
-                        auto_push_names
-                    ),
-                    fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                        auto_push_names, settings
-                    ),
-                    analysis_timestamp=(
-                        _stored_analysis_timestamp(stored) if stored else None
-                    ),
+        if (
+            auto_push_names
+            and total_failures > 0
+            and await _unreviewed_failure_count(job_id, total_failures) == 0
+        ):
+            # Auto-push must emit the same date_happened as the manual
+            # push endpoint: reuse the stored analysis timestamp instead
+            # of push time.
+            stored = await get_result(job_id)
+            context = await _build_export_context(
+                job_id=job_id,
+                result_data=result_data,
+                settings=settings,
+                pushed_by=AI_SYSTEM_USERNAME,
+                fetch_history=_exporter_needs_history_classifications(auto_push_names),
+                fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                    auto_push_names, settings
+                ),
+                analysis_timestamp=(
+                    _stored_analysis_timestamp(stored) if stored else None
+                ),
+            )
+            for plugin_name in auto_push_names:
+                logger.info(
+                    "All failures auto-reviewed for job %s, pushing to "
+                    "'%s' (pushed_by=%s)",
+                    job_id,
+                    plugin_name,
+                    AI_SYSTEM_USERNAME,
                 )
-                for plugin_name in auto_push_names:
-                    logger.info(
-                        "All failures auto-reviewed for job %s, pushing to "
-                        "'%s' (pushed_by=%s)",
-                        job_id,
+                try:
+                    exporter = _create_exporter(plugin_name, settings)
+                except (
+                    ValueError,
+                    TimeoutError,
+                    OSError,
+                    TypeError,
+                    RuntimeError,
+                ) as exc:
+                    logger.warning(
+                        "Auto-push skipped for exporter '%s', job_id=%s: %s",
                         plugin_name,
-                        AI_SYSTEM_USERNAME,
+                        job_id,
+                        exc,
                     )
-                    try:
-                        exporter = _create_exporter(plugin_name, settings)
-                    except (
-                        ValueError,
-                        TimeoutError,
-                        OSError,
-                        TypeError,
-                        RuntimeError,
-                    ) as exc:
+                    continue
+                try:
+                    with exporter:
+                        result = await exporter.push(context)
+                    if not result.success:
                         logger.warning(
-                            "Auto-push skipped for exporter '%s', job_id=%s: %s",
+                            "Auto-push to '%s' returned failure for job_id=%s: %s",
                             plugin_name,
                             job_id,
-                            exc,
+                            result.message,
                         )
-                        continue
-                    try:
-                        with exporter:
-                            result = await exporter.push(context)
-                        if not result.success:
-                            logger.warning(
-                                "Auto-push to '%s' returned failure for job_id=%s: %s",
-                                plugin_name,
-                                job_id,
-                                result.message,
-                            )
-                    except Exception:
-                        logger.warning(
-                            "Auto-push to '%s' failed for job_id=%s",
-                            plugin_name,
-                            job_id,
-                            exc_info=True,
-                        )
+                except Exception:
+                    logger.warning(
+                        "Auto-push to '%s' failed for job_id=%s",
+                        plugin_name,
+                        job_id,
+                        exc_info=True,
+                    )
 
 
 async def _auto_review_child_failures(
@@ -8169,6 +8176,100 @@ async def delete_tracked_in_endpoint(
     return {"status": "ok", "deleted_id": link_id}
 
 
+def _count_result_failures(result_data: dict[str, Any]) -> int:
+    """Count failures in a stored result dict, recursing into child analyses.
+
+    Mirrors the auto-review counting (top-level ``failures`` plus every
+    ``child_job_analyses`` entry, including nested ``failed_children``).
+    """
+    total = len(result_data.get("failures", []) or [])
+    for child in result_data.get("child_job_analyses", []) or []:
+        total += _count_child_result_failures(child)
+    return total
+
+
+def _count_child_result_failures(child: dict[str, Any]) -> int:
+    """Count failures in one stored child job analysis, recursively."""
+    total = len(child.get("failures", []) or [])
+    for nested in child.get("failed_children", []) or []:
+        total += _count_child_result_failures(nested)
+    return total
+
+
+async def _unreviewed_failure_count(job_id: str, total_failures: int) -> int:
+    """Count a job's failures not yet marked reviewed.
+
+    Shared review-completion check: the auto-push path and the manual push
+    endpoints both gate on this. Uses the same count comparison the
+    auto-push path has always used — reviewed review entries versus total
+    failures.
+
+    Args:
+        job_id: Analysis job identifier.
+        total_failures: Total failure count (from auto-review counting or
+            :func:`_count_result_failures`).
+
+    Returns:
+        Number of unreviewed failures (never negative).
+    """
+    if total_failures <= 0:
+        return 0
+    reviews = await storage.get_reviews_for_job(job_id)
+    reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
+    return max(total_failures - reviewed_count, 0)
+
+
+# Exporter name → Settings field allowing manual pushes of unreviewed jobs.
+# Unknown/future exporters have no entry, so they stay gated by default.
+_UNREVIEWED_PUSH_TOGGLE_FIELDS: dict[str, str] = {
+    ReportPortalClient.NAME: "rp_allow_unreviewed_push",
+    DatadogExporter.NAME: "dd_allow_unreviewed_push",
+}
+
+
+def _allows_unreviewed_push(plugin_name: str, settings: Settings) -> bool:
+    """Whether the named exporter may push jobs with unreviewed failures.
+
+    Per-exporter escape hatch (``rp_allow_unreviewed_push`` /
+    ``dd_allow_unreviewed_push``); exporters without a toggle are gated.
+    """
+    toggle_field = _UNREVIEWED_PUSH_TOGGLE_FIELDS.get(plugin_name)
+    if not toggle_field:
+        return False
+    return bool(getattr(settings, toggle_field))
+
+
+async def _gate_unreviewed_push(
+    job_id: str,
+    result_data: dict[str, Any],
+    plugin_name: str,
+    settings: Settings,
+) -> None:
+    """Reject a manual exporter push when the job has unreviewed failures.
+
+    Raises:
+        HTTPException: 409 when any failure is unreviewed and the
+            exporter's per-plugin toggle does not allow unreviewed pushes.
+    """
+    unreviewed = await _unreviewed_failure_count(
+        job_id, _count_result_failures(result_data)
+    )
+    if unreviewed and not _allows_unreviewed_push(plugin_name, settings):
+        logger.warning(
+            "Blocking manual push to '%s' for job %s: %d unreviewed failure(s)",
+            plugin_name,
+            job_id,
+            unreviewed,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job has {unreviewed} unreviewed failure(s)"
+                " — review them before pushing"
+            ),
+        )
+
+
 @app.post(
     "/results/{job_id}/push-reportportal",
     response_model=ReportPortalPushResult,
@@ -8209,6 +8310,15 @@ async def push_to_reportportal(
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     result_data = stored["result"]
+
+    await _gate_unreviewed_push(
+        # Same literal _create_exporter matches for the legacy RP endpoint —
+        # resilient to the ReportPortalClient symbol being patched in tests.
+        job_id,
+        result_data,
+        "reportportal",
+        settings,
+    )
 
     try:
         push_result = await _execute_rp_push(
@@ -8268,6 +8378,8 @@ async def push_to_exporter(
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
     result_data = stored["result"]
+
+    await _gate_unreviewed_push(job_id, result_data, plugin_name, settings)
 
     try:
         context = await _build_export_context(
@@ -14410,11 +14522,14 @@ async def _test_reportportal_connection(settings: Settings) -> dict[str, Any]:
 
 
 async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
-    """API-key validation ping against the effective Datadog settings.
+    """Credential validation ping against the effective Datadog settings.
 
     Uses the same read-only ``GET /api/v1/validate`` call the Datadog
     events push path relies on — a 200 with ``{"valid": true}`` proves
-    both reachability of the configured site and the API key.
+    both reachability of the configured site and the credential.
+    Credentials are classified exactly like the push path (API key vs
+    Service Access Token vs read-only application key): application keys
+    fail fast with the shared explanatory message instead of a bare 403.
     """
     api_key = settings.datadog_api_key
     missing = [
@@ -14430,6 +14545,9 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
             False, f"Datadog is not configured (missing: {', '.join(missing)})"
         )
     assert api_key is not None  # guaranteed by the missing-settings check above
+    credential = api_key.get_secret_value()
+    if classify_datadog_credential(credential) == _CREDENTIAL_APPLICATION_KEY:
+        return _test_result(False, APPLICATION_KEY_ERROR)
     site = _normalize_site(settings.datadog_site)
     if not site:
         return _test_result(
@@ -14440,7 +14558,7 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
     try:
         data = await _integration_test_get_json(
             f"https://api.{site}/api/v1/validate",
-            headers={"DD-API-KEY": api_key.get_secret_value()},
+            headers=_auth_headers(credential),
         )
     except _IntegrationTestError as exc:
         message = str(exc)

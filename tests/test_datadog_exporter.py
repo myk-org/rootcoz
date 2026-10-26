@@ -17,12 +17,16 @@ from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.exporters.base import ExportContext
 from rootcoz.exporters.datadog import (
+    APPLICATION_KEY_ERROR,
     DatadogExporter,
+    _auth_headers,
+    classify_datadog_credential,
     sanitize_tag_value,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
 
 _API_KEY = "dd-test-key"  # pragma: allowlist secret
+_SAT = "ddsat_service-token"  # pragma: allowlist secret
 _EVENTS_URL = "https://api.datadoghq.eu/api/v1/events"
 
 
@@ -415,6 +419,184 @@ class TestHistoryClassificationsAndReviewers:
         return exporter._build_event(_context(**ctx_overrides), _failure())
 
 
+class TestCredentialClassification:
+    """Multi-type Datadog credentials: API key, SAT, application key."""
+
+    def test_api_key_32_hex(self):
+        assert classify_datadog_credential("a" * 32) == "api_key"
+
+    def test_unrecognized_value_falls_back_to_api_key(self):
+        # Pre-existing behavior: only shapes Datadog documents are special-cased.
+        assert classify_datadog_credential("dd-test-key") == "api_key"
+        assert classify_datadog_credential("") == "api_key"
+
+    def test_service_access_token_prefix(self):
+        assert classify_datadog_credential("ddsat_anything") == "service_token"
+
+    def test_application_key_ddapp_prefix(self):
+        assert classify_datadog_credential("ddapp_anything") == "application_key"
+
+    def test_application_key_legacy_40_hex(self):
+        assert classify_datadog_credential("b" * 40) == "application_key"
+
+    def test_whitespace_stripped_before_classifying(self):
+        assert classify_datadog_credential("  ddsat_tok \n") == "service_token"
+        assert classify_datadog_credential("\t" + "c" * 40 + " ") == "application_key"
+
+    def test_auth_headers_api_key(self):
+        assert _auth_headers(f"  {_API_KEY} ") == {"DD-API-KEY": _API_KEY}
+
+    def test_auth_headers_service_token_bearer(self):
+        assert _auth_headers(f"  {_SAT} ") == {"Authorization": f"Bearer {_SAT}"}
+
+    def test_auth_headers_service_token_has_no_api_key_header(self):
+        assert "DD-API-KEY" not in _auth_headers(_SAT)
+
+
+class TestApplicationKeyFailFast:
+    """Application keys are read-only — they cannot post events."""
+
+    @pytest.mark.parametrize(
+        "credential",
+        [
+            "ddapp_" + "k" * 30,  # modern application key
+            "d" * 40,  # legacy 40-hex application key
+            " " + "e" * 40 + "\t",  # whitespace-stripped before classifying
+        ],
+        ids=["ddapp-prefix", "legacy-40-hex", "whitespace-stripped"],
+    )
+    def test_constructor_rejects_application_keys(self, credential):
+        with pytest.raises(ValueError, match="application keys cannot post events"):
+            _exporter(api_key=credential)
+
+    def test_error_message_names_the_alternatives(self):
+        assert "API key" in APPLICATION_KEY_ERROR
+        assert "Service Access Token (ddsat" in APPLICATION_KEY_ERROR
+
+    def test_site_check_not_reached_for_application_key(self):
+        """The credential check fires before the site validation."""
+        with pytest.raises(ValueError, match="application keys"):
+            _exporter(api_key="f" * 40, site="not a site!!")
+
+
+class TestServiceTokenPush:
+    """Service Access Tokens authenticate with Bearer, not DD-API-KEY."""
+
+    async def test_bearer_header_on_event_post(self):
+        mock_class, posts = _mock_http_client()
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
+            await _exporter(api_key=f"  {_SAT} ").push(_context(failures=[_failure()]))
+
+        assert posts[0]["url"] == _EVENTS_URL
+        assert posts[0]["headers"] == {"Authorization": f"Bearer {_SAT}"}
+
+    async def test_api_key_header_unchanged_for_api_keys(self):
+        mock_class, posts = _mock_http_client()
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
+            await _exporter().push(_context(failures=[_failure()]))
+
+        assert posts[0]["headers"] == {"DD-API-KEY": _API_KEY}
+
+
+class TestMarkdownWrapper:
+    """Datadog renders markdown only inside %%% markers (datadogpy#614)."""
+
+    @pytest.mark.parametrize(
+        "exporter_overrides",
+        [
+            {},  # all content toggles on (defaults)
+            {"push_classifications": False},
+            {"push_rootcoz_url": False, "push_tracker_links": False},
+            {
+                "push_classifications": False,
+                "push_rootcoz_url": False,
+                "push_tracker_links": False,
+            },
+        ],
+        ids=["all-on", "classifications-off", "links-off", "all-off"],
+    )
+    def test_text_wrapped_regardless_of_toggles(self, exporter_overrides):
+        text = _exporter(**exporter_overrides)._build_event(_context(), _failure())[
+            "text"
+        ]
+        assert text.startswith("%%%\n")
+        assert text.endswith("\n%%%")
+        assert text.count("%%%") == 2
+
+    def test_wrapper_surrounds_the_assembled_body(self):
+        text = _exporter()._build_event(_context(), _failure())["text"]
+        body = text[len("%%%\n") : -len("\n%%%")]
+        assert body.startswith("### test_login_flow")
+        assert "Session expired before token refresh." in body
+
+    async def test_every_posted_event_is_wrapped(self):
+        context = _context(failures=[_failure("test_a"), _failure("test_b")])
+        mock_class, posts = _mock_http_client()
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
+            await _exporter().push(context)
+
+        for post in posts:
+            text = post["json"]["text"]
+            assert text.startswith("%%%\n"), text
+            assert text.endswith("\n%%%"), text
+
+
+class TestConnectionTester:
+    """_test_datadog_connection shares the credential classification."""
+
+    @staticmethod
+    def _settings(credential: str) -> Settings:
+        return Settings(
+            datadog_api_key=credential,  # pragma: allowlist secret
+            datadog_site="datadoghq.eu",
+        )
+
+    async def test_application_key_fails_fast_with_explanatory_message(self):
+        from rootcoz.main import _test_datadog_connection
+
+        with patch(
+            "rootcoz.main._integration_test_get_json", new_callable=AsyncMock
+        ) as mock_get:
+            result = await _test_datadog_connection(self._settings("f" * 40))
+
+        assert result["ok"] is False
+        assert result["message"] == APPLICATION_KEY_ERROR
+        mock_get.assert_not_awaited()  # no request with a read-only key
+
+    async def test_ddapp_prefix_fails_fast_too(self):
+        from rootcoz.main import _test_datadog_connection
+
+        result = await _test_datadog_connection(self._settings("ddapp_tok"))
+        assert result["ok"] is False
+        assert result["message"] == APPLICATION_KEY_ERROR
+
+    async def test_service_token_uses_bearer_header(self):
+        from rootcoz.main import _test_datadog_connection
+
+        with patch(
+            "rootcoz.main._integration_test_get_json", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.return_value = {"valid": True}
+            result = await _test_datadog_connection(self._settings(_SAT))
+
+        assert result["ok"] is True
+        assert mock_get.call_args.kwargs["headers"] == {
+            "Authorization": f"Bearer {_SAT}"
+        }
+
+    async def test_api_key_uses_dd_api_key_header(self):
+        from rootcoz.main import _test_datadog_connection
+
+        with patch(
+            "rootcoz.main._integration_test_get_json", new_callable=AsyncMock
+        ) as mock_get:
+            mock_get.return_value = {"valid": True}
+            result = await _test_datadog_connection(self._settings(_API_KEY))
+
+        assert result["ok"] is True
+        assert mock_get.call_args.kwargs["headers"] == {"DD-API-KEY": _API_KEY}
+
+
 class TestPush:
     async def test_empty_failures(self):
         result = await _exporter().push(_context())
@@ -604,6 +786,9 @@ class TestSettings:
         assert settings.dd_push_classifications is True
         assert settings.dd_push_rootcoz_url is True
         assert settings.dd_push_tracker_links is True
+        # Manual pushes of unreviewed jobs are gated by default.
+        assert settings.rp_allow_unreviewed_push is False
+        assert settings.dd_allow_unreviewed_push is False
 
     def test_enabled_requires_api_key_and_site(self, monkeypatch):
         from rootcoz.config import Settings
@@ -667,6 +852,7 @@ class TestSettings:
             "dd_push_classifications",
             "dd_push_rootcoz_url",
             "dd_push_tracker_links",
+            "dd_allow_unreviewed_push",
         ):
             assert _FIELD_TO_CATEGORY[field] == "Datadog", field
             # Same registries as the rp_push_* trio: hidden from the
@@ -675,6 +861,10 @@ class TestSettings:
             assert field not in _SENSITIVE_SETTINGS, field
             # Runtime-tunable: no restart needed.
             assert field not in _RESTART_REQUIRED_SETTINGS, field
+        assert _FIELD_TO_CATEGORY["rp_allow_unreviewed_push"] == "Report Portal"
+        assert "rp_allow_unreviewed_push" in _DEFAULTS_HIDDEN_SETTINGS
+        assert "rp_allow_unreviewed_push" not in _SENSITIVE_SETTINGS
+        assert "rp_allow_unreviewed_push" not in _RESTART_REQUIRED_SETTINGS
 
 
 class TestDateHappenedClamp:

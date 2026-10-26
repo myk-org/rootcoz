@@ -316,10 +316,29 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 </tbody>
 </table></div>
 <p>At least one of the three must be enabled or the push is refused.</p>
+<p>Manual pushes are also gated on review completion: until every failure in the job is reviewed, the push is refused with <code>409 job has N unreviewed failure(s) — review them before pushing</code>. Each exporter has its own server-level escape hatch, and they are independent — enabling one does not ungate the other exporter:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Toggle</th>
+<th>Effect when enabled</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RP_ALLOW_UNREVIEWED_PUSH</code></td>
+<td>Allows Report Portal pushes of jobs that still have unreviewed failures</td>
+</tr>
+<tr>
+<td><code>DD_ALLOW_UNREVIEWED_PUSH</code></td>
+<td>Allows Datadog pushes of jobs that still have unreviewed failures</td>
+</tr>
+</tbody>
+</table></div>
 <ol>
 <li>Push failure events to Datadog.</li>
 </ol>
-<p>The Datadog exporter emits <strong>one event per failed test</strong> to the Datadog Events API (<code>https://api.{site}/api/v1/events</code>, default site <code>datadoghq.eu</code>), authenticated with the <code>DD-API-KEY</code> header. Enable it with <code>ENABLE_DATADOG=true</code> plus <code>DATADOG_API_KEY</code> — see <a href="configuration-reference.html">Configuration Reference</a> for the <code>DATADOG_SITE</code>, <code>DATADOG_SERVICE</code>, and <code>DATADOG_ENV</code> settings.</p>
+<p>The Datadog exporter emits <strong>one event per failed test</strong> to the Datadog Events API (<code>https://api.{site}/api/v1/events</code>, default site <code>datadoghq.eu</code>). Authentication depends on the credential type: an API key (32 hex characters) is sent as the <code>DD-API-KEY</code> header, and a Service Access Token (<code>ddsat…</code> prefix, Datadog's recommended integration credential) is sent as an <code>Authorization: Bearer</code> header. Application keys (<code>ddapp…</code> or exactly 40 hex characters) are rejected with an explanatory error — they are read-only and cannot post events. Enable it with <code>ENABLE_DATADOG=true</code> plus <code>DATADOG_API_KEY</code> — see <a href="configuration-reference.html">Configuration Reference</a> for the <code>DATADOG_SITE</code>, <code>DATADOG_SERVICE</code>, and <code>DATADOG_ENV</code> settings.</p>
 <p>Each event carries:</p>
 <ul>
 <li>A title like <code>[PRODUCT BUG] test_login_flow (Build #42)</code> — the classification stays verbatim in the title and body. When the <code>DD_PUSH_CLASSIFICATIONS</code> toggle (<code>false</code>) is off, the classification is left out entirely: plain title, no <code>tfa.classification</code> tag, no classification line.</li>
@@ -330,7 +349,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 <p>Push it like any other exporter:</p>
 <p><code>bash
    rootcoz push JOB_ID --plugin datadog</code></p>
-<p>Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events.</p>
+<p>Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events. Manual Datadog pushes obey the same review gate as Report Portal — the <code>DD_ALLOW_UNREVIEWED_PUSH</code> row in the toggle table above is their escape hatch.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
 <p>Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. <code>POST /results/{job_id}/push/{plugin_name}</code> takes the same optional <code>child_job_name</code> and <code>child_build_number</code> parameters and returns the exporter's own result fields plus <code>success</code> and <code>message</code>. The Report Portal-specific endpoint <code>POST /results/{job_id}/push-reportportal</code> remains available and is what the UI button uses.</p>
 <p>Let the pipeline push for you. When <code>AUTO_PUSH_EXPORTERS</code> is set to a comma-separated plugin list (for example <code>reportportal,datadog</code>) and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved <code>rootcoz-ai</code> identity. An empty <code>AUTO_PUSH_EXPORTERS</code> disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with <code>400 Server-only settings (env var only)</code>. Set <code>AUTO_PUSH_EXPORTERS</code> in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.</p>

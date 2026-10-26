@@ -783,9 +783,17 @@ SECURE_COOKIES=false
 <td>no</td>
 <td>yes</td>
 </tr>
+<tr>
+<td><code>RP_ALLOW_UNREVIEWED_PUSH</code></td>
+<td><code>false</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
 </tbody>
 </table></div>
-<p>Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. <code>RP_PUSH_CLASSIFICATIONS</code> maps RootCoz classifications to Report Portal defect types (<code>PRODUCT_BUG</code>, <code>AUTOMATION_BUG</code>, <code>SYSTEM_ISSUE</code>).</p>
+<p>Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. <code>RP_PUSH_CLASSIFICATIONS</code> maps RootCoz classifications to Report Portal defect types (<code>PRODUCT_BUG</code>, <code>AUTOMATION_BUG</code>, <code>SYSTEM_ISSUE</code>). <code>RP_ALLOW_UNREVIEWED_PUSH</code> is the escape hatch for the manual-push review gate: by default a manual push is refused with <code>409 job has N unreviewed failure(s) — review them before pushing</code> until every failure in the job is reviewed; set it to <code>true</code> to let Report Portal pushes through regardless. It is a server-level toggle (env var or Server Settings) with no request-payload or CLI equivalent.</p>
 <ol>
 <li><strong>Datadog category.</strong></li>
 </ol>
@@ -865,10 +873,18 @@ SECURE_COOKIES=false
 <td>no</td>
 <td>yes</td>
 </tr>
+<tr>
+<td><code>DD_ALLOW_UNREVIEWED_PUSH</code></td>
+<td><code>false</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
 </tbody>
 </table></div>
-<p>Same enable semantics as Report Portal: when <code>ENABLE_DATADOG</code> is unset, the exporter is enabled automatically once <code>DATADOG_API_KEY</code> <strong>and</strong> <code>DATADOG_SITE</code> are configured; set <code>ENABLE_DATADOG=false</code> to force it off. <code>DATADOG_SITE</code> is the Datadog site hostname for the Events API (<code>https://api.{site}/api/v1/events</code>, e.g. <code>datadoghq.eu</code> or <code>datadoghq.com</code>) — there is no built-in default, you choose your regional site. <code>DATADOG_SERVICE</code> and <code>DATADOG_ENV</code> optionally feed the <code>service:</code> and <code>env:</code> tags on emitted events; the tags are omitted when unset.</p>
-<p>The three <code>DD_PUSH_*</code> toggles mirror the <code>RP_PUSH_*</code> trio and control what goes into each event: <code>DD_PUSH_CLASSIFICATIONS</code> adds the <code>tfa.classification</code> tag, the <code>[classification]</code> title prefix, and the classification line in the event text; <code>DD_PUSH_ROOTCOZ_URL</code> adds the RootCoz report link to the event text (only when <code>PUBLIC_BASE_URL</code> is set); <code>DD_PUSH_TRACKER_LINKS</code> adds the tracked-in Jira/GitHub issue links to the event text. The exporter never sets the <code>alert_type</code> field — classification (root cause) and alert type (severity) are unrelated axes, and Datadog applies its own default.</p>
+<p>Same enable semantics as Report Portal: when <code>ENABLE_DATADOG</code> is unset, the exporter is enabled automatically once <code>DATADOG_API_KEY</code> <strong>and</strong> <code>DATADOG_SITE</code> are configured; set <code>ENABLE_DATADOG=false</code> to force it off. <code>DATADOG_API_KEY</code> accepts either an API key (32 hex characters, sent as the <code>DD-API-KEY</code> header) or a Service Access Token (<code>ddsat…</code> prefix, sent as an <code>Authorization: Bearer</code> header — Datadog's recommended integration credential). Application keys (<code>ddapp…</code> prefix or exactly 40 hex characters) are rejected with an explanatory error: they are read-only and cannot post events even when paired with an API key. <code>DATADOG_SITE</code> is the Datadog site hostname for the Events API (<code>https://api.{site}/api/v1/events</code>, e.g. <code>datadoghq.eu</code> or <code>datadoghq.com</code>) — there is no built-in default, you choose your regional site. <code>DATADOG_SERVICE</code> and <code>DATADOG_ENV</code> optionally feed the <code>service:</code> and <code>env:</code> tags on emitted events; the tags are omitted when unset.</p>
+<p>The three <code>DD_PUSH_*</code> toggles mirror the <code>RP_PUSH_*</code> trio and control what goes into each event: <code>DD_PUSH_CLASSIFICATIONS</code> adds the <code>tfa.classification</code> tag, the <code>[classification]</code> title prefix, and the classification line in the event text; <code>DD_PUSH_ROOTCOZ_URL</code> adds the RootCoz report link to the event text (only when <code>PUBLIC_BASE_URL</code> is set); <code>DD_PUSH_TRACKER_LINKS</code> adds the tracked-in Jira/GitHub issue links to the event text. The exporter never sets the <code>alert_type</code> field — classification (root cause) and alert type (severity) are unrelated axes, and Datadog applies its own default. <code>DD_ALLOW_UNREVIEWED_PUSH</code> is the Datadog-side escape hatch for the manual-push review gate: by default a manual push is refused with <code>409 job has N unreviewed failure(s) — review them before pushing</code> until every failure in the job is reviewed; set it to <code>true</code> to let Datadog pushes through regardless. Each exporter's toggle is independent — enabling the Report Portal one does not ungate Datadog, and unknown/future exporters have no toggle and stay gated.</p>
 <ol>
 <li><strong>Auth and Security category.</strong></li>
 </ol>
@@ -1581,6 +1597,12 @@ SECURE_COOKIES=false
 <td>runtime</td>
 </tr>
 <tr>
+<td><code>RP_ALLOW_UNREVIEWED_PUSH</code></td>
+<td><code>rp_allow_unreviewed_push</code></td>
+<td>Report Portal</td>
+<td>runtime</td>
+</tr>
+<tr>
 <td><code>DATADOG_API_KEY</code></td>
 <td><code>datadog_api_key</code></td>
 <td>Datadog</td>
@@ -1625,6 +1647,12 @@ SECURE_COOKIES=false
 <tr>
 <td><code>DD_PUSH_TRACKER_LINKS</code></td>
 <td><code>dd_push_tracker_links</code></td>
+<td>Datadog</td>
+<td>runtime</td>
+</tr>
+<tr>
+<td><code>DD_ALLOW_UNREVIEWED_PUSH</code></td>
+<td><code>dd_allow_unreviewed_push</code></td>
 <td>Datadog</td>
 <td>runtime</td>
 </tr>

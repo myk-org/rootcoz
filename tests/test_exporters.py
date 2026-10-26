@@ -249,22 +249,42 @@ class TestCreateExporter:
         assert rp.enabled is False
 
 
+def _reviewed_map(*test_names: str) -> dict[str, dict]:
+    """Review-state map marking every named test as reviewed."""
+    return {
+        name: {"reviewed": True, "username": "admin", "updated_at": ""}
+        for name in test_names
+    }
+
+
+@pytest.fixture
+def _init_db(temp_db_path):
+    """Initialize the storage schema at the temp DB path."""
+    import asyncio
+
+    from rootcoz import storage
+
+    with patch.object(storage, "DB_PATH", temp_db_path):
+        asyncio.run(storage.init_db())
+        yield
+
+
+#: Stored result for the review-gate tests: two failures, no reviews.
+_GATE_STORED = {
+    "result": {
+        "job_name": "test-job",
+        "build_number": "1",
+        "failures": [{"test_name": "t1"}, {"test_name": "t2"}],
+    }
+}
+
+
 class TestExporterEndpoints:
     """Tests for the generic exporter API endpoints."""
 
     @pytest.fixture
     def temp_db_path(self, tmp_path):
         return tmp_path / "test.db"
-
-    @pytest.fixture
-    def _init_db(self, temp_db_path):
-        import asyncio
-
-        from rootcoz import storage
-
-        with patch.object(storage, "DB_PATH", temp_db_path):
-            asyncio.run(storage.init_db())
-            yield
 
     def test_list_exporters(self, _init_db, temp_db_path):
         """GET /api/exporters returns exporter list."""
@@ -337,6 +357,11 @@ class TestExporterEndpoints:
                 patch(
                     "rootcoz.main._build_export_context", new_callable=AsyncMock
                 ) as mock_ctx,
+                patch(
+                    "rootcoz.main.storage.get_reviews_for_job",
+                    new_callable=AsyncMock,
+                    return_value=_reviewed_map("t"),
+                ),
             ):
                 mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
                 mock_ctx.return_value = ExportContext(
@@ -410,6 +435,11 @@ class TestExporterEndpoints:
                 patch(
                     "rootcoz.main._build_export_context", new_callable=AsyncMock
                 ) as mock_ctx,
+                patch(
+                    "rootcoz.main.storage.get_reviews_for_job",
+                    new_callable=AsyncMock,
+                    return_value=_reviewed_map("t"),
+                ),
             ):
                 mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
                 mock_ctx.return_value = ExportContext(
@@ -449,6 +479,11 @@ class TestExporterEndpoints:
                 patch(
                     "rootcoz.main._build_export_context", new_callable=AsyncMock
                 ) as mock_ctx,
+                patch(
+                    "rootcoz.main.storage.get_reviews_for_job",
+                    new_callable=AsyncMock,
+                    return_value=_reviewed_map("t"),
+                ),
             ):
                 mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
                 mock_ctx.return_value = ExportContext(
@@ -481,6 +516,11 @@ class TestExporterEndpoints:
                 patch(
                     "rootcoz.main._build_export_context", new_callable=AsyncMock
                 ) as mock_ctx,
+                patch(
+                    "rootcoz.main.storage.get_reviews_for_job",
+                    new_callable=AsyncMock,
+                    return_value=_reviewed_map("t"),
+                ),
             ):
                 mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
                 mock_ctx.return_value = ExportContext(
@@ -495,6 +535,139 @@ class TestExporterEndpoints:
 
             assert response.status_code == 502
             assert "connection refused" in response.json()["detail"]
+
+
+class TestUnreviewedPushGating:
+    """Manual exporter pushes require all failures reviewed, per exporter.
+
+    The gate mirrors the auto-push review-completion check; the escape
+    hatch is a separate server-level toggle per exporter
+    (``rp_allow_unreviewed_push`` / ``dd_allow_unreviewed_push``).
+    """
+
+    @staticmethod
+    def _mock_exporter() -> MagicMock:
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(
+            return_value=ExporterResult(
+                success=True, message="Pushed 2 items", details={"pushed": 2}
+            )
+        )
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+        return mock_exporter
+
+    def _post(
+        self,
+        temp_db_path,
+        plugin: str,
+        *,
+        env: dict[str, str] | None = None,
+        reviews: dict | None = None,
+    ) -> tuple:
+        """POST a push for a 2-failure job; returns (response, create_mock)."""
+        from tests.conftest import admin_login, make_app_client
+
+        for client in make_app_client(temp_db_path, env_overrides=env):
+            admin_login(client)
+            mock_create = MagicMock(return_value=self._mock_exporter())
+            with (
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch("rootcoz.main._create_exporter", mock_create),
+                patch(
+                    "rootcoz.main._build_export_context", new_callable=AsyncMock
+                ) as mock_ctx,
+            ):
+                mock_get.return_value = _GATE_STORED
+                mock_ctx.return_value = ExportContext(
+                    job_id="job-1",
+                    job_name="test-job",
+                    build_number="1",
+                    jenkins_url="https://jenkins.example.com/job/test-job/1/",
+                    failures=[{"test_name": "t1"}, {"test_name": "t2"}],
+                    report_url="",
+                )
+                if reviews is None:
+                    response = client.post(f"/results/job-1/push/{plugin}")
+                else:
+                    with patch(
+                        "rootcoz.main.storage.get_reviews_for_job",
+                        new_callable=AsyncMock,
+                        return_value=reviews,
+                    ):
+                        response = client.post(f"/results/job-1/push/{plugin}")
+            return response, mock_create
+        raise AssertionError("no client yielded")  # pragma: no cover
+
+    def test_unreviewed_reportportal_returns_409(self, _init_db, temp_db_path):
+        """No reviews at all → 409 before the exporter is created."""
+        response, mock_create = self._post(temp_db_path, "reportportal")
+        assert response.status_code == 409
+        assert response.json()["detail"] == (
+            "job has 2 unreviewed failure(s) — review them before pushing"
+        )
+        mock_create.assert_not_called()
+
+    def test_unreviewed_datadog_returns_409(self, _init_db, temp_db_path):
+        response, mock_create = self._post(temp_db_path, "datadog")
+        assert response.status_code == 409
+        assert "2 unreviewed failure(s)" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    def test_partial_reviews_still_409(self, _init_db, temp_db_path):
+        """One of two failures reviewed is not enough."""
+        response, _ = self._post(
+            temp_db_path, "reportportal", reviews=_reviewed_map("t1")
+        )
+        assert response.status_code == 409
+        assert "1 unreviewed failure(s)" in response.json()["detail"]
+
+    def test_rp_toggle_does_not_ungate_datadog(self, _init_db, temp_db_path):
+        """Each exporter is on its own: the RP toggle leaves Datadog gated."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "datadog",
+            env={"RP_ALLOW_UNREVIEWED_PUSH": "true"},
+        )
+        assert response.status_code == 409
+        mock_create.assert_not_called()
+
+    def test_dd_toggle_does_not_ungate_reportportal(self, _init_db, temp_db_path):
+        """...and the Datadog toggle leaves Report Portal gated."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            env={"DD_ALLOW_UNREVIEWED_PUSH": "true"},
+        )
+        assert response.status_code == 409
+        mock_create.assert_not_called()
+
+    def test_unknown_plugin_gated_by_default(self, _init_db, temp_db_path):
+        """Unknown/future exporters have no toggle, so they stay gated."""
+        response, _ = self._post(temp_db_path, "nonexistent")
+        assert response.status_code == 409
+
+    def test_all_reviewed_push_succeeds(self, _init_db, temp_db_path):
+        """Every failure reviewed → the push goes through, toggle off."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews=_reviewed_map("t1", "t2"),
+        )
+        assert response.status_code == 200
+        assert response.json()["pushed"] == 2
+        mock_create.assert_called_once()
+
+    def test_toggle_true_allows_unreviewed_push(self, _init_db, temp_db_path):
+        """The exporter's own toggle allows pushing an unreviewed job."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "datadog",
+            env={"DD_ALLOW_UNREVIEWED_PUSH": "true"},
+        )
+        assert response.status_code == 200
+        assert response.json()["pushed"] == 2
+        mock_create.assert_called_once()
 
 
 class TestExporterNeedsHistory:
