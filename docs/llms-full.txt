@@ -1705,7 +1705,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
 8. Push failure events to Datadog.
 
-   The Datadog exporter emits **one event per failed test** to the Datadog Events API (`https://api.{site}/api/v1/events`, default site `datadoghq.eu`). Authentication depends on the credential type: an API key (32 hex characters) is sent as the `DD-API-KEY` header, and a Service Access Token (`ddsat…` prefix, Datadog's recommended integration credential) is sent as an `Authorization: Bearer` header. Application keys (`ddapp…` or exactly 40 hex characters) are rejected with an explanatory error — they are read-only and cannot post events. Enable it with `ENABLE_DATADOG=true` plus `DATADOG_API_KEY` — see [Configuration Reference](configuration-reference.html) for the `DATADOG_SITE`, `DATADOG_SERVICE`, and `DATADOG_ENV` settings.
+   The Datadog exporter emits **one event per failed test** to the Datadog Events API (`https://api.{site}/api/v1/events`). Authentication depends on the credential type: an API key (32 hex characters) is sent as the `DD-API-KEY` header, and a Service Access Token (`ddsat…` prefix, Datadog's recommended integration credential) is sent as an `Authorization: Bearer` header. Application keys (`ddapp…` or exactly 40 hex characters) are rejected with an explanatory error — they are read-only and cannot post events. Enable it with `ENABLE_DATADOG=true` plus `DATADOG_API_KEY` and `DATADOG_SITE` — there is no built-in default site, the exporter stays disabled until `DATADOG_SITE` is configured — see [Configuration Reference](configuration-reference.html) for the `DATADOG_SITE`, `DATADOG_SERVICE`, and `DATADOG_ENV` settings.
 
    Each event carries:
 

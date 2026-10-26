@@ -1145,7 +1145,14 @@ class TestAutoPushAnalysisTimestamp:
             patch.object(
                 storage,
                 "get_reviews_for_job",
-                new=AsyncMock(return_value={"test_a": {"reviewed": True}}),
+                new=AsyncMock(
+                    return_value={
+                        "test_a": {
+                            "reviewed": True,
+                            "username": AI_SYSTEM_USERNAME,
+                        }
+                    }
+                ),
             ),
             patch(
                 "rootcoz.main.get_result", new=AsyncMock(return_value=stored)
@@ -1174,7 +1181,14 @@ class TestAutoPushAnalysisTimestamp:
             patch.object(
                 storage,
                 "get_reviews_for_job",
-                new=AsyncMock(return_value={"test_a": {"reviewed": True}}),
+                new=AsyncMock(
+                    return_value={
+                        "test_a": {
+                            "reviewed": True,
+                            "username": AI_SYSTEM_USERNAME,
+                        }
+                    }
+                ),
             ),
             patch("rootcoz.main.get_result", new=AsyncMock(return_value=None)),
             patch(

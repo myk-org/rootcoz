@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from rootcoz import storage
 from rootcoz.exporters.reportportal import ReportPortalClient
 
 
@@ -44,20 +45,33 @@ def _mock_storage_reviews():
     review maps.
     """
 
-    def _collect_reviewed(node, reviews):
+    def _collect_reviewed(node, reviews, child_job_name="", child_build_number=0):
         for failure in node.get("failures", []) or []:
             if isinstance(failure, dict) and failure.get("test_name"):
-                reviews[failure["test_name"]] = {
+                key = storage.review_key(
+                    failure["test_name"], child_job_name, child_build_number
+                )
+                reviews[key] = {
                     "reviewed": True,
                     "username": "admin",
                     "updated_at": "",
                 }
         for child in node.get("child_job_analyses", []) or []:
             if isinstance(child, dict):
-                _collect_reviewed(child, reviews)
+                _collect_reviewed(
+                    child,
+                    reviews,
+                    child.get("job_name", ""),
+                    child.get("build_number", 0),
+                )
         for child in node.get("failed_children", []) or []:
             if isinstance(child, dict):
-                _collect_reviewed(child, reviews)
+                _collect_reviewed(
+                    child,
+                    reviews,
+                    child.get("job_name", ""),
+                    child.get("build_number", 0),
+                )
 
     async def _reviews_for_job(job_id):
         from rootcoz import main as main_module
@@ -204,7 +218,7 @@ class TestPushReportPortalEndpoint:
     )
     @patch("rootcoz.main.get_result")
     def test_returns_422_on_invalid_stored_failures(
-        self, mock_get_result, mock_rp_class, _rp_enabled_env
+        self, mock_get_result, mock_rp_class, _rp_enabled_unreviewed_push_env
     ):
         mock_get_result.return_value = {
             "result": {
@@ -224,22 +238,11 @@ class TestPushReportPortalEndpoint:
             raise_server_exceptions=False,
             headers={"Authorization": "Bearer test-admin-key-16chars"},
         )
-        # The corrupt failure carries no test_name, so the review-derived
-        # fixture cannot mark it reviewed. Satisfy the count-based review
-        # gate with one reviewed entry (any key counts) to reach the
-        # stored-failures validation this test exercises.
-        with patch(
-            "rootcoz.main.storage.get_reviews_for_job",
-            new_callable=AsyncMock,
-            return_value={
-                "corrupt-entry": {
-                    "reviewed": True,
-                    "username": "admin",
-                    "updated_at": "",
-                }
-            },
-        ):
-            response = client.post("/results/corrupt-job/push-reportportal")
+        # The corrupt failure carries no test_name, so no review can ever
+        # match it — the identity-based gate (correctly) blocks it. Use the
+        # rp_allow_unreviewed_push escape hatch to reach the stored-failures
+        # validation this test exercises.
+        response = client.post("/results/corrupt-job/push-reportportal")
         assert response.status_code == 422
         detail = response.json()["detail"]
         assert "validation error" in detail.lower()

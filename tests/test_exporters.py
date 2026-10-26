@@ -278,6 +278,44 @@ _GATE_STORED = {
     }
 }
 
+# Job with one top-level failure plus two child failures, for scoped-review tests.
+_GATE_CHILD_STORED = {
+    "result": {
+        "job_name": "test-job",
+        "build_number": "1",
+        "failures": [{"test_name": "top"}],
+        "child_job_analyses": [
+            {
+                "job_name": "runner",
+                "build_number": 5,
+                "failures": [{"test_name": "c1"}, {"test_name": "c2"}],
+            }
+        ],
+    }
+}
+
+# Same test name in two builds of one child job: both share the review key
+# ``runner#0::dup`` under a wildcard (build 0) review.
+_GATE_SHARED_STORED = {
+    "result": {
+        "job_name": "test-job",
+        "build_number": "1",
+        "failures": [],
+        "child_job_analyses": [
+            {
+                "job_name": "runner",
+                "build_number": 5,
+                "failures": [{"test_name": "dup"}],
+            },
+            {
+                "job_name": "runner",
+                "build_number": 6,
+                "failures": [{"test_name": "dup"}],
+            },
+        ],
+    }
+}
+
 
 class TestExporterEndpoints:
     """Tests for the generic exporter API endpoints."""
@@ -564,6 +602,7 @@ class TestUnreviewedPushGating:
         *,
         env: dict[str, str] | None = None,
         reviews: dict | None = None,
+        stored: dict | None = None,
     ) -> tuple:
         """POST a push for a 2-failure job; returns (response, create_mock)."""
         from tests.conftest import admin_login, make_app_client
@@ -578,7 +617,7 @@ class TestUnreviewedPushGating:
                     "rootcoz.main._build_export_context", new_callable=AsyncMock
                 ) as mock_ctx,
             ):
-                mock_get.return_value = _GATE_STORED
+                mock_get.return_value = stored or _GATE_STORED
                 mock_ctx.return_value = ExportContext(
                     job_id="job-1",
                     job_name="test-job",
@@ -667,6 +706,97 @@ class TestUnreviewedPushGating:
         )
         assert response.status_code == 200
         assert response.json()["pushed"] == 2
+        mock_create.assert_called_once()
+
+    def test_unrelated_reviews_do_not_satisfy_gate(self, _init_db, temp_db_path):
+        """Stale/foreign review rows (names absent from this job) don't count."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews=_reviewed_map("gone-test", "another-gone"),
+        )
+        assert response.status_code == 409
+        assert "2 unreviewed failure(s)" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    def test_wildcard_review_for_one_child_does_not_cover_others(
+        self, _init_db, temp_db_path
+    ):
+        """A wildcard review of one child test leaves the other failures gated."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews={
+                "runner#0::c1": {
+                    "reviewed": True,
+                    "username": "alice",
+                    "updated_at": "",
+                }
+            },
+            stored=_GATE_CHILD_STORED,
+        )
+        assert response.status_code == 409
+        assert "2 unreviewed failure(s)" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    def test_exact_build_review_does_not_cover_other_builds(
+        self, _init_db, temp_db_path
+    ):
+        """An exact-build review of one child test leaves the other build gated."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews={
+                "runner#5::dup": {
+                    "reviewed": True,
+                    "username": "alice",
+                    "updated_at": "",
+                }
+            },
+            stored=_GATE_SHARED_STORED,
+        )
+        assert response.status_code == 409
+        assert "1 unreviewed failure(s)" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    def test_shared_review_key_covers_each_failure(self, _init_db, temp_db_path):
+        """Failures sharing one review key are each covered by that review."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews={
+                "runner#0::dup": {
+                    "reviewed": True,
+                    "username": "alice",
+                    "updated_at": "",
+                }
+            },
+            stored=_GATE_SHARED_STORED,
+        )
+        assert response.status_code == 200
+        mock_create.assert_called_once()
+
+    def test_child_scoped_job_fully_reviewed_pushes(self, _init_db, temp_db_path):
+        """Top-level + exact-build child reviews cover the whole tree."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews={
+                "top": {"reviewed": True, "username": "alice", "updated_at": ""},
+                "runner#5::c1": {
+                    "reviewed": True,
+                    "username": "alice",
+                    "updated_at": "",
+                },
+                "runner#5::c2": {
+                    "reviewed": True,
+                    "username": "alice",
+                    "updated_at": "",
+                },
+            },
+            stored=_GATE_CHILD_STORED,
+        )
+        assert response.status_code == 200
         mock_create.assert_called_once()
 
 

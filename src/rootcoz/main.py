@@ -1066,8 +1066,8 @@ def resolve_failure_review(
     keys: tuple[str, ...]
     if child_job_name:
         keys = (
-            f"{child_job_name}#{child_build_number}::{test_name}",
-            f"{child_job_name}#0::{test_name}",
+            storage.review_key(test_name, child_job_name, child_build_number),
+            storage.review_key(test_name, child_job_name),
         )
     else:
         keys = (test_name,)
@@ -3052,7 +3052,7 @@ async def _auto_review_matching_failures(
         if (
             auto_push_names
             and total_failures > 0
-            and await _unreviewed_failure_count(job_id, total_failures) == 0
+            and await _unreviewed_failure_count(job_id, result_data) == 0
         ):
             # Auto-push must emit the same date_happened as the manual
             # push endpoint: reuse the stored analysis timestamp instead
@@ -8176,47 +8176,37 @@ async def delete_tracked_in_endpoint(
     return {"status": "ok", "deleted_id": link_id}
 
 
-def _count_result_failures(result_data: dict[str, Any]) -> int:
-    """Count failures in a stored result dict, recursing into child analyses.
-
-    Mirrors the auto-review counting (top-level ``failures`` plus every
-    ``child_job_analyses`` entry, including nested ``failed_children``).
-    """
-    total = len(result_data.get("failures", []) or [])
-    for child in result_data.get("child_job_analyses", []) or []:
-        total += _count_child_result_failures(child)
-    return total
-
-
-def _count_child_result_failures(child: dict[str, Any]) -> int:
-    """Count failures in one stored child job analysis, recursively."""
-    total = len(child.get("failures", []) or [])
-    for nested in child.get("failed_children", []) or []:
-        total += _count_child_result_failures(nested)
-    return total
-
-
-async def _unreviewed_failure_count(job_id: str, total_failures: int) -> int:
-    """Count a job's failures not yet marked reviewed.
+async def _unreviewed_failure_count(job_id: str, result_data: dict[str, Any]) -> int:
+    """Count a job's failures that have no completed review.
 
     Shared review-completion check: the auto-push path and the manual push
-    endpoints both gate on this. Uses the same count comparison the
-    auto-push path has always used — reviewed review entries versus total
-    failures.
+    endpoints both gate on this. Each failure is resolved against its review
+    identity — test name plus child-job scoping, via
+    :func:`resolve_failure_review` (the same matching the report page and
+    export context use) — so stale or unrelated review rows can never
+    satisfy the gate, and a wildcard/exact-build review covers exactly the
+    failures its scoping matches.
 
     Args:
         job_id: Analysis job identifier.
-        total_failures: Total failure count (from auto-review counting or
-            :func:`_count_result_failures`).
+        result_data: Stored result dict containing failures.
 
     Returns:
-        Number of unreviewed failures (never negative).
+        Number of failures lacking a review.
     """
-    if total_failures <= 0:
-        return 0
     reviews = await storage.get_reviews_for_job(job_id)
-    reviewed_count = sum(1 for r in reviews.values() if r.get("reviewed"))
-    return max(total_failures - reviewed_count, 0)
+    unreviewed = 0
+    for failure, child_job_name, child_build_number in _iter_scoped_failures(
+        result_data
+    ):
+        test_name = failure.get("test_name", "")
+        if not resolve_failure_review(
+            reviews, test_name, child_job_name, child_build_number
+        ):
+            unreviewed += 1
+    if unreviewed:
+        logger.debug("Job %s has %d unreviewed failure(s)", job_id, unreviewed)
+    return unreviewed
 
 
 # Exporter name → Settings field allowing manual pushes of unreviewed jobs.
@@ -8251,9 +8241,7 @@ async def _gate_unreviewed_push(
         HTTPException: 409 when any failure is unreviewed and the
             exporter's per-plugin toggle does not allow unreviewed pushes.
     """
-    unreviewed = await _unreviewed_failure_count(
-        job_id, _count_result_failures(result_data)
-    )
+    unreviewed = await _unreviewed_failure_count(job_id, result_data)
     if unreviewed and not _allows_unreviewed_push(plugin_name, settings):
         logger.warning(
             "Blocking manual push to '%s' for job %s: %d unreviewed failure(s)",
