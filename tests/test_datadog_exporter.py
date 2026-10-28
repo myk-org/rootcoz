@@ -43,6 +43,20 @@ def _failure(
     }
 
 
+def _console_failure(test_name: str = "e2e-suite") -> dict[str, Any]:
+    """Stored console-only failure: placeholder name + synthetic message.
+
+    Identical to what ``CISource.run_console_only_analysis`` stores.
+    """
+    return {
+        **_failure(test_name=test_name),
+        "error": (
+            "Console-only analysis — read the mandatory console-output section "
+            "in the analysis prompt before analyzing."
+        ),
+    }
+
+
 def _context(**overrides: Any) -> ExportContext:
     params: dict[str, Any] = {
         "job_id": "job-123",
@@ -137,7 +151,6 @@ class TestBuildEvent:
             "tfa.stage:automated",
             "job_name:e2e-suite",
             "build_number:42",
-            "test_name:test_login_flow",
             "rootcoz.analysis_id:job-123",
             "tfa.classification:PRODUCT_BUG",
             "pushed_by:alice",
@@ -242,6 +255,67 @@ class TestBuildEvent:
         event = exporter._build_event(_context(), failure)
         assert event["title"] == "[UNKNOWN] test_x (Build #42)"
         assert "AI diagnosis" not in event["text"]
+
+
+class TestTestIdentityAttributes:
+    """The real test name travels as ``test.name``, never as a tag."""
+
+    def test_parametrized_node_id_verbatim(self):
+        node_id = "tests/test_x.py::test_concurrent_uploads[a-b:param]"
+        event = _exporter()._build_event(_context(), _failure(test_name=node_id))
+        assert event["test"]["name"] == node_id
+        assert event["rootcoz"]["scope"] == "test"
+
+    def test_no_test_name_tag(self):
+        for failure in (_failure(), _console_failure()):
+            event = _exporter()._build_event(_context(), failure)
+            assert not any(t.startswith("test_name:") for t in event["tags"])
+
+    def test_suite_omitted_when_absent(self):
+        event = _exporter()._build_event(_context(), _failure())
+        assert event["test"] == {"name": "test_login_flow"}
+
+    def test_suite_emitted_when_present(self):
+        failure = {**_failure(), "suite": "tests/test_x.py"}
+        event = _exporter()._build_event(_context(), failure)
+        assert event["test"]["suite"] == "tests/test_x.py"
+
+    def test_console_only_message_has_no_test_attribute(self):
+        event = _exporter()._build_event(_context(), _console_failure())
+        assert "test" not in event
+        assert event["rootcoz"] == {"scope": "console"}
+
+    def test_console_only_title_and_heading(self):
+        event = _exporter()._build_event(_context(), _console_failure())
+        assert event["title"] == "[PRODUCT BUG] build failure (Build #42)"
+        assert "### Build failure" in event["text"]
+        # The job name must never be presented as the failing test.
+        assert "### e2e-suite" not in event["text"]
+        assert "e2e-suite (Build #42)" not in event["title"]
+
+    def test_console_only_title_without_classification(self):
+        exporter = _exporter(push_classifications=False)
+        event = exporter._build_event(_context(), _console_failure())
+        assert event["title"] == "build failure (Build #42)"
+
+    def test_console_only_detected_by_job_name_placeholder(self):
+        # No synthetic message: the stored test_name is the job name.
+        failure = _failure(test_name="e2e-suite")
+        event = _exporter()._build_event(_context(), failure)
+        assert "test" not in event
+        assert event["rootcoz"] == {"scope": "console"}
+
+    def test_console_only_detected_by_child_placeholder(self):
+        context = _context(child_job_name="child job", child_build_number=7)
+        failure = _failure(test_name="child job#7")
+        event = _exporter()._build_event(context, failure)
+        assert "test" not in event
+        assert event["rootcoz"] == {"scope": "console"}
+
+    def test_console_only_event_text_still_wrapped(self):
+        text = _exporter()._build_event(_context(), _console_failure())["text"]
+        assert text.startswith("%%%\n### Build failure")
+        assert text.endswith("\n%%%")
 
 
 class TestContentToggles:

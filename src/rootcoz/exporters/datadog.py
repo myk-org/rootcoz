@@ -12,11 +12,13 @@ Events carry the rootcoz classification (when the ``dd_push_classifications``
 toggle is on) as a tag, title prefix, and text line. The exporter never
 sets ``alert_type``: classification (root cause) and alert_type (severity)
 are unrelated axes, so Datadog applies its own default.
-Events carry a stable ``aggregation_key`` per analysis/test pair and a tag
+Events carry a stable ``aggregation_key`` per analysis/test pair, a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
-job/build/test identity, and the push attribution).  Parity with Report
-Portal: events also carry per-test history classifications and reviewer
-attribution from the shared ``ExportContext``.
+job/build identity, and the push attribution) and structural attributes:
+``@test.name`` (the verbatim pytest node id) plus ``@rootcoz.scope``
+(``test``, or ``console`` for console-only analyses that have no test).
+Parity with Report Portal: events also carry per-test history classifications
+and reviewer attribution from the shared ``ExportContext``.
 
 Failures never raise: per-event HTTP/network errors are collected into the
 exporter result so a Datadog outage can never break the analysis pipeline.
@@ -71,6 +73,14 @@ _CIRCUIT_BREAKER_THRESHOLD = 5
 
 #: Fallback classification label when a stored failure carries none.
 _UNKNOWN_CLASSIFICATION = "UNKNOWN"
+
+#: Prefix of the synthetic failure message set by
+#: ``CISource.run_console_only_analysis`` for console-only analyses.
+_CONSOLE_ONLY_ERROR_PREFIX = "Console-only analysis"
+
+#: ``rootcoz.scope`` attribute values (``@rootcoz.scope:test|console``).
+_SCOPE_TEST = "test"
+_SCOPE_CONSOLE = "console"
 
 # Datadog tags allow alphanumerics, underscores, colons, periods, and
 # minus. Every other character (spaces, most punctuation) is replaced
@@ -207,6 +217,36 @@ def _aggregation_key(job_id: str, test_name: str) -> str:
     return f"{prefix}{test_name[: max(room, 0)]}-{digest}"
 
 
+def _is_console_only_failure(failure: dict[str, Any], context: ExportContext) -> bool:
+    """Whether a stored failure is a console-level synthetic one.
+
+    Console-only analyses have no test to name, so two markers are checked:
+
+    1. The synthetic failure message set by
+       ``CISource.run_console_only_analysis`` — ``FailureAnalysis.error``
+       stores the source message verbatim, so this also recognizes
+       results that were stored before this marker was relied on.
+    2. The placeholder name the console call sites synthesize, for stored
+       results whose error text was rewritten: ``job_name`` (main.py) or
+       ``f"{job_name}#{build_number}"`` (child jobs in
+       jenkins_source.py).
+
+    Args:
+        failure: Stored failure dict.
+        context: Export context with job metadata.
+
+    Returns:
+        ``True`` when the failure is a console-level synthetic one.
+    """
+    error = str(failure.get("error") or failure.get("error_message") or "")
+    if error.startswith(_CONSOLE_ONLY_ERROR_PREFIX):
+        return True
+    placeholders = {context.job_name}
+    if context.child_job_name:
+        placeholders.add(f"{context.child_job_name}#{context.child_build_number}")
+    return str(failure.get("test_name", "") or "") in placeholders
+
+
 def _circuit_breaker_message(skipped: int) -> str:
     """Result message for a circuit-broken push."""
     return (
@@ -328,6 +368,10 @@ class DatadogExporter(Exporter):
         Tag order is stable so tests and consumers can rely on it.
         ``classification`` is ``None`` when the ``dd_push_classifications``
         toggle is off — the ``tfa.classification`` tag is then omitted.
+        The test name is deliberately not a tag: a tag cannot hold brackets
+        or spaces, so a sanitized value could never match ``@test.name`` —
+        the verbatim name travels as the ``test.name`` attribute instead.
+        ``test_name`` is still the key for the per-test lookups below.
         """
         tags: list[str] = []
         if self._service:
@@ -338,7 +382,6 @@ class DatadogExporter(Exporter):
             "tfa.stage:automated",
             f"job_name:{sanitize_tag_value(context.job_name)}",
             f"build_number:{sanitize_tag_value(context.build_number)}",
-            f"test_name:{sanitize_tag_value(test_name)}",
             f"rootcoz.analysis_id:{sanitize_tag_value(context.job_id)}",
         ]
         if classification:
@@ -384,13 +427,23 @@ class DatadogExporter(Exporter):
             classification = ""
         details = str(analysis.get("details", "") or "").strip()
 
-        if classification:
-            title = f"[{classification}] {test_name} (Build #{context.build_number})"
+        console_only = _is_console_only_failure(failure, context)
+        if console_only:
+            # No test to name: the stored test_name is a synthesized
+            # placeholder equal to the job name, so never show it as a test.
+            subject = "build failure"
+            heading = "### Build failure"
         else:
-            title = f"{test_name} (Build #{context.build_number})"
+            subject = test_name
+            heading = f"### {test_name}"
+        build = f"Build #{context.build_number}"
+        if classification:
+            title = f"[{classification}] {subject} ({build})"
+        else:
+            title = f"{subject} ({build})"
 
         lines = [
-            f"### {test_name}",
+            heading,
             "",
         ]
         if classification:
@@ -445,7 +498,19 @@ class DatadogExporter(Exporter):
             "source_type_name": "rootcoz",
             "aggregation_key": _aggregation_key(context.job_id, test_name),
             "tags": self._build_tags(context, test_name, classification or None),
+            "rootcoz": {
+                "scope": _SCOPE_CONSOLE if console_only else _SCOPE_TEST,
+            },
         }
+        if not console_only:
+            # Datadog indexes nested event attributes as ``@test.name``, so
+            # the full pytest node id stays queryable verbatim (brackets,
+            # colons and parametrize ids intact — a tag cannot hold them).
+            test_attribute: dict[str, str] = {"name": test_name}
+            suite = str(failure.get("suite", "") or "")
+            if suite:
+                test_attribute["suite"] = suite
+            event["test"] = test_attribute
         return event
 
     async def push(self, context: ExportContext) -> ExporterResult:
