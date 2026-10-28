@@ -80,7 +80,8 @@
     "datadog": {
       "type": "object",
       "properties": {
-        "apiKey": { "type": "string" }
+        "apiKey": { "type": "string" },
+        "appKey": { "type": "string" }
       }
     },
     "sidecar": {
@@ -127,7 +128,9 @@
         "xdgConfigHome": { "type": "string" },
         "secureCookies": { "type": "string" },
         "publicBaseUrl": { "type": "string" },
-        "metadataRulesFile": { "type": "string" }
+        "metadataRulesFile": { "type": "string" },
+        "recordTranscripts": { "type": "boolean" },
+        "sidecarTranscriptsDir": { "type": "string" }
       }
     },
     "tuning": {

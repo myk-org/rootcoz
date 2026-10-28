@@ -736,7 +736,7 @@ class TestConstructorFailFast:
 
 
 class TestConnectionTester:
-    """_test_datadog_connection validates both keys before reporting success."""
+    """_test_datadog_connection validates the API key only."""
 
     @staticmethod
     def _settings(**overrides: Any) -> Settings:
@@ -800,7 +800,7 @@ class TestConnectionTester:
         assert "datadog_app_key" in result["message"]
         mock_get.assert_not_awaited()
 
-    async def test_both_keys_probed_with_both_headers(self):
+    async def test_api_key_validated_and_app_key_reported_present(self):
         from rootcoz.main import _test_datadog_connection
 
         with patch(
@@ -811,26 +811,17 @@ class TestConnectionTester:
 
         assert result["ok"] is True
         assert result["details"] == {"site": "datadoghq.eu"}
+        # Only the documented API-key probe: there is no side-effect-free
+        # probe for the application key's event-write permission.
         assert [call.args[0] for call in mock_get.await_args_list] == [
             "https://api.datadoghq.eu/api/v1/validate",
-            "https://api.datadoghq.eu/api/v1/dashboard",
         ]
-        for call in mock_get.await_args_list:
-            assert call.kwargs["headers"] == _EXPECTED_HEADERS
-
-    async def test_application_key_rejected(self):
-        from rootcoz.main import _IntegrationTestError, _test_datadog_connection
-
-        async def _get(url: str, **_kwargs: Any) -> dict[str, Any]:
-            if url.endswith("/dashboard"):
-                raise _IntegrationTestError("authentication failed (HTTP 403)")
-            return {"valid": True}
-
-        with patch("rootcoz.main._integration_test_get_json", new=_get):
-            result = await _test_datadog_connection(self._settings())
-
-        assert result["ok"] is False
-        assert "application key rejected" in result["message"]
+        assert mock_get.await_args.kwargs["headers"] == _EXPECTED_HEADERS
+        assert result["message"] == (
+            "Datadog API key is valid (site datadoghq.eu); application key"
+            " present — Datadog validates its event-write permission when the"
+            " first event is published"
+        )
 
     async def test_api_key_rejected(self):
         from rootcoz.main import _IntegrationTestError, _test_datadog_connection

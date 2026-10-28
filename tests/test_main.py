@@ -11330,17 +11330,12 @@ class TestIntegrationConnectionEndpoints:
         return Settings(**params)
 
     def test_datadog_success(self, test_client) -> None:
-        """Datadog test validates the API key, then the application key."""
+        """Datadog test validates the API key and reports the app key as present."""
         settings = self._dd_settings()
         validate_payload = self._http_response(
             200, {"valid": True}, "https://api.datadoghq.eu/api/v1/validate"
         )
-        dashboard_payload = self._http_response(
-            200, {"dashboards": []}, "https://api.datadoghq.eu/api/v1/dashboard"
-        )
-        mock_patch, mock_client_cls = self._mock_async_client(
-            [validate_payload, dashboard_payload]
-        )
+        mock_patch, mock_client_cls = self._mock_async_client(validate_payload)
         with (
             patch("rootcoz.main.get_settings", return_value=settings),
             mock_patch,
@@ -11350,12 +11345,18 @@ class TestIntegrationConnectionEndpoints:
         data = response.json()
         assert data["ok"] is True
         assert data["details"] == {"site": "datadoghq.eu"}
+        assert data["message"] == (
+            "Datadog API key is valid (site datadoghq.eu); application key present"
+            " — Datadog validates its event-write permission when the first event"
+            " is published"
+        )
         assert "not-a-real-key" not in json.dumps(data)
         assert self._DD_APP_KEY not in json.dumps(data)
         instance = mock_client_cls.return_value.__aenter__.return_value
+        # Only the documented API-key probe: no side-effect-free probe exists
+        # for the application key's event-write permission.
         assert [call.args[0] for call in instance.get.call_args_list] == [
             "https://api.datadoghq.eu/api/v1/validate",
-            "https://api.datadoghq.eu/api/v1/dashboard",
         ]
         headers = mock_client_cls.call_args.kwargs["headers"]
         assert headers["DD-API-KEY"] == "not-a-real-key"
@@ -11365,16 +11366,9 @@ class TestIntegrationConnectionEndpoints:
         """A site configured as a full URL is normalized to a bare hostname."""
         settings = self._dd_settings(datadog_site="https://api.datadoghq.com/")
         mock_patch, mock_client_cls = self._mock_async_client(
-            [
-                self._http_response(
-                    200, {"valid": True}, "https://api.datadoghq.com/api/v1/validate"
-                ),
-                self._http_response(
-                    200,
-                    {"dashboards": []},
-                    "https://api.datadoghq.com/api/v1/dashboard",
-                ),
-            ]
+            self._http_response(
+                200, {"valid": True}, "https://api.datadoghq.com/api/v1/validate"
+            )
         )
         with (
             patch("rootcoz.main.get_settings", return_value=settings),
@@ -11388,7 +11382,6 @@ class TestIntegrationConnectionEndpoints:
         instance = mock_client_cls.return_value.__aenter__.return_value
         assert [call.args[0] for call in instance.get.call_args_list] == [
             "https://api.datadoghq.com/api/v1/validate",
-            "https://api.datadoghq.com/api/v1/dashboard",
         ]
 
     def test_datadog_invalid_key_http_401(self, test_client) -> None:
@@ -11408,31 +11401,6 @@ class TestIntegrationConnectionEndpoints:
         data = response.json()
         assert data["ok"] is False
         assert "API key rejected" in data["message"]
-
-    def test_datadog_application_key_rejected(self, test_client) -> None:
-        """A 403 from the dashboard read names the application key."""
-        settings = self._dd_settings()
-        mock_patch, _ = self._mock_async_client(
-            [
-                self._http_response(
-                    200, {"valid": True}, "https://api.datadoghq.eu/api/v1/validate"
-                ),
-                self._http_response(
-                    403,
-                    {"errors": ["Forbidden"]},
-                    "https://api.datadoghq.eu/api/v1/dashboard",
-                ),
-            ]
-        )
-        with (
-            patch("rootcoz.main.get_settings", return_value=settings),
-            mock_patch,
-        ):
-            response = test_client.post("/api/admin/settings/test/datadog")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["ok"] is False
-        assert "application key rejected" in data["message"]
 
     def test_datadog_not_configured(self, test_client) -> None:
         """Missing API key reports not configured instead of erroring."""

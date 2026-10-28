@@ -14517,15 +14517,17 @@ async def _test_reportportal_connection(settings: Settings) -> dict[str, Any]:
 async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
     """Credential validation against the effective Datadog settings.
 
-    Both v2 event intake keys are probed, because either one being wrong
-    makes every push fail: the API key with the documented ``GET
-    /api/v1/validate`` (a 200 with ``{"valid": true}``), then the
-    application key with a lightweight ``GET /api/v1/dashboard`` that also
-    needs the application key — a plain read, documented and cheap. Both
-    requests carry both headers, exactly like the push path. Missing or
-    wrong-shaped values fail fast through the shared credential validator,
-    so the test button and the exporter report the same thing. Neither key
-    is ever logged or echoed into the result.
+    Only the API key is validated against Datadog, with the documented
+    ``GET /api/v1/validate`` (a 200 with ``{"valid": true}``). There is no
+    documented side-effect-free probe for the event-write permission the
+    v2 event intake needs from the application key — a dashboard or events
+    read would test a different permission and misreport keys in both
+    directions. The application key is therefore only checked for presence
+    and shape by the shared credential validator, and the result message
+    says so; Datadog validates its write permission when the first event is
+    published. Missing or wrong-shaped values fail fast through the shared
+    validator, so the test button and the exporter report the same thing.
+    Neither key is ever logged or echoed into the result.
     """
     api_key = settings.datadog_api_key
     app_key = settings.datadog_app_key
@@ -14566,20 +14568,11 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
         return _test_result(
             False, "Datadog connection failed: API key rejected (invalid key)"
         )
-    try:
-        await _integration_test_get_json(
-            f"https://api.{site}/api/v1/dashboard",
-            params={"count": 1},
-            headers=headers,
-        )
-    except _IntegrationTestError as exc:
-        message = str(exc)
-        if "authentication failed" in message:
-            message = "application key rejected (invalid or unauthorized)"
-        return _test_result(False, f"Datadog connection failed: {message}")
     return _test_result(
         True,
-        f"Datadog API key and application key are valid (site {site})",
+        f"Datadog API key is valid (site {site}); application key present — "
+        "Datadog validates its event-write permission when the first event is"
+        " published",
         site=site,
     )
 
