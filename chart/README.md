@@ -110,7 +110,7 @@ Provider credentials (typically in `~/.config/rootcoz/helm/values.secrets.yaml`)
 | Claude (API) | `ai.anthropicApiKey` | `ANTHROPIC_API_KEY` |
 | Claude (Vertex) | `ai.vertex.serviceAccountKey` + `ai.vertex.projectId` | mounted SA JSON |
 | Cursor | `ai.cursor.apiKey` and/or `ai.cursor.authJson` | `CURSOR_API_KEY` + auth mount |
-| Datadog (optional) | `datadog.apiKey` | `DATADOG_API_KEY` |
+| Datadog (optional) | `datadog.apiKey` + `datadog.appKey` | `DATADOG_API_KEY` + `DATADOG_APP_KEY` |
 | Custom (sidecar agent dir) | `sidecar.agentDir.modelsJson` etc. | `PI_SIDECAR_AGENT_DIR` + agent-dir mount |
 
 ### Sidecar custom providers (agent dir)

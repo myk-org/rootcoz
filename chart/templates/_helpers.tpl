@@ -82,7 +82,7 @@ validation (rootcoz.validate) and the credentials Secret merge in
 rootcoz.credentialsSecretData.
 */}}
 {{- define "rootcoz.reservedEnvKeys" -}}
-ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,DATADOG_API_KEY,ROOTCOZ_ENCRYPTION_KEY,AI_PROVIDER,AI_MODEL,PUBLIC_BASE_URL,SECURE_COOKIES,LOG_LEVEL,METADATA_RULES_FILE,XDG_CONFIG_HOME,XDG_DATA_HOME,CLAUDE_CODE_USE_VERTEX,CLOUD_ML_REGION,ANTHROPIC_VERTEX_PROJECT_ID,CLOUDSDK_CONFIG,GOOGLE_APPLICATION_CREDENTIALS,PI_SIDECAR_AGENT_DIR,SIDECAR_PORT,DEV_MODE,PORT
+ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,DATADOG_API_KEY,DATADOG_APP_KEY,ROOTCOZ_ENCRYPTION_KEY,AI_PROVIDER,AI_MODEL,PUBLIC_BASE_URL,SECURE_COOKIES,LOG_LEVEL,METADATA_RULES_FILE,XDG_CONFIG_HOME,XDG_DATA_HOME,CLAUDE_CODE_USE_VERTEX,CLOUD_ML_REGION,ANTHROPIC_VERTEX_PROJECT_ID,CLOUDSDK_CONFIG,GOOGLE_APPLICATION_CREDENTIALS,PI_SIDECAR_AGENT_DIR,SIDECAR_PORT,DEV_MODE,PORT
 {{- end }}
 
 {{- define "rootcoz.pvcName" -}}
@@ -264,6 +264,13 @@ CURSOR_API_KEY: {{ $cursor | b64enc | quote }}
 {{- end -}}
 {{- if $datadog }}
 DATADOG_API_KEY: {{ $datadog | b64enc | quote }}
+{{- end -}}
+{{- $datadogApp := .Values.datadog.appKey -}}
+{{- if and (not $datadogApp) $existing (index $existing.data "DATADOG_APP_KEY") -}}
+{{- $datadogApp = (index $existing.data "DATADOG_APP_KEY" | b64dec) -}}
+{{- end -}}
+{{- if $datadogApp }}
+DATADOG_APP_KEY: {{ $datadogApp | b64enc | quote }}
 {{- end -}}
 {{- /* Sidecar agent-dir env vars (API keys referenced as "$VAR" in models.json).
        Values override existing Secret keys; keys present in the existing Secret

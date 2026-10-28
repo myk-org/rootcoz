@@ -1,29 +1,36 @@
-"""Datadog Events exporter: one event per failed test.
+"""Datadog event exporter: one v2 event per failed test.
 
-Emits one Datadog event per failed test (1:N, ADR 0003) to
-``POST https://api.{site}/api/v1/events``. Credentials are API keys
-only (32 hex chars, ``DD-API-KEY`` header): event submission is data
-intake, which Datadog authenticates exclusively with API keys. Service
-Access Tokens (``ddsat_…``) have no ``events_write`` scope — Bearer-auth
-SATs get HTTP 403 on every event endpoint — and application keys
-(``ddapp_…`` or exactly 40 hex chars) are read-only, so the constructor
-fails fast on both with distinct explanatory messages.
+Emits one Datadog event per failed test (1:N, ADR 0003) to the v2 event
+intake ``POST https://event-management-intake.{site}/api/v2/events``.
+Intake requires **both** Datadog keys — ``DD-API-KEY`` (32 hex characters)
+and ``DD-APPLICATION-KEY`` (``ddapp_…`` or 40 hex characters) — so the
+constructor fails fast when either is missing. Service Access Tokens
+(``ddsat_…``) cannot post events at all, and an application key in the API
+key slot is reported as misplaced rather than as a rejected key.
+
 Events carry the rootcoz classification (when the ``dd_push_classifications``
-toggle is on) as a tag, title prefix, and text line. The exporter never
-sets ``alert_type``: classification (root cause) and alert_type (severity)
-are unrelated axes, so Datadog applies its own default.
+toggle is on) as a tag, title prefix, and message line. The exporter never
+sets an alert type: classification (root cause) and severity are unrelated
+axes. The v2 schema's ``category`` is a required enum of ``change`` |
+``alert`` — there is no generic "event" category, and a failed test is an
+alert.
+
 Events carry a stable ``aggregation_key`` per analysis/test pair, a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
-job/build identity, and the push attribution) and structural attributes:
-``@test.name`` (the verbatim pytest node id) plus ``@rootcoz.scope``
-(``test``, or ``console`` for console-only analyses that have no test).
+job/build identity, and the push attribution) and free-form custom
+attributes under ``attributes.custom``: ``test.name`` (the verbatim pytest
+node id) for real tests, plus ``rootcoz.scope`` (``test``, or ``console``
+for console-only analyses that have no test). Datadog documents
+``attributes.custom`` as a free-form JSON object of up to 100 properties and
+10 nesting levels; it does **not** document that nested keys become
+``@``-searchable facets, so do not rely on ``@test.name``.
 Parity with Report Portal: events also carry per-test history classifications
 and reviewer attribution from the shared ``ExportContext``.
 
 Failures never raise: per-event HTTP/network errors are collected into the
 exporter result so a Datadog outage can never break the analysis pipeline.
 Two abort modes stop a doomed run early: an auth rejection (HTTP 401/403)
-aborts immediately — retrying with the same key cannot help — and a circuit
+aborts immediately — retrying with the same keys cannot help — and a circuit
 breaker stops the push after 5 consecutive failed events, recording the
 remaining events as skipped.
 """
@@ -33,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -44,8 +52,11 @@ from rootcoz.storage import AI_SYSTEM_USERNAME
 
 logger = get_child_logger(__name__)
 
-#: Datadog Events API path on ``https://api.{site}``.
-_EVENTS_PATH = "/api/v1/events"
+#: The v2 event intake lives on its own host, not on ``api.{site}``.
+_EVENT_INTAKE_HOST = "event-management-intake.{site}"
+
+#: Datadog v2 event intake path.
+_EVENTS_PATH = "/api/v2/events"
 
 #: Per-request timeout (seconds) for event submission.
 _REQUEST_TIMEOUT = 30.0
@@ -56,14 +67,31 @@ _SITE_HOSTNAME_RE = re.compile(
     r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
 )
 
-#: Datadog's v1 Events API rejects ``date_happened`` values older than its
-#: ~18-hour intake window, so a manual push after a day of human review
-#: would drop every event.  17 hours keeps a safety margin below that window:
-#: older stored timestamps fall back to push time.
+#: Datadog's v2 intake rejects events whose ``timestamp`` is older than its
+#: ~18-hour window, so a manual push after a day of human review would drop
+#: every event.  17 hours keeps a safety margin below that window: older
+#: stored timestamps fall back to push time.
 _MAX_EVENT_AGE_SECONDS = 17 * 3600
+
+#: ISO 8601 rendering the v2 intake expects (UTC, second precision).
+_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 #: Datadog caps ``aggregation_key`` at 100 characters.
 _AGGREGATION_KEY_MAX = 100
+
+#: Datadog caps ``title`` at 500 characters.
+_TITLE_MAX = 500
+
+#: Datadog caps ``message`` at 4000 characters.
+_MESSAGE_MAX = 4000
+
+#: Marker appended when a field must be capped at a Datadog limit, so a
+#: truncated title or message is never silent.
+_TRUNCATION_MARKER = "… [truncated]"
+
+#: v2 ``category`` is a required enum of ``change`` | ``alert``.  There is no
+#: generic "event" category, and a failed test is an alert.
+_EVENT_CATEGORY = "alert"
 
 #: HTTP statuses meaning the API key was rejected: retrying cannot help.
 _AUTH_FAILURE_STATUSES = frozenset({401, 403})
@@ -87,6 +115,9 @@ _SCOPE_CONSOLE = "console"
 # with an underscore.
 _TAG_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_.:-]")
 
+#: Datadog API keys: exactly 32 hex characters.
+_API_KEY_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
 #: Datadog application keys (legacy format): exactly 40 hex characters.
 _APPLICATION_KEY_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -95,12 +126,27 @@ _CREDENTIAL_API_KEY = "api_key"  # pragma: allowlist secret
 _CREDENTIAL_SERVICE_TOKEN = "service_token"
 _CREDENTIAL_APPLICATION_KEY = "application_key"
 
-#: Fail-fast message for application keys: they are read-only and cannot
-#: post events even when paired with an API key (Datadog docs). Shared by
-#: the exporter constructor and the connection-test integration so both
-#: surface the same explanation instead of a bare HTTP 403.
+#: Fail-fast message for an application key in the API key slot: it belongs
+#: in the application key slot, not here. Shared by the exporter
+#: constructor and the connection-test integration.
 APPLICATION_KEY_ERROR = (
-    "Datadog application keys cannot post events — use an API key (32 hex characters)"
+    "Datadog application keys cannot post events — that looks like an"
+    " application key, put it in the application key setting (DATADOG_APP_KEY);"
+    " DATADOG_API_KEY must be an API key (32 hex characters)"
+)
+
+#: Fail-fast message for an API key in the application key slot.
+API_KEY_IN_APP_SLOT_ERROR = (
+    "Datadog application key looks like an API key (32 hex characters) — put it"
+    " in the API key setting (DATADOG_API_KEY); DATADOG_APP_KEY must be an"
+    " application key (ddapp_… or 40 hex characters)"
+)
+
+#: Fail-fast message for a Service Access Token in the application key slot.
+APP_KEY_SERVICE_TOKEN_ERROR = (
+    "Datadog service access tokens cannot post events and are not application"
+    " keys — set DATADOG_APP_KEY to an application key (ddapp_… or 40 hex"
+    " characters)"
 )
 
 #: Fail-fast message for Service Access Tokens: they have no
@@ -128,7 +174,7 @@ def classify_datadog_credential(credential: str) -> str:
         ``"api_key"`` (32 hex chars or any unrecognized value),
         ``"service_token"`` (``ddsat_…`` Service Access Token — cannot
         post events), or ``"application_key"`` (``ddapp_…`` prefix or
-        exactly 40 hex chars — read-only, cannot post events).
+        exactly 40 hex chars — belongs in the application key slot).
     """
     value = (credential or "").strip()
     if value.startswith("ddsat_"):
@@ -138,23 +184,74 @@ def classify_datadog_credential(credential: str) -> str:
     return _CREDENTIAL_API_KEY
 
 
-def _auth_headers(credential: str) -> dict[str, str]:
-    """Build the auth headers for Datadog Events API calls.
+def _auth_headers(api_key: str, app_key: str) -> dict[str, str]:
+    """Build the headers for Datadog API calls.
 
-    API keys only: event submission is data intake, which Datadog
-    authenticates exclusively with API keys (``DD-API-KEY`` header).
-    Service Access Tokens and application keys never reach this helper —
-    they are rejected earlier with their explanatory errors. Whitespace
-    is stripped. Shared by the event POST and the connection-test
-    integration so both authenticate identically.
+    The v2 event intake authenticates with both keys at once: the API key
+    (``DD-API-KEY``) and the application key (``DD-APPLICATION-KEY``).
+    Whitespace is stripped from both. Shared by the event POST and the
+    connection-test integration so both authenticate identically.
 
     Args:
-        credential: Raw credential value.
+        api_key: Datadog API key (32 hex characters).
+        app_key: Datadog application key (``ddapp_…`` or 40 hex characters).
 
     Returns:
         Header dict for ``httpx`` requests.
     """
-    return {"DD-API-KEY": (credential or "").strip()}
+    return {
+        "DD-API-KEY": (api_key or "").strip(),
+        "DD-APPLICATION-KEY": (app_key or "").strip(),
+        "Accept": "application/json",
+    }
+
+
+def validate_datadog_credentials(
+    *, api_key: str, app_key: str, site: str | None
+) -> str:
+    """Validate the Datadog credential trio and normalize the site.
+
+    Shared by :class:`DatadogExporter` and the Server Settings connection
+    test, so configuration and the test button fail fast with the same
+    messages instead of one reporting a shape the other accepts.
+
+    Args:
+        api_key: Value of the API key setting (``DD-API-KEY``).
+        app_key: Value of the application key setting (``DD-APPLICATION-KEY``).
+        site: Raw configured site value.
+
+    Returns:
+        Bare site hostname (e.g. ``datadoghq.eu``).
+
+    Raises:
+        ValueError: A missing or wrong-shaped piece, with a distinct message
+            naming the setting to fix.
+    """
+    api = (api_key or "").strip()
+    app = (app_key or "").strip()
+    if not api:
+        raise ValueError("datadog_api_key is required")
+    api_kind = classify_datadog_credential(api)
+    if api_kind == _CREDENTIAL_APPLICATION_KEY:
+        raise ValueError(APPLICATION_KEY_ERROR)
+    if api_kind == _CREDENTIAL_SERVICE_TOKEN:
+        raise ValueError(SERVICE_ACCESS_TOKEN_ERROR)
+    if not app:
+        raise ValueError(
+            "datadog_app_key is required — the v2 event intake authenticates with"
+            " both an API key and an application key"
+        )
+    if classify_datadog_credential(app) == _CREDENTIAL_SERVICE_TOKEN:
+        raise ValueError(APP_KEY_SERVICE_TOKEN_ERROR)
+    if _API_KEY_RE.fullmatch(app):
+        raise ValueError(API_KEY_IN_APP_SLOT_ERROR)
+    site_host = _normalize_site(site)
+    if not site_host:
+        raise ValueError(
+            f"Invalid Datadog site {site!r} — set DATADOG_SITE to a Datadog "
+            "hostname (e.g. datadoghq.eu)"
+        )
+    return site_host
 
 
 def _normalize_site(site: str | None) -> str:
@@ -217,34 +314,46 @@ def _aggregation_key(job_id: str, test_name: str) -> str:
     return f"{prefix}{test_name[: max(room, 0)]}-{digest}"
 
 
-def _is_console_only_failure(failure: dict[str, Any], context: ExportContext) -> bool:
+def _truncate(value: str, limit: int) -> str:
+    """Cap a v2 text field at Datadog's documented maximum length.
+
+    The cut is always visible — the marker makes the truncation explicit
+    rather than silently dropping the tail of a title or message.
+
+    Args:
+        value: Assembled title or message.
+        limit: Datadog's documented maximum length for the field.
+
+    Returns:
+        ``value`` unchanged when it fits, otherwise a marked truncation of
+        exactly ``limit`` characters.
+    """
+    if len(value) <= limit:
+        return value
+    return value[: limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+
+
+def _is_console_only_failure(failure: dict[str, Any]) -> bool:
     """Whether a stored failure is a console-level synthetic one.
 
-    Console-only analyses have no test to name, so two markers are checked:
+    Detection relies solely on the synthetic failure message that
+    ``CISource.run_console_only_analysis`` writes: ``FailureAnalysis.error``
+    stores the source message verbatim, so the marker also recognizes
+    results stored before this check existed.
 
-    1. The synthetic failure message set by
-       ``CISource.run_console_only_analysis`` — ``FailureAnalysis.error``
-       stores the source message verbatim, so this also recognizes
-       results that were stored before this marker was relied on.
-    2. The placeholder name the console call sites synthesize, for stored
-       results whose error text was rewritten: ``job_name`` (main.py) or
-       ``f"{job_name}#{build_number}"`` (child jobs in
-       jenkins_source.py).
+    Name-based heuristics (the synthesized placeholder name equal to
+    ``job_name`` or ``f"{job_name}#{build_number}"``) were removed: a real
+    structured test may legitimately share the job's name, and matching it
+    would strip its ``test`` attribute and title.
 
     Args:
         failure: Stored failure dict.
-        context: Export context with job metadata.
 
     Returns:
         ``True`` when the failure is a console-level synthetic one.
     """
     error = str(failure.get("error") or failure.get("error_message") or "")
-    if error.startswith(_CONSOLE_ONLY_ERROR_PREFIX):
-        return True
-    placeholders = {context.job_name}
-    if context.child_job_name:
-        placeholders.add(f"{context.child_job_name}#{context.child_build_number}")
-    return str(failure.get("test_name", "") or "") in placeholders
+    return error.startswith(_CONSOLE_ONLY_ERROR_PREFIX)
 
 
 def _circuit_breaker_message(skipped: int) -> str:
@@ -277,22 +386,23 @@ class DatadogExporter(Exporter):
     """Exporter that pushes one Datadog event per failed test.
 
     Args:
-        api_key: Datadog API key (32 hex chars, ``DD-API-KEY`` header) —
-            the only credential that can post events. Service Access
-            Tokens (``ddsat_…``) and application keys are rejected.
+        api_key: Datadog API key (32 hex chars, ``DD-API-KEY`` header).
+        app_key: Datadog application key (``ddapp_…`` or 40 hex chars,
+            ``DD-APPLICATION-KEY`` header) — the v2 intake requires it
+            alongside the API key.
         site: Datadog site, e.g. ``datadoghq.eu`` (default).
         service: Value of the ``service:`` tag.
         env: Value of the ``env:`` tag.
         push_classifications: Include the classification (tag, title prefix,
-            and text line) in the event.
-        push_rootcoz_url: Include the RootCoz report link in the event text.
+            and message line) in the event.
+        push_rootcoz_url: Include the RootCoz report link in the event message.
         push_tracker_links: Include tracked-in Jira/GitHub issue links in
-            the event text.
+            the event message.
 
     Raises:
-        ValueError: Invalid site, an application key credential
-            (read-only — cannot post events), or a Service Access Token
-            (no ``events_write`` scope — cannot post events).
+        ValueError: A missing API key or application key, an application key
+            in the API key slot, a Service Access Token (cannot post events),
+            or an invalid site.
     """
 
     NAME = "datadog"
@@ -309,6 +419,7 @@ class DatadogExporter(Exporter):
         self,
         *,
         api_key: str,
+        app_key: str,
         site: str,
         service: str | None = None,
         env: str | None = None,
@@ -316,18 +427,11 @@ class DatadogExporter(Exporter):
         push_rootcoz_url: bool = True,
         push_tracker_links: bool = True,
     ) -> None:
+        self._site = validate_datadog_credentials(
+            api_key=api_key, app_key=app_key, site=site
+        )
         self._api_key = (api_key or "").strip()
-        _credential_kind = classify_datadog_credential(self._api_key)
-        if _credential_kind == _CREDENTIAL_APPLICATION_KEY:
-            raise ValueError(APPLICATION_KEY_ERROR)
-        if _credential_kind == _CREDENTIAL_SERVICE_TOKEN:
-            raise ValueError(SERVICE_ACCESS_TOKEN_ERROR)
-        self._site = _normalize_site(site)
-        if not self._site:
-            raise ValueError(
-                f"Invalid Datadog site {site!r} — set DATADOG_SITE to a Datadog "
-                "hostname (e.g. datadoghq.eu)"
-            )
+        self._app_key = (app_key or "").strip()
         self._service = service
         self._env = env
         self._push_classifications = push_classifications
@@ -351,14 +455,15 @@ class DatadogExporter(Exporter):
         """Whether this client instance is ready to use.
 
         Always ``True`` for an instantiated client — construction requires
-        an API key.  Enablement gating (``ENABLE_DATADOG`` + key presence)
-        is handled by ``_create_exporter()`` via ``Settings.datadog_enabled``.
+        both keys and a site.  Enablement gating (``ENABLE_DATADOG`` +
+        credential presence) is handled by ``_create_exporter()`` via
+        ``Settings.datadog_enabled``.
         """
         return True
 
     @property
     def _events_url(self) -> str:
-        return f"https://api.{self._site}{_EVENTS_PATH}"
+        return f"https://{_EVENT_INTAKE_HOST.format(site=self._site)}{_EVENTS_PATH}"
 
     def _build_tags(
         self, context: ExportContext, test_name: str, classification: str | None
@@ -369,8 +474,8 @@ class DatadogExporter(Exporter):
         ``classification`` is ``None`` when the ``dd_push_classifications``
         toggle is off — the ``tfa.classification`` tag is then omitted.
         The test name is deliberately not a tag: a tag cannot hold brackets
-        or spaces, so a sanitized value could never match ``@test.name`` —
-        the verbatim name travels as the ``test.name`` attribute instead.
+        or spaces, so a sanitized value could never match the verbatim
+        ``test.name`` custom attribute.
         ``test_name`` is still the key for the per-test lookups below.
         """
         tags: list[str] = []
@@ -406,7 +511,7 @@ class DatadogExporter(Exporter):
             failure: Stored failure dict (``test_name`` + ``analysis``).
 
         Returns:
-            Datadog Events API payload.
+            Datadog v2 event intake payload.
         """
         test_name = str(failure.get("test_name", "") or "")
         analysis_value = failure.get("analysis")
@@ -423,14 +528,14 @@ class DatadogExporter(Exporter):
             classification = raw_classification or _UNKNOWN_CLASSIFICATION
         else:
             # Toggle off: no classification anywhere in the event — no
-            # tag, no title prefix, no text line.
+            # tag, no title prefix, no message line.
             classification = ""
         details = str(analysis.get("details", "") or "").strip()
 
-        console_only = _is_console_only_failure(failure, context)
+        console_only = _is_console_only_failure(failure)
         if console_only:
-            # No test to name: the stored test_name is a synthesized
-            # placeholder equal to the job name, so never show it as a test.
+            # No test to name: the stored test_name is the placeholder the
+            # console-only call sites synthesize, so never show it as a test.
             subject = "build failure"
             heading = "### Build failure"
         else:
@@ -479,39 +584,42 @@ class DatadogExporter(Exporter):
             lines.append(f"- **Reviewed by:** {reviewer}")
         if details:
             lines += ["", "**AI diagnosis:**", "", details]
-        text = "\n".join(lines)
-        # Datadog's v1 Events API renders markdown in ``text`` only when
-        # it is wrapped in %%% markers (datadogpy#614, confirmed by
-        # Datadog support) — always wrap, regardless of content toggles.
-        text = f"%%%\n{text}\n%%%"
+        message = "\n".join(lines)
 
         now = int(time.time())
-        date_happened = context.analysis_timestamp or now
-        if now - date_happened > _MAX_EVENT_AGE_SECONDS:
-            date_happened = now
+        timestamp = context.analysis_timestamp or now
+        if now - timestamp > _MAX_EVENT_AGE_SECONDS:
+            timestamp = now
 
-        event: dict[str, Any] = {
-            "title": title,
-            "text": text,
-            "priority": "normal",
-            "date_happened": date_happened,
-            "source_type_name": "rootcoz",
-            "aggregation_key": _aggregation_key(context.job_id, test_name),
-            "tags": self._build_tags(context, test_name, classification or None),
-            "rootcoz": {
-                "scope": _SCOPE_CONSOLE if console_only else _SCOPE_TEST,
-            },
+        # Free-form custom attributes. ``rootcoz.scope`` is always present;
+        # ``test.name`` only for a real test, so a console-only analysis never
+        # names the job as a test. The full pytest node id travels verbatim
+        # (brackets, colons and parametrize ids intact — a tag cannot hold
+        # them).
+        custom: dict[str, Any] = {
+            "rootcoz": {"scope": _SCOPE_CONSOLE if console_only else _SCOPE_TEST}
         }
         if not console_only:
-            # Datadog indexes nested event attributes as ``@test.name``, so
-            # the full pytest node id stays queryable verbatim (brackets,
-            # colons and parametrize ids intact — a tag cannot hold them).
-            test_attribute: dict[str, str] = {"name": test_name}
-            suite = str(failure.get("suite", "") or "")
-            if suite:
-                test_attribute["suite"] = suite
-            event["test"] = test_attribute
-        return event
+            custom["test"] = {"name": test_name}
+
+        return {
+            "data": {
+                "type": "event",
+                "attributes": {
+                    "title": _truncate(title, _TITLE_MAX),
+                    "message": _truncate(message, _MESSAGE_MAX),
+                    "category": _EVENT_CATEGORY,
+                    "timestamp": datetime.fromtimestamp(timestamp, UTC).strftime(
+                        _TIMESTAMP_FORMAT
+                    ),
+                    "aggregation_key": _aggregation_key(context.job_id, test_name),
+                    "tags": self._build_tags(
+                        context, test_name, classification or None
+                    ),
+                    "attributes": {"custom": custom},
+                },
+            }
+        }
 
     async def push(self, context: ExportContext) -> ExporterResult:
         """Push one Datadog event per failed test.
@@ -537,7 +645,7 @@ class DatadogExporter(Exporter):
         errors: list[str] = []
         consecutive_failures = 0
         abort_message: str | None = None
-        headers = _auth_headers(self._api_key)
+        headers = _auth_headers(self._api_key, self._app_key)
         logger.info(
             "Datadog push: emitting up to %d event(s) for job=%s to site=%s",
             len(failures),
@@ -587,11 +695,12 @@ class DatadogExporter(Exporter):
                         # fail identically, so abort the whole push now.
                         skipped = len(failures) - index - 1
                         abort_message = (
-                            f"Datadog rejected the API key (HTTP {status}) — "
+                            f"Datadog rejected the credentials (HTTP {status}) — "
                             f"push aborted, {skipped} event(s) skipped"
                         )
                         logger.error(
-                            "Datadog push aborted: API key rejected (HTTP %s), job=%s",
+                            "Datadog push aborted: credentials rejected (HTTP %s),"
+                            " job=%s",
                             status,
                             context.job_id,
                         )

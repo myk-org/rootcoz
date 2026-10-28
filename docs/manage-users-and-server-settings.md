@@ -122,7 +122,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Jira` | `jira_email`, `jira_api_token`, `jira_cloud_url`, `jira_cloud_ssl_verify`, `jira_pat`, `jira_server_url`, `jira_server_ssl_verify`, `jira_oauth_client_secret`, `atlassian_oauth_cloud_id`, `atlassian_oauth_client_id`, `jira_atst_token`, `jira_oauth_ssl_verify`, `jira_site_url`, `jira_project_key`, `jira_max_results`, `enable_jira`, `enable_jira_issues` |
    | `GitHub` | `github_token`, `tests_repo_url`, `tests_repo_token`, `enable_github_issues` |
    | `Report Portal` | `reportportal_url`, `reportportal_api_token`, `reportportal_project`, `reportportal_verify_ssl`, `enable_reportportal`, `rp_push_classifications`, `rp_push_rootcoz_url`, `rp_push_tracker_links` |
-   | `Datadog` | `datadog_api_key`, `datadog_site`, `datadog_service`, `datadog_env`, `enable_datadog` |
+   | `Datadog` | `datadog_api_key`, `datadog_app_key`, `datadog_site`, `datadog_service`, `datadog_env`, `enable_datadog`, `dd_push_classifications`, `dd_push_rootcoz_url`, `dd_push_tracker_links`, `dd_allow_unreviewed_push` |
    | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role` |
    | `Prow` | `prow_url`, `gcs_bucket` |
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |

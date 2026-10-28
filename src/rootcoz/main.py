@@ -134,14 +134,9 @@ from rootcoz.engine.core import (
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
 from rootcoz.exporters.datadog import (
-    _CREDENTIAL_APPLICATION_KEY,
-    _CREDENTIAL_SERVICE_TOKEN,
-    APPLICATION_KEY_ERROR,
-    SERVICE_ACCESS_TOKEN_ERROR,
     DatadogExporter,
     _auth_headers,
-    _normalize_site,
-    classify_datadog_credential,
+    validate_datadog_credentials,
 )
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
@@ -329,6 +324,7 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "tests_repo_token",
         "reportportal_api_token",
         "datadog_api_key",
+        "datadog_app_key",
         "admin_key",
         "vapid_private_key",
         "smtp_password",
@@ -512,6 +508,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     ],
     "Datadog": [
         "datadog_api_key",
+        "datadog_app_key",
         "datadog_site",
         "datadog_service",
         "datadog_env",
@@ -3056,7 +3053,7 @@ async def _auto_review_matching_failures(
             and total_failures > 0
             and await _unreviewed_failure_count(job_id, result_data) == 0
         ):
-            # Auto-push must emit the same date_happened as the manual
+            # Auto-push must emit the same event timestamp as the manual
             # push endpoint: reuse the stored analysis timestamp instead
             # of push time.
             stored = await get_result(job_id)
@@ -8781,13 +8778,13 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
         if not settings.datadog_enabled:
             raise ValueError("Datadog integration is disabled or not configured")
         api_key = settings.datadog_api_key
-        if api_key is None or not api_key.get_secret_value():
-            raise ValueError("datadog_api_key is required")
-        if not settings.datadog_site:
-            raise ValueError("datadog_site is required")
+        app_key = settings.datadog_app_key
+        # The exporter validates the pair (both keys + site) and fails fast with
+        # a distinct message per missing or wrong-shaped piece.
         return DatadogExporter(
-            api_key=api_key.get_secret_value(),
-            site=settings.datadog_site,
+            api_key=api_key.get_secret_value() if api_key else "",
+            app_key=app_key.get_secret_value() if app_key else "",
+            site=settings.datadog_site or "",
             service=settings.datadog_service,
             env=settings.datadog_env,
             push_classifications=settings.dd_push_classifications,
@@ -14518,22 +14515,25 @@ async def _test_reportportal_connection(settings: Settings) -> dict[str, Any]:
 
 
 async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
-    """Credential validation ping against the effective Datadog settings.
+    """Credential validation against the effective Datadog settings.
 
-    Uses the same read-only ``GET /api/v1/validate`` call the Datadog
-    events push path relies on — a 200 with ``{"valid": true}`` proves
-    both reachability of the configured site and the credential.
-    Credentials are classified exactly like the push path (API key vs
-    Service Access Token vs read-only application key): Service Access
-    Tokens (no ``events_write`` scope) and application keys (read-only)
-    both fail fast with their shared explanatory messages instead of a
-    bare 403.
+    Both v2 event intake keys are probed, because either one being wrong
+    makes every push fail: the API key with the documented ``GET
+    /api/v1/validate`` (a 200 with ``{"valid": true}``), then the
+    application key with a lightweight ``GET /api/v1/dashboard`` that also
+    needs the application key — a plain read, documented and cheap. Both
+    requests carry both headers, exactly like the push path. Missing or
+    wrong-shaped values fail fast through the shared credential validator,
+    so the test button and the exporter report the same thing. Neither key
+    is ever logged or echoed into the result.
     """
     api_key = settings.datadog_api_key
+    app_key = settings.datadog_app_key
     missing = [
         name
         for name, value in (
             ("datadog_api_key", api_key and api_key.get_secret_value()),
+            ("datadog_app_key", app_key and app_key.get_secret_value()),
             ("datadog_site", settings.datadog_site),
         )
         if not value
@@ -14543,23 +14543,19 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
             False, f"Datadog is not configured (missing: {', '.join(missing)})"
         )
     assert api_key is not None  # guaranteed by the missing-settings check above
-    credential = api_key.get_secret_value()
-    _credential_kind = classify_datadog_credential(credential)
-    if _credential_kind == _CREDENTIAL_APPLICATION_KEY:
-        return _test_result(False, APPLICATION_KEY_ERROR)
-    if _credential_kind == _CREDENTIAL_SERVICE_TOKEN:
-        return _test_result(False, SERVICE_ACCESS_TOKEN_ERROR)
-    site = _normalize_site(settings.datadog_site)
-    if not site:
-        return _test_result(
-            False,
-            f"Datadog connection failed: invalid site {settings.datadog_site!r} "
-            "— set DATADOG_SITE to a Datadog hostname (e.g. datadoghq.eu)",
+    assert app_key is not None  # ditto
+    try:
+        site = validate_datadog_credentials(
+            api_key=api_key.get_secret_value(),
+            app_key=app_key.get_secret_value(),
+            site=settings.datadog_site,
         )
+    except ValueError as exc:
+        return _test_result(False, str(exc))
+    headers = _auth_headers(api_key.get_secret_value(), app_key.get_secret_value())
     try:
         data = await _integration_test_get_json(
-            f"https://api.{site}/api/v1/validate",
-            headers=_auth_headers(credential),
+            f"https://api.{site}/api/v1/validate", headers=headers
         )
     except _IntegrationTestError as exc:
         message = str(exc)
@@ -14570,7 +14566,22 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
         return _test_result(
             False, "Datadog connection failed: API key rejected (invalid key)"
         )
-    return _test_result(True, f"Datadog API key is valid (site {site})", site=site)
+    try:
+        await _integration_test_get_json(
+            f"https://api.{site}/api/v1/dashboard",
+            params={"count": 1},
+            headers=headers,
+        )
+    except _IntegrationTestError as exc:
+        message = str(exc)
+        if "authentication failed" in message:
+            message = "application key rejected (invalid or unauthorized)"
+        return _test_result(False, f"Datadog connection failed: {message}")
+    return _test_result(
+        True,
+        f"Datadog API key and application key are valid (site {site})",
+        site=site,
+    )
 
 
 async def _test_prow_connection(settings: Settings) -> dict[str, Any]:

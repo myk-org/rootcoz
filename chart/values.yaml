@@ -63,11 +63,14 @@ ai:
     # Cursor auth.json content (secret, mounted at /home/appuser/.cursor-auth/auth.json)
     authJson: ""
 
-# Datadog Events exporter (optional) → DATADOG_API_KEY (secret).
-# Site, service, env, and the enable toggle are DB-configurable Server
-# Settings — no chart wiring needed for them.
+# Datadog event exporter (optional) → DATADOG_API_KEY and DATADOG_APP_KEY,
+# both stored in the credentials Secret. The v2 event intake requires the
+# pair: the API key identifies the organization, the application key
+# authorizes the request. Site, service, env, and the enable toggle are
+# DB-configurable Server Settings — no chart wiring needed for them.
 datadog:
   apiKey: ""
+  appKey: ""
 
 # Pi SDK sidecar custom providers/settings (pi-sidecar >=4.9.0) via a persistent
 # agent dir. Files are read once at sidecar start; changing them rolls the

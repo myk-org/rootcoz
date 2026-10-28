@@ -600,10 +600,11 @@ class Settings(BaseSettings):
     # Datadog Events integration (optional). Emits one event per failed
     # test when results are pushed to the 'datadog' exporter plugin.
     datadog_api_key: SecretStr | None = None
+    datadog_app_key: SecretStr | None = None
     datadog_site: str | None = Field(
         default=None,
         description=(
-            "Datadog site hostname for the Events API, e.g. datadoghq.eu."
+            "Datadog site hostname for the v2 event intake, e.g. datadoghq.eu."
             " Required to enable the exporter."
         ),
     )
@@ -619,7 +620,8 @@ class Settings(BaseSettings):
         default=None,
         description=(
             "Push each analysis to Datadog as one event per failed test."
-            " When None, enabled if DATADOG_API_KEY is configured."
+            " When None, enabled if DATADOG_API_KEY, DATADOG_APP_KEY, and"
+            " DATADOG_SITE are configured."
         ),
     )
     dd_push_classifications: bool = Field(
@@ -917,6 +919,7 @@ class Settings(BaseSettings):
             "jira_atst_token",
             "reportportal_api_token",
             "datadog_api_key",
+            "datadog_app_key",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -1077,6 +1080,12 @@ class Settings(BaseSettings):
             if self.enable_datadog is True:
                 logger.warning(
                     "enable_datadog is True but DATADOG_API_KEY is not configured"
+                )
+            return False
+        if not self.datadog_app_key or not self.datadog_app_key.get_secret_value():
+            if self.enable_datadog is True:
+                logger.warning(
+                    "enable_datadog is True but DATADOG_APP_KEY is not configured"
                 )
             return False
         if not self.datadog_site:
