@@ -5,12 +5,16 @@ import { MemoryRouter, RouterProvider, createMemoryRouter, useLocation } from 'r
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminAuditPage } from '@/pages/AdminAuditPage'
 import { ApiError } from '@/lib/api'
+import { clearTokens, clearUsername, getGithubToken, getUsername, setGithubToken, setUsername } from '@/lib/cookies'
 
 const apiGet = vi.fn()
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
   return { ...actual, api: { get: (...args: unknown[]) => apiGet(...args) } }
 })
+
+const logout = vi.hoisted(() => vi.fn<() => Promise<void>>())
+vi.mock('@/lib/auth', () => ({ useAuth: () => ({ logout }) }))
 
 // Radix Select opens its listbox through pointer capture, which jsdom lacks.
 HTMLElement.prototype.hasPointerCapture = () => false
@@ -123,6 +127,8 @@ function renderRouted(initialEntries: string[], initialIndex?: number) {
           </>
         ),
       },
+      // The layout has this route; the tests only need somewhere to land.
+      { path: '/login', element: <LocationProbe /> },
     ],
     { initialEntries, initialIndex },
   )
@@ -173,8 +179,11 @@ function enableLive() {
 describe('AdminAuditPage', () => {
   beforeEach(() => {
     apiGet.mockReset()
+    logout.mockReset().mockResolvedValue(undefined)
     MockEventSource.instances = []
     locationKeys = []
+    clearUsername()
+    clearTokens()
     vi.stubGlobal('EventSource', MockEventSource)
   })
 
@@ -204,7 +213,7 @@ describe('AdminAuditPage', () => {
 
     expect(await screen.findByText('500: audit table unavailable')).toBeInTheDocument()
     // A 401-only affordance: nothing to sign in to for a plain server error.
-    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
     // A failed request is not an outstanding one: no skeleton, no "empty" claim.
     expect(container.querySelector('.animate-pulse')).toBeNull()
     expect(screen.queryByText('No audit events yet')).not.toBeInTheDocument()
@@ -219,10 +228,44 @@ describe('AdminAuditPage', () => {
     renderPage()
 
     expect(await screen.findByText(/session expired — sign in again/i)).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
   })
 
-  it('shows the plain error and no sign-in link for a 500', async () => {
+  it('ends the session before showing the login form on a 401', async () => {
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/admin/audit/actions')
+        ? Promise.resolve({ actions: [] })
+        : Promise.reject(new ApiError(401, 'Unauthorized', { detail: 'Session expired' })),
+    )
+    const { router } = renderRouted(['/admin/audit'])
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }))
+
+    // Logging out first is what keeps RegisterPage from bouncing to the dashboard.
+    await waitFor(() => expect(router.state.location.pathname).toBe('/login'))
+    expect(logout).toHaveBeenCalledTimes(1)
+  })
+
+  it('still clears the session and reaches the login form when logout rejects', async () => {
+    logout.mockRejectedValueOnce(new Error('session already gone'))
+    setUsername('alice')
+    setGithubToken('gh-token')
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/admin/audit/actions')
+        ? Promise.resolve({ actions: [] })
+        : Promise.reject(new ApiError(401, 'Unauthorized', { detail: 'Session expired' })),
+    )
+    const { router } = renderRouted(['/admin/audit'])
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }))
+
+    await waitFor(() => expect(router.state.location.pathname).toBe('/login'))
+    expect(logout).toHaveBeenCalledTimes(1)
+    expect(getUsername()).toBe('')
+    expect(getGithubToken()).toBe('')
+  })
+
+  it('shows the plain error and no sign-in action for a 500', async () => {
     apiGet.mockImplementation((path: string) =>
       path.startsWith('/api/admin/audit/actions')
         ? Promise.resolve({ actions: [] })
@@ -231,7 +274,7 @@ describe('AdminAuditPage', () => {
     renderPage()
 
     expect(await screen.findByText('audit table unavailable')).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sign in' })).not.toBeInTheDocument()
     expect(screen.queryByText(/sign in again/i)).not.toBeInTheDocument()
   })
 
@@ -683,7 +726,7 @@ describe('AdminAuditPage', () => {
     expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
   })
 
-  it('replaces the count on a second gap instead of stacking a second notice', async () => {
+  it('adds up the count across gap frames instead of showing only the last batch', async () => {
     mockAuditApi(1)
     renderPage()
     await screen.findByText('alice')
@@ -698,8 +741,45 @@ describe('AdminAuditPage', () => {
       source.emit('audit-gap', { dropped: 5 })
     })
 
-    expect(await screen.findByText(/Missed 5 live events/)).toBeInTheDocument()
+    // Each frame reports only its own drops: 3 + 5 missed since the refresh.
+    expect(await screen.findByText(/Missed 8 live events/)).toBeInTheDocument()
     expect(screen.queryByText(/Missed 3 live events/)).toBeNull()
+    expect(screen.queryByText(/Missed 5 live events/)).toBeNull()
     expect(screen.getAllByRole('button', { name: 'Refresh' })).toHaveLength(1)
+  })
+
+  it('starts the gap count over after a refresh', async () => {
+    mockAuditApi(1)
+    renderPage()
+    await screen.findByText('alice')
+
+    const { source } = enableLive()
+    act(() => {
+      source.emit('audit-gap', { dropped: 3 })
+    })
+    expect(await screen.findByText(/Missed 3 live events/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(screen.queryByText(/Missed \d+ live/)).toBeNull())
+
+    act(() => {
+      source.emit('audit-gap', { dropped: 2 })
+    })
+
+    // The refreshed page is whole again: only the new gap counts.
+    expect(await screen.findByText(/Missed 2 live events/)).toBeInTheDocument()
+  })
+
+  it('shows a single gap frame with its own count', async () => {
+    mockAuditApi(1)
+    renderPage()
+    await screen.findByText('alice')
+
+    const { source } = enableLive()
+    act(() => {
+      source.emit('audit-gap', { dropped: 1 })
+    })
+
+    expect(await screen.findByText(/Missed 1 live event since the last refresh/)).toBeInTheDocument()
   })
 })

@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { Link, useNavigationType, useSearchParams } from 'react-router-dom'
+import { useNavigationType, useSearchParams } from 'react-router-dom'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
+import { useSignOut } from '@/lib/useSignOut'
 import { EMPTY_FILTERS, matchesFilters, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
 import { formatRelativeTime, formatTimestamp } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -267,6 +268,7 @@ function ActionFilter({
 }
 
 export function AdminAuditPage() {
+  const signOut = useSignOut()
   const [searchParams, setSearchParams] = useSearchParams()
   // ?limit, ?live=1 and every filter survive a refresh and a copied link.
   const [state, dispatch] = useReducer(reducer, searchParams, initialState)
@@ -455,11 +457,11 @@ export function AdminAuditPage() {
     })
     source.addEventListener('audit-gap', (message) => {
       try {
-        // One signal per overflow, already counted by the server: it replaces
-        // the previous number instead of adding to it.
-        const payload = JSON.parse((message as MessageEvent).data) as { dropped?: number }
-        if (typeof payload.dropped === 'number' && payload.dropped > 0) {
-          setDropped(payload.dropped)
+        // Each frame counts only the drops since the previous one, so the
+        // notice adds them up: it states the total missed since the refresh.
+        const count = (JSON.parse((message as MessageEvent).data) as { dropped?: number }).dropped
+        if (typeof count === 'number' && count > 0) {
+          setDropped((total) => total + count)
         }
       } catch {
         // A malformed frame must not kill the stream.
@@ -609,9 +611,15 @@ export function AdminAuditPage() {
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-signal-red/40 bg-signal-red/10 px-3 py-2 text-sm text-signal-red">
           <span>{error}</span>
           {unauthorized && (
-            <Link to="/login" className="font-medium underline underline-offset-2">
+            // Ends the session first: linking to /login while `authenticated`
+            // is still true sends RegisterPage straight back to the dashboard.
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className="font-medium underline underline-offset-2"
+            >
               Sign in
-            </Link>
+            </button>
           )}
         </div>
       )}
@@ -620,7 +628,7 @@ export function AdminAuditPage() {
           when the notice appears. */}
       {dropped > 0 && (
         <CustomMessageBanner
-          message={`Missed ${dropped} live ${dropped === 1 ? 'event' : 'events'} — the stream fell behind, so this view has a gap.`}
+          message={`Missed ${dropped} live ${dropped === 1 ? 'event' : 'events'} since the last refresh — the stream fell behind, so this view has a gap.`}
           action={
             <Button variant="ghost" size="sm" onClick={refreshView}>
               Refresh

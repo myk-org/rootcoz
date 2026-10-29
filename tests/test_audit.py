@@ -620,6 +620,32 @@ def test_login_username_that_is_a_credential_is_scrubbed(
     assert secret not in caplog.text
 
 
+def test_login_username_that_is_a_hex_token_is_scrubbed(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hex token is not a digest just because it has a digest's shape."""
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    token = (
+        "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    try:
+        response = app_client.post(
+            "/api/auth/login",
+            json={"username": token, "api_key": "wrong"},  # pragma: allowlist secret
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+    assert response.status_code == 401
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 1
+    assert events[0]["actor"] == "[redacted]"
+    assert events[0]["target_id"] == "[redacted]"
+    assert token not in json.dumps(events)
+    assert token not in caplog.text
+
+
 def test_logout_is_audited(app_client) -> None:
     admin_login(app_client)
     response = app_client.post("/api/auth/logout")
@@ -1228,6 +1254,44 @@ async def test_admin_db_schema_denial_is_audited(audit_db: Path) -> None:
     assert len(events) == 1
     assert events[0]["outcome"] == "denied"
     assert events[0]["details"] == {"reason": "forbidden"}
+
+
+def test_admin_db_query_with_a_parameter_placeholder_is_audited(
+    app_client, temp_db_path: Path
+) -> None:
+    """``SELECT ?`` raises ProgrammingError: still a 400 and still a failure row."""
+    admin_login(app_client)
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post("/api/admin/db/query", json={"sql": "SELECT ?"})
+    assert response.status_code == 400, response.text
+
+    events = _events(action="admin.db_query")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert set(events[0]["details"]) == {"sql_hash"}
+
+
+def test_admin_db_query_masks_credential_columns(
+    app_client, temp_db_path: Path
+) -> None:
+    """A query selecting a token column returns it masked, never in plaintext."""
+    admin_login(app_client)
+    secret = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post(
+            "/api/admin/db/query",
+            json={"sql": f"SELECT '{secret}' AS github_token, 1 AS n"},
+        )
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    assert payload["rows"] == [{"github_token": "***", "n": 1}]
+    assert payload["count"] == 1
+    assert secret not in response.text
+    # The audit row keeps the count, and never the rows themselves.
+    details = _events(action="admin.db_query")[0]["details"]
+    assert details["rows"] == 1
+    assert secret not in json.dumps(details)
 
 
 def test_admin_db_query_rejection_is_audited_as_denied(
@@ -2920,6 +2984,15 @@ def test_redact_details_scrubs_a_mixed_case_token_with_digits() -> None:
     }
 
 
+def test_redact_details_keeps_only_our_own_digests() -> None:
+    """The hex exemption is keyed on the detail name, not on the value shape."""
+    token = (
+        "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    assert main._redact_details({"sql_hash": token}) == {"sql_hash": token}
+    assert main._redact_details({"note": token}) == {"note": "[redacted]"}
+
+
 def test_redact_details_scrubs_secrets_inside_lists() -> None:
     redacted = main._redact_details(
         {"notes": ["first is fine", "second has sk-live-abc123def456ghi789jkl012"]}
@@ -2988,6 +3061,50 @@ async def test_record_audit_scrubs_a_credential_pasted_into_the_actor(
     newest = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
     assert newest["actor"] == "-x"
     assert newest["target_id"] == "-x"
+
+
+async def test_record_audit_keeps_a_real_account_that_looks_like_a_token(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Identity beats shape: a real account name is not a credential."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
+    account = "svc-ci-pipeline-Prod2024-runner"
+    # Users are stored normalized, so the lookup has to match case-insensitively.
+    _add_existing_user(audit_db, account.lower())
+
+    await _failed_logins(2, actor=account)
+    assert monitoring._audit_suppressed_auth_events == 1
+    # Another actor still has its own budget: no shared ``[redacted]`` bucket.
+    await _failed_logins(1, actor="mallory")
+
+    stored = await storage.list_audit_events(action="auth.login_failed")
+    assert [event["actor"] for event in stored["events"]] == ["mallory", account]
+    by_actor = await storage.list_audit_events(
+        action="auth.login_failed", actor=account
+    )
+    assert by_actor["total"] == 1
+
+
+async def test_record_audit_scrubs_a_token_shaped_name_with_no_account(
+    audit_db: Path,
+) -> None:
+    """The same name without a users row is a token typed as a username."""
+    account = "svc-ci-pipeline-Prod2024-runner"
+    await main.record_audit(
+        action="auth.login_failed",
+        actor=account,
+        message=f"Failed login attempt for username '{account}'",
+        target_type="user",
+        target_id=account,
+        outcome="failure",
+        request=_fake_request(),
+    )
+
+    event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
+    assert event["actor"] == "[redacted]"
+    assert event["target_id"] == "[redacted]"
+    assert account not in json.dumps(event)
 
 
 # --- volume guard for auth failures ---------------------------------------
@@ -3388,20 +3505,42 @@ def test_suppression_tracking_is_capped_for_junk_usernames(
     assert monitoring._audit_suppressed_auth_events == 5 * cap
 
 
-def test_suppression_tracking_is_pruned_when_the_window_rolls(
+def test_suppression_tracking_is_pruned_one_window_after_the_roll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Entries whose own window closed are dropped on the next window change."""
+    """A rolled entry keeps its count for the next summary, then is dropped."""
     _reset_suppression(monkeypatch)
-    stale = (
-        monitoring.time.monotonic()
-        - monitoring._AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
-        - 1
-    )
+    window = monitoring._AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
+    now = monitoring.time.monotonic()
     monitoring._audit_auth_suppression_windows.update(
-        {f"old{index}": (stale, 5) for index in range(3)}
+        {"gone": (now - 2 * window - 1, 5), "last": (now - window - 1, 5)}
     )
 
     monitoring.record_audit_auth_suppression("fresh", limit=1)
 
-    assert list(monitoring._audit_auth_suppression_windows) == ["fresh"]
+    assert list(monitoring._audit_auth_suppression_windows) == ["last", "fresh"]
+
+
+def test_suppression_summary_reports_its_own_previous_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another actor's window roll must not erase this actor's count."""
+    _reset_suppression(monkeypatch)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        monitoring.logger, "warning", lambda msg, *args, **kw: messages.append(msg)
+    )
+    window = monitoring._AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
+    now = monitoring.time.monotonic()
+
+    # Window 1: actor A drops three rows.
+    for _ in range(3):
+        monitoring.record_audit_auth_suppression("A", limit=1)
+    # Window 2: B's first drop rolls the window, so the prune runs.
+    monitoring._audit_auth_suppression_windows["B"] = (now - window - 1, 1)
+    monitoring.record_audit_auth_suppression("B", limit=1)
+    # Window 3: A's next window still knows what its previous window dropped.
+    monitoring._audit_auth_suppression_windows["A"] = (now - window - 1, 3)
+    monitoring.record_audit_auth_suppression("A", limit=1)
+
+    assert "previous window dropped 3" in messages[-1]

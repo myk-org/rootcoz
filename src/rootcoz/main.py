@@ -1133,9 +1133,12 @@ _AUDIT_SECRET_RE = re.compile(
 # predicate below): pytest node ids are dot-separated and identifiers are
 # camelCase, so neither is a single random-looking run.
 _AUDIT_RUN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
-# A bare lowercase hex string is a digest we record on purpose (an SQL hash, a
-# revoked key fingerprint), not a credential: leave the whole value alone.
+# A bare lowercase hex string is a digest we record on purpose, not a
+# credential: leave the whole value alone. Only the detail names below qualify —
+# they are the hashes we compute ourselves. Anywhere else (a detail a caller
+# filled in, an actor, a target) a hex token is scrubbed like any other run.
 _AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
+_AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
 # A lowercase letters-and-digits run of this length with no separator is the
 # shape of a hex/base32 blob, the one id-like form that is also credential-like.
 _AUDIT_BARE_BLOB_MIN_LENGTH = 32
@@ -1179,27 +1182,69 @@ def _looks_like_secret_run(run: str) -> bool:
     return changes / transitions >= 0.5
 
 
-def _scrub_audit_text(value: str) -> str:
-    """Replace credential-shaped substrings in one free-text detail value."""
-    if _AUDIT_HEX_DIGEST_RE.match(value):
+def _scrub_audit_text(
+    value: str, *, digest: bool = False, keep: frozenset[str] | set[str] = frozenset()
+) -> str:
+    """Replace credential-shaped substrings in one free-text value.
+
+    ``digest`` keeps a whole-value lowercase hex digest. Only
+    :func:`_redact_details` sets it, and only for
+    :data:`_AUDIT_DIGEST_DETAIL_KEYS` — hashes this process computes itself.
+
+    ``keep`` names the runs that are known accounts (see
+    :func:`_known_account_runs`): the generic long-run rule redacts by shape,
+    so a real username that happens to look like a token is redacted unless the
+    caller resolved it first. Identity fields pass the resolved set.
+    """
+    if digest and _AUDIT_HEX_DIGEST_RE.match(value):
         return value
     scrubbed = _AUDIT_SECRET_RE.sub("[redacted]", value)
     return _AUDIT_RUN_RE.sub(
         lambda match: (
-            "[redacted]" if _looks_like_secret_run(match.group()) else match.group()
+            "[redacted]"
+            if _looks_like_secret_run(match.group()) and match.group() not in keep
+            else match.group()
         ),
         scrubbed,
     )
 
 
-def _redact_audit_value(value: Any) -> Any:
+async def _known_account_runs(*values: str) -> set[str]:
+    """The credential-shaped runs in ``values`` that name an existing account.
+
+    Redaction is identity-aware: a run the generic rule would redact is a
+    token, unless it resolves to a ``users`` row — then it is the username a
+    real account signs in with and must survive. Only such a run costs a
+    lookup, so a normal username, message or target pays none. A failed lookup
+    keeps nothing, so an unreadable ``users`` table scrubs everything rather
+    than raising out of :func:`record_audit`.
+    """
+    candidates = {
+        run
+        for value in values
+        for run in _AUDIT_RUN_RE.findall(value or "")
+        if _looks_like_secret_run(run)
+    }
+    known: set[str] = set()
+    for run in candidates:
+        try:
+            # ``get_user_by_username`` normalizes, so the lookup is
+            # case-insensitive and the stored name is kept verbatim.
+            if await storage.get_user_by_username(run) is not None:
+                known.add(run)
+        except sqlite3.Error, OSError:
+            break
+    return known
+
+
+def _redact_audit_value(value: Any, *, digest: bool = False) -> Any:
     """Scrub one detail value: names for dicts, text for strings, else as-is."""
     if isinstance(value, dict):
         return _redact_details(value)
     if isinstance(value, list):
         return [_redact_audit_value(item) for item in value]
     if isinstance(value, str):
-        return _scrub_audit_text(value)
+        return _scrub_audit_text(value, digest=digest)
     return value
 
 
@@ -1213,7 +1258,7 @@ def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
     (no credential-shaped key name) is replaced in place, never the entry.
     """
     return {
-        name: _redact_audit_value(value)
+        name: _redact_audit_value(value, digest=name in _AUDIT_DIGEST_DETAIL_KEYS)
         for name, value in (details or {}).items()
         if name in _AUDIT_SAFE_DETAIL_KEYS or not is_sensitive_key(name)
     }
@@ -1270,6 +1315,12 @@ async def record_audit(
     ``target_id`` and the log line get the same treatment: a credential pasted
     into a login username must not reach the trail or the log raw.
 
+    Identity is kept identity-aware (#379 review): the three identity fields
+    are redacted by shape only when the value does not resolve to an existing
+    account, so a real name that looks like a token keeps its attribution (and
+    its own throttle bucket) while a hex token typed as a username does not.
+    The lookup happens in :func:`_known_account_runs`, on that path only.
+
     Role and admin flag default to the request's authenticated state. Never
     raises: an audit failure must not fail the action being audited.
 
@@ -1285,12 +1336,17 @@ async def record_audit(
     count. The log line above still fires, a summary line is logged per window,
     and the drop is counted in health. Every other action is always stored.
     """
+    known_accounts = await _known_account_runs(
+        message, actor or "", target_id if isinstance(target_id, str) else ""
+    )
     # Fully formatted on purpose: the log dedup filter suppresses consecutive
     # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
-    logger.info(f"[AUDIT] {_scrub_audit_text(message)}")
-    resolved_actor = _scrub_audit_text(actor or "anonymous")
+    logger.info(f"[AUDIT] {_scrub_audit_text(message, keep=known_accounts)}")
+    resolved_actor = _scrub_audit_text(actor or "anonymous", keep=known_accounts)
     resolved_target_id = (
-        _scrub_audit_text(target_id) if isinstance(target_id, str) else target_id
+        _scrub_audit_text(target_id, keep=known_accounts)
+        if isinstance(target_id, str)
+        else target_id
     )
     throttle: storage.AuditThrottle | None = None
     if action in _AUDIT_AUTH_FAILURE_ACTIONS:
@@ -19022,8 +19078,21 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
             },
             request=request,
         )
-        return {"columns": columns, "rows": results, "count": len(results)}
-    except sqlite3.OperationalError as e:
+        # A row can carry a credential column (``github_token``, a key): mask the
+        # sensitive names in every row before the payload leaves the API, and
+        # let the shared response filter redact a ``request_params``-shaped one.
+        # The audit row above keeps the row *count* only, never the rows.
+        return strip_sensitive_from_response(
+            {
+                "columns": columns,
+                "rows": [mask_sensitive_fields(row) for row in results],
+                "count": len(results),
+            }
+        )
+    except sqlite3.Error as e:
+        # Any sqlite3 error, not only an operational one: a malformed statement
+        # (``SELECT ?`` raises ``ProgrammingError``) is an attempt too, so it
+        # leaves a failure row and the same 400 the client expects.
         await record_audit(
             action="admin.db_query",
             actor=username,

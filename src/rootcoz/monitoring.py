@@ -405,10 +405,13 @@ def record_audit_auth_suppression(actor: str, limit: int) -> int:
 
     Returns the new process-lifetime suppressed total. The per-actor window
     keeps the log honest without a line per attempt: the first drop of each
-    minute explains itself, the rest are counted into the next summary. Tracking
-    state is pruned on every window change and capped at
-    ``_AUDIT_AUTH_SUPPRESSION_MAX_ACTORS`` (oldest windows dropped first), so a
-    flood of distinct usernames cannot grow memory without bound.
+    minute explains itself, the rest are counted into the next summary. An
+    entry is pruned one window *after* its own window rolled, so another
+    actor's roll can never erase the count this actor's next summary reports;
+    an entry whose actor is gone for longer than that is dropped. Tracking
+    state is capped at ``_AUDIT_AUTH_SUPPRESSION_MAX_ACTORS`` (oldest windows
+    dropped first), so a flood of distinct usernames cannot grow memory without
+    bound.
     """
     global _audit_suppressed_auth_events
     now = time.monotonic()
@@ -421,11 +424,14 @@ def record_audit_auth_suppression(actor: str, limit: int) -> int:
             windows[actor] = (window_start, seen + 1)
             return total
         # A window change is the only touch that adds an entry: drop the
-        # entries whose own window has rolled over first.
+        # entries whose window rolled more than one window ago first. The extra
+        # window is deliberate: the count of the window that just ended is what
+        # this actor's next summary reports, so another actor's roll must not
+        # take it away.
         for name in [
             name
             for name, (started, _) in windows.items()
-            if now - started >= _AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
+            if now - started >= 2 * _AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
         ]:
             del windows[name]
         windows[actor] = (now, 1)
