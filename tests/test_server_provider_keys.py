@@ -2976,6 +2976,9 @@ def test_ai_models_refresh_forces_deployment_capture(client, monkeypatch, tmp_pa
     monkeypatch.setattr(
         "rootcoz.main.probe_cursor_auth", AsyncMock(return_value={"ok": True})
     )
+    monkeypatch.setattr(
+        "rootcoz.main.registered_provider_ids", AsyncMock(return_value=set())
+    )
     try:
         refreshed = client.post(
             "/api/admin/ai-models/refresh", headers=_admin_headers()
