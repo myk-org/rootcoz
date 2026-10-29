@@ -783,7 +783,7 @@ def _env_reference_var(reference: object) -> str | None:
     return name if name.isidentifier() else None
 
 
-def deployment_provider_credentials() -> dict[str, str]:
+def deployment_provider_credentials() -> dict[str, str] | None:
     """Deployment-env keys of providers flagged ``trustKeyScopedListing`` (#372).
 
     A custom provider whose ``models.json`` ``apiKey`` is an environment
@@ -797,16 +797,28 @@ def deployment_provider_credentials() -> dict[str, str]:
     admin-controlled manifest. Unset/empty variables and literal keys are
     skipped. Key material is never logged — provider names only, at DEBUG so
     a page-load read does not log the same names on every request.
+
+    ``None`` means the manifest exists but could not be read or parsed right
+    now (rewritten under us, mount blip) — "unknown", never "nothing is
+    eligible": a caller must keep whatever it captured before (#376). An
+    empty dict is a successful read that resolved no credential.
     """
     try:
         agent_dir = _sidecar_agent_dir()
         if agent_dir is None:
             return {}
         manifest = json.loads((agent_dir / "models.json").read_text())
-    except OSError, ValueError:
-        # No agent dir / custom providers, or a manifest the sidecar also
-        # could not parse: nothing to resolve, not an error here.
+    except FileNotFoundError:
+        # No manifest: no custom providers, nothing to resolve.
         return {}
+    except OSError, ValueError:
+        # A failure must never look like "no eligible providers" (#376): the
+        # caller would sweep every captured deployment listing away.
+        logger.warning(
+            "Deployment provider manifest unreadable; keeping captured"
+            " key-scoped listings"
+        )
+        return None
     providers = manifest.get("providers") if isinstance(manifest, dict) else None
     if not isinstance(providers, dict):
         return {}

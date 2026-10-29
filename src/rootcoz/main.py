@@ -193,6 +193,7 @@ from rootcoz.models import (
     ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
     ReportPortalPushResult,
+    ServerProviderCanRefreshModels,
     ServerProviderKeyInput,
     ServerProviderKeyScopedSource,
     SetCanUseServerProvidersRequest,
@@ -12655,7 +12656,7 @@ async def _capture_deployment_listing_for(
     """
     from rootcoz.ai_client import deployment_provider_credentials
 
-    for name, key in deployment_provider_credentials().items():
+    for name, key in (deployment_provider_credentials() or {}).items():
         if name.lower() == provider.lower():
             return await _capture_deployment_provider_listing(name, key)
     return [], "missing"
@@ -12664,12 +12665,46 @@ async def _capture_deployment_listing_for(
 # Deployment-credential capture (#372) costs one sidecar round-trip per
 # provider. The admin page reads it on every load; a short TTL keeps repeated
 # loads from re-querying the sidecar, and a forced model refresh bypasses it.
+# The TTL is bound to a digest of the capturable credentials (#376): a key
+# added, rotated, removed, or shadowed by a new stored key must capture at
+# once instead of waiting out the window.
 _DEPLOYMENT_LISTING_TTL_SEC = 300.0
-_deployment_listing_captured_at: float | None = None
+# ``(captured_at, digest)`` of the last capture pass; None before the first.
+_deployment_listing_state: tuple[float, str] | None = None
+
+
+def _deployment_credentials_digest(credentials: dict[str, str]) -> str:
+    """Stable digest of a capturable credential map — key values never stored."""
+    return hashlib.sha256(json.dumps(sorted(credentials.items())).encode()).hexdigest()
+
+
+async def _deployment_capture_scope(
+    credentials: dict[str, str],
+) -> tuple[dict[str, str], set[str]]:
+    """Split resolved deployment credentials into capturable / stored-key (#376).
+
+    A provider with a stored key owns its rows and its own generation-bound
+    capture path: capturing it with the deployment key would overwrite the
+    stored key's listing, which the API then reports as ``stored`` while
+    sessions use the stored key. Returns ``(capturable, stored)``, ``stored``
+    being the normalized stored-provider set the stale sweep leaves alone.
+    """
+    stored = {
+        normalize_provider(row["provider"])
+        for row in await storage.list_server_ai_providers()
+    }
+    return (
+        {
+            name: key
+            for name, key in credentials.items()
+            if normalize_provider(name) not in stored
+        },
+        stored,
+    )
 
 
 async def _clear_stale_deployment_listings(
-    credentials: dict[str, str],
+    credentials: dict[str, str], stored: set[str]
 ) -> list[str]:
     """Clear captured key-scoped rows whose deployment credential is gone (#372).
 
@@ -12684,25 +12719,31 @@ async def _clear_stale_deployment_listings(
     Without a stored key the remaining rows can only be deployment-captured or
     orphaned — ``key_scoped_source`` cannot tell those apart for rows written
     before this change — and clearing is the correct outcome either way: no
-    credential exists to back the listing. Logs provider names only.
+    credential exists to back the listing. ``stored`` comes from
+    ``_deployment_capture_scope`` (the same skip rule the capture uses). Logs
+    provider names only. Best-effort: a storage failure logs a warning and
+    keeps every row — this runs inside page loads, model refreshes and the
+    startup task, none of which may fail because of a sweep (#376).
     """
     deployment = {normalize_provider(name) for name in credentials}
-    stored = {
-        normalize_provider(row["provider"])
-        for row in await storage.list_server_ai_providers()
-    }
-    # One spelling per provider: the row write is case-insensitive, so a
-    # drifted duplicate spelling must not be cleared (and logged) twice.
-    by_lower: dict[str, str] = {}
-    for row in await storage.list_server_provider_key_models():
-        by_lower.setdefault(row["provider"].lower(), row["provider"])
-    cleared: list[str] = []
-    for provider_lower, provider in sorted(by_lower.items()):
-        normalized = normalize_provider(provider)
-        if normalized in deployment or normalized in stored:
-            continue
-        if await storage.set_server_provider_key_models(provider, [], status=None):
-            cleared.append(provider)
+    try:
+        # One spelling per provider: the row write is case-insensitive, so a
+        # drifted duplicate spelling must not be cleared (and logged) twice.
+        by_lower: dict[str, str] = {}
+        for row in await storage.list_server_provider_key_models():
+            by_lower.setdefault(row["provider"].lower(), row["provider"])
+        cleared: list[str] = []
+        for provider_lower, provider in sorted(by_lower.items()):
+            normalized = normalize_provider(provider)
+            if normalized in deployment or normalized in stored:
+                continue
+            if await storage.set_server_provider_key_models(provider, [], status=None):
+                cleared.append(provider)
+    except sqlite3.Error, OSError:
+        logger.warning(
+            "Unable to clear stale deployment key-scoped listings; keeping them"
+        )
+        return []
     if cleared:
         logger.info(
             "Cleared captured deployment key-scoped listings for providers that"
@@ -12724,32 +12765,51 @@ async def capture_deployment_provider_listings(
     serves a live key-scoped listing for exactly that credential — capture it
     so the offered set matches what the gateway serves.
 
-    Best-effort per provider: a failure logs a warning naming the provider and
-    leaves its existing rows untouched. Runs at most once per
+    Best-effort per provider: a failure logs a warning and leaves its existing
+    rows untouched, never propagating. Runs at most once per
     ``_DEPLOYMENT_LISTING_TTL_SEC`` unless ``force`` (model refresh, per
-    provider refresh). Never touches the admin's model selection.
-    ``credentials`` reuses an already-resolved map so one request reads the
-    manifest once. Each pass also clears captured rows whose deployment
-    credential disappeared (``_clear_stale_deployment_listings``) — including
-    a pass that resolves no credential at all. Returns ``{provider: captured
-    model count}`` for the providers captured by this call.
+    provider refresh) or the capturable credential map changed since the last
+    pass (#376) — a key add/rotate/remove is never invisible for a TTL.
+    Never touches the admin's model selection. ``credentials`` reuses an
+    already-resolved map so one request reads the manifest once; ``None``
+    means the manifest read failed (or is unresolved), which keeps every
+    captured row and sweeps nothing. Each pass also clears captured rows whose
+    deployment credential disappeared (``_clear_stale_deployment_listings``)
+    — including a pass that resolves no credential at all. Returns
+    ``{provider: captured model count}`` for the providers captured by this
+    call.
     """
-    global _deployment_listing_captured_at
+    global _deployment_listing_state
     if credentials is None:
         from rootcoz.ai_client import deployment_provider_credentials
 
         credentials = deployment_provider_credentials()
+    if credentials is None:
+        # The manifest could not be read (#376): nothing is known about which
+        # rows a live credential still backs, so a sweep here would clear
+        # them all. The resolver already logged the warning.
+        return {}
+    try:
+        capturable, stored = await _deployment_capture_scope(credentials)
+    except sqlite3.Error, OSError:
+        logger.warning(
+            "Unable to read stored server providers; skipping deployment"
+            " key-scoped capture"
+        )
+        return {}
+    digest = _deployment_credentials_digest(capturable)
     now = _time.monotonic()
     if (
         not force
-        and _deployment_listing_captured_at is not None
-        and now - _deployment_listing_captured_at < _DEPLOYMENT_LISTING_TTL_SEC
+        and _deployment_listing_state is not None
+        and _deployment_listing_state[1] == digest
+        and now - _deployment_listing_state[0] < _DEPLOYMENT_LISTING_TTL_SEC
     ):
         return {}
-    _deployment_listing_captured_at = now
-    await _clear_stale_deployment_listings(credentials)
+    _deployment_listing_state = (now, digest)
+    await _clear_stale_deployment_listings(capturable, stored)
     captured: dict[str, int] = {}
-    for provider, key in credentials.items():
+    for provider, key in capturable.items():
         models, status = await _capture_deployment_provider_listing(provider, key)
         if status == "supported":
             captured[provider] = len(models)
@@ -12873,8 +12933,17 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     from rootcoz.ai_client import deployment_provider_credentials
 
     deployment_credentials = deployment_provider_credentials()
-    await capture_deployment_provider_listings(credentials=deployment_credentials)
-    deployment_providers = {p.lower() for p in deployment_credentials}
+    # Providers this load holds a deployment credential for — the same
+    # ``capturable`` scope the capture writes with, so a stored key is not
+    # counted here (it owns its rows) and the refresh flag below cannot drift
+    # from what a capture would actually do. ``None`` = manifest unreadable.
+    capturable: set[str] | None = None
+    if deployment_credentials is not None:
+        await capture_deployment_provider_listings(credentials=deployment_credentials)
+        capturable_credentials, _stored = await _deployment_capture_scope(
+            deployment_credentials
+        )
+        capturable = {normalize_provider(name) for name in capturable_credentials}
     catalog = await _get_model_catalog()
     # Case-insensitive join (#347): storage matches providers ignoring case,
     # so a key stored as "Google" must key the catalog's "google" entry —
@@ -12976,12 +13045,27 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         # stored server key or the deployment env's env-referenced manifest
         # key. The deployment case keeps has_key False — nothing is stored —
         # so the UI can show a live, deployment-verified listing alongside it.
-        key_scoped_source: ServerProviderKeyScopedSource | None = (
-            "stored"
-            if record is not None
-            else "deployment"
-            if provider_lower in deployment_providers and provider_lower in key_scoped
-            else None
+        # Both sources require captured rows (#376): a stored credential with
+        # no listing (unsupported discovery / failed capture) is not a source,
+        # or ``key_scoped: false`` would come with ``key_scoped_source:
+        # "stored"``.
+        key_scoped_source: ServerProviderKeyScopedSource | None = None
+        if record is not None and provider_lower in key_scoped:
+            key_scoped_source = "stored"
+        elif record is None and (
+            capturable is not None
+            and provider_lower in capturable
+            and provider_lower in key_scoped
+        ):
+            key_scoped_source = "deployment"
+        # Whether the refresh-models endpoint can act for this provider (#376):
+        # it reads a stored key or re-captures with a capturable deployment
+        # credential. With the manifest unreadable (``capturable`` None) only
+        # an already captured listing keeps it refreshable. Boolean only.
+        can_refresh_models: ServerProviderCanRefreshModels = record is not None or (
+            provider_lower in key_scoped
+            if capturable is None
+            else provider_lower in capturable
         )
         providers.append(
             {
@@ -13005,6 +13089,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 if record
                 else None,
                 "key_scoped_source": key_scoped_source,
+                "can_refresh_models": can_refresh_models,
                 "models": models,
             }
         )

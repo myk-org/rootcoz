@@ -6,7 +6,10 @@ delete warnings), the scoped-models server pool, and per-session apiKey
 injection with unchanged credential-source semantics.
 """
 
+import contextlib
 import json
+import logging
+import sqlite3
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -43,7 +46,7 @@ def client(tmp_path, monkeypatch):
     # dir manifest from the host, no TTL carried over from another test, and no
     # startup preload racing a test's own manifest/call-count assertions.
     monkeypatch.delenv("PI_SIDECAR_AGENT_DIR", raising=False)
-    monkeypatch.setattr("rootcoz.main._deployment_listing_captured_at", None)
+    monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
     monkeypatch.setattr("rootcoz.main._safe_preload_cursor_models", AsyncMock())
     get_settings.cache_clear()
     with TestClient(app) as client:
@@ -53,6 +56,20 @@ def client(tmp_path, monkeypatch):
 
 def _admin_headers():
     return {"Authorization": "Bearer sp-bootstrap-key"}
+
+
+@contextlib.contextmanager
+def _captured_logs(caplog, *names, level=logging.WARNING):
+    """Collect records from rootcoz module loggers (they set propagate=False)."""
+    module_loggers = [logging.getLogger(name) for name in names]
+    for module_logger in module_loggers:
+        module_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(level):
+            yield caplog
+    finally:
+        for module_logger in module_loggers:
+            module_logger.removeHandler(caplog.handler)
 
 
 def _fake_catalog(monkeypatch, catalog):
@@ -2401,11 +2418,11 @@ async def test_deployment_capture_failure_keeps_prior_listing(
         return [m["id"] for m in provider["models"]]
 
     # Sidecar down: the captured rows survive and the page keeps working.
-    monkeypatch.setattr("rootcoz.main._deployment_listing_captured_at", None)
+    monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
     _mock_key_discovery(monkeypatch, httpx.ConnectError("sidecar down"))
     assert await _listed_models() == ["mygateway/gpt-4o", "mygateway/llama-4"]
     # Listing endpoint withdrawn: still no downgrade to the static manifest.
-    monkeypatch.setattr("rootcoz.main._deployment_listing_captured_at", None)
+    monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
     _mock_key_discovery(monkeypatch, [], listing_supported=False)
     assert await _listed_models() == ["mygateway/gpt-4o", "mygateway/llama-4"]
 
@@ -2481,6 +2498,218 @@ async def test_stale_deployment_sweep_never_clears_stored_key_rows(
     assert google["key_scoped_source"] == "stored"
 
 
+async def test_deployment_capture_skips_provider_with_stored_key(
+    client, monkeypatch, tmp_path
+):
+    """A stored key owns its rows (#376): the deployment key never overwrites them."""
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
+    await storage.set_server_ai_credential("mygateway", SECRET, "admin")
+    await storage.set_server_provider_key_models(
+        "mygateway", [{"id": "mygateway/stored-only"}], status="supported"
+    )
+    calls = _mock_key_discovery(monkeypatch, [{"id": "mygateway/deployment-only"}])
+
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+
+    assert listed.status_code == 200
+    # Not one discovery ran with the deployment key for a stored-key provider.
+    assert calls == []
+    rows = await storage.list_server_provider_key_models()
+    assert [(row["provider"], row["model"]) for row in rows] == [
+        ("mygateway", "mygateway/stored-only")
+    ]
+    provider = {p["provider"]: p for p in listed.json()["providers"]}["mygateway"]
+    assert provider["has_key"] is True
+    assert provider["key_scoped"] is True
+    assert provider["key_scoped_status"] == "supported"
+    assert provider["key_scoped_source"] == "stored"
+
+
+async def test_deployment_credential_change_bypasses_ttl(client, monkeypatch, tmp_path):
+    """A key rotate captures at once; an unchanged map keeps the TTL (#376)."""
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
+    calls = _mock_key_discovery(monkeypatch, [{"id": "mygateway/gpt-4o"}])
+    client.get("/api/admin/server-providers", headers=_admin_headers())
+    client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert len(calls) == 1  # unchanged map inside the TTL: served from cache
+
+    rotated = "rotated-deployment-key"  # pragma: allowlist secret
+    monkeypatch.setenv(DEPLOYMENT_ENV, rotated)
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert listed.status_code == 200
+    assert len(calls) == 2  # changed credential: captured immediately
+    assert calls[-1] == ("mygateway", rotated)
+    client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert len(calls) == 2  # unchanged again: back to the TTL
+
+    # The variable disappearing also changes the map: the sweep runs at once.
+    monkeypatch.delenv(DEPLOYMENT_ENV, raising=False)
+    assert await rootcoz_main.capture_deployment_provider_listings() == {}
+    assert await storage.list_server_provider_key_models() == []
+
+
+async def test_manifest_read_failure_keeps_listing_and_skips_sweep(
+    client, monkeypatch, tmp_path, caplog
+):
+    """An unreadable manifest is not "nothing eligible" (#376): keep the rows."""
+    agent_dir = _point_agent_dir(
+        monkeypatch, tmp_path, {"mygateway": _deployment_provider()}
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(
+        monkeypatch, [{"provider": "mygateway", "id": "mygateway/catalog-only"}]
+    )
+    _mock_key_discovery(monkeypatch, [{"id": "mygateway/gpt-4o"}])
+    client.get("/api/admin/server-providers", headers=_admin_headers())
+
+    # Credential gone AND manifest unreadable (mount blip / rewrite): an empty
+    # resolve here would sweep the captured listing away.
+    monkeypatch.delenv(DEPLOYMENT_ENV, raising=False)
+    (agent_dir / "models.json").write_text("{ half-written")
+    with _captured_logs(caplog, "rootcoz.ai_client", "rootcoz.main") as captured:
+        listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+
+    assert listed.status_code == 200
+    assert [
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_key_models()
+    ] == [("mygateway", "mygateway/gpt-4o")]
+    provider = {p["provider"]: p for p in listed.json()["providers"]}["mygateway"]
+    assert provider["key_scoped"] is True
+    assert "manifest unreadable" in captured.text
+
+
+async def test_sweep_storage_failure_keeps_rows_and_endpoint_ok(
+    client, monkeypatch, tmp_path, caplog
+):
+    """A storage error inside the sweep never 500s the listing (#376)."""
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
+    _mock_key_discovery(monkeypatch, [{"id": "mygateway/gpt-4o"}])
+    client.get("/api/admin/server-providers", headers=_admin_headers())
+
+    async def _boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.delenv(DEPLOYMENT_ENV, raising=False)
+    monkeypatch.setattr(storage, "set_server_provider_key_models", _boom)
+    with _captured_logs(caplog, "rootcoz.main") as captured:
+        listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+
+    assert listed.status_code == 200
+    provider = {p["provider"]: p for p in listed.json()["providers"]}["mygateway"]
+    assert provider["key_scoped"] is True
+    assert [m["id"] for m in provider["models"]] == ["mygateway/gpt-4o"]
+    assert [
+        row["model"] for row in await storage.list_server_provider_key_models()
+    ] == ["mygateway/gpt-4o"]
+    assert "Unable to clear stale deployment" in captured.text
+
+
+async def test_startup_capture_survives_sweep_storage_failure(tmp_path, monkeypatch):
+    """The startup preload never raises from the deployment capture (#376)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp.db")
+    await storage.init_db()
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
+    monkeypatch.setattr(rootcoz_main, "list_models", AsyncMock(return_value=[]))
+    await storage.set_server_provider_key_models(
+        "orphan", [{"id": "orphan/model"}], status=None
+    )
+
+    async def _boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(storage, "set_server_provider_key_models", _boom)
+    await rootcoz_main._safe_preload_cursor_models()
+
+    assert [
+        (row["provider"], row["model"])
+        for row in await storage.list_server_provider_key_models()
+    ] == [("orphan", "orphan/model")]
+
+
+async def test_stored_credential_without_rows_reports_no_source(client, monkeypatch):
+    """``key_scoped_source`` reflects rows, not a credential record (#376)."""
+    _fake_catalog(monkeypatch, [{"provider": "google", "id": "gemini-2.5-pro"}])
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+
+    provider = {p["provider"]: p for p in listed.json()["providers"]}["google"]
+    assert provider["has_key"] is True
+    assert provider["key_scoped"] is False
+    assert provider["key_scoped_source"] is None
+    # The refresh path reads the stored record, so the button stays offered.
+    assert provider["can_refresh_models"] is True
+
+
+def _providers(client):
+    """Admin provider listing, keyed by provider name."""
+    listed = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert listed.status_code == 200
+    return {p["provider"]: p for p in listed.json()["providers"]}
+
+
+async def test_can_refresh_models_true_for_deployment_credential(
+    client, monkeypatch, tmp_path
+):
+    """A capturable deployment credential is refreshable before any capture (#376)."""
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
+    # No listing endpoint: this load captures no rows at all.
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    provider = _providers(client)["mygateway"]
+
+    assert provider["has_key"] is False
+    assert provider["key_scoped"] is False
+    assert await storage.list_server_provider_key_models() == []
+    assert provider["can_refresh_models"] is True
+
+
+async def test_can_refresh_models_false_for_ambient_provider(client, monkeypatch):
+    """No stored key and no capturable credential: nothing to refresh (#376)."""
+    _fake_catalog(monkeypatch, [{"provider": "google", "id": "gemini-2.5-pro"}])
+
+    provider = _providers(client)["google"]
+
+    assert provider["has_key"] is False
+    assert provider["can_refresh_models"] is False
+
+
+async def test_can_refresh_models_with_unreadable_manifest(
+    client, monkeypatch, tmp_path
+):
+    """Manifest unreadable (#376): only an already captured listing refreshes."""
+    agent_dir = _point_agent_dir(
+        monkeypatch, tmp_path, {"mygateway": _deployment_provider()}
+    )
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "mygateway", "id": "mygateway/gpt-4o"},
+            {"provider": "google", "id": "gemini-2.5-pro"},
+        ],
+    )
+    await storage.set_server_provider_key_models(
+        "mygateway", [{"id": "mygateway/gpt-4o"}], status="supported"
+    )
+    (agent_dir / "models.json").write_text("{ half-written")
+
+    providers = _providers(client)
+
+    assert providers["mygateway"]["has_key"] is False
+    assert providers["mygateway"]["can_refresh_models"] is True
+    assert providers["google"]["can_refresh_models"] is False
+
+
 def test_ai_models_refresh_forces_deployment_capture(client, monkeypatch, tmp_path):
     """The catalog refresh re-reads deployment listings despite the TTL."""
     _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
@@ -2512,7 +2741,7 @@ async def test_startup_discovery_captures_deployment_listings(tmp_path, monkeypa
     await storage.init_db()
     _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
     monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
-    monkeypatch.setattr("rootcoz.main._deployment_listing_captured_at", None)
+    monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
     _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
     calls = _mock_key_discovery(monkeypatch, [{"id": "mygateway/gpt-4o"}])
     await rootcoz_main._safe_preload_cursor_models()
@@ -2527,24 +2756,14 @@ async def test_deployment_key_never_logged_or_returned(
     client, monkeypatch, tmp_path, caplog
 ):
     """Capture logs and responses name providers, never key material (#372)."""
-    import logging
-
     _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
     monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
     _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
     _mock_key_discovery(monkeypatch, [{"id": "mygateway/gpt-4o"}])
-    handlers = [
-        logging.getLogger("rootcoz.main"),
-        logging.getLogger("rootcoz.ai_client"),
-    ]
-    for handler_logger in handlers:
-        handler_logger.addHandler(caplog.handler)
-    try:
-        with caplog.at_level(logging.DEBUG):
-            listed = client.get("/api/admin/server-providers", headers=_admin_headers())
-    finally:
-        for handler_logger in handlers:
-            handler_logger.removeHandler(caplog.handler)
+    with _captured_logs(
+        caplog, "rootcoz.main", "rootcoz.ai_client", level=logging.DEBUG
+    ):
+        listed = client.get("/api/admin/server-providers", headers=_admin_headers())
     assert DEPLOYMENT_KEY not in listed.text
     assert DEPLOYMENT_KEY not in caplog.text
     assert "mygateway" in caplog.text
