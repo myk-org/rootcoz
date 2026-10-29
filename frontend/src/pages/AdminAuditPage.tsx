@@ -1,11 +1,12 @@
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { useNavigationType, useSearchParams } from 'react-router-dom'
-import { api, extractApiDetail } from '@/lib/api'
+import { Link, useNavigationType, useSearchParams } from 'react-router-dom'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { EMPTY_FILTERS, matchesFilters, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
 import { formatRelativeTime, formatTimestamp } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -346,15 +347,25 @@ export function AdminAuditPage() {
   }, [searchParams, navigationType, dispatch])
 
   const [result, setResult] = useState<{ key: string; data: AuditListResponse } | null>(null)
-  const [errorState, setErrorState] = useState<{ key: string; text: string }>({ key: '', text: '' })
+  const [errorState, setErrorState] = useState<{ key: string; text: string; unauthorized: boolean }>({
+    key: '',
+    text: '',
+    unauthorized: false,
+  })
   const [actions, setActions] = useState<AuditActionEntry[]>([])
   const [expandedId, setExpandedId] = useState<number | null>(null)
+  // Events the server dropped for this subscriber; the list below has holes.
+  const [dropped, setDropped] = useState(0)
+  // Bumped by the notice's refresh action to refetch the current query.
+  const [reloadToken, setReloadToken] = useState(0)
 
   // The request key doubles as the loading flag: a response for the current
   // key means the shown page matches the filters, anything else is stale.
   const query = buildAuditQuery(filters, offset, limit)
   const loaded = result?.key === query ? result.data : null
   const error = errorState.key === query ? errorState.text : ''
+  // A 401 is not a generic failure: the admin cannot fix it from this page.
+  const unauthorized = errorState.key === query && errorState.unauthorized
   // A failed request has no data for this query, but it is not still loading it.
   const loading = loaded === null && !error
 
@@ -381,21 +392,24 @@ export function AdminAuditPage() {
         if (cancelled) return
         setResult({ key: query, data: payload })
         // A query that failed earlier is recovered — do not keep its banner.
-        setErrorState({ key: '', text: '' })
+        setErrorState({ key: '', text: '', unauthorized: false })
       })
       .catch((err: unknown) => {
         if (cancelled) return
+        const sessionExpired = err instanceof ApiError && err.status === 401
         setErrorState({
           key: query,
-          text:
-            extractApiDetail(err) ??
-            (err instanceof Error ? err.message : 'Failed to load audit events'),
+          unauthorized: sessionExpired,
+          text: sessionExpired
+            ? 'Your session expired — sign in again to load the audit log.'
+            : extractApiDetail(err) ??
+              (err instanceof Error ? err.message : 'Failed to load audit events'),
         })
       })
     return () => {
       cancelled = true
     }
-  }, [query])
+  }, [query, reloadToken])
 
   // Latest view for the stable stream handler: reconnecting SSE on every filter
   // or page change would drop the events emitted in the gap.
@@ -439,6 +453,18 @@ export function AdminAuditPage() {
         // A malformed frame must not kill the stream.
       }
     })
+    source.addEventListener('audit-gap', (message) => {
+      try {
+        // One signal per overflow, already counted by the server: it replaces
+        // the previous number instead of adding to it.
+        const payload = JSON.parse((message as MessageEvent).data) as { dropped?: number }
+        if (typeof payload.dropped === 'number' && payload.dropped > 0) {
+          setDropped(payload.dropped)
+        }
+      } catch {
+        // A malformed frame must not kill the stream.
+      }
+    })
     source.onopen = () => dispatch({ type: 'live', phase: 'streaming' })
     // No automatic reconnect: the switch goes off and the admin re-enables it.
     source.onerror = () => {
@@ -449,6 +475,13 @@ export function AdminAuditPage() {
 
     return () => source.close()
   }, [live, prependEvent, writeParam, dispatch])
+
+  // Refetch what is on screen with the same filters and offset, and drop the
+  // gap notice: the fresh page has the events the stream skipped.
+  const refreshView = useCallback(() => {
+    setDropped(0)
+    setReloadToken((token) => token + 1)
+  }, [])
 
   const setLive = (checked: boolean) => {
     dispatch({ type: 'live', phase: checked ? 'connecting' : 'off' })
@@ -573,9 +606,27 @@ export function AdminAuditPage() {
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 rounded-lg border border-signal-red/40 bg-signal-red/10 px-3 py-2 text-sm text-signal-red">
-          {error}
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-signal-red/40 bg-signal-red/10 px-3 py-2 text-sm text-signal-red">
+          <span>{error}</span>
+          {unauthorized && (
+            <Link to="/login" className="font-medium underline underline-offset-2">
+              Sign in
+            </Link>
+          )}
         </div>
+      )}
+
+      {/* Outside the toolbar and the table: no control reorders and no row resizes
+          when the notice appears. */}
+      {dropped > 0 && (
+        <CustomMessageBanner
+          message={`Missed ${dropped} live ${dropped === 1 ? 'event' : 'events'} — the stream fell behind, so this view has a gap.`}
+          action={
+            <Button variant="ghost" size="sm" onClick={refreshView}>
+              Refresh
+            </Button>
+          }
+        />
       )}
 
       <Card>
@@ -583,7 +634,27 @@ export function AdminAuditPage() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Time</TableHead>
+                <TableHead>
+                  {/* Stored values and the date filters are UTC; the cells show local time. */}
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span
+                          data-testid="time-basis"
+                          tabIndex={0}
+                          aria-label="Stored times and the date filters are UTC — this column is shown in your local time."
+                          className="cursor-help"
+                        >
+                          Time <span className="text-xs font-normal text-text-tertiary">UTC</span>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        Stored times and the date filters are UTC — this column is shown in your local
+                        time.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </TableHead>
                 <TableHead>Actor</TableHead>
                 <TableHead>Action</TableHead>
                 <TableHead>Target</TableHead>

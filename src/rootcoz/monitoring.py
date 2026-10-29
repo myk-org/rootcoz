@@ -395,6 +395,9 @@ _audit_suppressed_auth_events = 0
 # username -> (window_start_monotonic, suppressed in that window)
 _audit_auth_suppression_windows: dict[str, tuple[float, int]] = {}
 _AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS = 60
+# Hard cap on tracked usernames: a flood of fresh junk names must not grow
+# process memory without bound (the count above still records every drop).
+_AUDIT_AUTH_SUPPRESSION_MAX_ACTORS = 1000
 
 
 def record_audit_auth_suppression(actor: str, limit: int) -> int:
@@ -402,18 +405,34 @@ def record_audit_auth_suppression(actor: str, limit: int) -> int:
 
     Returns the new process-lifetime suppressed total. The per-actor window
     keeps the log honest without a line per attempt: the first drop of each
-    minute explains itself, the rest are counted into the next summary.
+    minute explains itself, the rest are counted into the next summary. Tracking
+    state is pruned on every window change and capped at
+    ``_AUDIT_AUTH_SUPPRESSION_MAX_ACTORS`` (oldest windows dropped first), so a
+    flood of distinct usernames cannot grow memory without bound.
     """
     global _audit_suppressed_auth_events
     now = time.monotonic()
     with _audit_counters_lock:
         _audit_suppressed_auth_events += 1
         total = _audit_suppressed_auth_events
-        window_start, seen = _audit_auth_suppression_windows.get(actor, (0.0, 0))
+        windows = _audit_auth_suppression_windows
+        window_start, seen = windows.get(actor, (0.0, 0))
         if now - window_start < _AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS:
-            _audit_auth_suppression_windows[actor] = (window_start, seen + 1)
+            windows[actor] = (window_start, seen + 1)
             return total
-        _audit_auth_suppression_windows[actor] = (now, 1)
+        # A window change is the only touch that adds an entry: drop the
+        # entries whose own window has rolled over first.
+        for name in [
+            name
+            for name, (started, _) in windows.items()
+            if now - started >= _AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
+        ]:
+            del windows[name]
+        windows[actor] = (now, 1)
+        # Dicts keep insertion order and every window is the same length, so
+        # the front holds the oldest window: dropping from it bounds memory.
+        while len(windows) > _AUDIT_AUTH_SUPPRESSION_MAX_ACTORS:
+            del windows[next(iter(windows))]
     # Fully formatted on purpose: the log dedup filter drops a repeat of the
     # same ``msg``, and the window summary must survive a later actor's line.
     logger.warning(

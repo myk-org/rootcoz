@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { MemoryRouter, RouterProvider, createMemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminAuditPage } from '@/pages/AdminAuditPage'
+import { ApiError } from '@/lib/api'
 
 const apiGet = vi.fn()
 vi.mock('@/lib/api', async (importOriginal) => {
@@ -202,9 +203,49 @@ describe('AdminAuditPage', () => {
     const { container } = renderPage()
 
     expect(await screen.findByText('500: audit table unavailable')).toBeInTheDocument()
+    // A 401-only affordance: nothing to sign in to for a plain server error.
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument()
     // A failed request is not an outstanding one: no skeleton, no "empty" claim.
     expect(container.querySelector('.animate-pulse')).toBeNull()
     expect(screen.queryByText('No audit events yet')).not.toBeInTheDocument()
+  })
+
+  it('offers a re-login path when the list request is rejected with 401', async () => {
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/admin/audit/actions')
+        ? Promise.resolve({ actions: [] })
+        : Promise.reject(new ApiError(401, 'Unauthorized', { detail: 'Session expired' })),
+    )
+    renderPage()
+
+    expect(await screen.findByText(/session expired — sign in again/i)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login')
+  })
+
+  it('shows the plain error and no sign-in link for a 500', async () => {
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/admin/audit/actions')
+        ? Promise.resolve({ actions: [] })
+        : Promise.reject(new ApiError(500, 'Internal Server Error', { detail: 'audit table unavailable' })),
+    )
+    renderPage()
+
+    expect(await screen.findByText('audit table unavailable')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/sign in again/i)).not.toBeInTheDocument()
+  })
+
+  it('labels the time column as UTC with the explanation in its tooltip', async () => {
+    mockAuditApi(1)
+    renderPage()
+    await screen.findByText('alice')
+
+    const marker = screen.getByTestId('time-basis')
+    expect(marker).toHaveTextContent('Time UTC')
+    // The explanation is on the marker itself, not on every row.
+    expect(marker.getAttribute('aria-label')).toContain('date filters are UTC')
+    await userEvent.hover(marker)
+    expect((await screen.findByRole('tooltip')).textContent).toContain('date filters are UTC')
   })
 
   it('restores filters from the URL and mirrors filter edits back into it', async () => {
@@ -588,5 +629,77 @@ describe('AdminAuditPage', () => {
     expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Live tail is off'))
     expect(liveDot()).toHaveClass('bg-border-default')
     expect(await liveTooltip()).toContain('Live tail is off')
+  })
+
+  it('shows how many events the stream dropped when audit-gap arrives', async () => {
+    mockAuditApi(1)
+    renderPage()
+    await screen.findByText('alice')
+
+    const { source } = enableLive()
+    act(() => {
+      source.emit('audit-gap', { dropped: 3 })
+    })
+
+    expect(await screen.findByText(/Missed 3 live events/)).toBeInTheDocument()
+    // The stream is still healthy — nothing else about the page changes.
+    expect(screen.getByText('alice')).toBeInTheDocument()
+    expect(liveSwitch()).toHaveAttribute('aria-checked', 'true')
+  })
+
+  it('clears the gap notice and refetches the current view when Refresh is clicked', async () => {
+    mockAuditApi(1)
+    renderPage('/admin/audit?q=alice&offset=0')
+    await screen.findByText('alice')
+
+    const { source } = enableLive()
+    act(() => {
+      source.emit('audit-gap', { dropped: 3 })
+    })
+    expect(await screen.findByText(/Missed 3 live events/)).toBeInTheDocument()
+
+    apiGet.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+
+    // Same filters, same offset: it refreshes the view instead of resetting it.
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith('/api/admin/audit?limit=50&offset=0&q=alice'),
+    )
+    await waitFor(() => expect(screen.queryByText(/Missed 3 live events/)).toBeNull())
+  })
+
+  it('shows no gap notice when only normal events arrive', async () => {
+    mockAuditApi(1)
+    renderPage()
+    await screen.findByText('alice')
+
+    const { source } = enableLive()
+    act(() => {
+      source.emit('audit:event', event({ id: 2, actor: 'bob', action: 'user.role.change' }))
+    })
+
+    expect(await screen.findByText('bob')).toBeInTheDocument()
+    expect(screen.queryByText(/Missed \d+ live/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull()
+  })
+
+  it('replaces the count on a second gap instead of stacking a second notice', async () => {
+    mockAuditApi(1)
+    renderPage()
+    await screen.findByText('alice')
+
+    const { source } = enableLive()
+    act(() => {
+      source.emit('audit-gap', { dropped: 3 })
+    })
+    expect(await screen.findByText(/Missed 3 live events/)).toBeInTheDocument()
+
+    act(() => {
+      source.emit('audit-gap', { dropped: 5 })
+    })
+
+    expect(await screen.findByText(/Missed 5 live events/)).toBeInTheDocument()
+    expect(screen.queryByText(/Missed 3 live events/)).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Refresh' })).toHaveLength(1)
   })
 })

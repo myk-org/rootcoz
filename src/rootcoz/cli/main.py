@@ -4403,7 +4403,9 @@ def transcripts_show_cmd(
         client = _get_client()
         if output:
             written = client.admin_download_transcript_to_file(session_id, output)
-            typer.echo(f"Saved {written} bytes to {output}")
+            # A '-' target is a pipe: the status line would corrupt the JSONL.
+            if output != "-":
+                typer.echo(f"Saved {written} bytes to {output}")
             return
         content = client.admin_download_transcript(session_id)
     except RootCozError as exc:

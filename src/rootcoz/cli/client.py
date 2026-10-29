@@ -1,5 +1,7 @@
 """HTTP client for the rootcoz REST API."""
 
+import contextlib
+import os
 import re
 import sys
 from typing import Any
@@ -510,7 +512,9 @@ class RootCozClient:
         """Stream one GET response to *path* (``-`` = stdout); bytes written.
 
         Consumes the server's streamed chunks instead of buffering the whole
-        download in memory.
+        download in memory. A file target is written to ``<path>.part`` and only
+        renamed into place once the stream completed, so an interrupted export
+        never leaves a truncated file that looks like a valid one.
         """
         if params:
             params = {k: v for k, v in params.items() if v is not None and v != ""}
@@ -525,16 +529,27 @@ class RootCozClient:
                         detail = response.text
                     raise RootCozError(status_code=response.status_code, detail=detail)
                 written = 0
-                try:
-                    if path == "-":
+                if path == "-":
+                    try:
                         written = _copy_stream(response, sys.stdout.buffer)
-                    else:
-                        with open(path, "wb") as handle:
+                    except OSError as exc:
+                        raise RootCozError(
+                            status_code=0, detail=f"Cannot write {path}: {exc}"
+                        ) from exc
+                else:
+                    partial = f"{path}.part"
+                    try:
+                        with open(partial, "wb") as handle:
                             written = _copy_stream(response, handle)
-                except OSError as exc:
-                    raise RootCozError(
-                        status_code=0, detail=f"Cannot write {path}: {exc}"
-                    ) from exc
+                        os.replace(partial, path)
+                    except BaseException as exc:
+                        with contextlib.suppress(OSError):
+                            os.unlink(partial)
+                        if isinstance(exc, OSError):
+                            raise RootCozError(
+                                status_code=0, detail=f"Cannot write {path}: {exc}"
+                            ) from exc
+                        raise
             return written
         except httpx.TimeoutException as exc:
             raise RootCozError(

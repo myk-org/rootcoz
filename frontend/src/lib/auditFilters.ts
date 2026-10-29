@@ -1,3 +1,5 @@
+import { parseApiTimestamp } from '@/lib/utils'
+
 export interface AuditEvent {
   id: number
   created_at: string
@@ -30,15 +32,18 @@ export const EMPTY_FILTERS: AuditFilters = {
   q: '',
 }
 
-/** DB timestamps are naive UTC "YYYY-MM-DD HH:MM:SS"; a date-only bound covers that day. */
-function boundValue(value: string, endOfDay: boolean): string {
+/**
+ * A filter bound in epoch millis, or null when unbounded. Stored timestamps and
+ * the bounds are both UTC; a date-only bound covers that whole UTC day.
+ */
+function boundMillis(value: string, endOfDay: boolean): number | null {
   const trimmed = value.trim()
-  if (!trimmed) return ''
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    return `${trimmed} ${endOfDay ? '23:59:59' : '00:00:00'}`
-  }
-  // shortcut: only the local `YYYY-MM-DD` inputs are used, other bounds compare as strings
-  return trimmed.replace('T', ' ')
+  if (!trimmed) return null
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? `${trimmed}T${endOfDay ? '23:59:59.999' : '00:00:00'}`
+    : trimmed
+  const millis = parseApiTimestamp(iso).getTime()
+  return Number.isNaN(millis) ? null : millis
 }
 
 /**
@@ -68,10 +73,16 @@ export function matchesFilters(event: AuditEvent, filters: AuditFilters): boolea
   const outcome = filters.outcome.trim()
   if (outcome && event.outcome !== outcome) return false
 
-  const since = boundValue(filters.since, false)
-  if (since && event.created_at < since) return false
-  const until = boundValue(filters.until, true)
-  if (until && event.created_at > until) return false
+  // Compare instants, not strings: live events carry a `T`-separated UTC stamp
+  // while a date-only bound used to be space-separated, and `T` sorts after ` `
+  // — that dropped every event on the bound's own day.
+  const createdAt = parseApiTimestamp(event.created_at).getTime()
+  if (!Number.isNaN(createdAt)) {
+    const since = boundMillis(filters.since, false)
+    if (since !== null && createdAt < since) return false
+    const until = boundMillis(filters.until, true)
+    if (until !== null && createdAt > until) return false
+  }
 
   const needle = filters.q.trim().toLowerCase()
   if (needle && !detailsSearchTexts(event.details).some((text) => text.toLowerCase().includes(needle))) {

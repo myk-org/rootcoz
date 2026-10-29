@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { useAuth } from '@/lib/auth'
+import { api } from '@/lib/api'
 import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 import {
   SSEContext,
@@ -61,8 +62,7 @@ const EXPIRY_FAILURE_LIMIT = 3
  */
 async function probeSession(): Promise<number | null> {
   try {
-    const response = await fetch('/api/auth/me', { credentials: 'include' })
-    return response.status
+    return await api.status('/api/auth/me')
   } catch {
     // A failed probe is a network problem, never proof of expiry.
     return null

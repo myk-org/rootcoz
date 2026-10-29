@@ -40,6 +40,34 @@ describe('matchesFilters', () => {
     ).toBe(true)
   })
 
+  it('matches a live (T-separated) event on a date-only until bound and rejects the next day', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    expect(
+      matchesFilters(event({ created_at: `${today}T23:00:00Z` }), {
+        ...EMPTY_FILTERS,
+        until: today,
+      }),
+    ).toBe(true)
+
+    const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000)
+      .toISOString()
+      .slice(0, 10)
+    expect(
+      matchesFilters(event({ created_at: `${tomorrow}T00:00:01Z` }), {
+        ...EMPTY_FILTERS,
+        until: today,
+      }),
+    ).toBe(false)
+  })
+
+  it('compares an unchanged since/until pair alike for spaced and T-separated stamps', () => {
+    const filters = { ...EMPTY_FILTERS, since: '2024-01-02', until: '2024-01-02' }
+    expect(matchesFilters(event({ created_at: '2024-01-02 10:00:00' }), filters)).toBe(true)
+    expect(matchesFilters(event({ created_at: '2024-01-02T10:00:00Z' }), filters)).toBe(true)
+    expect(matchesFilters(event({ created_at: '2024-01-01T23:59:59Z' }), filters)).toBe(false)
+    expect(matchesFilters(event({ created_at: '2024-01-03T00:00:00Z' }), filters)).toBe(false)
+  })
+
   it('matches q case-insensitively inside the serialized details', () => {
     expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'AI_CALL_TIMEOUT' })).toBe(true)
     expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'not-there' })).toBe(false)

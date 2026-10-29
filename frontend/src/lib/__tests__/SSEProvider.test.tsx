@@ -5,6 +5,13 @@ import { useSSE } from '@/lib/useSSE'
 
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ authenticated: auth.authenticated }) }))
 
+/** The probe must go through the api wrapper, so the wrapper is what gets mocked. */
+const { probeStatus } = vi.hoisted(() => ({ probeStatus: vi.fn() }))
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>()
+  return { ...actual, api: { ...actual.api, status: (...args: unknown[]) => probeStatus(...args) } }
+})
+
 const EXPIRED_TEXT = /session expired/i
 
 /** Auth state the mocked useAuth reports — toggled to log out and back in. */
@@ -43,20 +50,20 @@ const fetchMock = vi.fn()
 
 /** The guard asks /api/auth/me whether the session survived; the answer decides. */
 function probe(status: number | 'network') {
-  fetchMock.mockImplementation(() =>
+  probeStatus.mockImplementation(() =>
     status === 'network'
       ? Promise.reject(new TypeError('Failed to fetch'))
-      : Promise.resolve({ status } as Response),
+      : Promise.resolve(status),
   )
 }
 
 /** Probes that stay in flight until the test says how the server answered. */
 function deferredProbes() {
   const resolvers: Array<(status: number) => void> = []
-  fetchMock.mockImplementation(
+  probeStatus.mockImplementation(
     () =>
-      new Promise<Response>((resolve) =>
-        resolvers.push((status) => resolve({ status } as Response)),
+      new Promise<number>((resolve) =>
+        resolvers.push((status) => resolve(status)),
       ),
   )
   return {
@@ -75,6 +82,7 @@ describe('SSEProvider session expiry', () => {
     vi.useFakeTimers()
     MockEventSource.instances = []
     fetchMock.mockReset()
+    probeStatus.mockReset()
     vi.stubGlobal('EventSource', MockEventSource)
     vi.stubGlobal('fetch', fetchMock)
     // No BroadcastChannel → the manager every non-multiplexed environment gets.
@@ -113,7 +121,9 @@ describe('SSEProvider session expiry', () => {
 
     await fail(source)
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/auth/me', { credentials: 'include' })
+    expect(probeStatus).toHaveBeenCalledWith('/api/auth/me')
+    // The probe goes through the api wrapper — never a bare fetch of its own.
+    expect(fetchMock).not.toHaveBeenCalled()
     expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
     expect(source.closed).toBe(true)
 
@@ -142,12 +152,14 @@ describe('SSEProvider session expiry', () => {
     expect(MockEventSource.instances[1].closed).toBe(false)
   })
 
-  it('treats a network-error probe as transient and reconnects', async () => {
+  it('treats a rejected probe as transient and reconnects', async () => {
     const source = await renderAndConnect()
     probe('network')
 
     await fail(source)
 
+    expect(probeStatus).toHaveBeenCalledWith('/api/auth/me')
+    expect(fetchMock).not.toHaveBeenCalled()
     expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000)
@@ -281,6 +293,7 @@ describe('SSEProvider follower promotion', () => {
     MockEventSource.instances = []
     MockBroadcastChannel.instances = []
     fetchMock.mockReset()
+    probeStatus.mockReset()
     vi.stubGlobal('EventSource', MockEventSource)
     vi.stubGlobal('BroadcastChannel', MockBroadcastChannel)
     vi.stubGlobal('fetch', fetchMock)
@@ -541,6 +554,7 @@ describe('SSEProvider leader lock', () => {
     MockEventSource.instances = []
     MockBroadcastChannel.instances = []
     fetchMock.mockReset()
+    probeStatus.mockReset()
     locks = new MockLocks()
     Object.defineProperty(navigator, 'locks', { value: locks, configurable: true })
     vi.stubGlobal('EventSource', MockEventSource)

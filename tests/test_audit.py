@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -595,6 +596,30 @@ def test_login_failure_is_audited(app_client) -> None:
     assert events[0]["outcome"] == "failure"
 
 
+def test_login_username_that_is_a_credential_is_scrubbed(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A credential pasted into the login username never reaches row or log."""
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    secret = "sk-live-abcdefghijklmnop"  # pragma: allowlist secret  # gitleaks:allow
+    try:
+        response = app_client.post(
+            "/api/auth/login",
+            json={"username": secret, "api_key": "wrong"},  # pragma: allowlist secret
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+    assert response.status_code == 401
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 1
+    assert events[0]["actor"] == "[redacted]"
+    assert events[0]["target_id"] == "[redacted]"
+    assert secret not in json.dumps(events)
+    assert secret not in caplog.text
+
+
 def test_logout_is_audited(app_client) -> None:
     admin_login(app_client)
     response = app_client.post("/api/auth/logout")
@@ -728,6 +753,52 @@ def test_deployment_key_promotion_has_its_own_action(app_client) -> None:
     assert _SECRET not in json.dumps(event)
     # The manual-entry action is not written for a promotion.
     assert _events(action="provider.key.store") == []
+
+
+def test_a_rejected_promotion_is_audited(app_client) -> None:
+    """A promotion that never stores anything still leaves exactly one row."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main, "_canonical_key_provider_id", AsyncMock(return_value="claude")
+        ),
+        patch("rootcoz.ai_client.verify_ai_key", AsyncMock(return_value="rejected")),
+        patch(
+            "rootcoz.ai_client.deployment_provider_credentials",
+            lambda: {"claude": _SECRET},
+        ),
+    ):
+        response = app_client.post(
+            "/api/admin/server-providers/claude/store-deployment-key",
+            json={"verification_model": "test-model"},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is False
+
+    events = _events(action="provider.key.promote")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["target_id"] == "claude"
+    assert events[0]["details"] == {
+        "provider": "claude",
+        "reason": "verification_rejected",
+    }
+    assert _SECRET not in json.dumps(events[0])
+
+
+def test_a_refused_promotion_is_audited_once(app_client) -> None:
+    """No deployment credential to promote: a 404 and one failure row."""
+    admin_login(app_client)
+    with patch("rootcoz.ai_client.deployment_provider_credentials", dict):
+        response = app_client.post(
+            "/api/admin/server-providers/claude/store-deployment-key", json={}
+        )
+    assert response.status_code == 404, response.text
+
+    events = _events(action="provider.key.promote")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"] == {"provider": "claude", "reason": "not_found"}
 
 
 def test_analysis_rerun_is_audited_with_previous_classification(
@@ -958,6 +1029,33 @@ def test_comment_delete_is_audited_without_the_body(app_client) -> None:
     assert "body text" not in json.dumps(event)
 
 
+def test_comment_delete_keeps_a_uuid_job_id_in_the_details(app_client) -> None:
+    """A uuid4 job id is an id, not a credential: it stays verbatim."""
+    job_id = "123e4567-e89b-12d3-a456-426614174000"
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {"job_name": "my-job", "failures": [{"test_name": "test_a"}]},
+        )
+    )
+    created = app_client.post(
+        f"/results/{job_id}/comments",
+        json={"test_name": "test_a", "comment": "a note"},
+    )
+    assert created.status_code == 201, created.text
+    comment_id = created.json()["id"]
+
+    deleted = app_client.delete(f"/results/{job_id}/comments/{comment_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    event = _events(action="comment.delete")[0]
+    assert event["details"] == {"job_id": job_id}
+    assert event["target_id"] == str(comment_id)
+
+
 def test_job_delete_is_audited(app_client) -> None:
     admin_login(app_client)
     asyncio.run(
@@ -1004,6 +1102,37 @@ def test_export_push_is_audited(app_client) -> None:
     assert events[0]["details"] == {"plugin": "reportportal"}
     assert events[0]["outcome"] == "success"
     assert events[0]["target_id"] == "job-1"
+
+
+def test_export_push_to_an_unknown_job_is_audited(app_client) -> None:
+    """A push that never reaches the exporter still leaves one failure row."""
+    admin_login(app_client)
+    job_id = "123e4567-e89b-12d3-a456-426614174000"
+    with patch.object(main, "get_result", AsyncMock(return_value=None)):
+        response = app_client.post(f"/results/{job_id}/push/reportportal")
+    assert response.status_code == 404, response.text
+
+    events = _events(action="export.push")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["target_id"] == job_id
+    assert events[0]["details"] == {
+        "reason": "not_found",
+        "plugin": "reportportal",
+    }
+
+
+def test_export_push_with_the_exporter_disabled_is_audited(app_client) -> None:
+    admin_login(app_client)
+    job_id = "123e4567-e89b-12d3-a456-426614174000"
+    response = app_client.post(f"/results/{job_id}/push-reportportal")
+    assert response.status_code == 400, response.text
+
+    events = _events(action="export.push")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"]["plugin"] == "reportportal"
+    assert events[0]["details"]["reason"] == "invalid_request"
 
 
 def test_transcript_download_is_audited(app_client, tmp_path: Path) -> None:
@@ -1078,6 +1207,59 @@ def test_admin_db_query_is_audited_without_raw_sql(
     assert "secret-value" not in json.dumps(events[0])
 
 
+def test_admin_db_schema_is_audited(app_client, temp_db_path: Path) -> None:
+    admin_login(app_client)
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.get("/api/admin/db/schema")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="admin.db_schema")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+    assert events[0]["details"] == {"tables": len(response.json()["tables"])}
+
+
+async def test_admin_db_schema_denial_is_audited(audit_db: Path) -> None:
+    with pytest.raises(Exception) as exc_info:
+        await main.admin_db_schema(_fake_request(is_admin=False))
+    assert getattr(exc_info.value, "status_code", None) == 403
+
+    events = (await storage.list_audit_events(action="admin.db_schema"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "denied"
+    assert events[0]["details"] == {"reason": "forbidden"}
+
+
+def test_admin_db_query_rejection_is_audited_as_denied(
+    app_client, temp_db_path: Path
+) -> None:
+    """A rejected query form leaves a denied row, never the statement."""
+    admin_login(app_client)
+    sql = "DELETE FROM users WHERE username = 'secret-value'"
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post("/api/admin/db/query", json={"sql": sql})
+    assert response.status_code == 400, response.text
+
+    events = _events(action="admin.db_query")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "denied"
+    assert events[0]["details"] == {"reason": "invalid_request"}
+    assert "secret-value" not in json.dumps(events[0])
+
+
+async def test_admin_db_query_by_a_non_admin_is_audited_as_denied(
+    audit_db: Path,
+) -> None:
+    with pytest.raises(Exception) as exc_info:
+        await main.admin_db_query(_fake_request(is_admin=False))
+    assert getattr(exc_info.value, "status_code", None) == 403
+
+    events = (await storage.list_audit_events(action="admin.db_query"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "denied"
+    assert events[0]["details"] == {"reason": "forbidden"}
+
+
 # --- GET /api/admin/audit --------------------------------------------------
 
 
@@ -1095,6 +1277,13 @@ def _clear_audit(db_path: Path) -> None:
 def _csv_unescape(value: str) -> str:
     """The documented inverse of the export escaping: drop one apostrophe."""
     return value.removeprefix("'")
+
+
+def _export_hash(event: dict[str, Any]) -> str:
+    """The server's recomputation: payload text plus prev_hash, nothing mapped."""
+    return hashlib.sha256(
+        (event["hash_payload"] + event["prev_hash"]).encode()
+    ).hexdigest()
 
 
 def test_audit_endpoint_exposes_event_fields(app_client) -> None:
@@ -1383,6 +1572,81 @@ async def test_audit_stream_requires_admin() -> None:
     assert getattr(exc_info.value, "status_code", None) == 403
 
 
+def _sse_payload(chunk: str) -> dict[str, Any]:
+    return json.loads(chunk.split("data: ", 1)[1].removesuffix("\n\n"))
+
+
+async def test_audit_stream_strips_nested_credentials(audit_db: Path) -> None:
+    """A queued event is projected like the list endpoint before it is sent."""
+    request = AsyncMock()
+    request.state.is_admin = True
+    request.is_disconnected = AsyncMock(return_value=False)
+
+    response = await main.stream_audit_events(request)
+    body = response.body_iterator
+    assert await asyncio.wait_for(anext(body), timeout=1) == ": connected\n\n"
+    pending = asyncio.create_task(anext(body))
+    await asyncio.sleep(0)  # let the generator register its listener
+    try:
+        main.notify_audit_event(
+            {
+                "action": "admin.setting_set",
+                "details": {
+                    "request_params": {
+                        "jira_api_token": "s3cret-value",
+                        "job_name": "job-1",
+                    }
+                },
+            }
+        )
+        chunk = await asyncio.wait_for(pending, timeout=1)
+    finally:
+        await body.aclose()
+
+    assert "s3cret-value" not in chunk
+    payload = _sse_payload(chunk)
+    assert payload["details"]["request_params"] == {"job_name": "job-1"}
+
+
+async def test_slow_audit_subscriber_gets_one_gap_event(audit_db: Path) -> None:
+    """Dropped payloads are reported once, then normal events flow again."""
+    broadcast = main._PayloadBroadcast()
+    overflow = 3
+    async with broadcast.subscribe() as subscription:
+        for index in range(main._SSE_QUEUE_MAXSIZE + overflow):
+            broadcast.publish({"id": index})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # let call_soon_threadsafe enqueue everything
+
+        request = AsyncMock()
+        request.is_disconnected = AsyncMock(return_value=False)
+
+        def _render(event: dict[str, Any]) -> str:
+            return f"event: audit:event\ndata: {json.dumps(event)}\n\n"
+
+        chunks = main._queue_sse_events(
+            request, subscription, _render, gap_event="audit-gap"
+        )
+        try:
+            assert await anext(chunks) == ": connected\n\n"
+            gap = await anext(chunks)
+            assert gap.startswith("event: audit-gap\ndata: ")
+            assert _sse_payload(gap) == {"dropped": overflow}
+            assert _sse_payload(await anext(chunks)) == {"id": 0}
+
+            broadcast.publish({"id": "late"})
+            late = None
+            for _ in range(main._SSE_QUEUE_MAXSIZE + 2):
+                late = await asyncio.wait_for(anext(chunks), timeout=1)
+                # No second gap: the count was reported and reset.
+                assert not late.startswith("event: audit-gap")
+                if _sse_payload(late) == {"id": "late"}:
+                    break
+            assert late is not None and _sse_payload(late) == {"id": "late"}
+        finally:
+            await chunks.aclose()
+
+
 # --- tamper evidence: the hash chain --------------------------------------
 
 _LEGACY_AUDIT_SCHEMA = """
@@ -1576,6 +1840,64 @@ async def test_verify_chain_reports_legacy_rows_separately(audit_db: Path) -> No
         "truncated_before_id": None,
     }
     assert _chain_rows(audit_db)[0][2] is None
+
+
+async def test_verify_chain_flags_a_cleared_hash_on_the_newest_row(
+    audit_db: Path,
+) -> None:
+    """Clearing the newest hash must not demote a tampered row to "legacy"."""
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    last = await storage.insert_audit_event(action="action.two", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory', entry_hash = NULL WHERE id = ?",
+            (last["id"],),
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == last["id"]
+    assert result["legacy"] == 0
+
+
+async def test_verify_chain_flags_a_cleared_hash_inside_the_chain(
+    audit_db: Path,
+) -> None:
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    middle = await storage.insert_audit_event(action="action.two", actor="alice")
+    await storage.insert_audit_event(action="action.three", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET entry_hash = NULL WHERE id = ?", (middle["id"],)
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == middle["id"]
+    assert result["legacy"] == 0
+
+
+async def test_verify_chain_still_counts_a_pre_chain_row_as_legacy(
+    audit_db: Path,
+) -> None:
+    """A NULL hash *before* the first chained row stays legacy, not a break."""
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "INSERT INTO audit_events (created_at, actor, action)"
+            " VALUES ('2021-03-04T05:06:07.000000Z', 'alice', 'auth.login')"
+        )
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    await storage.insert_audit_event(action="action.two", actor="alice")
+
+    result = await storage.verify_audit_chain()
+    assert result == {
+        "checked": 2,
+        "legacy": 1,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
 
 
 async def test_verify_chain_limit_checks_only_the_newest_rows(audit_db: Path) -> None:
@@ -1822,6 +2144,135 @@ def test_audit_export_json_returns_every_match_in_order(
     assert events[0]["details"] == {"n": 0}
 
 
+def test_audit_export_json_hash_payload_verifies_every_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """``sha256(hash_payload + prev_hash)`` matches for every exported row."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = [
+        _insert_audit(action="action.0", actor="alice", details={"n": 0}),
+        _insert_audit(
+            action="action.1",
+            actor="bob",
+            is_admin=True,
+            details={"n": 1, "note": "naïve"},
+        ),
+        _insert_audit(action="action.2", actor="alice", target_id="job-1"),
+    ]
+
+    events = _export(app_client, format="json").json()
+    assert [event["id"] for event in events] == [row["id"] for row in stored]
+    for event in events:
+        # No field re-mapping and no coercion: an exported row is verifiable as-is.
+        assert _export_hash(event) == event["entry_hash"]
+    assert events[1]["prev_hash"] == events[0]["entry_hash"]
+
+
+def test_audit_export_hash_payload_is_the_stored_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """The payload decodes to the stored hash fields, not the API rendering."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(
+        action="user.job_delete",
+        actor="alice",
+        actor_role="admin",
+        is_admin=True,
+        target_type="job",
+        target_id="job-1",
+        details={"note": "naïve"},
+        request_ip="203.0.113.9",
+    )
+
+    event = _export(app_client, format="json").json()[0]
+    assert json.loads(event["hash_payload"]) == {
+        "id": stored["id"],
+        "created_at": stored["created_at"],
+        "actor": "alice",
+        "actor_role": "admin",
+        "is_admin": 1,  # stored as 1/0 while the event renders a bool
+        "action": "user.job_delete",
+        "target_type": "job",
+        "target_id": "job-1",
+        "outcome": "success",
+        "details": '{"note":"naïve"}',  # the stored text, not the object
+        "request_ip": "203.0.113.9",
+    }
+    assert event["is_admin"] is True
+    assert json.loads(event["hash_payload"])["details"] == event["details_raw"]
+
+
+def test_audit_export_hash_payload_exposes_a_tampered_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """A direct edit behind the API's back stops matching the stored hash."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(action="user.job_delete", actor="alice", details={"n": 1})
+    before = _export(app_client, format="json").json()[0]
+    assert _export_hash(before) == before["entry_hash"]
+
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET details = ? WHERE id = ?",
+            ('{"n":2}', stored["id"]),
+        )
+
+    after = _export(app_client, format="json").json()[0]
+    # The edit rewrites the payload and leaves the stored hash column alone, so
+    # the exported row no longer reproduces its own hash.
+    assert after["entry_hash"] == before["entry_hash"]
+    assert after["hash_payload"] != before["hash_payload"]
+    assert _export_hash(after) != after["entry_hash"]
+    verify = app_client.get("/api/admin/audit/verify").json()
+    assert verify["first_broken_id"] == stored["id"]
+
+
+def test_audit_export_csv_carries_a_verifiable_hash_payload(
+    app_client, temp_db_path: Path
+) -> None:
+    """The CSV cell quotes and unquotes back to the bytes the hash covers."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    _insert_audit(action="action.0", actor="alice", details={"n": 0})
+    _insert_audit(
+        action="action.1",
+        actor="alice",
+        details={"reason": 'quote ", comma , and naïveté'},
+    )
+
+    rows = list(csv.DictReader(io.StringIO(_export(app_client, format="csv").text)))
+    assert len(rows) == 2
+    for row in rows:
+        assert _export_hash(row) == row["entry_hash"]
+        payload = json.loads(row["hash_payload"])
+        assert payload["is_admin"] == int(row["is_admin"])
+        assert payload["details"] == row["details"]
+    assert rows[1]["prev_hash"] == rows[0]["entry_hash"]
+
+
+def test_audit_export_json_carries_verifiable_details_text(
+    app_client, temp_db_path: Path
+) -> None:
+    """``details_raw`` is the stored text, so the hash can be recomputed."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(
+        action="action.raw", actor="alice", details={"n": 1, "note": "naïve"}
+    )
+
+    event = _export(app_client, format="json").json()[0]
+    assert json.loads(event["details_raw"]) == event["details"]
+    restored = {name: event[name] for name in storage._AUDIT_HASH_FIELDS}
+    restored["is_admin"] = int(bool(event["is_admin"]))
+    restored["details"] = event["details_raw"]
+    assert (
+        storage._audit_entry_hash(restored, event["prev_hash"]) == stored["entry_hash"]
+    )
+
+
 def test_audit_export_streams_past_the_batch_size(
     app_client, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1874,6 +2325,7 @@ def test_audit_export_csv_has_the_documented_columns(
         "details",
         "prev_hash",
         "entry_hash",
+        "hash_payload",
     ]
     assert len(rows) == 1
     row = rows[0]
@@ -2017,8 +2469,9 @@ def test_audit_export_honours_the_list_filters(app_client, temp_db_path: Path) -
     assert [event["id"] for event in events] == [keep["id"]]
 
 
+@pytest.mark.parametrize("fmt", ["json", "csv"])
 def test_audit_export_strips_sensitive_detail_fields(
-    app_client, temp_db_path: Path
+    app_client, temp_db_path: Path, fmt: str
 ) -> None:
     admin_login(app_client)
     _clear_audit(temp_db_path)
@@ -2028,11 +2481,20 @@ def test_audit_export_strips_sensitive_detail_fields(
         details={"request_params": {"github_token": _SECRET, "job_name": "keep"}},
     )
 
-    response = _export(app_client, format="csv")
+    response = _export(app_client, format=fmt)
     assert response.status_code == 200, response.text
     assert _SECRET not in response.text
-    rows = list(csv.DictReader(io.StringIO(response.text)))
-    assert rows[0]["details"] == '{"request_params":{"job_name":"keep"}}'
+    if fmt == "json":
+        event = response.json()[0]
+        assert event["details"] == {"request_params": {"job_name": "keep"}}
+        # The stored bytes still hold the token, so the raw hash fields are
+        # withheld rather than leaked: the row is not verifiable, and says so.
+        assert "hash_payload" not in event
+        assert "details_raw" not in event
+    else:
+        row = next(iter(csv.DictReader(io.StringIO(response.text))))
+        assert row["details"] == '{"request_params":{"job_name":"keep"}}'
+        assert row["hash_payload"] == ""
 
 
 def test_audit_export_rejects_non_admin(app_client) -> None:
@@ -2279,6 +2741,38 @@ def test_redact_details_keeps_a_long_lowercase_word() -> None:
     assert main._redact_details(details) == details
 
 
+@pytest.mark.parametrize(
+    "keep",
+    [
+        # A canonical uuid4 job id: hex and dashes, no case alternation.
+        "123e4567-e89b-12d3-a456-426614174000",
+        # Dated model name and test name: a digit proves nothing on its own.
+        "claude-sonnet-4-5-20250929",
+        "test_foo_20240101_abcdef",
+    ],
+)
+def test_redact_details_keeps_digit_bearing_identifiers(keep: str) -> None:
+    details = {"value": keep}
+    assert main._redact_details(details) == details
+    assert keep in main._redact_details({"note": f"handled {keep} today"})["note"]
+
+
+def test_redact_details_keeps_a_40_char_lowercase_hex_digest() -> None:
+    """The whole-value digest exemption covers the 40-char (sha1) length too."""
+    digest = "4f9c2b7d1e6a8c3f5b0d2e7a9c4b6f8d1a2b3c4d"  # pragma: allowlist secret
+    assert main._redact_details({"sql_hash": digest}) == {"sql_hash": digest}
+
+
+def test_redact_details_scrubs_a_mixed_case_token_with_digits() -> None:
+    """With digits, mixed case is what separates a token from an identifier."""
+    token = (
+        "Ab3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    assert main._redact_details({"note": f"pasted {token} here"}) == {
+        "note": "pasted [redacted] here"
+    }
+
+
 def test_redact_details_scrubs_secrets_inside_lists() -> None:
     redacted = main._redact_details(
         {"notes": ["first is fine", "second has sk-live-abc123def456ghi789jkl012"]}
@@ -2307,6 +2801,46 @@ async def test_record_audit_scrubs_a_secret_pasted_into_free_text(
     assert event["details"] == {"reason": "rotated [redacted] manually"}
     assert secret not in json.dumps(event)
     assert secret not in caplog.text
+
+
+async def test_record_audit_scrubs_a_credential_pasted_into_the_actor(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The username is a free-text field too: it reaches the row and the log."""
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    secret = "sk-live-abcdefghijklmnop"  # pragma: allowlist secret  # gitleaks:allow
+    try:
+        await main.record_audit(
+            action="auth.login_failed",
+            actor=secret,
+            message=f"Failed login attempt for username '{secret}'",
+            target_type="user",
+            target_id=secret,
+            outcome="failure",
+            request=_fake_request(),
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
+    assert event["actor"] == "[redacted]"
+    assert event["target_id"] == "[redacted]"
+    assert secret not in json.dumps(event)
+    assert secret not in caplog.text
+
+    # A normal username (including CSV-formula characters) survives untouched.
+    await main.record_audit(
+        action="auth.login_failed",
+        actor="-x",
+        message="Failed login attempt for username '-x'",
+        target_id="-x",
+        outcome="failure",
+        request=_fake_request(),
+    )
+    newest = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
+    assert newest["actor"] == "-x"
+    assert newest["target_id"] == "-x"
 
 
 # --- volume guard for auth failures ---------------------------------------
@@ -2680,3 +3214,41 @@ async def test_suppressed_auth_failures_still_log_once_per_window(
     assert len(summaries) == 1
     assert summaries[0].levelno == logging.WARNING
     assert "beyond 1 per minute" in summaries[0].getMessage()
+
+
+def test_suppression_tracking_is_capped_for_junk_usernames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flood of fresh usernames cannot grow the tracking dict past the cap."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(monitoring.logger, "warning", lambda *a, **k: None)
+    cap = monitoring._AUDIT_AUTH_SUPPRESSION_MAX_ACTORS
+
+    for index in range(5 * cap):
+        monitoring.record_audit_auth_suppression(f"junk{index}", limit=1)
+
+    windows = monitoring._audit_auth_suppression_windows
+    assert len(windows) == cap
+    # The newest window survived; the oldest tracked names were dropped.
+    assert "junk4999" in windows
+    assert "junk0" not in windows
+    assert monitoring._audit_suppressed_auth_events == 5 * cap
+
+
+def test_suppression_tracking_is_pruned_when_the_window_rolls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entries whose own window closed are dropped on the next window change."""
+    _reset_suppression(monkeypatch)
+    stale = (
+        monitoring.time.monotonic()
+        - monitoring._AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
+        - 1
+    )
+    monitoring._audit_auth_suppression_windows.update(
+        {f"old{index}": (stale, 5) for index in range(3)}
+    )
+
+    monitoring.record_audit_auth_suppression("fresh", limit=1)
+
+    assert list(monitoring._audit_auth_suppression_windows) == ["fresh"]

@@ -839,13 +839,33 @@ def notify_chat_changed(job_id: str, username: str = "") -> None:
 
 # Payload-carrying SSE broadcast: the notification *is* the payload (audit
 # events, log lines), so each listener owns a queue instead of an Event.
-# Listeners are (owning_loop, queue) so a write from a non-asyncio thread can
-# wake the correct loop via call_soon_threadsafe.
+# Listeners are (owning_loop, subscription) so a write from a non-asyncio thread
+# can wake the correct loop via call_soon_threadsafe.
+_SSE_QUEUE_MAXSIZE = 1000
+
+
+class _PayloadSubscription:
+    """One subscriber's queue plus how many payloads it had to drop.
+
+    ``dropped`` is only touched on the subscriber's own loop, so it needs no
+    lock; the reader drains it with :meth:`take_dropped` once it catches up.
+    """
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_SSE_QUEUE_MAXSIZE)
+        self.dropped = 0
+
+    def take_dropped(self) -> int:
+        """Return the drops since the last call and reset the counter."""
+        dropped, self.dropped = self.dropped, 0
+        return dropped
+
+
 class _PayloadBroadcast:
     """One payload broadcast channel: the SSE subscribers of a single stream."""
 
     def __init__(self) -> None:
-        self._listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[Any]]] = (
+        self._listeners: set[tuple[asyncio.AbstractEventLoop, _PayloadSubscription]] = (
             set()
         )
         self._lock = threading.Lock()
@@ -862,27 +882,30 @@ class _PayloadBroadcast:
                 return
             listeners = list(self._listeners)
 
-        def _enqueue(queue: asyncio.Queue[Any]) -> None:
+        def _enqueue(subscription: _PayloadSubscription) -> None:
             try:
-                queue.put_nowait(payload)
+                subscription.queue.put_nowait(payload)
             except asyncio.QueueFull:
-                pass
+                # Counted, not silently forgotten: the reader reports the gap
+                # as its own event so a slow admin sees the stream is missing
+                # payloads instead of trusting a gapped feed.
+                subscription.dropped += 1
 
-        for loop, queue in listeners:
+        for loop, subscription in listeners:
             try:
-                loop.call_soon_threadsafe(_enqueue, queue)
+                loop.call_soon_threadsafe(_enqueue, subscription)
             except RuntimeError:
                 logger.debug("SSE payload dropped: subscriber loop is closed")
 
     @asynccontextmanager
-    async def subscribe(self) -> AsyncIterator[asyncio.Queue[Any]]:
+    async def subscribe(self) -> AsyncIterator[_PayloadSubscription]:
         """Register the calling connection for this channel's payloads."""
-        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
-        listener = (asyncio.get_running_loop(), queue)
+        subscription = _PayloadSubscription()
+        listener = (asyncio.get_running_loop(), subscription)
         with self._lock:
             self._listeners.add(listener)
         try:
-            yield queue
+            yield subscription
         finally:
             with self._lock:
                 self._listeners.discard(listener)
@@ -899,13 +922,16 @@ def notify_audit_event(event: dict[str, Any]) -> None:
 
 async def _queue_sse_events(
     request: Request,
-    queue: asyncio.Queue[Any],
+    subscription: _PayloadSubscription,
     render: Callable[[Any], str | None],
+    gap_event: str = "",
 ) -> AsyncIterator[str]:
-    """Yield rendered SSE chunks from a payload queue until the client leaves.
+    """Yield rendered SSE chunks from a subscription's queue until the client leaves.
 
     ``render`` returns the wire chunk, or ``None`` to drop a payload the
-    subscription does not want. A quiet queue yields a keepalive comment.
+    subscription does not want. A quiet queue yields a keepalive comment. When
+    payloads were dropped for a slow subscriber, a ``gap_event`` chunk reports
+    the count before the next payload; an empty ``gap_event`` stays silent.
     """
     # Flush a comment immediately: the browser fires EventSource.onopen on the
     # first bytes, so without this the client shows "connecting" until the first
@@ -914,11 +940,13 @@ async def _queue_sse_events(
     while not await request.is_disconnected():
         try:
             payload = await asyncio.wait_for(
-                queue.get(), timeout=_SSE_KEEPALIVE_SECONDS
+                subscription.queue.get(), timeout=_SSE_KEEPALIVE_SECONDS
             )
         except TimeoutError:
             yield ": keepalive\n\n"
             continue
+        if gap_event and (dropped := subscription.take_dropped()):
+            yield f"event: {gap_event}\ndata: {json.dumps({'dropped': dropped})}\n\n"
         if (chunk := render(payload)) is not None:
             yield chunk
 
@@ -1108,20 +1136,38 @@ _AUDIT_RUN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
 # A bare lowercase hex string is a digest we record on purpose (an SQL hash, a
 # revoked key fingerprint), not a credential: leave the whole value alone.
 _AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
+# A lowercase letters-and-digits run of this length with no separator is the
+# shape of a hex/base32 blob, the one id-like form that is also credential-like.
+_AUDIT_BARE_BLOB_MIN_LENGTH = 32
+_AUDIT_LOWER_ALNUM_RE = re.compile(r"\A[0-9a-z]+\Z")
 
 
 def _looks_like_secret_run(run: str) -> bool:
-    """Is this bare run a random token rather than a camelCase identifier?
+    """Is this bare run a random token rather than an identifier or an id?
 
     A random token almost always changes letter case from one character to the
     next (``AbCdEf...``); a camelCase/PascalCase identifier changes case only at
-    word boundaries (``testChargeDeclinesWhenCardExpired``: 5 of 32). So: a
-    digit anywhere, or case changing on at least half the letter-to-letter
-    transitions.
+    word boundaries (``testChargeDeclinesWhenCardExpired``: 5 of 32). So a run
+    without digits is credential-shaped when case changes on at least half the
+    letter-to-letter transitions.
+
+    A digit on its own proves nothing: ``uuid4`` job ids, ``test_foo_20240101``
+    style names and ``claude-sonnet-4-5-20250929`` all carry digits and must
+    stay readable in the trail. With digits in it, a run is credential-shaped
+    only when it is *also* credential-like: mixed case, or a bare lowercase
+    hex/base32 blob of 32+ characters. A known credential prefix never reaches
+    this predicate — ``_AUDIT_SECRET_RE`` already matched it.
     """
-    if any(char.isdigit() for char in run):
-        return True
     letters = [char for char in run if char.isalpha()]
+    if any(char.isdigit() for char in run):
+        if any(char.isupper() for char in letters) and any(
+            char.islower() for char in letters
+        ):
+            return True
+        return (
+            len(run) >= _AUDIT_BARE_BLOB_MIN_LENGTH
+            and _AUDIT_LOWER_ALNUM_RE.match(run) is not None
+        )
     transitions = len(letters) - 1
     if transitions < 1:
         return False
@@ -1220,7 +1266,9 @@ async def record_audit(
 
     ``message`` is the human-readable half (the pre-existing wording, so log
     consumers keep matching); ``details`` is the structured half, scrubbed by
-    :func:`_redact_details` so no secret can reach the table.
+    :func:`_redact_details` so no secret can reach the table. ``actor``,
+    ``target_id`` and the log line get the same treatment: a credential pasted
+    into a login username must not reach the trail or the log raw.
 
     Role and admin flag default to the request's authenticated state. Never
     raises: an audit failure must not fail the action being audited.
@@ -1239,8 +1287,11 @@ async def record_audit(
     """
     # Fully formatted on purpose: the log dedup filter suppresses consecutive
     # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
-    logger.info(f"[AUDIT] {message}")
-    resolved_actor = actor or "anonymous"
+    logger.info(f"[AUDIT] {_scrub_audit_text(message)}")
+    resolved_actor = _scrub_audit_text(actor or "anonymous")
+    resolved_target_id = (
+        _scrub_audit_text(target_id) if isinstance(target_id, str) else target_id
+    )
     throttle: storage.AuditThrottle | None = None
     if action in _AUDIT_AUTH_FAILURE_ACTIONS:
         limit = get_settings().audit_auth_failure_max_per_minute
@@ -1266,7 +1317,7 @@ async def record_audit(
             actor_role=resolved_role,
             is_admin=resolved_admin,
             target_type=target_type,
-            target_id=target_id,
+            target_id=resolved_target_id,
             outcome=outcome,
             details=_redact_details(details),
             request_ip=_audit_request_ip(request),
@@ -1278,7 +1329,7 @@ async def record_audit(
             "[AUDIT] Failed to persist audit event '%s' by '%s'"
             " (%d audit write failure(s) this process)",
             action,
-            actor,
+            resolved_actor,
             failures,
         )
         return
@@ -1287,6 +1338,62 @@ async def record_audit(
         record_audit_auth_suppression(resolved_actor, throttle.limit)
         return
     notify_audit_event(event)
+
+
+# Reason code per refusal class: short, stable and never derived from the
+# request body, so an audit row cannot carry what it is meant to protect.
+_AUDIT_REASON_BY_STATUS = {
+    400: "invalid_request",
+    401: "unauthenticated",
+    403: "forbidden",
+    404: "not_found",
+    409: "conflict",
+    422: "invalid_payload",
+    502: "upstream_failure",
+}
+_AUDIT_DENIED_STATUSES = frozenset({401, 403})
+
+
+def _audit_rejection(exc: HTTPException) -> tuple[Literal["failure", "denied"], str]:
+    """``(outcome, reason)`` for a request the handler refused."""
+    return (
+        "denied" if exc.status_code in _AUDIT_DENIED_STATUSES else "failure",
+        _AUDIT_REASON_BY_STATUS.get(exc.status_code, f"http_{exc.status_code}"),
+    )
+
+
+async def _record_refused_attempt(
+    *,
+    action: str,
+    request: Request,
+    message: str,
+    target_type: str,
+    target_id: str,
+    exc: HTTPException,
+    details: dict[str, Any] | None = None,
+    denied: bool = False,
+) -> None:
+    """Audit one attempt the handler refused, so an early exit still leaves a row.
+
+    Called from ``except HTTPException`` on every endpoint that must record one
+    row per attempt: the reason is a fixed code (never request text) and the
+    error detail the client sees is not copied into the trail. ``denied`` marks
+    a handler whose every refusal is an access/shape denial rather than a
+    failed action.
+    """
+    outcome, reason = _audit_rejection(exc)
+    if denied:
+        outcome = "denied"
+    await record_audit(
+        action=action,
+        actor=getattr(request.state, "username", ""),
+        message=f"{message} ({outcome}: {reason})",
+        target_type=target_type,
+        target_id=target_id,
+        outcome=outcome,
+        details={"reason": reason, **(details or {})},
+        request=request,
+    )
 
 
 # Statuses that indicate the analysis is still in progress.
@@ -8669,50 +8776,70 @@ async def push_to_reportportal(
     # Sanitize control characters to prevent log forging (trusted-proxy
     # mode populates username from X-Forwarded-User with minimal validation)
     safe_username = _sanitize_control_chars(username)
-    logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
-    if not settings.reportportal_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail="Report Portal integration is disabled or not configured",
-        )
-
-    stored = await get_result(job_id)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    result_data = stored["result"]
-
     try:
-        push_result = await _execute_rp_push(
-            job_id,
-            result_data,
-            settings,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-            pushed_by=safe_username,
-        )
-        if push_result.get("error_type") == INVALID_STORED_FAILURES:
-            errors = push_result.get("errors") or []
-            detail = errors[0] if errors else push_result.get("message", "")
+        logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
+        if not settings.reportportal_enabled:
             raise HTTPException(
-                status_code=422, detail=detail or "Invalid stored failures"
+                status_code=400,
+                detail="Report Portal integration is disabled or not configured",
             )
-        await record_audit(
+
+        stored = await get_result(job_id)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        result_data = stored["result"]
+
+        try:
+            push_result = await _execute_rp_push(
+                job_id,
+                result_data,
+                settings,
+                child_job_name=child_job_name,
+                child_build_number=child_build_number,
+                pushed_by=safe_username,
+            )
+            if push_result.get("error_type") == INVALID_STORED_FAILURES:
+                errors = push_result.get("errors") or []
+                detail = errors[0] if errors else push_result.get("message", "")
+                raise HTTPException(
+                    status_code=422, detail=detail or "Invalid stored failures"
+                )
+            await record_audit(
+                action="export.push",
+                actor=safe_username,
+                message=(
+                    f"Exporter push by '{safe_username}' for job {job_id},"
+                    " plugin=reportportal"
+                ),
+                target_type="job",
+                target_id=job_id,
+                outcome="success" if not push_result.get("errors") else "failure",
+                details={
+                    "plugin": "reportportal",
+                    "pushed": push_result.get("pushed"),
+                },
+                request=request,
+            )
+            return push_result
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException as exc:
+        # One row per attempt: a push that never reached the exporter still
+        # says who tried what and why it stopped.
+        await _record_refused_attempt(
             action="export.push",
-            actor=safe_username,
+            request=request,
             message=(
                 f"Exporter push by '{safe_username}' for job {job_id},"
                 " plugin=reportportal"
             ),
             target_type="job",
             target_id=job_id,
-            outcome="success" if not push_result.get("errors") else "failure",
-            details={"plugin": "reportportal", "pushed": push_result.get("pushed")},
-            request=request,
+            exc=exc,
+            details={"plugin": "reportportal"},
         )
-        return push_result
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise
 
 
 @app.post(
@@ -8741,73 +8868,91 @@ async def push_to_exporter(
     _check_allow_list(request)
     username = getattr(request.state, "username", "")
     safe_username = _sanitize_control_chars(username)
-    logger.info(
-        "Exporter push requested by '%s' for job %s, plugin=%s",
-        safe_username,
-        job_id,
-        plugin_name,
-    )
-
-    stored = await get_result(job_id)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    result_data = stored["result"]
-
     try:
-        context = await _build_export_context(
-            job_id=job_id,
-            result_data=result_data,
-            settings=settings,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-            pushed_by=safe_username,
-            fetch_history=_exporter_needs_history_classifications([plugin_name]),
-            fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                [plugin_name], settings
-            ),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    try:
-        exporter = _create_exporter(plugin_name, settings)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
-        # Constructor/transport failures are server-side, not bad client input.
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    try:
-        with exporter:
-            result = await exporter.push(context)
-    except Exception as exc:
-        # Guard against unexpected exporter failures leaking as raw 500s.
-        # Expected error modes are already returned inside push() as a
-        # failed ExporterResult; this catches genuinely unforeseen faults.
-        logger.exception(
-            "Exporter '%s' push raised unexpectedly for job %s",
-            plugin_name,
+        logger.info(
+            "Exporter push requested by '%s' for job %s, plugin=%s",
+            safe_username,
             job_id,
+            plugin_name,
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Exporter '{plugin_name}' failed unexpectedly",
-        ) from exc
 
-    await record_audit(
-        action="export.push",
-        actor=safe_username,
-        message=(
-            f"Exporter push by '{safe_username}' for job {job_id}, plugin={plugin_name}"
-        ),
-        target_type="job",
-        target_id=job_id,
-        outcome="success" if result.success else "failure",
-        details={"plugin": plugin_name},
-        request=request,
-    )
-    return {**result.details, "success": result.success, "message": result.message}
+        stored = await get_result(job_id)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        result_data = stored["result"]
+
+        try:
+            context = await _build_export_context(
+                job_id=job_id,
+                result_data=result_data,
+                settings=settings,
+                child_job_name=child_job_name,
+                child_build_number=child_build_number,
+                pushed_by=safe_username,
+                fetch_history=_exporter_needs_history_classifications([plugin_name]),
+                fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                    [plugin_name], settings
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        try:
+            exporter = _create_exporter(plugin_name, settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
+            # Constructor/transport failures are server-side, not client input.
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        try:
+            with exporter:
+                result = await exporter.push(context)
+        except Exception as exc:
+            # Guard against unexpected exporter failures leaking as raw 500s.
+            # Expected error modes are already returned inside push() as a
+            # failed ExporterResult; this catches genuinely unforeseen faults.
+            logger.exception(
+                "Exporter '%s' push raised unexpectedly for job %s",
+                plugin_name,
+                job_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Exporter '{plugin_name}' failed unexpectedly",
+            ) from exc
+
+        await record_audit(
+            action="export.push",
+            actor=safe_username,
+            message=(
+                f"Exporter push by '{safe_username}' for job {job_id},"
+                f" plugin={plugin_name}"
+            ),
+            target_type="job",
+            target_id=job_id,
+            outcome="success" if result.success else "failure",
+            details={"plugin": plugin_name},
+            request=request,
+        )
+        return {**result.details, "success": result.success, "message": result.message}
+    except HTTPException as exc:
+        # One row per attempt: a push that never reached the exporter still
+        # says who tried what and why it stopped.
+        await _record_refused_attempt(
+            action="export.push",
+            request=request,
+            message=(
+                f"Exporter push by '{safe_username}' for job {job_id},"
+                f" plugin={plugin_name}"
+            ),
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"plugin": plugin_name},
+        )
+        raise
 
 
 def _rp_push_error_result(
@@ -12582,30 +12727,44 @@ async def stream_logs(
             return True
         return level_filter in line
 
+    def _log_chunk(line: str) -> str:
+        return f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
+
     async def event_generator() -> AsyncIterator[str]:
-        # Send initial tail from log file
-        if _LOG_FILE:
-            log_path = Path(_LOG_FILE)
-            if log_path.exists():
-                try:
-                    tail_lines = await asyncio.to_thread(
-                        _read_log_tail, log_path, lines
-                    )
-                    for line in tail_lines:
-                        clean = _ANSI_RE.sub("", line)
-                        if _matches_level(clean):
-                            yield f"event: log\ndata: {clean.replace(chr(10), '  ')}\n\n"
-                except OSError:
-                    pass
+        # Subscribe before reading the tail: a line logged while the tail is
+        # being read then lands in the queue instead of falling into the gap
+        # between the two sources.
+        async with _log_broadcast.subscribe() as subscription:
+            # De-duplication: an exact-content multiset of the tail lines. A live
+            # line matching one already sent is that same line read twice, so it
+            # is skipped once. Cheap, and a duplicate log line is only ever
+            # suppressed for the tail window.
+            tail_seen: Counter[str] = Counter()
 
-        # Stream live logs via the payload broadcast queue
-        def _render(line: str) -> str | None:
-            if not _matches_level(line):
-                return None
-            return f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
+            # Send initial tail from log file
+            if _LOG_FILE:
+                log_path = Path(_LOG_FILE)
+                if log_path.exists():
+                    try:
+                        tail_lines = await asyncio.to_thread(
+                            _read_log_tail, log_path, lines
+                        )
+                        for line in tail_lines:
+                            clean = _ANSI_RE.sub("", line)
+                            tail_seen[clean] += 1
+                            if _matches_level(clean):
+                                yield _log_chunk(clean)
+                    except OSError:
+                        pass
 
-        async with _log_broadcast.subscribe() as queue:
-            async for chunk in _queue_sse_events(request, queue, _render):
+            # Stream live logs via the payload broadcast queue
+            def _render(line: str) -> str | None:
+                if tail_seen[line] > 0:
+                    tail_seen[line] -= 1
+                    return None
+                return _log_chunk(line) if _matches_level(line) else None
+
+            async for chunk in _queue_sse_events(request, subscription, _render):
                 yield chunk
 
     logger.info(
@@ -12663,7 +12822,8 @@ def _audit_iso_bound(
 
 
 # CSV column order for the audit export — the documented header. The hash
-# columns make the export independently verifiable, row by row.
+# columns make the export independently verifiable, row by row;
+# ``hash_payload`` is the exact text ``entry_hash`` covers.
 _AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
     "id",
     "created_at",
@@ -12678,11 +12838,21 @@ _AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
     "details",
     "prev_hash",
     "entry_hash",
+    "hash_payload",
 )
 # Free-text columns can be attacker-controlled (a failed login records the
 # typed username), so a spreadsheet would execute a leading formula prefix.
+# ``hash_payload`` is JSON object text, which never starts with one.
 _AUDIT_EXPORT_TEXT_COLUMNS: frozenset[str] = frozenset(
-    {"actor", "action", "target_type", "target_id", "details", "request_ip"}
+    {
+        "actor",
+        "action",
+        "target_type",
+        "target_id",
+        "details",
+        "request_ip",
+        "hash_payload",
+    }
 )
 _AUDIT_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 # Rows per storage round-trip and the CSV buffer size that triggers a flush:
@@ -12793,6 +12963,25 @@ def _audit_public_event(event: dict[str, Any]) -> dict[str, Any]:
     return strip_sensitive_from_response(event)
 
 
+def _audit_export_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Public event plus ``hash_payload``: the bytes ``entry_hash`` covers.
+
+    Verification is then ``sha256(hash_payload + prev_hash) == entry_hash``,
+    with nothing re-mapped. A row written before details were scrubbed carries
+    its secrets in those bytes, so the raw fields are withheld when read-time
+    redaction changed the details: an unverifiable row beats a leaked
+    credential.
+    """
+    public = _audit_public_event(event)
+    if public["details"] == event["details"]:
+        return public
+    return {
+        name: value
+        for name, value in public.items()
+        if name not in {"details_raw", "hash_payload"}
+    }
+
+
 def _audit_action_label(action: str) -> str:
     """Human label for an action id: ``auth.login_failed`` → ``Auth Login Failed``."""
     return action.replace(".", " ").replace("_", " ").title()
@@ -12859,8 +13048,11 @@ async def export_audit_events_endpoint(
     full matched set is streamed, so no page size limits the export and memory
     stays bounded. CSV columns are ``id, created_at, actor, actor_role,
     is_admin, action, target_type, target_id, outcome, request_ip, details,
-    prev_hash, entry_hash`` — the hash columns let a retained export be
-    verified on its own.
+    prev_hash, entry_hash, hash_payload`` — the hash columns let a retained
+    export be verified on its own: ``hash_payload`` is the exact canonical text
+    ``entry_hash`` covers, so ``sha256(hash_payload + prev_hash)`` matches with
+    no field re-mapping. Each JSON event carries the same ``hash_payload`` plus
+    ``details_raw``, the stored ``details`` text inside it.
     """
     _require_admin(request)
     logger.info(
@@ -12874,7 +13066,7 @@ async def export_audit_events_endpoint(
             batch_size=_AUDIT_EXPORT_BATCH, **filters
         ):
             for event in batch:
-                yield _audit_public_event(event)
+                yield _audit_export_event(event)
 
     async def _json_chunks() -> AsyncIterator[str]:
         yield "["
@@ -12926,15 +13118,25 @@ async def list_audit_actions(request: Request) -> dict[str, Any]:
 
 @app.get("/api/admin/audit/stream", operation_id="streamAuditEvents")
 async def stream_audit_events(request: Request) -> StreamingResponse:
-    """SSE stream of audit events as they are recorded (admin only)."""
+    """SSE stream of audit events as they are recorded (admin only).
+
+    Each event is sent as ``event: audit:event`` with the same public
+    projection as the list endpoint (credentials in nested ``details`` are
+    stripped). If a slow subscriber's queue overflows, the skipped payloads are
+    not silently lost: ``event: audit-gap`` carries ``{"dropped": N}`` before
+    the stream resumes, so the client can refetch the missed range.
+    """
     _require_admin(request)
 
     def _render(event: dict[str, Any]) -> str:
-        return f"event: audit:event\ndata: {json.dumps(event, default=str)}\n\n"
+        public = _audit_public_event(event)
+        return f"event: audit:event\ndata: {json.dumps(public, default=str)}\n\n"
 
     async def event_generator() -> AsyncIterator[str]:
-        async with _audit_broadcast.subscribe() as queue:
-            async for chunk in _queue_sse_events(request, queue, _render):
+        async with _audit_broadcast.subscribe() as subscription:
+            async for chunk in _queue_sse_events(
+                request, subscription, _render, gap_event="audit-gap"
+            ):
                 yield chunk
 
     return StreamingResponse(
@@ -14183,6 +14385,22 @@ async def _verify_and_store_server_provider_key(
             break
     if outcome != "accepted":
         # Mirror the user flow: report the outcome, never store an untested key.
+        if promoted:
+            # A promotion that never stores its credential still happened: the
+            # attempt is the trail entry (the success row is written below).
+            await record_audit(
+                action="provider.key.promote",
+                actor=request.state.username,
+                message=(
+                    f"Admin '{request.state.username}' promoted the deployment"
+                    f" credential for '{provider}' (failure: verification_{outcome})"
+                ),
+                target_type="provider",
+                target_id=provider,
+                outcome="failure",
+                details={"provider": provider, "reason": f"verification_{outcome}"},
+                request=request,
+            )
         message = {
             "rejected": "Check the key and selected model; existing credential unchanged.",
             "inconclusive": "Try again when the provider is available; existing credential unchanged.",
@@ -14548,48 +14766,70 @@ async def store_deployment_provider_key(
     ``verification_model`` is optional: omitted, the credential's own first
     discovered model verifies it, and a ``400`` asks for one when discovery
     exposes none (#378).
-    """
-    _require_admin(request)
-    # Stored first: that answer needs no credential, so it must not hide
-    # behind a "no deployment credential" 404.
-    if await _has_stored_server_key(provider):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
-        )
-    from rootcoz.ai_client import deployment_provider_credentials
 
-    credentials = deployment_provider_credentials()
-    # ``None`` is an unreadable manifest (the resolver logged why): it resolves
-    # nothing right now, so it answers like "no credential", never a 500.
-    match = next(
-        (
-            (name, key)
-            for name, key in (credentials or {}).items()
-            if normalize_provider(name) == normalize_provider(provider)
-        ),
-        None,
-    )
-    if match is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Provider '{provider}' has no deployment credential to store",
+    Every exit writes exactly one ``provider.key.promote`` row: the shared add
+    path writes ``success`` (or a rejected verification's ``failure``) and the
+    refusals below are audited here from their status code, with a reason code
+    and never the key.
+    """
+    try:
+        _require_admin(request)
+        # Stored first: that answer needs no credential, so it must not hide
+        # behind a "no deployment credential" 404.
+        if await _has_stored_server_key(provider):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+            )
+        from rootcoz.ai_client import deployment_provider_credentials
+
+        credentials = deployment_provider_credentials()
+        # ``None`` is an unreadable manifest (the resolver logged why): it
+        # resolves nothing right now, so it answers like "no credential", never
+        # a 500.
+        match = next(
+            (
+                (name, key)
+                for name, key in (credentials or {}).items()
+                if normalize_provider(name) == normalize_provider(provider)
+            ),
+            None,
         )
-    name, key = match
-    # The resolved credential is handed over as the submitted key, so the add
-    # path does every part of the store exactly once, for both entry points.
-    return await _verify_and_store_server_provider_key(
-        name,
-        ServerProviderKeyInput(
-            provider=name,
-            api_key=SecretStr(key),
-            verification_model=body.verification_model,
-        ),
-        request,
-        replacing=False,
-        promoted=True,
-        include_model_count=True,
-    )
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Provider '{provider}' has no deployment credential to store",
+            )
+        name, key = match
+        # The resolved credential is handed over as the submitted key, so the
+        # add path does every part of the store exactly once, for both entry
+        # points.
+        return await _verify_and_store_server_provider_key(
+            name,
+            ServerProviderKeyInput(
+                provider=name,
+                api_key=SecretStr(key),
+                verification_model=body.verification_model,
+            ),
+            request,
+            replacing=False,
+            promoted=True,
+            include_model_count=True,
+        )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="provider.key.promote",
+            request=request,
+            message=(
+                f"Promotion of the deployment credential for '{provider}'"
+                f" by '{getattr(request.state, 'username', '')}'"
+            ),
+            target_type="provider",
+            target_id=provider,
+            exc=exc,
+            details={"provider": provider},
+        )
+        raise
 
 
 @app.post(
@@ -18657,7 +18897,19 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
 @app.get("/api/admin/db/schema", operation_id="adminDbSchema")
 async def admin_db_schema(request: Request) -> dict[str, Any]:
     """Get database schema — tables, columns, types, row counts. Admin only."""
-    _require_admin(request)
+    username = getattr(request.state, "username", "")
+    try:
+        _require_admin(request)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="admin.db_schema",
+            request=request,
+            message=f"Admin '{username}' read the DB schema",
+            target_type="database",
+            target_id="schema",
+            exc=exc,
+        )
+        raise
 
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -18682,6 +18934,16 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
                 f"SELECT COUNT(*) as c FROM [{table_name}]"
             ).fetchone()["c"]
             tables.append({"name": table_name, "columns": columns, "row_count": count})
+        await record_audit(
+            action="admin.db_schema",
+            actor=username,
+            message=(f"Admin '{username}' read the DB schema ({len(tables)} tables)"),
+            target_type="database",
+            target_id="schema",
+            outcome="success",
+            details={"tables": len(tables)},
+            request=request,
+        )
         return {"tables": tables}
     finally:
         conn.close()
@@ -18690,32 +18952,44 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
 @app.post("/api/admin/db/query", operation_id="adminDbQuery")
 async def admin_db_query(request: Request) -> dict[str, Any]:
     """Execute a read-only SQL query. Admin only."""
-    _require_admin(request)
+    username = getattr(request.state, "username", "")
+    try:
+        _require_admin(request)
+        body = await request.json()
+        if not await _ai_admin_role_current(request.state.username):
+            logger.info("Admin DB query denied after role change for %s", username)
+            raise HTTPException(status_code=403, detail="Admin access required")
+        sql = body.get("sql", "").strip()
+        if not sql:
+            raise HTTPException(status_code=400, detail="Empty query")
 
-    body = await request.json()
-    if not await _ai_admin_role_current(request.state.username):
-        logger.info(
-            "Admin DB query denied after role change for %s", request.state.username
+        first_word = sql.split()[0].upper() if sql.split() else ""
+        if first_word in (
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "DROP",
+            "ALTER",
+            "CREATE",
+            "REPLACE",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Write operations not allowed (got {first_word})",
+            )
+    except HTTPException as exc:
+        # A refused query form, or a caller who lost the role, is an attempt
+        # too: the trail records that and never the statement itself.
+        await _record_refused_attempt(
+            action="admin.db_query",
+            request=request,
+            message=f"Admin '{username}' ran an admin chat DB query",
+            target_type="database",
+            target_id="query",
+            exc=exc,
+            denied=True,
         )
-        raise HTTPException(status_code=403, detail="Admin access required")
-    sql = body.get("sql", "").strip()
-    if not sql:
-        raise HTTPException(status_code=400, detail="Empty query")
-
-    first_word = sql.split()[0].upper() if sql.split() else ""
-    if first_word in (
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "DROP",
-        "ALTER",
-        "CREATE",
-        "REPLACE",
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Write operations not allowed (got {first_word})",
-        )
+        raise
 
     sql_hash = hashlib.sha256(sql.encode()).hexdigest()
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
@@ -18727,10 +19001,9 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
         results = [dict(row) for row in rows]
         await record_audit(
             action="admin.db_query",
-            actor=request.state.username,
+            actor=username,
             message=(
-                f"Admin '{request.state.username}' ran an admin chat DB query"
-                f" ({len(results)} rows)"
+                f"Admin '{username}' ran an admin chat DB query ({len(results)} rows)"
             ),
             target_type="database",
             outcome="success",
@@ -18746,8 +19019,8 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
     except sqlite3.OperationalError as e:
         await record_audit(
             action="admin.db_query",
-            actor=request.state.username,
-            message=f"Admin '{request.state.username}' admin chat DB query failed",
+            actor=username,
+            message=f"Admin '{username}' admin chat DB query failed",
             target_type="database",
             outcome="failure",
             details={"sql_hash": sql_hash},

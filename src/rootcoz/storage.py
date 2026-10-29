@@ -9916,16 +9916,26 @@ _AUDIT_COLUMNS = (
 )
 
 
-def _audit_entry_hash(row: dict[str, Any], prev_hash: str) -> str:
-    """``sha256(canonical_json(fields) + prev_hash)`` for one audit row."""
-    canonical = json.dumps(
+def _audit_hash_payload(row: dict[str, Any]) -> str:
+    """The canonical JSON text ``entry_hash`` covers, from the stored row.
+
+    Verifying is then plain ``sha256(hash_payload + prev_hash)`` on the stored
+    bytes: no field re-mapping and no type coercion. An export that re-rendered
+    the values would break it — ``is_admin`` is stored ``1``/``0`` and rendered
+    ``true``/``false`` — so the payload travels with the row instead.
+    """
+    return json.dumps(
         {name: row[name] for name in _AUDIT_HASH_FIELDS},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         default=str,
     )
-    return hashlib.sha256((canonical + prev_hash).encode()).hexdigest()
+
+
+def _audit_entry_hash(row: dict[str, Any], prev_hash: str) -> str:
+    """``sha256(hash_payload + prev_hash)`` for one audit row."""
+    return hashlib.sha256((_audit_hash_payload(row) + prev_hash).encode()).hexdigest()
 
 
 def _audit_details_json(details: dict[str, Any] | None) -> str:
@@ -9946,6 +9956,20 @@ def _audit_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     event = dict(row)
     event["is_admin"] = bool(event.get("is_admin"))
     event["details"] = _decode_audit_details(event.get("details"))
+    return event
+
+
+def _audit_export_event_row(row: aiosqlite.Row) -> dict[str, Any]:
+    """Decoded row plus the exact bytes ``entry_hash`` covers.
+
+    ``hash_payload`` is the canonical JSON text the hash was computed over and
+    ``details_raw`` the stored ``details`` text inside it. Both come from the
+    stored row, never from the decoded event: re-rendering a value (``is_admin``
+    as ``true`` instead of ``1``) would make an exported row unverifiable.
+    """
+    event = _audit_event_row(row)
+    event["details_raw"] = row["details"]
+    event["hash_payload"] = _audit_hash_payload(row)
     return event
 
 
@@ -10243,7 +10267,7 @@ async def iter_audit_events(
             rows = await cursor.fetchall()
         if not rows:
             return
-        yield [_audit_event_row(row) for row in rows]
+        yield [_audit_export_event_row(row) for row in rows]
         if len(rows) < batch_size:
             return
         last_id = rows[-1]["id"]
@@ -10265,6 +10289,11 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
     only when ``audit_chain_state`` records that exact cut (same id range, same
     hash); a prefix deleted any other way fails the trail at the oldest
     surviving row, and a mismatch inside the window always fails.
+
+    A NULL ``entry_hash`` is legacy only *before* the first chained row: a row
+    whose hash was cleared after the chain started is a break, not a jump back
+    to the pre-chain era — otherwise clearing the newest row's hash would hide
+    a tampered payload from this check.
     """
     sql = f"SELECT {_AUDIT_COLUMNS} FROM audit_events ORDER BY id DESC"
     params: tuple[Any, ...] = ()
@@ -10277,6 +10306,13 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
         prev_hash = _AUDIT_GENESIS_HASH
         truncated = False
         truncated_before_id: int | None = None
+        # The legacy/chained boundary: everything above the oldest chained row
+        # must carry a verifiable hash.
+        cursor = await db.execute(
+            "SELECT MIN(id) FROM audit_events WHERE entry_hash IS NOT NULL"
+        )
+        first_chained = await cursor.fetchone()
+        first_chained_id = first_chained[0] if first_chained else None
         if rows:
             # The walk's first row links to a row before it: seed the walk with
             # that row's hash instead of calling a bounded view broken.
@@ -10312,7 +10348,12 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
     first_broken_id: int | None = None
     for row in rows:
         if row["entry_hash"] is None:
-            legacy += 1
+            if first_chained_id is not None and row["id"] > first_chained_id:
+                # A cleared hash inside the chained era hides its payload.
+                if first_broken_id is None:
+                    first_broken_id = row["id"]
+            else:
+                legacy += 1
             continue
         if (
             row["prev_hash"] != prev_hash

@@ -2008,6 +2008,35 @@ class TestRootCozClientAdminUsers:
             client.admin_export_audit(output=str(tmp_path / "audit.json"))
         assert exc_info.value.status_code == 403
 
+    def test_admin_export_audit_writes_no_partial_file_on_a_stream_error(
+        self, tmp_path
+    ):
+        """A dropped connection must not leave an evidence file that looks valid."""
+
+        def handler(request):
+            def chunks():
+                yield b"id,action\n"
+                raise httpx.ReadError("connection dropped")
+
+            return httpx.Response(200, content=chunks())
+
+        target = tmp_path / "audit.csv"
+        with pytest.raises(RootCozError):
+            _make_client(handler).admin_export_audit(output=str(target))
+        assert not target.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_admin_export_audit_replaces_the_target_only_when_complete(self, tmp_path):
+        def handler(request):
+            return httpx.Response(200, content=b"id,action\n1,auth.login\n")
+
+        target = tmp_path / "audit.csv"
+        target.write_text("stale")
+        written = _make_client(handler).admin_export_audit(output=str(target))
+        assert written == len(target.read_bytes())
+        assert target.read_text() == "id,action\n1,auth.login\n"
+        assert list(tmp_path.iterdir()) == [target]
+
     def test_admin_component_versions(self):
         def handler(request):
             assert request.method == "GET"
@@ -3394,6 +3423,18 @@ class TestRootCozClientTranscripts:
         with pytest.raises(RootCozError) as exc_info:
             client.admin_download_transcript("00000000-0000-0000-0000-000000000002")
         assert "Transcript not found" in str(exc_info.value)
+
+    def test_download_transcript_to_stdout_is_untouched(self, capsys):
+        """``-`` keeps streaming straight to stdout, no temp file involved."""
+        session = "00000000-0000-0000-0000-000000000007"
+        payload = '{"type": "turn"}\n'
+
+        def handler(request):
+            return httpx.Response(200, content=payload.encode())
+
+        written = _make_client(handler).admin_download_transcript_to_file(session, "-")
+        assert written == len(payload)
+        assert capsys.readouterr().out == payload
 
     def test_download_transcript_to_file_streams(self, tmp_path):
         """--output streams chunks to disk instead of buffering the download."""

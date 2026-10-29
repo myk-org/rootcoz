@@ -13236,6 +13236,77 @@ class TestReadLogTail:
         assert all(line.startswith("y") for line in result)
 
 
+class TestLogStream:
+    """SSE log stream: the tail is read only after the queue is subscribed."""
+
+    async def _chunks(
+        self,
+        monkeypatch,
+        tmp_path,
+        tail_lines: list[str],
+        published: list[str],
+        expected: int,
+    ) -> list[str]:
+        """Stream chunks while ``published`` lines land during the tail read.
+
+        Publishing from inside the patched tail reader models a line logged in
+        the window between subscribing to the queue and reading the file.
+        """
+        from rootcoz import main as main_module
+
+        log_path = tmp_path / "app.log"
+        log_path.write_text("INFO old line\n")
+        monkeypatch.setattr(main_module, "_LOG_FILE", str(log_path))
+        monkeypatch.setattr(main_module, "record_audit", AsyncMock())
+
+        def fake_tail(path, n):
+            for line in published:
+                main_module._log_broadcast.publish(line)
+            return tail_lines
+
+        monkeypatch.setattr(main_module, "_read_log_tail", fake_tail)
+
+        request = AsyncMock()
+        request.state.is_admin = True
+        request.is_disconnected = AsyncMock(return_value=False)
+
+        response = await main_module.stream_logs(request, lines=100, level="")
+        body = response.body_iterator
+        try:
+            return [
+                await asyncio.wait_for(anext(body), timeout=1) for _ in range(expected)
+            ]
+        finally:
+            await body.aclose()
+
+    async def test_line_logged_during_the_tail_read_is_not_lost(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A line logged while the file is being read is delivered exactly once."""
+        racy = "INFO line logged mid-tail"
+
+        chunks = await self._chunks(
+            monkeypatch, tmp_path, ["INFO old line"], [racy], expected=3
+        )
+
+        # Tail line, the connect comment, then the live line.
+        assert sum(chunk.count(racy) for chunk in chunks) == 1
+
+    async def test_line_present_in_both_sources_is_delivered_once(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The live copy of a line the tail already sent is de-duplicated."""
+        racy = "INFO line logged mid-tail"
+
+        chunks = await self._chunks(
+            monkeypatch, tmp_path, ["INFO old line", racy], [racy], expected=3
+        )
+
+        # Both tail lines plus the connect comment; the queued copy matched the
+        # tail line already sent, so it was skipped.
+        assert sum(chunk.count(racy) for chunk in chunks) == 1
+
+
 class TestSubmitIntake:
     def test_submit_raw_does_not_require_ai(self, test_client) -> None:
         data, mock_process = _post_submit_queued(
