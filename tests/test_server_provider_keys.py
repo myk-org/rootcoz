@@ -62,9 +62,11 @@ def _hermetic_deployment_env(monkeypatch):
     providers in the last-known catalog, so a developer's own exports (and the
     shared test catalog) would turn a provider capturable behind a test's
     back. Tests that need either set it themselves (``_register_providers``,
-    ``monkeypatch.setenv``).
+    ``monkeypatch.setenv``). The default is a *warm but empty* catalog — what
+    a deployment has after any successful refresh; the cold-cache case
+    (``None``, unknown) is set explicitly by the test that covers it.
     """
-    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", [])
     for ambient_var in (
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
@@ -277,6 +279,50 @@ async def test_key_scoped_models_storage_roundtrip(tmp_path, monkeypatch):
     await storage.set_server_ai_credential("google", SECRET, "admin")
     await storage.delete_server_ai_provider("google")
     assert await storage.list_server_provider_key_models() == []
+
+
+async def test_guarded_write_skips_when_a_credential_is_stored(tmp_path, monkeypatch):
+    """Storage: the deployment write guard is part of the row transaction.
+
+    A deployment capture writes without a generation binding (it has no
+    credential row), so "this provider still has no stored key" must be
+    tested inside the same transaction as the replacement — a check in the
+    caller leaves a window a concurrent add slips through (#376).
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-guard.db")
+    await storage.init_db()
+    await storage.set_server_ai_credential("openai", SECRET, "admin")
+    await storage.set_server_provider_key_models(
+        "openai", [{"id": "ambient-model"}], status="supported"
+    )
+    assert (
+        await storage.set_server_provider_key_models(
+            "openai",
+            [{"id": "deployment-model"}],
+            status="supported",
+            only_without_stored_credential=True,
+        )
+        is False
+    )
+    # Rows and capture status both untouched: nothing was written at all.
+    assert [
+        row["model"] for row in await storage.list_server_provider_key_models()
+    ] == ["ambient-model"]
+    assert (await storage.list_server_ai_providers())[0]["key_capture_status"] == (
+        "supported"
+    )
+    # The same write succeeds once the credential is gone — the guard is the
+    # only reason it was rejected.
+    await storage.delete_server_ai_provider("openai")
+    assert (
+        await storage.set_server_provider_key_models(
+            "openai",
+            [{"id": "deployment-model"}],
+            status="supported",
+            only_without_stored_credential=True,
+        )
+        is True
+    )
 
 
 # --- Endpoints ---
@@ -3111,6 +3157,126 @@ def test_deployment_credentials_gemini_alias_falls_back_to_google(monkeypatch):
 
     monkeypatch.setenv("GEMINI_API_KEY", AMBIENT_KEY)
     assert ai_client.deployment_provider_credentials() == {"gemini": AMBIENT_KEY}
+
+
+def test_cold_catalog_cache_is_unknown_not_empty(monkeypatch):
+    """A cold catalog cannot answer ambient eligibility, so it is ``None`` (#376).
+
+    Startup, a refresh in flight, or a failed ``list_models()`` leaves no
+    catalog. Reporting an empty resolve there would sweep every captured
+    deployment listing on the next pass (#372's ``_clear_stale_...``).
+    """
+    _register_providers(monkeypatch, "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+
+    assert ai_client.deployment_provider_credentials() is None
+    # A warm catalog — even one holding no credential — is a real answer.
+    _register_providers(monkeypatch, "openai")
+    assert ai_client.deployment_provider_credentials() == {"openai": AMBIENT_KEY}
+
+
+async def test_cold_catalog_keeps_captured_ambient_listing(tmp_path, monkeypatch):
+    """A capture pass on a cold catalog captures and sweeps nothing (#376)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-cold.db")
+    await storage.init_db()
+    await storage.set_server_provider_key_models(
+        "openai", [{"id": "gpt-5.6-luna"}], status="supported"
+    )
+    _register_providers(monkeypatch, "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    _mock_supported(monkeypatch, ["openai"])
+    calls = _mock_key_discovery(monkeypatch, [{"id": "gpt-5.6-mini"}])
+    monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+
+    assert await rootcoz_main.capture_deployment_provider_listings(force=True) == {}
+    assert calls == []
+    assert [
+        row["model"] for row in await storage.list_server_provider_key_models()
+    ] == ["gpt-5.6-luna"]
+
+
+async def test_server_provider_key_resolves_ambient_env_key(tmp_path, monkeypatch):
+    """An ambient-keyed provider's session gets that key; stored still wins (#376).
+
+    Without it the sidecar cannot construct a model id that is absent from
+    the static catalog and rejects the session, so the captured ambient
+    models would be offered but unusable.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-key.db")
+    await storage.init_db()
+    _register_providers(monkeypatch, "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    assert await ai_client.server_provider_key("openai") == AMBIENT_KEY
+    # Nothing resolvable: ``None`` keeps the deployment's env bootstrap.
+    monkeypatch.delenv("OPENAI_API_KEY")
+    assert await ai_client.server_provider_key("openai") is None
+    # A stored key always wins over the ambient credential.
+    await storage.set_server_ai_credential("openai", SECRET, "admin")
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    assert await ai_client.server_provider_key("openai") == SECRET
+
+
+async def test_server_provider_key_manifest_reference_never_logged(
+    tmp_path, monkeypatch, caplog
+):
+    """A manifest ``$VAR`` credential resolves in memory and is never logged (#376)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-manifest-key.db")
+    await storage.init_db()
+    agent_dir = _point_agent_dir(
+        monkeypatch, tmp_path, {"mygateway": _deployment_provider()}
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+
+    with _captured_logs(
+        caplog, "rootcoz.ai_client", "rootcoz.main", level=logging.DEBUG
+    ):
+        assert await ai_client.server_provider_key("mygateway") == DEPLOYMENT_KEY
+        # An unreadable manifest is unknown, never an exception.
+        (agent_dir / "models.json").write_text("{ half-written")
+        assert await ai_client.server_provider_key("mygateway") is None
+    assert DEPLOYMENT_KEY not in caplog.text
+
+
+async def test_deployment_capture_rechecks_stored_key_at_write(
+    tmp_path, monkeypatch, caplog
+):
+    """A key stored during discovery is rejected by the row write itself (#376)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp-race.db")
+    await storage.init_db()
+    await storage.set_server_provider_key_models(
+        "mygateway", [{"id": "mygateway/gpt-4o"}], status="supported"
+    )
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+
+    async def _discovery(provider, key):
+        # Lands between the capture's own re-check and the row write, so only
+        # the guard inside the write transaction can see it.
+        await storage.set_server_ai_credential(provider, SECRET, "admin")
+        return {
+            "modelListingSupported": True,
+            "models": [
+                {
+                    "id": "mygateway/deployment-only",
+                    "name": "deployment-only",
+                    "provider": provider,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(ai_client, "models_for_api_key", _discovery)
+    with _captured_logs(caplog, "rootcoz.main") as captured:
+        models, status = await rootcoz_main._capture_deployment_provider_listing(
+            "mygateway", DEPLOYMENT_KEY
+        )
+
+    assert (models, status) == ([], "superseded")
+    assert [
+        row["model"] for row in await storage.list_server_provider_key_models()
+    ] == ["mygateway/gpt-4o"]
+    assert "mygateway" in captured.text
+    assert DEPLOYMENT_KEY not in captured.text
 
 
 # --- Capability gate for key-scoped listing (#376) ---

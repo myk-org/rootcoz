@@ -411,18 +411,38 @@ async def session_key(provider: str) -> str | None:
     return key
 
 
+def _deployment_provider_key(provider: str) -> str | None:
+    """Deployment-env/ambient key of a provider with no stored credential."""
+    credentials = deployment_provider_credentials()
+    if credentials is None:
+        # Manifest unreadable or catalog still cold: unknown, so leave the
+        # session on the sidecar's own env bootstrap.
+        return None
+    wanted = provider.lower()
+    return next(
+        (key for name, key in credentials.items() if name.lower() == wanted), None
+    )
+
+
 async def server_provider_key(provider: str) -> str | None:
-    """Admin-stored server provider key (#347), or None.
+    """Server-side provider key for a session (#347, #376), or None.
 
     A stored key wins over the deployment's env/ambient credentials and is
-    passed as a per-session apiKey exactly like a user key. Unreadable or
-    unreachable storage falls back to the env bootstrap with a warning —
-    the deployment credentials still authenticate the call.
+    passed as a per-session apiKey exactly like a user key. With no stored key
+    the provider's deployment credential is resolved instead (#376): a model
+    captured from an ambient ``<PROVIDER>_API_KEY`` exists only for that key,
+    so the session must authenticate with it — otherwise the sidecar cannot
+    construct an id the static catalog lacks and rejects the session.
+    Unreadable or unreachable storage falls back to the env bootstrap with a
+    warning — the deployment credentials still authenticate the call.
+
+    The returned key is in-memory only: never logged, persisted, or returned
+    by an API.
     """
     from rootcoz.storage import UnreadableAiCredentialsError, get_server_ai_credential
 
     try:
-        return await get_server_ai_credential(provider)
+        key = await get_server_ai_credential(provider)
     except UnreadableAiCredentialsError:
         logger.warning(
             "Server AI credential store unreadable for provider=%s; "
@@ -433,6 +453,7 @@ async def server_provider_key(provider: str) -> str | None:
     except sqlite3.Error, OSError, RuntimeError:
         logger.warning("Unable to read server AI credential for provider=%s", provider)
         return None
+    return key if key is not None else _deployment_provider_key(provider)
 
 
 # Pi-sidecar's catalog is the provider/model contract.  These aliases only
@@ -857,11 +878,21 @@ def deployment_provider_credentials() -> dict[str, str] | None:
     ``None`` means "unknown": the raw answer a caller must not act on. It is
     returned when a configured agent dir did not yield a readable manifest
     right now — the file is missing (atomic replace, mount blip), unreadable,
-    or unparseable. Unknown is never "nothing is eligible": a caller must
-    keep whatever it captured before (#376), so ambient resolution is skipped
-    too rather than reporting an empty-capture pass. An empty dict is a
-    successful read that resolved no credential.
+    or unparseable — and also while the catalog is cold (``None``), since
+    ambient eligibility is then unknown rather than empty: startup, a refresh
+    in flight, or a failed ``list_models()`` must never look like "no provider
+    is eligible" (#376). Unknown is never "nothing is eligible": a caller must
+    keep whatever it captured before, so ambient resolution is skipped too
+    rather than reporting an empty-capture pass. An empty dict is a
+    successful read of a warm catalog that resolved no credential.
     """
+    if _model_catalog_cache is None:
+        # Only a warm catalog may produce an ambient-derived map (#376): an
+        # unwarmed one cannot answer the ambient half of this resolve.
+        logger.debug(
+            "Sidecar model catalog not loaded yet; deployment credentials unknown"
+        )
+        return None
     resolved: dict[str, str] = {}
     declared: set[str] = set()
     agent_dir = _sidecar_agent_dir()

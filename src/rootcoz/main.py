@@ -12489,6 +12489,7 @@ async def _store_supported_key_listing(
     discovery_models: list[dict[str, Any]],
     *,
     expected_generation: int | None,
+    only_without_stored_credential: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Persist a supported key-scoped listing (#350, shared with #372).
 
@@ -12500,7 +12501,9 @@ async def _store_supported_key_listing(
 
     ``expected_generation`` binds the write to a stored credential's
     generation; a deployment-env credential (#372) has no stored row, so it
-    passes ``None``. Returns ``(listing_models, stored)``.
+    passes ``None`` and instead sets ``only_without_stored_credential`` so the
+    storage guard rejects the write if a key was stored meanwhile. Returns
+    ``(listing_models, stored)``.
     """
     listing_models = [
         entry for entry in discovery_models if entry.get("source") != "manifest"
@@ -12510,6 +12513,7 @@ async def _store_supported_key_listing(
         listing_models or [{"id": "", "sentinel": True}],
         status="supported",
         expected_generation=expected_generation,
+        only_without_stored_credential=only_without_stored_credential,
     )
     return listing_models, stored
 
@@ -12598,9 +12602,9 @@ async def _stored_provider_ids() -> set[str]:
 
     The single storage query behind "does this provider have a stored key":
     ``_deployment_capture_scope`` uses the whole set to pick what a capture
-    pass may touch, and the deployment write path re-reads it just before
-    writing — the scope set is only a snapshot, and a key stored during a
-    sidecar round-trip owns the rows from then on.
+    pass may touch. The deployment write itself does not re-read it — the
+    scope set is only a snapshot, so the row replacement carries its own
+    in-transaction guard instead (``only_without_stored_credential``).
     """
     return {
         normalize_provider(row["provider"])
@@ -12615,13 +12619,15 @@ async def _capture_deployment_provider_listing(
 
     Returns ``(models, status)``: ``"supported"`` (rows stored),
     ``"unsupported"`` (the sidecar serves no key-scoped listing for this
-    provider), ``"unavailable"`` (discovery or the write failed) or
-    ``"superseded"`` (a server key was stored for the provider while the
-    discovery ran, so the write was skipped — the stored key owns the rows).
-    Rows are written without a generation binding — a deployment credential
-    has no stored row to bind to. Every failure leaves the existing rows
-    untouched: a deployment credential never clears a listing, so a sidecar
-    hiccup can never downgrade the admin view to the static manifest.
+    provider), ``"unavailable"`` (discovery failed) or ``"superseded"`` (a
+    server key was stored for the provider while the discovery ran, so the
+    write was rejected — the stored key owns the rows). Rows are written
+    without a generation binding — a deployment credential has no stored row
+    to bind to — and the "no stored key" test runs inside the write's own
+    transaction, so a key stored between any check and the write still wins
+    (#376). Every failure leaves the existing rows untouched: a deployment
+    credential never clears a listing, so a sidecar hiccup can never downgrade
+    the admin view to the static manifest.
     """
     try:
         from rootcoz.ai_client import models_for_api_key
@@ -12640,19 +12646,15 @@ async def _capture_deployment_provider_listing(
         )
         return [], "unsupported"
     try:
-        # Re-checked at write time, never trusted from the pass-start scope:
-        # the discovery above is a sidecar round-trip, and a key stored in that
-        # window (another tab, startup task, forced refresh) must not have its
-        # listing overwritten by the deployment credential (#376).
-        if normalize_provider(provider) in await _stored_provider_ids():
-            logger.warning(
-                "Deployment key-scoped capture superseded for provider=%s (a"
-                " stored key appeared during discovery); discarding",
-                provider,
-            )
-            return [], "superseded"
+        # The write is guarded inside storage (#376): the discovery above is a
+        # sidecar round-trip, and a key stored in that window (another tab,
+        # startup task, forced refresh) owns the rows from then on, so the
+        # replacement must not overwrite it.
         models, stored = await _store_supported_key_listing(
-            provider, discovery["models"], expected_generation=None
+            provider,
+            discovery["models"],
+            expected_generation=None,
+            only_without_stored_credential=True,
         )
     except sqlite3.Error, OSError:
         logger.warning(
@@ -12661,10 +12663,11 @@ async def _capture_deployment_provider_listing(
         return [], "unavailable"
     if not stored:
         logger.warning(
-            "Deployment key-scoped listing write was skipped for provider=%s",
+            "Deployment key-scoped capture superseded for provider=%s (a stored"
+            " key appeared during discovery); discarding",
             provider,
         )
-        return [], "unavailable"
+        return [], "superseded"
     logger.info(
         "Captured deployment key-scoped listing for provider=%s (%d models)",
         provider,
