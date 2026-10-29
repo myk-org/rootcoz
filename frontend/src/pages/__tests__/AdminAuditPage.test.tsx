@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, useLocation } from 'react-router-dom'
+import { useEffect } from 'react'
+import { MemoryRouter, RouterProvider, createMemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminAuditPage } from '@/pages/AdminAuditPage'
 
@@ -108,9 +109,35 @@ function renderPage(initialEntry = '/admin/audit') {
   )
 }
 
+/** A router whose history stack the test can walk, like a real Back button. */
+function renderRouted(initialEntries: string[], initialIndex?: number) {
+  const router = createMemoryRouter(
+    [
+      {
+        path: '/admin/audit',
+        element: (
+          <>
+            <AdminAuditPage />
+            <LocationProbe />
+          </>
+        ),
+      },
+    ],
+    { initialEntries, initialIndex },
+  )
+  const view = render(<RouterProvider router={router} />)
+  return { router, ...view }
+}
+
+/** Every location the page has rendered, to catch stray history entries. */
+let locationKeys: string[] = []
+
 /** The page owns the query string, so the URL assertions read it from the router. */
 function LocationProbe() {
   const location = useLocation()
+  useEffect(() => {
+    locationKeys.push(location.key)
+  }, [location.key])
   return <span data-testid="location">{`${location.pathname}${location.search}`}</span>
 }
 
@@ -146,6 +173,7 @@ describe('AdminAuditPage', () => {
   beforeEach(() => {
     apiGet.mockReset()
     MockEventSource.instances = []
+    locationKeys = []
     vi.stubGlobal('EventSource', MockEventSource)
   })
 
@@ -204,6 +232,40 @@ describe('AdminAuditPage', () => {
     await waitFor(() => expect(screen.getByTestId('location')).not.toHaveTextContent('actor='))
     expect(screen.getByTestId('location')).not.toHaveTextContent('outcome=')
     expect(screen.getByTestId('location')).not.toHaveTextContent('since=')
+  })
+
+  it('adopts a URL the browser navigates back to while the page stays mounted', async () => {
+    mockAuditApi(120, pageOfEvents(120))
+    // An earlier entry with other filters and a shared link on top of it.
+    const { router } = renderRouted(
+      ['/admin/audit?actor=bob&outcome=failure&limit=100&live=1', '/admin/audit?actor=alice'],
+      1,
+    )
+
+    expect(await screen.findByText('Showing 1–50 of 120')).toBeInTheDocument()
+    expect(screen.getByLabelText('Actor filter')).toHaveValue('alice')
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=0&actor=alice'),
+    )
+
+    // Back: the component is not remounted, only the query changes.
+    await act(async () => {
+      await router.navigate(-1)
+    })
+
+    expect(screen.getByLabelText('Actor filter')).toHaveValue('bob')
+    expect(screen.getByRole('combobox', { name: 'Outcome filter' })).toHaveTextContent('failure')
+    expect(screen.getByRole('combobox', { name: 'Rows per page' })).toHaveTextContent('100')
+    expect(liveSwitch()).toHaveAttribute('aria-checked', 'true')
+    // The next request asks for what the URL says, from the first page.
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith(
+        '/api/admin/audit?limit=100&offset=0&actor=bob&outcome=failure',
+      ),
+    )
+    // Adopting the URL rewrites nothing: no pushed entry and no replace either.
+    expect(router.state.historyAction).toBe('POP')
+    expect(locationKeys).toHaveLength(2)
   })
 
   it('shows the empty state', async () => {

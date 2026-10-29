@@ -1065,7 +1065,7 @@
 <tr>
 <td><code>audit export</code></td>
 <td><code>--format</code> (<code>json</code>, <code>csv</code>), <code>--output</code>/<code>-o</code> (file, or <code>-</code> for stdout), plus the <code>audit list</code> filters</td>
-<td>Stream the whole matching set to a file or stdout — uncapped, unlike <code>audit list</code>. This is how evidence is retained before retention pruning deletes it, which is why both hash columns travel with it. CSV columns: <code>id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, prev_hash, entry_hash</code>. Admin only.</td>
+<td>Stream the whole matching set to a file or stdout — uncapped, unlike <code>audit list</code>. This is how evidence is retained before retention pruning deletes it, which is why both hash columns travel with it. CSV columns: <code>id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, prev_hash, entry_hash</code>; a text cell starting with <code>'</code>, <code>=</code>, <code>+</code>, <code>-</code>, <code>@</code>, a tab or a CR carries one leading <code>'</code> escape (remove exactly one to recover the stored value). Admin only.</td>
 </tr>
 <tr>
 <td><code>users list</code></td>

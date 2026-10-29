@@ -1598,6 +1598,15 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events (actor)"
         )
+        # Retention checkpoint: names how far the chain was legitimately cut,
+        # so a prefix deleted by hand cannot pass verify as mere truncation.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_chain_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                pruned_through_id INTEGER NOT NULL,
+                pruned_last_hash TEXT NOT NULL
+            )
+        """)
 
         # Migration: case-insensitive username uniqueness.
         # Lowercase all existing usernames, merge case-variant duplicates
@@ -9930,12 +9939,20 @@ def _audit_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     return event
 
 
+# Server-wide login-failure budget as a multiple of the per-username one: big
+# enough that a junk-username flood only rarely spends it, small enough to
+# still bound a distributed flood.
+AUDIT_GLOBAL_THROTTLE_MULTIPLIER = 10
+
+
 @dataclass(frozen=True, slots=True)
 class AuditThrottle:
     """Per-minute row budget checked in the same transaction as the insert.
 
-    ``limit`` applies both to the requesting actor and to the whole server, so
-    an attacker cycling usernames cannot give itself a fresh budget per name.
+    ``limit`` applies per username N, ``limit * AUDIT_GLOBAL_THROTTLE_MULTIPLIER``
+    server-wide, and always at least one row per minute for an attempt against
+    an existing account: cycling usernames cannot give an attacker a fresh
+    budget per name, and no flood can erase the evidence for a real account.
     """
 
     limit: int
@@ -9943,20 +9960,43 @@ class AuditThrottle:
     since: str
 
 
-async def _audit_throttled(
+async def _audit_suppressed(
     db: aiosqlite.Connection, actor: str, throttle: AuditThrottle
 ) -> bool:
-    """True when ``actor`` or the whole server already used up its budget."""
+    """True when this row must be dropped.
+
+    Spent budgets suppress the row, except for the rescue: per username N,
+    N×10 server-wide, and always at least one row per minute for an attempt
+    against an existing account. The rescue is bounded to one row per account
+    per window because it only fires when the account has no row yet, so it
+    cannot be used to flood the table.
+    """
     action_filter = f"action IN ({', '.join('?' * len(throttle.actions))})"
-    for actor_filter, scope in ((" AND actor = ?", (actor,)), ("", ())):
+    count_sql = (
+        f"SELECT COUNT(*) FROM audit_events WHERE created_at >= ? AND {action_filter}"
+    )
+    for actor_filter, scope, budget in (
+        (" AND actor = ?", (actor,), throttle.limit),
+        ("", (), throttle.limit * AUDIT_GLOBAL_THROTTLE_MULTIPLIER),
+    ):
         cursor = await db.execute(
-            "SELECT COUNT(*) FROM audit_events"
-            f" WHERE created_at >= ? AND {action_filter}{actor_filter}",
-            (throttle.since, *throttle.actions, *scope),
+            count_sql + actor_filter, (throttle.since, *throttle.actions, *scope)
         )
-        if (await cursor.fetchone())[0] >= throttle.limit:
-            return True
-    return False
+        if (await cursor.fetchone())[0] >= budget:
+            break
+    else:
+        return False
+    username = _normalize_username(actor)
+    cursor = await db.execute(
+        "SELECT 1 FROM users WHERE lower(username) = ?", (username,)
+    )
+    if await cursor.fetchone() is None:
+        return True
+    cursor = await db.execute(
+        count_sql + " AND lower(actor) = ?",
+        (throttle.since, *throttle.actions, username),
+    )
+    return (await cursor.fetchone())[0] > 0
 
 
 async def insert_audit_event(
@@ -9984,14 +10024,16 @@ async def insert_audit_event(
 
     With ``throttle``, the budget check runs inside that same transaction and
     the insert is skipped (``None`` returned) once it is exhausted: parallel
-    writers can no longer all read a stale count and then all insert.
+    writers can no longer all read a stale count and then all insert. The one
+    exception is the rescue for an existing account with no row yet in the
+    window (see :func:`_audit_suppressed`).
     """
     actor_value = actor or "anonymous"
     async with _connect_db() as db:
         # Take the write lock before reading the tail: two concurrent inserts
         # can then never link to the same predecessor.
         await db.execute("BEGIN IMMEDIATE")
-        if throttle is not None and await _audit_throttled(db, actor_value, throttle):
+        if throttle is not None and await _audit_suppressed(db, actor_value, throttle):
             # Nothing written: closing the connection rolls the empty
             # transaction back and releases the write lock.
             return None
@@ -10191,10 +10233,11 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
     recomputation (``None`` when intact).
 
     ``truncated`` is not a break: retention pruning deletes the oldest rows, so
-    the oldest surviving row links to a predecessor that no longer exists.
-    That boundary is reported with ``truncated_before_id`` (the first surviving
-    row) instead of failing the trail; a mismatch inside the surviving window
-    still fails.
+    the oldest surviving row links to a predecessor that no longer exists. That
+    boundary is reported with ``truncated_before_id`` (the first surviving row)
+    only when ``audit_chain_state`` records that exact cut (same id range, same
+    hash); a prefix deleted any other way fails the trail at the oldest
+    surviving row, and a mismatch inside the window always fails.
     """
     sql = f"SELECT {_AUDIT_COLUMNS} FROM audit_events ORDER BY id DESC"
     params: tuple[Any, ...] = ()
@@ -10219,13 +10262,24 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
             if seed:
                 prev_hash = seed[0]
             elif rows[0]["prev_hash"] not in (None, _AUDIT_GENESIS_HASH):
-                # Its predecessor is gone (pruning or the row cap), so the
-                # surviving window starts mid-chain: truncated, not tampered.
-                # Seed the walk with the recorded link so the boundary itself
-                # is not reported as a break.
-                truncated = True
-                truncated_before_id = rows[0]["id"]
-                prev_hash = rows[0]["prev_hash"]
+                # Its predecessor is gone. Only the retention checkpoint makes
+                # that legitimate: it names the last row pruned and its hash.
+                # Anything else means the prefix was deleted outside the
+                # retention job — leave the walk unseeded so the boundary is
+                # reported as broken at the oldest surviving row.
+                cursor = await db.execute(
+                    "SELECT pruned_through_id, pruned_last_hash"
+                    " FROM audit_chain_state WHERE id = 1"
+                )
+                checkpoint = await cursor.fetchone()
+                if (
+                    checkpoint
+                    and checkpoint[0] < rows[0]["id"]
+                    and checkpoint[1] == rows[0]["prev_hash"]
+                ):
+                    truncated = True
+                    truncated_before_id = rows[0]["id"]
+                    prev_hash = rows[0]["prev_hash"]
 
     checked = legacy = 0
     first_broken_id: int | None = None
@@ -10260,14 +10314,41 @@ async def distinct_audit_actions() -> list[dict[str, Any]]:
         return [dict(row) for row in await cursor.fetchall()]
 
 
+async def _prune_audit_rows(
+    db: aiosqlite.Connection, where: str, params: tuple[Any, ...]
+) -> int:
+    """Delete the matching rows and advance the retention checkpoint.
+
+    The checkpoint records the highest deleted id and its ``entry_hash``, i.e.
+    exactly the link the oldest survivor still points to. It only moves
+    forward, so a later prune of an older window cannot rewind it.
+    """
+    cursor = await db.execute(
+        "SELECT id, entry_hash FROM audit_events"
+        f" WHERE {where} ORDER BY id DESC LIMIT 1",
+        params,
+    )
+    last = await cursor.fetchone()
+    cursor = await db.execute(f"DELETE FROM audit_events WHERE {where}", params)
+    deleted = int(cursor.rowcount or 0)
+    if last is not None and last[1] is not None:
+        await db.execute(
+            "INSERT INTO audit_chain_state (id, pruned_through_id, pruned_last_hash)"
+            " VALUES (1, ?, ?)"
+            " ON CONFLICT(id) DO UPDATE SET"
+            " pruned_through_id = excluded.pruned_through_id,"
+            " pruned_last_hash = excluded.pruned_last_hash"
+            " WHERE excluded.pruned_through_id > audit_chain_state.pruned_through_id",
+            (last[0], last[1]),
+        )
+    await db.commit()
+    return deleted
+
+
 async def prune_audit_events(cutoff: str) -> int:
     """Delete audit events created before *cutoff*; return how many were deleted."""
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM audit_events WHERE created_at < ?", (cutoff,)
-        )
-        await db.commit()
-        return int(cursor.rowcount or 0)
+        return await _prune_audit_rows(db, "created_at < ?", (cutoff,))
 
 
 async def enforce_audit_row_cap(max_rows: int) -> int:
@@ -10279,10 +10360,9 @@ async def enforce_audit_row_cap(max_rows: int) -> int:
     if max_rows <= 0:
         return 0
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM audit_events WHERE id NOT IN ("
+        return await _prune_audit_rows(
+            db,
+            "id NOT IN ("
             " SELECT id FROM audit_events ORDER BY created_at DESC, id DESC LIMIT ?)",
             (max_rows,),
         )
-        await db.commit()
-        return int(cursor.rowcount or 0)

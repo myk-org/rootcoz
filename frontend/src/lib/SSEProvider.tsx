@@ -79,6 +79,8 @@ async function probeSession(): Promise<number | null> {
 function createSessionGuard(onExpired: () => void) {
   let failures = 0
   let expired = false
+  /** Bumped by every successful open — a probe started before it is stale. */
+  let generation = 0
   return {
     get expired() {
       return expired
@@ -86,6 +88,7 @@ function createSessionGuard(onExpired: () => void) {
     /** The stream opened — the session is alive and the run is broken. */
     connected() {
       failures = 0
+      generation += 1
     },
     /** Another tab proved the session is dead — same once-only trip, no probe. */
     markExpired() {
@@ -93,17 +96,25 @@ function createSessionGuard(onExpired: () => void) {
       expired = true
       onExpired()
     },
-    /** Probe the session after a failed attempt; true once it counts as expired. */
-    async failed(): Promise<boolean> {
+    /**
+     * Probe the session after a failed attempt; true once it counts as expired.
+     * `strikes` is how many consecutive 401s it takes: one where the browser
+     * will never retry the stream itself, three on the leader's reconnect path.
+     */
+    async failed(strikes = EXPIRY_FAILURE_LIMIT): Promise<boolean> {
       if (expired) return true
+      const startedAt = generation
       const status = await probeSession()
       if (expired) return true
+      // A stream opened while this probe was in flight: its verdict belongs to
+      // a connection that is gone, so it counts neither as a failure nor a hit.
+      if (startedAt !== generation) return false
       if (status !== 401) {
         failures = 0
         return false
       }
       failures += 1
-      if (failures < EXPIRY_FAILURE_LIMIT) return false
+      if (failures < strikes) return false
       failures = 0
       expired = true
       onExpired()
@@ -144,19 +155,7 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
 
   // ---- BroadcastChannel ----
   const hasBroadcast = typeof BroadcastChannel !== 'undefined'
-  // lib.dom predates BroadcastChannel.onclose, though browsers fire it on close().
-  let channel: (BroadcastChannel & { onclose?: (() => void) | null }) | null = hasBroadcast
-    ? new BroadcastChannel(CHANNEL_NAME)
-    : null
-
-  /**
-   * Followers hear about streamed events only through the channel. When it goes
-   * away they can no longer be told anything, so they take over themselves.
-   */
-  function handleChannelLost() {
-    channel = null
-    if (!isLeader && !destroyed) requestLeaderLock()
-  }
+  let channel: BroadcastChannel | null = hasBroadcast ? new BroadcastChannel(CHANNEL_NAME) : null
 
   // ---- Helpers ----
 
@@ -370,7 +369,14 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
   function handleSessionExpired() {
     stopHeartbeat()
     stopWatchdog()
-    if (isLeader) {
+    // A dead tab must never advertise or take leadership of the dead session:
+    // drop the flag now and stop any queued lock request from promoting it.
+    const wasLeader = isLeader
+    isLeader = false
+    tabTopics.clear()
+    tabEventNames.clear()
+    if (lockAbort) { lockAbort.abort(); lockAbort = null }
+    if (wasLeader) {
       if (reconnectDebounceTimer) { clearTimeout(reconnectDebounceTimer); reconnectDebounceTimer = null }
       if (reconnectBackoffTimer) { clearTimeout(reconnectBackoffTimer); reconnectBackoffTimer = null }
       removeEventSourceListeners()
@@ -418,8 +424,8 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
         LOCK_NAME,
         { signal: lockAbort.signal },
         () => {
-          // We acquired the lock — we are the leader
-          if (destroyed) return Promise.resolve()
+          // We acquired the lock — but a dead tab must not take the stream.
+          if (destroyed || guard.expired) return Promise.resolve()
           becomeLeader()
           // Return a promise that never resolves — we hold the lock until
           // this tab closes or destroy() is called. When the tab closes,
@@ -457,9 +463,10 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
   }
 
   // ---- Channel message handler ----
+  // A messageerror means one broadcast was dropped, not that the channel is
+  // gone (and BroadcastChannel fires no close event at all): the tab keeps
+  // listening. A silent leader is caught by the heartbeat watchdog instead.
   if (channel) {
-    channel.onclose = handleChannelLost
-    channel.onmessageerror = handleChannelLost
     channel.onmessage = (msg: MessageEvent<ChannelMessage>) => {
       const m = msg.data
 
@@ -573,7 +580,9 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
     if (lockReleaseResolve) { lockReleaseResolve(); lockReleaseResolve = null }
     // Abort any pending lock request
     if (lockAbort) { lockAbort.abort(); lockAbort = null }
+    // The only deliberate path that gives up the channel — this tab closes it.
     channel?.close()
+    channel = null
   }
 
   return { subscribe, unsubscribe, destroy }
@@ -638,12 +647,17 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
       for (const sub of subscriptions.values()) sub.onReconnect?.()
     }
     eventSource.onerror = () => {
-      // The browser auto-reconnects, so only a dead session closes it for good.
+      // EventSource treats a 401 as fatal: it fires onerror once and closes for
+      // good, so this tab probes the session and decides whether to retry.
       const es = eventSource
-      void guard.failed().then((expired) => {
-        if (!expired) return
-        es?.close()
-        if (eventSource === es) eventSource = null
+      for (const { name, handler } of activeListeners) es?.removeEventListener(name, handler)
+      activeListeners = []
+      es?.close()
+      if (eventSource === es) eventSource = null
+      // One 401 is enough here — the browser will never retry it.
+      void guard.failed(1).then((expired) => {
+        if (expired || destroyed || eventSource) return
+        scheduleReconnect()
       })
     }
   }

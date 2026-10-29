@@ -1092,6 +1092,11 @@ def _clear_audit(db_path: Path) -> None:
         conn.execute("DELETE FROM audit_events")
 
 
+def _csv_unescape(value: str) -> str:
+    """The documented inverse of the export escaping: drop one apostrophe."""
+    return value.removeprefix("'")
+
+
 def test_audit_endpoint_exposes_event_fields(app_client) -> None:
     admin_login(app_client)
     _insert_audit(
@@ -1493,6 +1498,64 @@ async def test_verify_chain_still_flags_a_tampered_surviving_row(
     assert result["first_broken_id"] == middle["id"]
 
 
+async def test_verify_chain_rejects_a_prefix_deleted_outside_retention(
+    audit_db: Path,
+) -> None:
+    """No checkpoint means the prefix was not cut by the retention job."""
+    events = [
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+        for index in range(4)
+    ]
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute("DELETE FROM audit_events WHERE id <= ?", (events[1]["id"],))
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["truncated"] is False
+    assert result["truncated_before_id"] is None
+    assert result["first_broken_id"] == events[2]["id"]
+
+
+async def test_a_second_prune_advances_the_retention_checkpoint(
+    audit_db: Path,
+) -> None:
+    events = [
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+        for index in range(6)
+    ]
+    assert await storage.enforce_audit_row_cap(5) == 1
+    assert await storage.enforce_audit_row_cap(3) == 2
+
+    with sqlite3.connect(audit_db) as conn:
+        checkpoint = conn.execute(
+            "SELECT pruned_through_id, pruned_last_hash FROM audit_chain_state"
+        ).fetchone()
+    assert checkpoint == (events[2]["id"], events[2]["entry_hash"])
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is True
+    assert result["truncated"] is True
+    assert result["truncated_before_id"] == events[3]["id"]
+
+
+async def test_prune_by_cutoff_advances_the_retention_checkpoint(
+    audit_db: Path,
+) -> None:
+    old = await storage.insert_audit_event(action="action.old", actor="alice")
+    await storage.insert_audit_event(action="action.new", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z'"
+            " WHERE id = ?",
+            (old["id"],),
+        )
+
+    assert await storage.prune_audit_events("2021-01-01 00:00:00") == 1
+    result = await storage.verify_audit_chain()
+    assert (result["ok"], result["truncated"]) == (True, True)
+    assert result["truncated_before_id"] is not None
+
+
 async def test_verify_chain_reports_legacy_rows_separately(audit_db: Path) -> None:
     with sqlite3.connect(audit_db) as conn:
         for _ in range(2):
@@ -1886,6 +1949,64 @@ def test_audit_export_neutralizes_spreadsheet_formulas(
     assert normal["is_admin"] in {"0", "1"}
 
 
+@pytest.mark.parametrize(
+    ("name", "stored", "exported"),
+    [
+        ("actor", "=cmd|' /C calc'!A0", "'=cmd|' /C calc'!A0"),
+        ("actor", "-x", "'-x"),
+        ("actor", "'quoted", "''quoted"),
+        ("actor", "alice", "alice"),
+        ("id", "-1", "-1"),
+    ],
+)
+def test_audit_csv_escaping_is_invertible(
+    name: str, stored: str, exported: str
+) -> None:
+    """Escaping is one added apostrophe, so it is always undoable."""
+    assert main._audit_csv_cell(name, stored) == exported
+    assert _csv_unescape(exported) == stored
+
+
+def test_audit_export_unescapes_to_the_hashed_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """A formula-shaped text cell unescapes back to the value in the hash."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(
+        action="auth.login_failed",
+        actor="-x",
+        actor_role="anon",
+        target_type="user",
+        target_id="'quoted",
+        outcome="failure",
+        details={"note": "x"},
+        request_ip="@10.0.0.1",
+    )
+
+    rows = list(csv.DictReader(io.StringIO(_export(app_client, format="csv").text)))
+    row = next(candidate for candidate in rows if candidate["id"] == str(stored["id"]))
+    restored = {
+        "id": int(row["id"]),
+        "created_at": row["created_at"],
+        "actor": _csv_unescape(row["actor"]),
+        "actor_role": _csv_unescape(row["actor_role"]),
+        "is_admin": int(row["is_admin"]),
+        "action": _csv_unescape(row["action"]),
+        "target_type": _csv_unescape(row["target_type"]),
+        "target_id": _csv_unescape(row["target_id"]),
+        "outcome": _csv_unescape(row["outcome"]),
+        "details": _csv_unescape(row["details"]),
+        "request_ip": _csv_unescape(row["request_ip"]),
+    }
+    assert restored["actor"] == "-x"
+    assert restored["target_id"] == "'quoted"
+    assert (
+        storage._audit_entry_hash(restored, stored["prev_hash"])
+        == (stored["entry_hash"])
+    )
+
+
 def test_audit_export_honours_the_list_filters(app_client, temp_db_path: Path) -> None:
     admin_login(app_client)
     _clear_audit(temp_db_path)
@@ -2201,14 +2322,37 @@ def _reset_suppression(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(monitoring, "_audit_auth_suppression_windows", {})
 
 
-async def _failed_logins(count: int, action: str = "auth.login_failed") -> None:
+async def _failed_logins(
+    count: int, action: str = "auth.login_failed", actor: str = "mallory"
+) -> None:
     for index in range(count):
         await main.record_audit(
             action=action,
-            actor="mallory",
-            message=f"Failed login attempt #{index} for username 'mallory'",
+            actor=actor,
+            message=f"Failed login attempt #{index} for username '{actor}'",
             outcome="failure" if action == "auth.login_failed" else "denied",
         )
+
+
+async def _distinct_name_logins(prefix: str, count: int) -> None:
+    """One attempt per username, so no single name hits its own budget."""
+    await asyncio.gather(
+        *(
+            main.record_audit(
+                action="auth.login_failed",
+                actor=f"{prefix}{index}",
+                message=f"Failed login attempt for '{prefix}{index}'",
+                outcome="failure",
+            )
+            for index in range(count)
+        )
+    )
+
+
+def _add_existing_user(db_path: Path, username: str) -> None:
+    """A users row for an account the login attempt targets."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO users (username) VALUES (?)", (username,))
 
 
 async def test_auth_failure_guard_caps_stored_rows_per_actor(
@@ -2273,10 +2417,41 @@ async def test_parallel_failed_logins_cannot_exceed_the_budget(
     assert monitoring._audit_suppressed_auth_events == 45
 
 
-async def test_login_flood_across_usernames_hits_the_global_cap(
+async def test_login_flood_across_usernames_stays_under_the_global_cap(
     audit_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cycling usernames buys no fresh budget: the cap is also server-wide."""
+    """Cycling usernames buys no fresh budget, but 30 is under the 50 cap."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await _distinct_name_logins("user", 30)
+
+    stored = await storage.list_audit_events(action="auth.login_failed")
+    assert stored["total"] == 30
+    assert stored["total"] <= 5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    assert monitoring._audit_suppressed_auth_events == 0
+
+
+async def test_distributed_flood_still_hits_the_global_cap(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different username every time is bounded by the server-wide budget."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await _distinct_name_logins("user", 60)
+
+    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == (
+        5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    )
+    assert monitoring._audit_suppressed_auth_events == 10
+
+
+async def test_junk_username_flood_cannot_starve_the_target(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60 junk attempts across 5 names are capped at 5 rows each, so the
+    targeted username's rows still fit under the server-wide budget."""
     _reset_suppression(monkeypatch)
     monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
 
@@ -2284,16 +2459,100 @@ async def test_login_flood_across_usernames_hits_the_global_cap(
         *(
             main.record_audit(
                 action="auth.login_failed",
-                actor=f"user{index}",
-                message=f"Failed login attempt for 'user{index}'",
+                actor=f"junk{index % 5}",
+                message=f"Failed login attempt for 'junk{index % 5}'",
                 outcome="failure",
             )
-            for index in range(30)
+            for index in range(60)
         )
     )
+    for index in range(3):
+        await main.record_audit(
+            action="auth.login_failed",
+            actor="admin",
+            message=f"Failed login attempt #{index} for 'admin'",
+            outcome="failure",
+        )
 
-    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == 5
-    assert monitoring._audit_suppressed_auth_events == 25
+    events = await storage.list_audit_events(action="auth.login_failed", limit=500)
+    per_actor: dict[str, int] = {}
+    for event in events["events"]:
+        per_actor[event["actor"]] = per_actor.get(event["actor"], 0) + 1
+    assert per_actor["admin"] == 3
+    assert all(count <= 5 for name, count in per_actor.items() if name != "admin")
+    assert per_actor.get("junk0") == 5
+
+
+def _counts_by_actor(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        counts[event["actor"]] = counts.get(event["actor"], 0) + 1
+    return counts
+
+
+async def test_existing_account_is_recorded_once_when_the_budget_is_spent(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60 junk names spend the 50-row budget; the real target keeps a row.
+
+    One rescue per account per window, not one per attempt: the invariant is
+    "at least one row", and anything more would let the rescue be flooded.
+    """
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    _add_existing_user(audit_db, "admin")
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(3, actor="admin")
+
+    counts = _counts_by_actor(
+        (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+            "events"
+        ]
+    )
+    assert counts["admin"] == 1
+    assert sum(n for name, n in counts.items() if name != "admin") == (
+        5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    )
+    assert monitoring._audit_suppressed_auth_events == 12
+
+
+async def test_unknown_target_stays_suppressed_when_the_budget_is_spent(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rescue covers existing accounts only — junk names stay capped."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(3, actor="ghost")
+
+    events = (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+        "events"
+    ]
+    assert len(events) == 5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    assert "ghost" not in _counts_by_actor(events)
+    assert monitoring._audit_suppressed_auth_events == 13
+
+
+async def test_rescue_is_one_row_per_account_per_window(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeating the target's attempts gives one rescued row, not five."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    _add_existing_user(audit_db, "admin")
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(5, actor="admin")
+
+    counts = _counts_by_actor(
+        (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+            "events"
+        ]
+    )
+    assert counts["admin"] == 1
+    assert monitoring._audit_suppressed_auth_events == 14
 
 
 async def test_volume_guard_never_throttles_other_actions(

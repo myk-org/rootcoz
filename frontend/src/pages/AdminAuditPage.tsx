@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigationType, useSearchParams } from 'react-router-dom'
 import { api, extractApiDetail } from '@/lib/api'
 import { EMPTY_FILTERS, matchesFilters, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
 import { formatRelativeTime, formatTimestamp } from '@/lib/utils'
@@ -55,33 +55,6 @@ const OUTCOME_BADGE_VARIANT: Record<string, 'success' | 'destructive' | 'warning
   denied: 'warning',
 }
 
-interface AuditState {
-  filters: AuditFilters
-  offset: number
-  limit: PageSize
-}
-
-type AuditAction =
-  | { type: 'filter'; key: keyof AuditFilters; value: string }
-  | { type: 'offset'; value: number }
-  | { type: 'limit'; value: PageSize }
-  | { type: 'clear' }
-
-function reducer(state: AuditState, action: AuditAction): AuditState {
-  switch (action.type) {
-    case 'filter':
-      if (state.filters[action.key] === action.value) return state
-      return { ...state, filters: { ...state.filters, [action.key]: action.value }, offset: 0 }
-    case 'offset':
-      return { ...state, offset: action.value }
-    // A new page size makes the old offset meaningless.
-    case 'limit':
-      return { ...state, limit: action.value, offset: 0 }
-    case 'clear':
-      return { ...state, filters: EMPTY_FILTERS, offset: 0 }
-  }
-}
-
 /** ?limit must be one of the offered page sizes — anything else means 50. */
 function parsePageSize(raw: string | null): PageSize {
   const value = Number(raw)
@@ -97,12 +70,88 @@ function filtersFromParams(params: URLSearchParams): AuditFilters {
   return filters
 }
 
+/** Do these filters already match the filter params of this query? */
+function filtersMatchParams(params: URLSearchParams, filters: AuditFilters): boolean {
+  return FILTER_KEYS.every((key) => (params.get(key) ?? '').trim() === filters[key].trim())
+}
+
 /**
  * One value drives the whole live-tail UI: the switch, the dot and the label.
  * `failed` is the switch-off state that still has to look red, so it cannot be
  * derived from the switch alone.
  */
 type LivePhase = 'off' | 'connecting' | 'streaming' | 'failed'
+
+interface AuditState {
+  filters: AuditFilters
+  offset: number
+  limit: PageSize
+  livePhase: LivePhase
+  /** Text inputs are drafts; the reducer only sees them after the debounce. */
+  actorDraft: string
+  qDraft: string
+}
+
+type AuditAction =
+  | { type: 'filter'; key: keyof AuditFilters; value: string }
+  | { type: 'offset'; value: number }
+  | { type: 'limit'; value: PageSize }
+  /** The URL changed under us (Back/Forward, an outside link). */
+  | { type: 'sync'; filters: AuditFilters; limit: PageSize; live: boolean }
+  | { type: 'draft'; field: 'actorDraft' | 'qDraft'; value: string }
+  | { type: 'live'; phase: LivePhase }
+  | { type: 'clear' }
+
+function reducer(state: AuditState, action: AuditAction): AuditState {
+  switch (action.type) {
+    case 'filter':
+      if (state.filters[action.key] === action.value) return state
+      return { ...state, filters: { ...state.filters, [action.key]: action.value }, offset: 0 }
+    case 'offset':
+      if (state.offset === action.value) return state
+      return { ...state, offset: action.value }
+    // A new page size makes the old offset meaningless.
+    case 'limit':
+      return { ...state, limit: action.value, offset: 0 }
+    // An adopted query describes rows from the start of the list.
+    case 'sync':
+      return {
+        ...state,
+        filters: action.filters,
+        limit: action.limit,
+        offset: 0,
+        actorDraft: action.filters.actor,
+        qDraft: action.filters.q,
+        // A streaming tail keeps its phase; a live URL re-arms a dead one.
+        livePhase: action.live
+          ? state.livePhase === 'off' || state.livePhase === 'failed'
+            ? 'connecting'
+            : state.livePhase
+          : 'off',
+      }
+    case 'draft':
+      if (state[action.field] === action.value) return state
+      return { ...state, [action.field]: action.value }
+    case 'live':
+      if (state.livePhase === action.phase) return state
+      return { ...state, livePhase: action.phase }
+    case 'clear':
+      return { ...state, filters: EMPTY_FILTERS, offset: 0, actorDraft: '', qDraft: '' }
+  }
+}
+
+/** Fuel for the reducer, from the URL the page was opened or navigated on. */
+function initialState(params: URLSearchParams): AuditState {
+  const filters = filtersFromParams(params)
+  return {
+    filters,
+    offset: 0,
+    limit: parsePageSize(params.get('limit')),
+    livePhase: params.get('live') === '1' ? 'connecting' : 'off',
+    actorDraft: filters.actor,
+    qDraft: filters.q,
+  }
+}
 
 // No text label: the dot plus its tooltip carry the state (off / connecting /
 // streaming / failed). A label of varying length shifted the switch around.
@@ -219,16 +268,8 @@ function ActionFilter({
 export function AdminAuditPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   // ?limit, ?live=1 and every filter survive a refresh and a copied link.
-  const [state, dispatch] = useReducer(reducer, {
-    filters: filtersFromParams(searchParams),
-    offset: 0,
-    limit: parsePageSize(searchParams.get('limit')),
-  })
-  const { filters, offset, limit } = state
-
-  const [livePhase, setLivePhase] = useState<LivePhase>(() =>
-    searchParams.get('live') === '1' ? 'connecting' : 'off',
-  )
+  const [state, dispatch] = useReducer(reducer, searchParams, initialState)
+  const { filters, offset, limit, livePhase, actorDraft, qDraft } = state
   const live = livePhase === 'connecting' || livePhase === 'streaming'
 
   // setSearchParams changes identity with the query string; a ref keeps the
@@ -237,35 +278,72 @@ export function AdminAuditPage() {
   useEffect(() => {
     setSearchParamsRef.current = setSearchParams
   }, [setSearchParams])
-  const writeParam = useCallback((key: string, value: string | null) => {
-    setSearchParamsRef.current(
-      (prev) => {
-        const next = new URLSearchParams(prev)
-        if (value === null) next.delete(key)
-        else next.set(key, value)
-        return next
-      },
-      { replace: true },
-    )
+
+  // The query string this page believes is in the address bar. Writes start
+  // from here, not from the router's copy, so two edits in a row cannot clobber
+  // each other while a navigation is still committing.
+  const urlRef = useRef(searchParams.toString())
+  const navigationType = useNavigationType()
+
+  const writeUrl = useCallback((mutate: (params: URLSearchParams) => void) => {
+    const next = new URLSearchParams(urlRef.current)
+    mutate(next)
+    const query = next.toString()
+    // Already there — writing it again would only push router work around.
+    if (query === urlRef.current) return
+    urlRef.current = query
+    setSearchParamsRef.current(next, { replace: true })
   }, [])
 
-  // Text inputs are drafts; the reducer only sees them after the debounce.
-  const [actorDraft, setActorDraft] = useState(filters.actor)
-  const [queryDraft, setQueryDraft] = useState(filters.q)
+  const writeParam = useCallback(
+    (key: string, value: string | null) => {
+      writeUrl((next) => {
+        if (value === null) next.delete(key)
+        else next.set(key, value)
+      })
+    },
+    [writeUrl],
+  )
+
+  // Latest state for the URL-sync effect, which must not re-run on every
+  // keystroke — a stale read there would adopt the URL over a fresh edit.
+  const stateRef = useRef({ filters, limit, live })
+  useEffect(() => {
+    stateRef.current = { filters, limit, live }
+  })
 
   // Mirror the filters back into the URL. Unrelated params (limit, live) stay,
   // and empty filters are removed rather than stored as empty strings.
   useEffect(() => {
-    setSearchParamsRef.current((prev) => {
-      const next = new URLSearchParams(prev)
+    writeUrl((next) => {
       for (const key of FILTER_KEYS) {
         const value = filters[key].trim()
         if (value) next.set(key, value)
         else next.delete(key)
       }
-      return next.toString() === prev.toString() ? prev : next
-    }, { replace: true })
-  }, [filters])
+    })
+  }, [filters, writeUrl])
+
+  // Back/Forward or an outside link can replace the query while this page stays
+  // mounted. This page only ever writes with `replace`, so any other navigation
+  // type is somebody else's — adopt it, and the next request follows it.
+  useEffect(() => {
+    // A `replace` is this page's own write, already accounted for in urlRef.
+    if (navigationType === 'REPLACE') return
+    urlRef.current = searchParams.toString()
+    const current = stateRef.current
+    const adopted = filtersFromParams(searchParams)
+    const adoptedLimit = parsePageSize(searchParams.get('limit'))
+    const adoptedLive = searchParams.get('live') === '1'
+    if (
+      adoptedLimit === current.limit &&
+      adoptedLive === current.live &&
+      filtersMatchParams(searchParams, current.filters)
+    ) {
+      return
+    }
+    dispatch({ type: 'sync', filters: adopted, limit: adoptedLimit, live: adoptedLive })
+  }, [searchParams, navigationType, dispatch])
 
   const [result, setResult] = useState<{ key: string; data: AuditListResponse } | null>(null)
   const [errorState, setErrorState] = useState<{ key: string; text: string }>({ key: '', text: '' })
@@ -283,10 +361,10 @@ export function AdminAuditPage() {
   useEffect(() => {
     const timer = setTimeout(() => {
       dispatch({ type: 'filter', key: 'actor', value: actorDraft })
-      dispatch({ type: 'filter', key: 'q', value: queryDraft })
+      dispatch({ type: 'filter', key: 'q', value: qDraft })
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [actorDraft, queryDraft])
+  }, [actorDraft, qDraft])
 
   useEffect(() => {
     api
@@ -361,25 +439,23 @@ export function AdminAuditPage() {
         // A malformed frame must not kill the stream.
       }
     })
-    source.onopen = () => setLivePhase('streaming')
+    source.onopen = () => dispatch({ type: 'live', phase: 'streaming' })
     // No automatic reconnect: the switch goes off and the admin re-enables it.
     source.onerror = () => {
       source.close()
-      setLivePhase('failed')
+      dispatch({ type: 'live', phase: 'failed' })
       writeParam('live', null)
     }
 
     return () => source.close()
-  }, [live, prependEvent, writeParam])
+  }, [live, prependEvent, writeParam, dispatch])
 
   const setLive = (checked: boolean) => {
-    setLivePhase(checked ? 'connecting' : 'off')
+    dispatch({ type: 'live', phase: checked ? 'connecting' : 'off' })
     writeParam('live', checked ? '1' : null)
   }
 
   const clearFilters = () => {
-    setActorDraft('')
-    setQueryDraft('')
     dispatch({ type: 'clear' })
   }
 
@@ -403,7 +479,7 @@ export function AdminAuditPage() {
           placeholder="Actor…"
           aria-label="Actor filter"
           value={actorDraft}
-          onChange={(e) => setActorDraft(e.target.value)}
+          onChange={(e) => dispatch({ type: 'draft', field: 'actorDraft', value: e.target.value })}
           className="sm:w-40"
         />
         <ActionFilter
@@ -446,8 +522,8 @@ export function AdminAuditPage() {
         <Input
           placeholder="Search details…"
           aria-label="Search filter"
-          value={queryDraft}
-          onChange={(e) => setQueryDraft(e.target.value)}
+          value={qDraft}
+          onChange={(e) => dispatch({ type: 'draft', field: 'qDraft', value: e.target.value })}
           className="sm:w-52"
         />
         {hasFilters && (

@@ -47,6 +47,26 @@ function probe(status: number | 'network') {
   )
 }
 
+/** Probes that stay in flight until the test says how the server answered. */
+function deferredProbes() {
+  const resolvers: Array<(status: number) => void> = []
+  fetchMock.mockImplementation(
+    () =>
+      new Promise<Response>((resolve) =>
+        resolvers.push((status) => resolve({ status } as Response)),
+      ),
+  )
+  return {
+    async resolveAll(status: number) {
+      const pending = resolvers.splice(0)
+      await act(async () => {
+        for (const resolve of pending) resolve(status)
+        await Promise.resolve()
+      })
+    },
+  }
+}
+
 describe('SSEProvider session expiry', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -83,20 +103,17 @@ describe('SSEProvider session expiry', () => {
     })
   }
 
-  it('surfaces the expired session after three 401 probes and stops reconnecting', async () => {
+  it('reports the expiry on the first 401 probe, since a 401 is never retried', async () => {
     const source = await renderAndConnect()
     probe(401)
 
-    await fail(source, 2)
-    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
-    expect(source.closed).toBe(false)
-
     await fail(source)
+
     expect(fetchMock).toHaveBeenCalledWith('/api/auth/me', { credentials: 'include' })
     expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
     expect(source.closed).toBe(true)
 
-    // No new stream: the 401 loop must stop rather than hammer the server.
+    // No reconnect: the 401 loop must stop rather than hammer the server.
     await fail(source, 3)
     await act(async () => {
       await vi.advanceTimersByTimeAsync(120_000)
@@ -105,45 +122,33 @@ describe('SSEProvider session expiry', () => {
     expect(screen.getAllByText(EXPIRED_TEXT)).toHaveLength(1)
   })
 
-  it('treats a 200 probe as transient and keeps retrying', async () => {
+  it('treats a 200 probe as transient and reconnects', async () => {
     const source = await renderAndConnect()
     probe(200)
 
-    await fail(source, 5)
+    await fail(source)
 
     expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
-    // The stream was never given up on — the browser keeps reconnecting it.
-    expect(source.closed).toBe(false)
+    // The browser will not retry a closed stream — the manager does it itself.
+    expect(source.closed).toBe(true)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(MockEventSource.instances[1].closed).toBe(false)
   })
 
-  it('treats a network-error probe as transient', async () => {
+  it('treats a network-error probe as transient and reconnects', async () => {
     const source = await renderAndConnect()
     probe('network')
 
-    await fail(source, 5)
+    await fail(source)
 
     expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
-    expect(source.closed).toBe(false)
-  })
-
-  it('does not expire when a successful connection breaks the 401 run', async () => {
-    const source = await renderAndConnect()
-    probe(401)
-
-    await fail(source, 2)
-    act(() => {
-      source.open()
-    })
-    await fail(source, 2)
-    act(() => {
-      source.open()
-    })
-    await fail(source, 2)
-
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(120_000)
+      await vi.advanceTimersByTimeAsync(200)
     })
-    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    expect(MockEventSource.instances).toHaveLength(2)
   })
 })
 
@@ -226,7 +231,7 @@ describe('SSEProvider follower promotion', () => {
     return channel().sent.filter((m) => (m as { type?: string }).type === type)
   }
 
-  it('promotes a follower whose channel dies and never duplicates a healthy stream', async () => {
+  it('promotes a follower after the leader goes silent for too long', async () => {
     renderTab()
     await settle()
     expect(openStreams()).toHaveLength(1)
@@ -236,11 +241,8 @@ describe('SSEProvider follower promotion', () => {
     await settle()
     expect(openStreams()).toHaveLength(0)
 
-    // Channel gone — nothing can arrive any more, so the tab takes over itself.
-    act(() => {
-      channel().close()
-    })
-    await settle()
+    // Past the heartbeat timeout the follower assumes the leader is gone.
+    await settle(13_000)
 
     const streams = openStreams()
     expect(streams).toHaveLength(1)
@@ -271,6 +273,102 @@ describe('SSEProvider follower promotion', () => {
     expect(posted('leader')).toHaveLength(heartbeats)
     expect(posted('session-expired')).toHaveLength(1)
     expect(openStreams()).toHaveLength(0)
+  })
+
+  it('treats a channel message error as one dropped broadcast, not a lost channel', async () => {
+    const onEvent = vi.fn()
+    function Listener() {
+      useSSE('navbar', { 'active-count': onEvent })
+      return <div>listener</div>
+    }
+
+    render(
+      <SSEProvider>
+        <Listener />
+      </SSEProvider>,
+    )
+    await settle()
+    hear({ type: 'leader', tabId: '0' })
+    await settle()
+    expect(openStreams()).toHaveLength(0)
+    const updates = posted('topics-update').length
+
+    act(() => {
+      channel().onmessageerror?.()
+    })
+    await settle()
+
+    // No takeover on a single dropped message…
+    expect(openStreams()).toHaveLength(0)
+    // …and the tab is not muted: it still sends and still receives.
+    hear({ type: 'topics-request' })
+    expect(posted('topics-update')).toHaveLength(updates + 1)
+    hear({ type: 'sse-event', name: 'navbar:active-count', data: '{"count":7}' })
+    expect(onEvent).toHaveBeenCalledWith('{"count":7}')
+  })
+
+  it('never advertises leadership once the session expired', async () => {
+    renderTab()
+    await settle()
+    const source = openStreams()[0]
+    probe(401)
+
+    await act(async () => {
+      for (let i = 0; i < 3; i += 1) source.fail()
+    })
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+
+    const heartbeats = posted('leader').length
+    hear({ type: 'who-is-leader' })
+    // A dead tab answers nothing, so a new tab will not cancel its election.
+    expect(posted('leader')).toHaveLength(heartbeats)
+  })
+
+  it('does not expire when a successful open breaks the 401 run', async () => {
+    renderTab()
+    await settle()
+    probe(401)
+
+    for (let round = 0; round < 3; round += 1) {
+      const source = MockEventSource.instances[MockEventSource.instances.length - 1]
+      await act(async () => {
+        source.fail()
+        source.fail()
+      })
+      act(() => {
+        source.open()
+      })
+      // Let the scheduled reconnect replace the closed stream.
+      await settle(2_000)
+    }
+
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    expect(openStreams()).toHaveLength(1)
+  })
+
+  it('discards 401 probes that were in flight when the stream reopened', async () => {
+    renderTab()
+    await settle()
+    const source = openStreams()[0]
+    const probes = deferredProbes()
+
+    // Three probes in flight, then a successful open — they were measuring a
+    // connection that no longer exists, so their 401s count for nothing.
+    await act(async () => {
+      source.fail()
+      source.fail()
+      source.fail()
+    })
+    act(() => {
+      source.open()
+    })
+    await probes.resolveAll(401)
+
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    // And the retries keep going instead of the tab going quiet.
+    const before = MockEventSource.instances.length
+    await settle(5_000)
+    expect(MockEventSource.instances.length).toBeGreaterThan(before)
   })
 
   it('shows the banner on a follower that hears of the expiry and opens no stream', async () => {
@@ -317,5 +415,85 @@ describe('SSEProvider follower promotion', () => {
     await settle()
     hear({ type: 'sse-event', name: 'navbar:active-count', data: '{"count":3}' })
     expect(onEvent).toHaveBeenCalledWith('{"count":3}')
+  })
+})
+
+/**
+ * jsdom has no navigator.locks, so the tests above elect through the channel.
+ * This one hands the test the moment a queued lock request would be granted.
+ */
+class MockLocks {
+  requests: Array<{ rejected: boolean; grant: () => void }> = []
+  request = (
+    _name: string,
+    options: { signal?: AbortSignal },
+    callback: () => Promise<void>,
+  ) =>
+    new Promise<void>((resolve, reject) => {
+      const entry = {
+        rejected: false,
+        grant: () => {
+          void callback().then(resolve, reject)
+        },
+      }
+      options.signal?.addEventListener('abort', () => {
+        entry.rejected = true
+        reject(new DOMException('Aborted', 'AbortError'))
+      })
+      this.requests.push(entry)
+    })
+}
+
+describe('SSEProvider leader lock', () => {
+  let locks: MockLocks
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockEventSource.instances = []
+    MockBroadcastChannel.instances = []
+    fetchMock.mockReset()
+    locks = new MockLocks()
+    Object.defineProperty(navigator, 'locks', { value: locks, configurable: true })
+    vi.stubGlobal('EventSource', MockEventSource)
+    vi.stubGlobal('BroadcastChannel', MockBroadcastChannel)
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    delete (navigator as { locks?: unknown }).locks
+  })
+
+  it('never lets an expired follower take the lock it is queued for', async () => {
+    render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+    })
+    // The lock is held by another tab: this one waits, no stream yet.
+    expect(locks.requests).toHaveLength(1)
+    expect(openStreams()).toHaveLength(0)
+
+    act(() => {
+      MockBroadcastChannel.instances[0].onmessage?.({ data: { type: 'session-expired' } } as MessageEvent)
+    })
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+    // The queued request is cancelled instead of waiting to promote a dead tab.
+    expect(locks.requests[0].rejected).toBe(true)
+
+    // Even if the browser grants it late, a dead tab must not lead.
+    act(() => {
+      locks.requests[0].grant()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+    })
+    const sent = MockBroadcastChannel.instances[0].sent
+    expect(sent.filter((m) => (m as { type?: string }).type === 'leader')).toHaveLength(0)
+    expect(openStreams()).toHaveLength(0)
   })
 })

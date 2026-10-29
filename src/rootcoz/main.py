@@ -1226,9 +1226,13 @@ async def record_audit(
     raises: an audit failure must not fail the action being audited.
 
     ``auth.login_failed`` / ``auth.login_blocked`` are volume-guarded (#379):
-    once one actor — or the server as a whole, so cycling usernames buys
-    nothing — has ``audit_auth_failure_max_per_minute`` rows for those actions
-    in the last minute, the row is skipped. The budget is checked in the same
+    once one actor has ``audit_auth_failure_max_per_minute`` rows for those
+    actions in the last minute — or the server as a whole has ten times that,
+    so cycling usernames buys nothing — the row is skipped. The budget is
+    bounded per username N, N×10 server-wide, and always admits at least one
+    row per minute for an attempt against an existing account, so no flood of
+    junk usernames can starve the evidence for the real target. The budget is
+    checked in the same
     transaction as the insert, so parallel attempts cannot all pass a stale
     count. The log line above still fires, a summary line is logged per window,
     and the drop is counted in health. Every other action is always stored.
@@ -12749,13 +12753,16 @@ def _audit_csv_cell(name: str, value: Any) -> Any:
     """Neutralize a spreadsheet formula in an attacker-controlled text cell.
 
     A leading ``=``/``+``/``-``/``@``/tab/CR makes Excel and Sheets treat the
-    cell as a formula, so it is quoted with ``'``. Numeric and id columns keep
-    their value verbatim — they are not attacker text and must stay castable.
+    cell as a formula, so it is quoted with ``'``. A value that already starts
+    with ``'`` is quoted too, which keeps the escaping invertible: removing one
+    leading apostrophe always recovers the stored value, including one that
+    began with an apostrophe. Numeric and id columns keep their value verbatim
+    — they are not attacker text and must stay castable.
     """
     if (
         name in _AUDIT_EXPORT_TEXT_COLUMNS
         and isinstance(value, str)
-        and value.startswith(_AUDIT_CSV_FORMULA_PREFIXES)
+        and value.startswith((*_AUDIT_CSV_FORMULA_PREFIXES, "'"))
     ):
         return f"'{value}"
     return value
