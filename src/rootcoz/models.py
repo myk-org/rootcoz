@@ -1595,6 +1595,21 @@ class ServerProviderKeyInput(BaseModel):
 # models.json key. ``None`` means no key-scoped listing was captured.
 ServerProviderKeyScopedSource = Literal["deployment", "stored"]
 
+# Whether ``POST /api/admin/server-providers/{provider}/refresh-models`` can
+# act for a provider (#376): it has a stored server key, or a deployment
+# credential sits in the capturable scope the listing capture writes with.
+# False for an ambient/env-only provider with no per-provider refresh path.
+ServerProviderCanRefreshModels = Annotated[
+    bool,
+    Field(
+        description=(
+            "True when refresh-models can act for this provider: a stored "
+            "server key, or a deployment credential eligible for key-scoped "
+            "capture. Boolean only, never key material."
+        ),
+    ),
+]
+
 
 class ServerProviderModelEntry(BaseModel):
     """One model in a per-provider server model selection (#347)."""
