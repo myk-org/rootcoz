@@ -2035,3 +2035,38 @@ async def test_user_credential_listing_keeps_case_distinct_configured_flags(
         b'{"provider":"Foo","configured":false,"supports_user_keys":true},'
         b'{"provider":"foo","configured":true,"supports_user_keys":true}]}'
     )
+
+
+@pytest.mark.asyncio
+async def test_delete_credential_keeps_case_variant_key_when_registry_unknown(
+    tmp_path, monkeypatch
+):
+    """A malformed ``/providers`` payload must never delete the other spelling.
+
+    ``DELETE /api/user/ai-credentials/{provider}`` feeds
+    ``registered_provider_ids()`` into ``update_user_ai_credential()``. A
+    filtered (partial) registry would report ``MyGateway`` as unregistered and
+    consolidate — deleting the stored key and revoking its session. Fail-closed
+    ``None`` means unknown registration, so only the requested spelling goes.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "unknown-registry.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "MyGateway", "upper-key")
+    await storage.save_ai_session_source("upper-session", "alice", "MyGateway", "user")
+
+    client = AsyncMock()
+    # One valid entry plus one malformed: registration is unknown, not partial.
+    client.get_providers.return_value = [{"provider": "MyGateway"}, None]
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    assert await ai_client.registered_provider_ids() is None
+
+    request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
+    response = await main.delete_user_ai_credential("mygateway", request)
+
+    assert response.status_code == 200
+    assert await storage.get_user_ai_credentials("alice") == {"MyGateway": "upper-key"}
+    assert (
+        await storage.get_ai_session_source("upper-session", "alice", "MyGateway")
+        == "user"
+    )
