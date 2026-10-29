@@ -13,7 +13,9 @@ toggle is on) as a tag, title prefix, and message line. The exporter never
 sets an alert type: classification (root cause) and severity are unrelated
 axes. The v2 schema's ``category`` is a required enum of ``change`` |
 ``alert`` — there is no generic "event" category, and a failed test is an
-alert.
+alert. The ``alert`` branch also requires ``status`` (enum ``warn`` |
+``error`` | ``ok``), which is always ``error`` here for the same reason: no
+classification→severity mapping.
 
 Events carry a stable ``aggregation_key`` per analysis/test pair, a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
@@ -92,6 +94,12 @@ _TRUNCATION_MARKER = "… [truncated]"
 #: v2 ``category`` is a required enum of ``change`` | ``alert``.  There is no
 #: generic "event" category, and a failed test is an alert.
 _EVENT_CATEGORY = "alert"
+
+#: The ``alert`` branch's ``status`` is a required enum of
+#: ``warn`` | ``error`` | ``ok``.  Every event we emit reports a failing test,
+#: so it is always ``error``; classification is deliberately not mapped to
+#: severity (the same reason the exporter sets no alert type).
+_ALERT_STATUS_ERROR = "error"
 
 #: HTTP statuses meaning the API key was rejected: retrying cannot help.
 _AUTH_FAILURE_STATUSES = frozenset({401, 403})
@@ -364,6 +372,62 @@ def _circuit_breaker_message(skipped: int) -> str:
     )
 
 
+def _response_error_detail(response: Any) -> str:
+    """Extract Datadog's own error text from a failed response body.
+
+    The v2 intake answers a rejected event with
+    ``{"errors": [{"detail": ..., "source": {"pointer": ...}}]}``, where the
+    pointer is a JSON pointer to the offending value (e.g.
+    ``/data/attributes/attributes/status``). That detail is the only way to
+    tell a schema mistake from anything else, so it is surfaced verbatim.
+
+    Args:
+        response: ``httpx`` response of a non-2xx call.
+
+    Returns:
+        ``"<detail> at <pointer>"`` (or whichever of the two is present), or
+        ``""`` when the body is not JSON or carries no usable error entry.
+    """
+    try:
+        payload = response.json()
+    except ValueError:  # empty or non-JSON body
+        return ""
+    errors = payload.get("errors") if isinstance(payload, dict) else None
+    if not isinstance(errors, list) or not errors:
+        return ""
+    first = errors[0] if isinstance(errors[0], dict) else {}
+    detail = str(first.get("detail") or first.get("title") or "").strip()
+    source = first.get("source")
+    pointer = ""
+    if isinstance(source, dict):
+        pointer = str(source.get("pointer") or "").strip()
+    if detail and pointer:
+        return f"{detail} at {pointer}"
+    return detail or pointer
+
+
+def _http_error_detail(exc: httpx.HTTPError) -> tuple[int | None, str]:
+    """Describe a failed event POST as ``(status_code, detail)``.
+
+    One call feeds both the per-event error string and the log line, so the
+    two can never disagree.
+
+    Args:
+        exc: The raised ``httpx`` error.
+
+    Returns:
+        ``(status, "HTTP <status>: <Datadog error text>")``, falling back to
+        ``(status, "HTTP <status>")`` when the body has no usable text, and
+        ``(None, "")`` for a network error with no response.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if not status:
+        return None, ""
+    detail = _response_error_detail(response)
+    return status, f"HTTP {status}: {detail}" if detail else f"HTTP {status}"
+
+
 def sanitize_tag_value(value: str) -> str:
     """Sanitize a value for use inside a Datadog tag.
 
@@ -616,7 +680,10 @@ class DatadogExporter(Exporter):
                     "tags": self._build_tags(
                         context, test_name, classification or None
                     ),
-                    "attributes": {"custom": custom},
+                    "attributes": {
+                        "status": _ALERT_STATUS_ERROR,
+                        "custom": custom,
+                    },
                 },
             }
         }
@@ -677,18 +744,16 @@ class DatadogExporter(Exporter):
                         context.job_id,
                     )
                 except httpx.HTTPError as exc:
-                    status = getattr(
-                        getattr(exc, "response", None), "status_code", None
-                    )
+                    status, detail = _http_error_detail(exc)
                     msg = f"Failed to emit Datadog event for '{test_name}'" + (
-                        f" (HTTP {status})" if status else ""
+                        f" ({detail})" if detail else ""
                     )
                     errors.append(msg)
                     logger.error(
                         "Datadog push failed for test='%s', job=%s: %s",
                         test_name,
                         context.job_id,
-                        exc,
+                        detail or exc,
                     )
                     if status in _AUTH_FAILURE_STATUSES:
                         # The key is bad — every remaining request would

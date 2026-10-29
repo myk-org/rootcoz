@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -186,6 +186,23 @@ class TestV2Envelope:
         for failure in (_failure(), _console_failure()):
             event = _exporter()._build_event(_context(), failure)
             assert _attributes(event)["category"] == "alert"
+
+    def test_alert_status_always_error(self):
+        """The ``alert`` branch requires ``status``; no severity mapping."""
+        exporters = (
+            _exporter(),
+            _exporter(
+                push_classifications=False,
+                push_rootcoz_url=False,
+                push_tracker_links=False,
+            ),
+        )
+        for exporter in exporters:
+            for failure in (_failure(), _console_failure()):
+                event = exporter._build_event(_context(), failure)
+                assert _attributes(event)["attributes"]["status"] == "error"
+                # Optional and without a documented default — never sent.
+                assert "priority" not in _attributes(event)["attributes"]
 
     def test_no_v1_only_fields(self):
         event = _exporter()._build_event(_context(), _failure())
@@ -958,6 +975,117 @@ class TestPush:
         ):
             await _exporter().push(context)
         assert _attributes(posts[0]["json"])["timestamp"] == _iso(12345)
+
+
+class TestApiErrorDetail:
+    """A rejected event surfaces Datadog's own error text, never just a code."""
+
+    #: Documented v2 rejection body — ``source.pointer`` names the value that
+    #: caused the error.
+    _MISSING_STATUS_BODY: ClassVar[dict[str, Any]] = {
+        "errors": [
+            {
+                "detail": "Missing required attribute in body",
+                "meta": {},
+                "source": {
+                    "header": "Accept",
+                    "parameter": "status",
+                    "pointer": "/data/attributes/attributes/status",
+                },
+                "status": "400",
+                "title": "Bad Request",
+            }
+        ]
+    }
+
+    @staticmethod
+    def _bad_request(
+        *, body: Any = None, raw: bytes | None = None
+    ) -> httpx.HTTPStatusError:
+        response = (
+            httpx.Response(400, content=raw, request=MagicMock())
+            if raw is not None
+            else httpx.Response(400, json=body, request=MagicMock())
+        )
+        return httpx.HTTPStatusError(
+            "Bad Request", request=MagicMock(), response=response
+        )
+
+    @staticmethod
+    async def _push(error: httpx.HTTPError) -> Any:
+        mock_class, _posts = _mock_http_client(responses=[error])
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
+            return await _exporter().push(_context(failures=[_failure()]))
+
+    async def test_detail_and_pointer_in_the_error_string(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from rootcoz.exporters.datadog import logger as datadog_logger
+
+        datadog_logger.addHandler(caplog.handler)
+        try:
+            result = await self._push(self._bad_request(body=self._MISSING_STATUS_BODY))
+        finally:
+            datadog_logger.removeHandler(caplog.handler)
+
+        expected = (
+            "Failed to emit Datadog event for 'test_login_flow' (HTTP 400:"
+            " Missing required attribute in body at"
+            " /data/attributes/attributes/status)"
+        )
+        assert result.details["errors"] == [expected]
+        # The same detail reaches the log line, from the same single parse.
+        assert any(
+            "Missing required attribute in body at"
+            " /data/attributes/attributes/status" in record.getMessage()
+            for record in caplog.records
+        )
+
+    async def test_title_used_when_detail_missing(self) -> None:
+        body = {"errors": [{"title": "Bad Request", "status": "400"}]}
+        result = await self._push(self._bad_request(body=body))
+        assert "(HTTP 400: Bad Request)" in result.details["errors"][0]
+
+    async def test_pointer_only_detail(self) -> None:
+        body = {"errors": [{"source": {"pointer": "/data/attributes/title"}}]}
+        result = await self._push(self._bad_request(body=body))
+        assert "(HTTP 400: /data/attributes/title)" in result.details["errors"][0]
+
+    @pytest.mark.parametrize(
+        "raw",
+        [b"", b"not json", b"<html>400</html>"],
+        ids=["empty", "plain-text", "html"],
+    )
+    async def test_non_json_body_falls_back_to_plain_status(self, raw) -> None:
+        result = await self._push(self._bad_request(raw=raw))
+        assert result.details["errors"] == [
+            "Failed to emit Datadog event for 'test_login_flow' (HTTP 400)"
+        ]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"errors": []},
+            {"errors": "nope"},
+            {"errors": ["nope"]},
+            {"errors": [{}]},
+            {"message": "no errors key"},
+            [],
+        ],
+        ids=[
+            "empty-list",
+            "not-a-list",
+            "non-dict-entry",
+            "no-text",
+            "no-errors-key",
+            "top-level-list",
+        ],
+    )
+    async def test_body_without_usable_detail_falls_back(self, body) -> None:
+        result = await self._push(self._bad_request(body=body))
+        assert result.details["errors"] == [
+            "Failed to emit Datadog event for 'test_login_flow' (HTTP 400)"
+        ]
 
 
 class TestExporterAbc:
