@@ -3783,6 +3783,30 @@ def test_add_without_a_model_on_an_unsupported_provider_never_discovers(
     assert calls == []
 
 
+async def test_unrelated_discovery_failure_keeps_the_model_guidance(
+    client, monkeypatch, tmp_path
+):
+    """A discovery failure that is not a credential rejection blames no key.
+
+    "model rejected by provider" is about the model, not the key: telling the
+    admin to check the key sends them after the wrong cause (#378).
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("model rejected by provider"))
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "check the key" not in detail
+    assert "rejected by the provider" not in detail
+    assert "enter a model id to verify against" in detail
+    assert verified == []
+    assert await storage.list_server_ai_providers() == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
 async def test_rejected_credential_is_not_reported_as_a_missing_model(
     client, monkeypatch, tmp_path
 ):

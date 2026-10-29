@@ -730,25 +730,32 @@ _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
 )
 
 
-# Text markers for an error that means "the credential was rejected", used when
-# the sidecar client has already flattened an HTTP status into a message.
-_AUTH_FAILURE_MARKERS = (
-    "unauthorized",
-    "forbidden",
-    "rejected",
-    "invalid_api_key",
-    "invalid api key",
-)
+# Unambiguous auth phrases only. A bare word like "rejected" also occurs in
+# unrelated failures ("model rejected by provider"), and blaming the key for
+# those sends the admin after the wrong cause.
+_AUTH_FAILURE_MARKERS: dict[str, int] = {
+    "unauthorized": 401,
+    "forbidden": 403,
+    "invalid api key": 401,
+    "api key is invalid": 401,
+    "incorrect api key": 401,
+    "authentication failed": 401,
+}
+
+# The sidecar client flattens an HTTP status into the message text, so only the
+# explicit ``(HTTP 401)``/``(HTTP 403)`` suffix is evidence — never a bare digit.
+_AUTH_STATUS_SUFFIX = re.compile(r"\(http\s+(401|403)\)")
 
 
 def auth_failure_status(exc: BaseException | None) -> int | None:
     """HTTP status when ``exc`` says the credential was rejected, else ``None``.
 
-    Distinguishes a bad key from every other failure. The sidecar client
-    flattens the status into a ``RuntimeError`` message (``Sidecar API key
-    model discovery failed (HTTP 401)``, raised ``from None``), so the status
-    is read from the text or from an ``httpx.HTTPStatusError`` still in the
-    chain. A message naming an auth failure without a status reports 401.
+    Distinguishes a bad key from every other failure: a model-discovery error
+    for an unrelated reason (unusable model, provider outage) must not be
+    reported as a credential rejection. Structured evidence only — an
+    ``httpx.HTTPStatusError`` still in the chain, the sidecar's explicit
+    ``(HTTP 401)``/``(HTTP 403)`` suffix (``Sidecar API key model discovery
+    failed (HTTP 401)``, raised ``from None``), or an unambiguous auth phrase.
     """
     seen: set[int] = set()
     error = exc
@@ -760,11 +767,11 @@ def auth_failure_status(exc: BaseException | None) -> int | None:
         ):
             return error.response.status_code
         text = str(error).lower()
-        for status in (401, 403):
-            if re.search(rf"\b{status}\b", text):
-                return status
-        if any(marker in text for marker in _AUTH_FAILURE_MARKERS):
-            return 401
+        if status := _AUTH_STATUS_SUFFIX.search(text):
+            return int(status.group(1))
+        for marker, status_code in _AUTH_FAILURE_MARKERS.items():
+            if marker in text:
+                return status_code
         error = error.__cause__ or error.__context__
     return None
 
