@@ -810,9 +810,9 @@ describe('ServerSettingsPage active server providers', () => {
     )
   })
 
-  it('keeps stored ids that discovery omits when saving another toggle (#380)', async () => {
-    // vertex-claude is stored but no longer discovered: it has no checkbox, so
-    // the save must carry it through instead of silently dropping it.
+  it('checking every visible provider saves all-active even when discovery omits a stored id (#380)', async () => {
+    // vertex-claude is stored but no longer discovered: it has no checkbox, and
+    // all visible providers checked means "all active" (empty value).
     get.mockResolvedValue(
       restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
     )
@@ -824,7 +824,7 @@ describe('ServerSettingsPage active server providers', () => {
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', {
-        settings: { active_server_providers: 'gemini,openai,vertex-claude' },
+        settings: { active_server_providers: '' },
       }),
     )
   })
@@ -844,6 +844,47 @@ describe('ServerSettingsPage active server providers', () => {
     )
     // The draft is consumed by the save: no Save left for the same selection
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument())
+  })
+
+  it('unchecking every visible provider saves the empty value even with an undiscovered stored id (#380)', async () => {
+    // Saved value must stay "all active": appending the undiscovered id first
+    // would turn it into a one-provider allowlist disabling the visible ones.
+    get.mockResolvedValue(
+      restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
+    )
+
+    await openAiTab()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'gemini' }))
+
+    expect(
+      screen.getByText(/No providers selected — saving this activates ALL server providers/),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: '' },
+      }),
+    )
+  })
+
+  it('saves the visible subset plus undiscovered stored ids (#380)', async () => {
+    // A real subset is the only case where undiscovered stored ids ride along:
+    // dropping them would silently narrow the restriction.
+    get.mockResolvedValue(
+      restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
+    )
+
+    await openAiTab()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'gemini' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: 'openai,vertex-claude' },
+      }),
+    )
   })
 
   it('unchecking everything saves the empty value (empty = all, never "none")', async () => {

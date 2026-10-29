@@ -433,6 +433,24 @@ function sameProviderSet(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every(p => b.includes(p))
 }
 
+// Serializes the picker selection back to a setting value.
+// The "all active" decision must be made on the visible selection BEFORE the
+// undiscovered stored IDs are appended: otherwise unchecking every visible
+// provider while a stored ID is undiscovered yields a one-provider allowlist
+// instead of the empty "all" value, silently disabling the rest (#380).
+function serializeActiveServerProviders(
+  checked: string[],
+  options: string[],
+  undiscovered: string[],
+): string {
+  const visibleChecked = options.filter(o => checked.includes(o))
+  // None selected and all selected both mean "all active" (there is no "none").
+  if (visibleChecked.length === 0 || sameProviderSet(visibleChecked, options)) return ''
+  // A real subset: carry undiscovered stored IDs through unchanged — they have
+  // no checkbox, so dropping them would silently narrow the restriction.
+  return [...new Set([...visibleChecked, ...undiscovered])].join(',')
+}
+
 // ---------------------------------------------------------------------------
 // Source badge
 // ---------------------------------------------------------------------------
@@ -856,12 +874,7 @@ export function ServerSettingsPage() {
 
   // ---- Active server providers editor ----
   async function handleSaveServerProviders(checked: string[], options: string[], undiscovered: string[]) {
-    // '' is the "all active" contract: every provider checked saves it, and so
-    // does checking none (there is no "none" state — empty means all).
-    // Stored IDs discovery did not report ride along unchanged: they have no
-    // checkbox, so dropping them would silently narrow the restriction.
-    const ids = [...options.filter(o => checked.includes(o)), ...undiscovered]
-    const value = sameProviderSet(ids, options) ? '' : ids.join(',')
+    const value = serializeActiveServerProviders(checked, options, undiscovered)
     const error = await saveSettingValue('active_server_providers', value)
     if (error) return
     setServerProvidersDraft(null)
