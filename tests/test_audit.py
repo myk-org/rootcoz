@@ -1811,6 +1811,24 @@ def _insert_pre_v2_row(
     return row
 
 
+def _insert_pre_chain_row(db_path: Path, **fields: Any) -> dict[str, Any]:
+    """Write a row as the pre-chain code did: NULL ``prev_hash``/``entry_hash``."""
+    row: dict[str, Any] = {
+        "created_at": "2021-03-04T05:06:07.000000Z",
+        "actor": "alice",
+        "action": "auth.login",
+    }
+    row.update(fields)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            f"INSERT INTO audit_events ({', '.join(row)})"
+            f" VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+        row["id"] = cursor.lastrowid
+    return row
+
+
 async def test_chain_links_each_row_to_its_predecessor(audit_db: Path) -> None:
     for index in range(3):
         await storage.insert_audit_event(action=f"action.{index}", actor="alice")
@@ -2001,12 +2019,8 @@ async def test_prune_by_cutoff_advances_the_retention_checkpoint(
 
 
 async def test_verify_chain_reports_legacy_rows_separately(audit_db: Path) -> None:
-    with sqlite3.connect(audit_db) as conn:
-        for _ in range(2):
-            conn.execute(
-                "INSERT INTO audit_events (created_at, actor, action)"
-                " VALUES ('2021-03-04T05:06:07.000000Z', 'alice', 'auth.login')"
-            )
+    for _ in range(2):
+        _insert_pre_chain_row(audit_db)
     await storage.insert_audit_event(action="action.chained", actor="alice")
 
     # Pre-chain rows are counted, not called broken, and not faked into it.
@@ -2061,11 +2075,7 @@ async def test_verify_chain_still_counts_a_pre_chain_row_as_legacy(
     audit_db: Path,
 ) -> None:
     """A NULL hash *before* the first chained row stays legacy, not a break."""
-    with sqlite3.connect(audit_db) as conn:
-        conn.execute(
-            "INSERT INTO audit_events (created_at, actor, action)"
-            " VALUES ('2021-03-04T05:06:07.000000Z', 'alice', 'auth.login')"
-        )
+    _insert_pre_chain_row(audit_db)
     await storage.insert_audit_event(action="action.one", actor="alice")
     await storage.insert_audit_event(action="action.two", actor="alice")
 
@@ -2476,6 +2486,42 @@ def test_audit_export_verifies_a_mixed_v1_v2_trail(
             event["hash_version"] == 2
         )
     assert app_client.get("/api/admin/audit/verify").json()["ok"] is True
+
+
+@pytest.mark.parametrize("fmt", ["json", "csv"])
+def test_audit_export_omits_the_payload_of_an_unverifiable_row(
+    app_client, temp_db_path: Path, fmt: str
+) -> None:
+    """A pre-chain row ships no ``hash_payload``, so it cannot look verifiable.
+
+    The rule consumers rely on: the payload's presence means "checkable here",
+    so a row with no ``entry_hash`` omits the field in JSON and leaves the CSV
+    cell empty. A chained row in the same export keeps it.
+    """
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    legacy = _insert_pre_chain_row(temp_db_path, action="auth.login")
+    chained = _insert_audit(action="action.chained", actor="alice")
+
+    if fmt == "json":
+        rows = {
+            event["id"]: event for event in _export(app_client, format="json").json()
+        }
+        assert "hash_payload" not in rows[legacy["id"]]
+    else:
+        rows = {
+            int(row["id"]): row
+            for row in csv.DictReader(
+                io.StringIO(_export(app_client, format="csv").text)
+            )
+        }
+    # Absent in JSON, empty cell in CSV: a legacy row is not checkable, and says so.
+    assert not rows[legacy["id"]].get("hash_payload")
+    assert rows[chained["id"]]["hash_payload"]
+    # Every row that does carry a payload still reproduces its own hash.
+    assert _export_hash(rows[chained["id"]]) == rows[chained["id"]]["entry_hash"]
+
+    assert app_client.get("/api/admin/audit/verify").json()["legacy"] == 1
 
 
 def test_audit_export_streams_past_the_batch_size(

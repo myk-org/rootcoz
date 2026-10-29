@@ -142,6 +142,8 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
   let reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectBackoffTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectDelay = 1000
+  /** Abandoned connections outlive their replacement — this tells them apart. */
+  let connectSeq = 0
   /** Currently active event listeners on the EventSource (for cleanup). */
   let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
   /** Leader heartbeat interval (leader sends heartbeat to followers). */
@@ -231,7 +233,12 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
     if (topics.length === 0) return
 
     const url = buildEventSourceUrl(topics)
-    eventSource = new EventSource(url)
+    // The callbacks below belong to this instance, not to whatever the mutable
+    // `eventSource` points at when they fire: an abandoned connection can still
+    // report an error after a reconnect replaced it.
+    const es = new EventSource(url)
+    const seq = ++connectSeq
+    eventSource = es
 
     // Build listeners for all subscribed topic:event combinations
     const listenerNames = new Set<string>()
@@ -248,7 +255,7 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
         // Relay to follower tabs
         channel?.postMessage({ type: 'sse-event', name: fullName, data })
       }
-      eventSource.addEventListener(fullName, handler)
+      es.addEventListener(fullName, handler)
       activeListeners.push({ name: fullName, handler })
     }
 
@@ -263,27 +270,32 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
               // Don't dispatch locally — this is a remote-only event
               channel?.postMessage({ type: 'sse-event', name: fullName, data })
             }
-            eventSource.addEventListener(fullName, handler)
+            es.addEventListener(fullName, handler)
             activeListeners.push({ name: fullName, handler })
           }
         }
       }
     }
 
-    eventSource.onopen = () => {
+    es.onopen = () => {
+      // A late open from a replaced connection must not reset the backoff or
+      // announce a reconnect for a stream that is no longer the current one.
+      if (seq !== connectSeq) return
       reconnectDelay = 1000
       guard.connected()
       notifyReconnect()
       channel?.postMessage({ type: 'sse-open' })
     }
 
-    eventSource.onerror = () => {
+    es.onerror = () => {
+      // A replaced connection's failure must not touch the live stream, its
+      // listeners or the reconnect timers.
+      if (seq !== connectSeq) return
       // Close immediately and reconnect manually with backoff.
       // This prevents the browser's built-in auto-reconnect from opening
       // duplicate connections that exhaust the per-domain connection pool.
-      const es = eventSource
       removeEventSourceListeners()
-      es?.close()
+      es.close()
       eventSource = null
 
       // An expired session keeps answering 401 — stop retrying it. Anything
@@ -609,6 +621,8 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
   let backoffTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectDelay = 1000
+  /** Abandoned connections outlive their replacement — this tells them apart. */
+  let connectSeq = 0
 
   /** At most one reconnect is pending: whichever timer is armed, both are cleared. */
   function cancelPendingReconnect() {
@@ -637,7 +651,11 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
     if (topics.size === 0) return
 
     const url = `/api/stream?topics=${encodeURIComponent([...topics].sort().join(','))}`
-    eventSource = new EventSource(url)
+    // Bound to this attempt: an abandoned connection may report errors (or a
+    // late open) after a reconnect replaced it.
+    const es = new EventSource(url)
+    const seq = ++connectSeq
+    eventSource = es
 
     // Register listeners
     const listenerNames = new Set<string>()
@@ -658,23 +676,28 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
           }
         }
       }
-      eventSource.addEventListener(fullName, handler)
+      es.addEventListener(fullName, handler)
       activeListeners.push({ name: fullName, handler })
     }
 
-    eventSource.onopen = () => {
+    es.onopen = () => {
+      // A late open from a replaced connection must not reset the backoff or
+      // tell subscribers they reconnected to a stream that is gone.
+      if (seq !== connectSeq) return
       reconnectDelay = 1000
       guard.connected()
       for (const sub of subscriptions.values()) sub.onReconnect?.()
     }
-    eventSource.onerror = () => {
+    es.onerror = () => {
+      // A replaced connection's failure must not touch the live stream, its
+      // listeners or the reconnect timers.
+      if (seq !== connectSeq) return
       // EventSource treats a 401 as fatal: it fires onerror once and closes for
       // good, so this tab probes the session and decides whether to retry.
-      const es = eventSource
-      for (const { name, handler } of activeListeners) es?.removeEventListener(name, handler)
+      for (const { name, handler } of activeListeners) es.removeEventListener(name, handler)
       activeListeners = []
-      es?.close()
-      if (eventSource === es) eventSource = null
+      es.close()
+      eventSource = null
       // One 401 is enough here — the browser will never retry it.
       void guard.failed(1).then((expired) => {
         if (expired || destroyed || eventSource) return

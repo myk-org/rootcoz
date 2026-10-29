@@ -9998,11 +9998,16 @@ def _audit_export_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     ``details_raw`` the stored ``details`` text inside it. Both come from the
     stored row, never from the decoded event: re-rendering a value (``is_admin``
     as ``true`` instead of ``1``) would make an exported row unverifiable.
+
+    A row with no ``entry_hash`` (written before the chain existed) gets no
+    ``hash_payload`` at all: consumers identify a verifiable row by the payload's
+    presence, so shipping one there would invite a hash check that cannot pass.
     """
     raw = dict(row)
     event = _audit_event_row(row)
     event["details_raw"] = raw["details"]
-    event["hash_payload"] = _audit_hash_payload(raw)
+    if raw["entry_hash"] is not None:
+        event["hash_payload"] = _audit_hash_payload(raw)
     return event
 
 

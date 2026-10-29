@@ -23,14 +23,26 @@ class MockEventSource {
   closed = false
   onopen: (() => void) | null = null
   onerror: (() => void) | null = null
+  /** Handlers still registered per event name — a removed one is gone for good. */
+  listeners = new Map<string, Set<(e: Event) => void>>()
   constructor(url: string) {
     this.url = url
     MockEventSource.instances.push(this)
   }
-  addEventListener() {}
-  removeEventListener() {}
+  addEventListener(name: string, handler: (e: Event) => void) {
+    const handlers = this.listeners.get(name) ?? new Set()
+    handlers.add(handler)
+    this.listeners.set(name, handlers)
+  }
+  removeEventListener(name: string, handler: (e: Event) => void) {
+    this.listeners.get(name)?.delete(handler)
+  }
   close() {
     this.closed = true
+  }
+  /** Deliver an event the way a live stream would. */
+  emit(name: string, data: string) {
+    for (const handler of this.listeners.get(name) ?? []) handler({ data } as MessageEvent)
   }
   open() {
     this.onopen?.()
@@ -49,6 +61,12 @@ function Subscriber() {
 /** A subscription whose topic can change, like a page navigating to another job. */
 function TopicSubscriber({ topic }: { topic: string }) {
   useSSE(topic, { 'active-count': () => {} })
+  return <div>page content</div>
+}
+
+/** Reports reconnects, like a page that refetches when the stream comes back. */
+function ReconnectSubscriber({ onReconnect }: { onReconnect: () => void }) {
+  useSSE('navbar', { 'active-count': () => {} }, { onReconnect })
   return <div>page content</div>
 }
 
@@ -216,6 +234,73 @@ describe('SSEProvider session expiry', () => {
     })
     await fail(source)
     await expectReconnectAfter(1_000)
+  })
+
+  it('ignores an error from the stream a reconnect replaced', async () => {
+    const { rerender } = render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    const stale = MockEventSource.instances[0]
+
+    // A topic change replaces the stream; the old connection is abandoned.
+    rerender(
+      <SSEProvider>
+        <TopicSubscriber topic="results:abc123" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    const live = MockEventSource.instances[1]
+
+    await fail(stale)
+
+    // The abandoned connection's failure is its own: the live stream keeps its
+    // listeners, is never closed, and no probe or reconnect is started.
+    expect(probeStatus).not.toHaveBeenCalled()
+    expect(stale.closed).toBe(true)
+    expect(live.closed).toBe(false)
+    expect(live.listeners.get('results:abc123:active-count')?.size).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(live.closed).toBe(false)
+  })
+
+  it('ignores a late open from the stream a reconnect replaced', async () => {
+    const onReconnect = vi.fn()
+    render(
+      <SSEProvider>
+        <ReconnectSubscriber onReconnect={onReconnect} />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    const stale = MockEventSource.instances[0]
+    probe('network')
+
+    // Two failures take the backoff to 2000ms for the next attempt.
+    await fail(stale)
+    const second = await expectReconnectAfter(1_000)
+    await fail(second)
+
+    act(() => {
+      stale.open()
+    })
+
+    // The replaced connection's open proves nothing: the backoff keeps its
+    // 2000ms and no subscriber is told it reconnected.
+    await expectReconnectAfter(2_000)
+    expect(onReconnect).not.toHaveBeenCalled()
   })
 
   it('reconnects once when a subscription changes during a scheduled backoff', async () => {
@@ -583,6 +668,77 @@ describe('SSEProvider follower promotion', () => {
     await settle()
     hear({ type: 'sse-event', name: 'navbar:active-count', data: '{"count":3}' })
     expect(onEvent).toHaveBeenCalledWith('{"count":3}')
+  })
+
+  it('ignores an error from the stream a leader reconnect replaced', async () => {
+    const { rerender } = render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await settle()
+    expect(openStreams()).toHaveLength(1)
+    const stale = openStreams()[0]
+
+    // A topic change replaces the leader's stream; the old one is abandoned.
+    rerender(
+      <SSEProvider>
+        <TopicSubscriber topic="results:abc123" />
+      </SSEProvider>,
+    )
+    await settle(200)
+    expect(openStreams()).toHaveLength(1)
+    const live = openStreams()[0]
+    expect(live).not.toBe(stale)
+
+    probe(401)
+    await act(async () => {
+      stale.fail()
+    })
+
+    // The abandoned connection must not be mistaken for the live one: no probe,
+    // no closed stream, no removed listeners, no extra reconnect.
+    expect(probeStatus).not.toHaveBeenCalled()
+    expect(live.closed).toBe(false)
+    expect(live.listeners.get('results:abc123:active-count')?.size).toBe(1)
+    const opened = MockEventSource.instances.length
+    await settle(5_000)
+    expect(MockEventSource.instances).toHaveLength(opened)
+    expect(live.closed).toBe(false)
+  })
+
+  it('ignores a late open from the stream a leader reconnect replaced', async () => {
+    render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await settle()
+    const stale = openStreams()[0]
+    probe('network')
+
+    // A failure backs off into a replacement; the abandoned stream is still
+    // holding callbacks that the browser may fire late.
+    await act(async () => {
+      stale.fail()
+    })
+    await settle(1_000)
+    const live = openStreams()[0]
+    expect(live).not.toBe(stale)
+    const opens = posted('sse-open').length
+
+    act(() => {
+      stale.open()
+    })
+
+    // The replaced connection's open announces nothing to followers and resets
+    // no backoff: the next attempt keeps the doubled 2000ms delay.
+    expect(posted('sse-open')).toHaveLength(opens)
+    await act(async () => {
+      live.fail()
+    })
+    await settle(1_500)
+    expect(openStreams()).toHaveLength(0)
   })
 })
 
