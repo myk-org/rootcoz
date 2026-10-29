@@ -1098,10 +1098,12 @@ _AUDIT_AUTH_FAILURE_ACTIONS: frozenset[str] = frozenset(
 _AUDIT_SECRET_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
     r"|(?:sk-|ddsat_|ddapp_|ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]+"
-    # A long run only counts as a credential when it also contains a digit:
-    # identifiers such as pytest node ids and CamelCase class names are long
-    # but carry no digits, and redacting them destroys the audit record.
-    r"|\b(?=[A-Za-z0-9_-]{24,}\b)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b",
+    # A long run is credential-shaped when it contains a digit, or when it is
+    # at least 40 characters of mixed case: pytest node ids are dot-separated
+    # and ordinary words are short or single-case, so neither is touched.
+    r"|\b(?=[A-Za-z0-9_-]{24,}\b)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b"
+    r"|\b(?=[A-Za-z0-9_-]{40,}\b)(?=[A-Za-z0-9_-]*[a-z])"
+    r"(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]+\b",
     re.DOTALL,
 )
 # A bare lowercase hex string is a digest we record on purpose (an SQL hash, a
@@ -1196,32 +1198,28 @@ async def record_audit(
     raises: an audit failure must not fail the action being audited.
 
     ``auth.login_failed`` / ``auth.login_blocked`` are volume-guarded (#379):
-    once one actor has ``audit_auth_failure_max_per_minute`` rows for those
-    actions in the last minute, the row is skipped — the log line above still
-    fires, a summary line is logged per window, and the drop is counted in
-    health. Every other action is always stored.
+    once one actor — or the server as a whole, so cycling usernames buys
+    nothing — has ``audit_auth_failure_max_per_minute`` rows for those actions
+    in the last minute, the row is skipped. The budget is checked in the same
+    transaction as the insert, so parallel attempts cannot all pass a stale
+    count. The log line above still fires, a summary line is logged per window,
+    and the drop is counted in health. Every other action is always stored.
     """
     # Fully formatted on purpose: the log dedup filter suppresses consecutive
     # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
     logger.info(f"[AUDIT] {message}")
     resolved_actor = actor or "anonymous"
+    throttle: storage.AuditThrottle | None = None
     if action in _AUDIT_AUTH_FAILURE_ACTIONS:
         limit = get_settings().audit_auth_failure_max_per_minute
         if limit > 0:
-            since = storage.audit_timestamp(datetime.now(UTC) - timedelta(seconds=60))
-            try:
-                recent = await storage.count_audit_events_recent(
-                    actor=resolved_actor,
-                    actions=sorted(_AUDIT_AUTH_FAILURE_ACTIONS),
-                    since=since,
-                )
-            except sqlite3.Error, OSError:
-                # A broken count must never drop a security row: store it.
-                logger.warning("Audit volume guard could not count recent events")
-                recent = 0
-            if recent >= limit:
-                record_audit_auth_suppression(resolved_actor, limit)
-                return
+            throttle = storage.AuditThrottle(
+                limit=limit,
+                actions=tuple(sorted(_AUDIT_AUTH_FAILURE_ACTIONS)),
+                since=storage.audit_timestamp(
+                    datetime.now(UTC) - timedelta(seconds=60)
+                ),
+            )
     resolved_role = actor_role
     resolved_admin = is_admin
     if request is not None:
@@ -1240,6 +1238,7 @@ async def record_audit(
             outcome=outcome,
             details=_redact_details(details),
             request_ip=_audit_request_ip(request),
+            throttle=throttle,
         )
     except sqlite3.Error, OSError:
         failures = record_audit_write_failure()
@@ -1250,6 +1249,10 @@ async def record_audit(
             actor,
             failures,
         )
+        return
+    if event is None:
+        assert throttle is not None  # only a throttled insert can skip
+        record_audit_auth_suppression(resolved_actor, throttle.limit)
         return
     notify_audit_event(event)
 
@@ -12409,16 +12412,21 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     if not kwargs:
         return JSONResponse(content={"ok": True, "saved": False})
 
+    # One row per (tracker, kind) and only for a field that really changed: the
+    # profile form resubmits every field on each save, so an unchanged value (or
+    # clearing one that was never set) must not write a row. Read the stored
+    # values first — afterwards every submitted value trivially "matches".
+    stored = await storage.get_user_tokens(username)
+    changed = {
+        field: value for field, value in kwargs.items() if value != stored[field]
+    }
     await storage.save_user_tokens(username, **kwargs)
     logger.debug(f"Saved tokens for user '{username}': {sorted(kwargs)}")
-    # One row per (tracker, kind): setting a Jira token and clearing the other
-    # Jira token in one request is a set and a delete, but never a third row
-    # per field — the detail names the tracker only, never the field's value.
     audited: set[tuple[str, str]] = set()
     for field, tracker in _TRACKER_TOKEN_FIELDS.items():
-        if field not in kwargs:
+        if field not in changed:
             continue
-        kind = "set" if kwargs[field] else "delete"
+        kind = "set" if changed[field] else "delete"
         if (tracker, kind) in audited:
             continue
         audited.add((tracker, kind))
@@ -12622,7 +12630,8 @@ def _audit_iso_bound(
     return storage.audit_timestamp(parsed)
 
 
-# CSV column order for the audit export — the documented header.
+# CSV column order for the audit export — the documented header. The hash
+# columns make the export independently verifiable, row by row.
 _AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
     "id",
     "created_at",
@@ -12635,8 +12644,15 @@ _AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
     "outcome",
     "request_ip",
     "details",
+    "prev_hash",
     "entry_hash",
 )
+# Free-text columns can be attacker-controlled (a failed login records the
+# typed username), so a spreadsheet would execute a leading formula prefix.
+_AUDIT_EXPORT_TEXT_COLUMNS: frozenset[str] = frozenset(
+    {"actor", "action", "target_type", "target_id", "details", "request_ip"}
+)
+_AUDIT_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 # Rows per storage round-trip and the CSV buffer size that triggers a flush:
 # an export streams the whole matched set without holding it in memory.
 _AUDIT_EXPORT_BATCH = 500
@@ -12701,6 +12717,22 @@ def _audit_filter_params(
     }
 
 
+def _audit_csv_cell(name: str, value: Any) -> Any:
+    """Neutralize a spreadsheet formula in an attacker-controlled text cell.
+
+    A leading ``=``/``+``/``-``/``@``/tab/CR makes Excel and Sheets treat the
+    cell as a formula, so it is quoted with ``'``. Numeric and id columns keep
+    their value verbatim — they are not attacker text and must stay castable.
+    """
+    if (
+        name in _AUDIT_EXPORT_TEXT_COLUMNS
+        and isinstance(value, str)
+        and value.startswith(_AUDIT_CSV_FORMULA_PREFIXES)
+    ):
+        return f"'{value}"
+    return value
+
+
 def _audit_export_record(event: dict[str, Any]) -> dict[str, Any]:
     """One CSV row: the export columns, ``details`` as its stored JSON text."""
     record: dict[str, Any] = {}
@@ -12710,7 +12742,7 @@ def _audit_export_record(event: dict[str, Any]) -> dict[str, Any]:
             value = json.dumps(value or {}, ensure_ascii=False, separators=(",", ":"))
         elif name == "is_admin":
             value = int(bool(value))
-        record[name] = "" if value is None else value
+        record[name] = _audit_csv_cell(name, "" if value is None else value)
     return record
 
 
@@ -12763,7 +12795,8 @@ async def verify_audit_chain_endpoint(
 
     ``legacy`` counts rows written before the chain existed (NULL hashes): they
     are reported separately, never counted as broken and never given a
-    fabricated hash.
+    fabricated hash. ``truncated``/``truncated_before_id`` mark the boundary
+    left by retention pruning, which is not a break.
     """
     _require_admin(request)
     result = await storage.verify_audit_chain(limit=limit)
@@ -12778,7 +12811,7 @@ async def verify_audit_chain_endpoint(
 
 
 @app.get("/api/admin/audit/export", operation_id="exportAuditEventsEndpoint")
-async def export_audit_events(
+async def export_audit_events_endpoint(
     request: Request,
     filters: Annotated[dict[str, Any], Depends(_audit_filter_params)],
     format: Literal["json", "csv"] = Query(
@@ -12791,7 +12824,8 @@ async def export_audit_events(
     full matched set is streamed, so no page size limits the export and memory
     stays bounded. CSV columns are ``id, created_at, actor, actor_role,
     is_admin, action, target_type, target_id, outcome, request_ip, details,
-    entry_hash``.
+    prev_hash, entry_hash`` — the hash columns let a retained export be
+    verified on its own.
     """
     _require_admin(request)
     logger.info(

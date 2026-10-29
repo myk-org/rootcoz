@@ -854,26 +854,30 @@ def test_analysis_rerun_failure_is_audited(app_client) -> None:
     assert _events(action="analysis.rerun")[0]["outcome"] == "failure"
 
 
-def test_tracker_token_set_and_delete_audit_the_tracker_only(app_client) -> None:
-    registered = app_client.post("/api/auth/register", json={"username": "carol"})
+def _registered_user_session(app_client, username: str) -> dict[str, Any]:
+    """Register a user and return the kwargs that call the API as them."""
+    registered = app_client.post("/api/auth/register", json={"username": username})
     assert registered.status_code == 200, registered.text
-    session = registered.cookies.get("rootcoz_session")
-    headers = {"Authorization": ""}
-    cookies = {"rootcoz_session": session}
+    return {
+        "headers": {"Authorization": ""},
+        "cookies": {"rootcoz_session": registered.cookies.get("rootcoz_session")},
+    }
+
+
+def test_tracker_token_set_and_delete_audit_the_tracker_only(app_client) -> None:
+    session = _registered_user_session(app_client, "carol")
 
     token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
     response = app_client.put(
         "/api/user/tokens",
         json={"jira_token": token, "github_token": "gh-token-0123456789"},
-        headers=headers,
-        cookies=cookies,
+        **session,
     )
     assert response.status_code == 200, response.text
     response = app_client.put(
         "/api/user/tokens",
         json={"jira_token": ""},
-        headers=headers,
-        cookies=cookies,
+        **session,
     )
     assert response.status_code == 200, response.text
 
@@ -887,6 +891,39 @@ def test_tracker_token_set_and_delete_audit_the_tracker_only(app_client) -> None
     stored = json.dumps(sets + deletes)
     assert token not in stored
     assert "gh-token-0123456789" not in stored
+
+
+def test_tracker_token_audit_records_only_actual_changes(app_client) -> None:
+    """The profile form resubmits every field; only real changes are audited."""
+    session = _registered_user_session(app_client, "dave")
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+
+    first = app_client.put("/api/user/tokens", json={"jira_token": token}, **session)
+    assert first.status_code == 200, first.text
+    assert len(_events(action="user.tracker_token_set")) == 1
+
+    # Unchanged values, and empty fields that were never set, record nothing.
+    resubmit = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token, "github_token": "", "jira_sa_token": ""},
+        **session,
+    )
+    assert resubmit.status_code == 200, resubmit.text
+    assert len(_events(action="user.tracker_token_set")) == 1
+    assert _events(action="user.tracker_token_delete") == []
+
+    # Clearing a stored value is exactly one delete row, never a set row.
+    cleared = app_client.put("/api/user/tokens", json={"jira_token": ""}, **session)
+    assert cleared.status_code == 200, cleared.text
+    deletes = _events(action="user.tracker_token_delete")
+    assert len(deletes) == 1
+    assert deletes[0]["details"] == {"tracker": "jira"}
+    assert len(_events(action="user.tracker_token_set")) == 1
+
+    # Clearing an already empty field is not a change either.
+    again = app_client.put("/api/user/tokens", json={"jira_token": ""}, **session)
+    assert again.status_code == 200, again.text
+    assert len(_events(action="user.tracker_token_delete")) == 1
 
 
 def test_comment_delete_is_audited_without_the_body(app_client) -> None:
@@ -1382,6 +1419,8 @@ async def test_chain_links_each_row_to_its_predecessor(audit_db: Path) -> None:
         "legacy": 0,
         "ok": True,
         "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
     }
 
 
@@ -1413,6 +1452,47 @@ async def test_verify_chain_flags_a_deleted_row(audit_db: Path) -> None:
     assert result["first_broken_id"] == last["id"]
 
 
+async def test_verify_chain_reports_a_pruned_head_as_truncated(audit_db: Path) -> None:
+    for index in range(4):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+    assert await storage.enforce_audit_row_cap(3) == 1
+    oldest = (await storage.list_audit_events())["events"][-1]["id"]
+
+    # Retention deleted the predecessor of the oldest survivor: the window
+    # starts mid-chain, which is truncation, not tampering.
+    result = await storage.verify_audit_chain()
+    assert result == {
+        "checked": 3,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": True,
+        "truncated_before_id": oldest,
+    }
+
+
+async def test_verify_chain_still_flags_a_tampered_surviving_row(
+    audit_db: Path,
+) -> None:
+    """A pruned boundary must not hide a mismatch inside the window."""
+    events = [
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+        for index in range(5)
+    ]
+    await storage.enforce_audit_row_cap(4)
+    middle = events[2]
+    assert middle is not None
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory' WHERE id = ?", (middle["id"],)
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["truncated"] is True
+    assert result["ok"] is False
+    assert result["first_broken_id"] == middle["id"]
+
+
 async def test_verify_chain_reports_legacy_rows_separately(audit_db: Path) -> None:
     with sqlite3.connect(audit_db) as conn:
         for _ in range(2):
@@ -1429,6 +1509,8 @@ async def test_verify_chain_reports_legacy_rows_separately(audit_db: Path) -> No
         "legacy": 2,
         "ok": True,
         "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
     }
     assert _chain_rows(audit_db)[0][2] is None
 
@@ -1443,7 +1525,14 @@ async def test_verify_chain_limit_checks_only_the_newest_rows(audit_db: Path) ->
         )
 
     window = await storage.verify_audit_chain(limit=2)
-    assert window == {"checked": 2, "legacy": 0, "ok": True, "first_broken_id": None}
+    assert window == {
+        "checked": 2,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
 
     everything = await storage.verify_audit_chain()
     assert everything["ok"] is False
@@ -1607,6 +1696,8 @@ def test_audit_verify_endpoint_reports_an_intact_and_a_broken_chain(
         "legacy": 0,
         "ok": True,
         "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
     }
 
     with sqlite3.connect(temp_db_path) as conn:
@@ -1619,7 +1710,14 @@ def test_audit_verify_endpoint_reports_an_intact_and_a_broken_chain(
 
     # A window that excludes the tampered row is intact; its link is seeded.
     window = app_client.get("/api/admin/audit/verify", params={"limit": 1}).json()
-    assert window == {"checked": 1, "legacy": 0, "ok": True, "first_broken_id": None}
+    assert window == {
+        "checked": 1,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
 
 
 def test_audit_verify_requires_admin(app_client) -> None:
@@ -1649,14 +1747,16 @@ def test_audit_export_json_returns_every_match_in_order(
         "attachment; filename=audit-export.json"
     )
     events = json.loads(response.text)
+    # Ascending id: the exported rows walk the chain oldest-first, so
+    # prev_hash of row N is entry_hash of row N-1 in the same file.
     assert [event["action"] for event in events] == [
-        "action.2",
-        "action.1",
         "action.0",
+        "action.1",
+        "action.2",
     ]
     assert all(len(event["entry_hash"]) == 64 for event in events)
-    assert events[0]["prev_hash"] == events[1]["entry_hash"]
-    assert events[2]["details"] == {"n": 0}
+    assert events[1]["prev_hash"] == events[0]["entry_hash"]
+    assert events[0]["details"] == {"n": 0}
 
 
 def test_audit_export_streams_past_the_batch_size(
@@ -1671,7 +1771,7 @@ def test_audit_export_streams_past_the_batch_size(
     events = _export(app_client, format="json").json()
     assert len(events) == 5
     assert [event["action"] for event in events] == [
-        f"action.{index}" for index in range(4, -1, -1)
+        f"action.{index}" for index in range(5)
     ]
 
 
@@ -1709,6 +1809,7 @@ def test_audit_export_csv_has_the_documented_columns(
         "outcome",
         "request_ip",
         "details",
+        "prev_hash",
         "entry_hash",
     ]
     assert len(rows) == 1
@@ -1721,7 +1822,68 @@ def test_audit_export_csv_has_the_documented_columns(
     assert row["outcome"] == "success"
     assert row["request_ip"] == "203.0.113.9"
     assert row["details"] == '{"reason":"cleanup"}'
+    # The chain columns travel with the CSV, so a retained export can be
+    # checked without the server.
+    assert row["prev_hash"] == storage._AUDIT_GENESIS_HASH
     assert len(row["entry_hash"]) == 64
+
+
+async def test_iter_audit_events_never_repeats_a_row_while_writes_continue(
+    audit_db: Path,
+) -> None:
+    """Keyset paging: rows inserted mid-export cannot shift a yielded row."""
+    created = []
+    for index in range(3):
+        event = await storage.insert_audit_event(
+            action=f"action.{index}", actor="alice"
+        )
+        assert event is not None
+        created.append(event["id"])
+
+    exported: list[int] = []
+    batches = 0
+    async for batch in storage.iter_audit_events(batch_size=2):
+        batches += 1
+        exported.extend(event["id"] for event in batch)
+        if batches == 1:
+            # New events land at the head between the two batches.
+            for index in range(2):
+                await storage.insert_audit_event(action=f"late.{index}", actor="alice")
+
+    # Every row that existed when the export started appears exactly once and
+    # in id order: rows written during the walk can only join the tail, so the
+    # evidence has neither duplicates nor gaps.
+    assert exported[: len(created)] == created
+    assert exported == sorted(set(exported))
+    assert len(exported) == len(created) + 2
+
+
+def test_audit_export_neutralizes_spreadsheet_formulas(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    formula = "=cmd|' /C calc'!A0"
+    _insert_audit(
+        action="auth.login_failed",
+        actor=formula,
+        target_id="-2+3",
+        details={"note": formula},
+        request_ip="@SUM(1+1)",
+    )
+    _insert_audit(action="auth.login", actor="alice", target_id="job-1")
+
+    rows = list(csv.DictReader(io.StringIO(_export(app_client, format="csv").text)))
+    flagged = next(row for row in rows if row["actor"] == f"'{formula}")
+    assert flagged["target_id"] == "'-2+3"
+    assert flagged["request_ip"] == "'@SUM(1+1)"
+    # A details cell always starts with its JSON object, so it is not a formula.
+    assert flagged["details"] == f'{{"note":"{formula}"}}'
+    # Normal text is untouched and id columns stay castable.
+    normal = next(row for row in rows if row["actor"] == "alice")
+    assert normal["target_id"] == "job-1"
+    assert normal["id"].isdigit()
+    assert normal["is_admin"] in {"0", "1"}
 
 
 def test_audit_export_honours_the_list_filters(app_client, temp_db_path: Path) -> None:
@@ -1958,6 +2120,21 @@ def test_redact_details_scrubs_long_opaque_token_with_digits() -> None:
     assert "[redacted]" in redacted["note"]
 
 
+def test_redact_details_scrubs_long_mixed_case_token_without_digits() -> None:
+    """40+ characters of mixed case is credential-shaped even with no digit."""
+    token = "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMn"  # pragma: allowlist secret
+    assert len(token) == 40
+    redacted = main._redact_details({"note": f"pasted {token} here"})
+    assert redacted == {"note": "pasted [redacted] here"}
+
+
+def test_redact_details_keeps_a_long_lowercase_word() -> None:
+    """A long single-case word is prose or an identifier, not a token."""
+    word = "miscellaneous" * 5  # 65 characters, all lowercase, no digit
+    details = {"note": f"the {word} value"}
+    assert main._redact_details(details) == details
+
+
 def test_redact_details_scrubs_secrets_inside_lists() -> None:
     redacted = main._redact_details(
         {"notes": ["first is fine", "second has sk-live-abc123def456ghi789jkl012"]}
@@ -2058,6 +2235,42 @@ async def test_auth_failure_guard_zero_disables_it(
 
     assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == 5
     assert monitoring._audit_suppressed_auth_events == 0
+
+
+async def test_parallel_failed_logins_cannot_exceed_the_budget(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Count-and-insert is one transaction, so 50 racers store only 5 rows."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await asyncio.gather(*(_failed_logins(1) for _ in range(50)))
+
+    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == 5
+    assert monitoring._audit_suppressed_auth_events == 45
+
+
+async def test_login_flood_across_usernames_hits_the_global_cap(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cycling usernames buys no fresh budget: the cap is also server-wide."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await asyncio.gather(
+        *(
+            main.record_audit(
+                action="auth.login_failed",
+                actor=f"user{index}",
+                message=f"Failed login attempt for 'user{index}'",
+                outcome="failure",
+            )
+            for index in range(30)
+        )
+    )
+
+    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == 5
+    assert monitoring._audit_suppressed_auth_events == 25
 
 
 async def test_volume_guard_never_throttles_other_actions(

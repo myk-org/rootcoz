@@ -823,9 +823,11 @@ class Settings(BaseSettings):
         default=20,
         ge=0,
         description=(
-            "How many failed or blocked logins one username may record in the "
-            "audit trail per minute. Attempts beyond it are still logged and "
-            "counted in health, but not stored as rows. 0 disables the limit."
+            "How many failed or blocked logins may be recorded in the audit "
+            "trail per minute — per username AND in total across all "
+            "usernames, so cycling names does not reset the budget. Attempts "
+            "beyond the limit are still logged and counted in health, but not "
+            "stored as rows. 0 disables the limit."
         ),
     )
 

@@ -4900,6 +4900,51 @@ def test_admin_audit_verify_json(mock_client):
     assert json.loads(result.output)["ok"] is True
 
 
+def test_admin_audit_verify_json_exits_non_zero_on_a_broken_chain(mock_client):
+    mock_client.admin_verify_audit.return_value = {
+        "checked": 3,
+        "legacy": 0,
+        "ok": False,
+        "first_broken_id": 7,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+    result = runner.invoke(app, ["--json", "admin", "audit", "verify"])
+    assert result.exit_code == 1
+    assert json.loads(result.output)["ok"] is False
+
+
+def test_admin_audit_verify_json_exits_zero_when_truncated(mock_client):
+    """A trail truncated by retention is not tampered, so the exit stays 0."""
+    mock_client.admin_verify_audit.return_value = {
+        "checked": 3,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": True,
+        "truncated_before_id": 11,
+    }
+    result = runner.invoke(app, ["--json", "admin", "audit", "verify"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["truncated"] is True
+
+
+def test_admin_audit_verify_reports_truncation(mock_client):
+    mock_client.admin_verify_audit.return_value = {
+        "checked": 3,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": True,
+        "truncated_before_id": 11,
+    }
+    result = runner.invoke(app, ["admin", "audit", "verify"])
+    assert result.exit_code == 0, result.output
+    assert "Audit chain OK: 3 event(s) verified, truncated before event 11" in (
+        result.output
+    )
+
+
 def test_admin_audit_export_writes_the_file(mock_client, tmp_path):
     mock_client.admin_export_audit.return_value = 42
     target = tmp_path / "audit.csv"

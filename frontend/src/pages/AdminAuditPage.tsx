@@ -88,6 +88,15 @@ function parsePageSize(raw: string | null): PageSize {
   return PAGE_SIZE_OPTIONS.includes(value as PageSize) ? (value as PageSize) : DEFAULT_PAGE_SIZE
 }
 
+/** The filters kept in the URL, so a copied link shows the same rows. */
+const FILTER_KEYS = Object.keys(EMPTY_FILTERS) as Array<keyof AuditFilters>
+
+function filtersFromParams(params: URLSearchParams): AuditFilters {
+  const filters = { ...EMPTY_FILTERS }
+  for (const key of FILTER_KEYS) filters[key] = params.get(key) ?? ''
+  return filters
+}
+
 /**
  * One value drives the whole live-tail UI: the switch, the dot and the label.
  * `failed` is the switch-off state that still has to look red, so it cannot be
@@ -209,9 +218,9 @@ function ActionFilter({
 
 export function AdminAuditPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  // ?limit and ?live=1 survive a refresh.
+  // ?limit, ?live=1 and every filter survive a refresh and a copied link.
   const [state, dispatch] = useReducer(reducer, {
-    filters: EMPTY_FILTERS,
+    filters: filtersFromParams(searchParams),
     offset: 0,
     limit: parsePageSize(searchParams.get('limit')),
   })
@@ -241,8 +250,22 @@ export function AdminAuditPage() {
   }, [])
 
   // Text inputs are drafts; the reducer only sees them after the debounce.
-  const [actorDraft, setActorDraft] = useState('')
-  const [queryDraft, setQueryDraft] = useState('')
+  const [actorDraft, setActorDraft] = useState(filters.actor)
+  const [queryDraft, setQueryDraft] = useState(filters.q)
+
+  // Mirror the filters back into the URL. Unrelated params (limit, live) stay,
+  // and empty filters are removed rather than stored as empty strings.
+  useEffect(() => {
+    setSearchParamsRef.current((prev) => {
+      const next = new URLSearchParams(prev)
+      for (const key of FILTER_KEYS) {
+        const value = filters[key].trim()
+        if (value) next.set(key, value)
+        else next.delete(key)
+      }
+      return next.toString() === prev.toString() ? prev : next
+    }, { replace: true })
+  }, [filters])
 
   const [result, setResult] = useState<{ key: string; data: AuditListResponse } | null>(null)
   const [errorState, setErrorState] = useState<{ key: string; text: string }>({ key: '', text: '' })
@@ -253,8 +276,9 @@ export function AdminAuditPage() {
   // key means the shown page matches the filters, anything else is stale.
   const query = buildAuditQuery(filters, offset, limit)
   const loaded = result?.key === query ? result.data : null
-  const loading = loaded === null
   const error = errorState.key === query ? errorState.text : ''
+  // A failed request has no data for this query, but it is not still loading it.
+  const loading = loaded === null && !error
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -499,7 +523,7 @@ export function AdminAuditPage() {
                     </TableCell>
                   </TableRow>
                 ))}
-              {!loading && events.length === 0 && (
+              {!loading && !error && events.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
                     No audit events yet

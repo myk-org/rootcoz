@@ -952,12 +952,17 @@ export function ServerSettingsPage() {
     // matches AUDIT_RETENTION_DAYS even though the words are not adjacent.
     const tokens = state.search.trim().toLowerCase().split(/\s+/).filter(Boolean)
     if (tokens.length === 0) return allGroups
-    const matches = (s: ServerSetting) => {
-      const text = `${s.key} ${s.env_var} ${s.description}`.toLowerCase()
+    // The category is searchable too: "audit security" finds AUDIT_RETENTION_DAYS
+    // under "Auth & Security".
+    const matches = (s: ServerSetting, group: string) => {
+      const text = `${s.key} ${s.env_var} ${s.description} ${group}`.toLowerCase()
       return tokens.every(token => text.includes(token))
     }
     return allGroups
-      .map(({ category, settings }) => ({ category, settings: settings.filter(matches) }))
+      .map(({ category, settings }) => ({
+        category,
+        settings: settings.filter(s => matches(s, category)),
+      }))
       .filter(g => g.settings.length > 0)
   }, [allGroups, state.search])
 

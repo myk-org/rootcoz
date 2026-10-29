@@ -4256,19 +4256,34 @@ def admin_audit_verify(
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Recompute the audit hash chain and report the first broken event."""
+    """Recompute the audit hash chain and report the first broken event.
+
+    A broken chain exits non-zero in every output mode, JSON included, so a
+    script can rely on the exit code. A trail truncated by retention is not
+    broken and exits zero.
+    """
     data = _run_client_command(
         json_output,
         lambda c: c.admin_verify_audit(limit=limit),
         emit_output=False,
     )
+    ok = bool(data.get("ok"))
     if _state.get("json", False):
+        if not ok:
+            raise typer.Exit(1)
         return
     checked = data.get("checked", 0)
     legacy = data.get("legacy", 0)
     legacy_note = f", {legacy} legacy row(s) skipped" if legacy else ""
-    if data.get("ok"):
-        typer.echo(f"Audit chain OK: {checked} event(s) verified{legacy_note}")
+    truncated_note = (
+        f", truncated before event {data['truncated_before_id']}"
+        if data.get("truncated")
+        else ""
+    )
+    if ok:
+        typer.echo(
+            f"Audit chain OK: {checked} event(s) verified{legacy_note}{truncated_note}"
+        )
         return
     typer.echo(
         f"Audit chain BROKEN at event {data.get('first_broken_id')}"

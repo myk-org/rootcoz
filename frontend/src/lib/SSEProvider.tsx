@@ -51,18 +51,32 @@ const RECONNECT_DEBOUNCE_MS = 150
 const LEADER_HEARTBEAT_MS = 5_000
 const LEADER_TIMEOUT_MS = 12_000
 const MAX_RECONNECT_DELAY_MS = 30_000
-/** Failures this close together, with no successful open in between, mean the session died. */
+/** Consecutive 401s, with no successful open in between, mean the session died. */
 const EXPIRY_FAILURE_LIMIT = 3
-const EXPIRY_FAILURE_WINDOW_MS = 30_000
+
+/**
+ * Generic EventSource errors carry no HTTP status — a network blip and an
+ * expired session look identical. Ask the server who the session still is.
+ */
+async function probeSession(): Promise<number | null> {
+  try {
+    const response = await fetch('/api/auth/me', { credentials: 'include' })
+    return response.status
+  } catch {
+    // A failed probe is a network problem, never proof of expiry.
+    return null
+  }
+}
 
 /**
  * Watches the stream's connect attempts. The server answers an expired session
- * with 401 on every reconnect, so an unbroken run of failures is the signal —
- * once tripped the manager stops reconnecting until the manager is recreated
- * (page reload or a new login).
+ * with 401 on every reconnect, so an unbroken run of 401s is the signal — once
+ * tripped the manager stops reconnecting until the manager is recreated (page
+ * reload or a new login). Anything else (200, network error) is transient: the
+ * retries continue and the user is not asked to sign in again.
  */
 function createSessionGuard(onExpired: () => void) {
-  let failures: number[] = []
+  let failures = 0
   let expired = false
   return {
     get expired() {
@@ -70,14 +84,20 @@ function createSessionGuard(onExpired: () => void) {
     },
     /** The stream opened — the session is alive and the run is broken. */
     connected() {
-      failures = []
+      failures = 0
     },
-    /** Record a failed attempt; true once the session counts as expired. */
-    failed(): boolean {
-      const now = Date.now()
-      failures = [...failures, now].filter((at) => now - at <= EXPIRY_FAILURE_WINDOW_MS)
-      if (failures.length < EXPIRY_FAILURE_LIMIT) return false
-      failures = []
+    /** Probe the session after a failed attempt; true once it counts as expired. */
+    async failed(): Promise<boolean> {
+      if (expired) return true
+      const status = await probeSession()
+      if (expired) return true
+      if (status !== 401) {
+        failures = 0
+        return false
+      }
+      failures += 1
+      if (failures < EXPIRY_FAILURE_LIMIT) return false
+      failures = 0
       expired = true
       onExpired()
       return true
@@ -117,7 +137,19 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
 
   // ---- BroadcastChannel ----
   const hasBroadcast = typeof BroadcastChannel !== 'undefined'
-  const channel = hasBroadcast ? new BroadcastChannel(CHANNEL_NAME) : null
+  // lib.dom predates BroadcastChannel.onclose, though browsers fire it on close().
+  let channel: (BroadcastChannel & { onclose?: (() => void) | null }) | null = hasBroadcast
+    ? new BroadcastChannel(CHANNEL_NAME)
+    : null
+
+  /**
+   * Followers hear about streamed events only through the channel. When it goes
+   * away they can no longer be told anything, so they take over themselves.
+   */
+  function handleChannelLost() {
+    channel = null
+    if (!isLeader && !destroyed) requestLeaderLock()
+  }
 
   // ---- Helpers ----
 
@@ -244,17 +276,18 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
       es?.close()
       eventSource = null
 
-      // An expired session keeps answering 401 — stop retrying it.
-      if (guard.failed()) return
-
-      if (!destroyed && isLeader) {
+      // An expired session keeps answering 401 — stop retrying it. Anything
+      // else (network blip, server restart) is transient: reconnect.
+      void guard.failed().then((expired) => {
+        // `eventSource` set again = a reconnect already happened while probing.
+        if (expired || destroyed || !isLeader || eventSource) return
         if (reconnectBackoffTimer) clearTimeout(reconnectBackoffTimer)
         reconnectBackoffTimer = setTimeout(() => {
           reconnectBackoffTimer = null
           if (!destroyed && isLeader) connectEventSource()
         }, reconnectDelay)
         reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
-      }
+      })
     }
   }
 
@@ -398,12 +431,14 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
 
   // ---- Channel message handler ----
   if (channel) {
+    channel.onclose = handleChannelLost
+    channel.onmessageerror = handleChannelLost
     channel.onmessage = (msg: MessageEvent<ChannelMessage>) => {
       const m = msg.data
 
       switch (m.type) {
         case 'who-is-leader':
-          if (isLeader) channel.postMessage({ type: 'leader', tabId: TAB_ID })
+          if (isLeader) channel?.postMessage({ type: 'leader', tabId: TAB_ID })
           break
 
         case 'leader': {
@@ -570,10 +605,13 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
       for (const sub of subscriptions.values()) sub.onReconnect?.()
     }
     eventSource.onerror = () => {
-      // The browser auto-reconnects; close it for good once the session is gone.
-      if (!guard.failed()) return
-      eventSource?.close()
-      eventSource = null
+      // The browser auto-reconnects, so only a dead session closes it for good.
+      const es = eventSource
+      void guard.failed().then((expired) => {
+        if (!expired) return
+        es?.close()
+        if (eventSource === es) eventSource = null
+      })
     }
   }
 

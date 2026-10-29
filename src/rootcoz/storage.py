@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -9929,6 +9930,35 @@ def _audit_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     return event
 
 
+@dataclass(frozen=True, slots=True)
+class AuditThrottle:
+    """Per-minute row budget checked in the same transaction as the insert.
+
+    ``limit`` applies both to the requesting actor and to the whole server, so
+    an attacker cycling usernames cannot give itself a fresh budget per name.
+    """
+
+    limit: int
+    actions: tuple[str, ...]
+    since: str
+
+
+async def _audit_throttled(
+    db: aiosqlite.Connection, actor: str, throttle: AuditThrottle
+) -> bool:
+    """True when ``actor`` or the whole server already used up its budget."""
+    action_filter = f"action IN ({', '.join('?' * len(throttle.actions))})"
+    for actor_filter, scope in ((" AND actor = ?", (actor,)), ("", ())):
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM audit_events"
+            f" WHERE created_at >= ? AND {action_filter}{actor_filter}",
+            (throttle.since, *throttle.actions, *scope),
+        )
+        if (await cursor.fetchone())[0] >= throttle.limit:
+            return True
+    return False
+
+
 async def insert_audit_event(
     *,
     action: str,
@@ -9940,7 +9970,8 @@ async def insert_audit_event(
     outcome: str = "success",
     details: dict[str, Any] | None = None,
     request_ip: str | None = None,
-) -> dict[str, Any]:
+    throttle: AuditThrottle | None = None,
+) -> dict[str, Any] | None:
     """Insert one audit event and return the stored row.
 
     ``details`` must already be redacted by the caller — this layer stores
@@ -9950,12 +9981,20 @@ async def insert_audit_event(
     ``created_at`` is set here (not by a column default) so it is always the
     canonical UTC form the hash covers. The returned row is what the DB holds,
     so callers can broadcast it.
+
+    With ``throttle``, the budget check runs inside that same transaction and
+    the insert is skipped (``None`` returned) once it is exhausted: parallel
+    writers can no longer all read a stale count and then all insert.
     """
     actor_value = actor or "anonymous"
     async with _connect_db() as db:
         # Take the write lock before reading the tail: two concurrent inserts
         # can then never link to the same predecessor.
         await db.execute("BEGIN IMMEDIATE")
+        if throttle is not None and await _audit_throttled(db, actor_value, throttle):
+            # Nothing written: closing the connection rolls the empty
+            # transaction back and releases the write lock.
+            return None
         cursor = await db.execute(
             "SELECT entry_hash FROM audit_events"
             " WHERE entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1"
@@ -10018,7 +10057,7 @@ def _audit_like_patterns(q: str) -> list[str]:
     )
 
 
-async def list_audit_events(
+def _audit_filter_sql(
     *,
     actor: str | None = None,
     action: str | Sequence[str] | None = None,
@@ -10028,15 +10067,11 @@ async def list_audit_events(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
-) -> dict[str, Any]:
-    """List audit events newest-first, with the total number of matches.
+) -> tuple[str, list[Any]]:
+    """``(WHERE clause, params)`` for the audit list/export filters.
 
-    Filters are pushed into SQL so ``offset``/``limit`` page over the
-    filtered set. ``actor`` matches case-insensitively, ``action`` accepts one
-    id or a list of ids, and ``q`` is a substring search over ``details``.
-    Returns ``{"events": [...], "total": <int>}``.
+    Shared by :func:`list_audit_events` and :func:`iter_audit_events` so the
+    list and the export can never drift apart.
     """
     conditions: list[str] = []
     params: list[Any] = []
@@ -10068,6 +10103,39 @@ async def list_audit_events(
         conditions.append("created_at <= ?")
         params.append(date_to)
     where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+    return where, params
+
+
+async def list_audit_events(
+    *,
+    actor: str | None = None,
+    action: str | Sequence[str] | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    outcome: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List audit events newest-first, with the total number of matches.
+
+    Filters are pushed into SQL so ``offset``/``limit`` page over the
+    filtered set. ``actor`` matches case-insensitively, ``action`` accepts one
+    id or a list of ids, and ``q`` is a substring search over ``details``.
+    Returns ``{"events": [...], "total": <int>}``.
+    """
+    where, params = _audit_filter_sql(
+        actor=actor,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        outcome=outcome,
+        q=q,
+        date_from=date_from,
+        date_to=date_to,
+    )
 
     async with _connect_db() as db:
         cursor = await db.execute(f"SELECT COUNT(*) FROM audit_events{where}", params)
@@ -10082,54 +10150,51 @@ async def list_audit_events(
     return {"events": [_audit_event_row(row) for row in rows], "total": total}
 
 
-async def count_audit_events_recent(
-    *, actor: str, actions: Sequence[str], since: str
-) -> int:
-    """Count one actor's rows for ``actions`` at or after ``since``.
-
-    One indexed query (``idx_audit_events_actor``) — the volume guard in
-    ``main.record_audit`` runs it before every auth-failure write.
-    """
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM audit_events"
-            " WHERE actor = ? AND created_at >= ?"
-            f" AND action IN ({', '.join('?' * len(actions))})",
-            (actor, since, *actions),
-        )
-        return (await cursor.fetchone())[0]
-
-
 async def iter_audit_events(
     *, batch_size: int = 500, **filters: Any
 ) -> AsyncIterator[list[dict[str, Any]]]:
-    """Yield audit events newest-first in batches of ``batch_size``.
+    """Yield audit events in ascending id order, ``batch_size`` at a time.
 
     A full export must not be capped by the list endpoint's page size, so this
-    walks every match in bounded memory. Offset paging is safe here: pruning
-    only ever deletes the oldest rows, i.e. the tail this walk has not reached
-    yet, so nothing already yielded can push an unvisited row out of reach.
+    walks every match in bounded memory. Keyset paging by id (not OFFSET)
+    gives every row exactly one slot whatever else is written meanwhile: rows
+    inserted during the walk get ids above the cursor, so they can never shift
+    an already yielded row into a later batch and duplicate it.
     """
-    offset = 0
+    where, params = _audit_filter_sql(**filters)
+    last_id = 0
     while True:
-        page = await list_audit_events(**filters, limit=batch_size, offset=offset)
-        events = page["events"]
-        if not events:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                f"SELECT {_AUDIT_COLUMNS} FROM audit_events"
+                f"{where}{' AND' if where else ' WHERE'} id > ?"
+                " ORDER BY id ASC LIMIT ?",
+                [*params, last_id, batch_size],
+            )
+            rows = await cursor.fetchall()
+        if not rows:
             return
-        yield events
-        if len(events) < batch_size:
+        yield [_audit_event_row(row) for row in rows]
+        if len(rows) < batch_size:
             return
-        offset += len(events)
+        last_id = rows[-1]["id"]
 
 
 async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
     """Recompute the audit hash chain, newest ``limit`` events when given.
 
-    Returns ``{checked, legacy, ok, first_broken_id}``: ``checked`` is how many
-    chained rows were verified, ``legacy`` how many pre-chain rows (NULL hashes)
-    were skipped — they are reported, never faked into the chain — and
-    ``first_broken_id`` the oldest row whose stored ``prev_hash`` or
-    ``entry_hash`` does not match the recomputation (``None`` when intact).
+    Returns ``{checked, legacy, ok, first_broken_id, truncated,
+    truncated_before_id}``: ``checked`` is how many chained rows were verified,
+    ``legacy`` how many pre-chain rows (NULL hashes) were skipped — they are
+    reported, never faked into the chain — and ``first_broken_id`` the oldest
+    row whose stored ``prev_hash`` or ``entry_hash`` does not match the
+    recomputation (``None`` when intact).
+
+    ``truncated`` is not a break: retention pruning deletes the oldest rows, so
+    the oldest surviving row links to a predecessor that no longer exists.
+    That boundary is reported with ``truncated_before_id`` (the first surviving
+    row) instead of failing the trail; a mismatch inside the surviving window
+    still fails.
     """
     sql = f"SELECT {_AUDIT_COLUMNS} FROM audit_events ORDER BY id DESC"
     params: tuple[Any, ...] = ()
@@ -10140,16 +10205,27 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
         cursor = await db.execute(sql, params)
         rows = [dict(row) for row in await cursor.fetchall()][::-1]
         prev_hash = _AUDIT_GENESIS_HASH
-        if limit is not None and rows:
-            # The window's first row links to a row outside it: seed the walk
-            # with that row's hash instead of calling a truncated view broken.
+        truncated = False
+        truncated_before_id: int | None = None
+        if rows:
+            # The walk's first row links to a row before it: seed the walk with
+            # that row's hash instead of calling a bounded view broken.
             cursor = await db.execute(
                 "SELECT entry_hash FROM audit_events"
                 " WHERE id < ? AND entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1",
                 (rows[0]["id"],),
             )
             seed = await cursor.fetchone()
-            prev_hash = seed[0] if seed else _AUDIT_GENESIS_HASH
+            if seed:
+                prev_hash = seed[0]
+            elif rows[0]["prev_hash"] not in (None, _AUDIT_GENESIS_HASH):
+                # Its predecessor is gone (pruning or the row cap), so the
+                # surviving window starts mid-chain: truncated, not tampered.
+                # Seed the walk with the recorded link so the boundary itself
+                # is not reported as a break.
+                truncated = True
+                truncated_before_id = rows[0]["id"]
+                prev_hash = rows[0]["prev_hash"]
 
     checked = legacy = 0
     first_broken_id: int | None = None
@@ -10169,6 +10245,8 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
         "legacy": legacy,
         "ok": first_broken_id is None,
         "first_broken_id": first_broken_id,
+        "truncated": truncated,
+        "truncated_before_id": truncated_before_id,
     }
 
 

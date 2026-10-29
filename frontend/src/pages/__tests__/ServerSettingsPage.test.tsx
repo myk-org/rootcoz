@@ -197,6 +197,11 @@ describe('ServerSettingsPage tabs and search', () => {
     fireEvent.change(search, { target: { value: 'audit' } })
     await waitFor(() => expect(screen.getByText('AUDIT_RETENTION_DAYS')).toBeInTheDocument())
 
+    // The category is searchable too — this setting lives under "Auth & Security".
+    fireEvent.change(search, { target: { value: 'audit security' } })
+    await waitFor(() => expect(screen.getByText('AUDIT_RETENTION_DAYS')).toBeInTheDocument())
+    expect(screen.queryByText('JENKINS_URL')).not.toBeInTheDocument()
+
     // Whitespace-only is still no query at all.
     fireEvent.change(search, { target: { value: '   ' } })
     await waitFor(() => expect(screen.getByText('JENKINS_URL')).toBeInTheDocument())

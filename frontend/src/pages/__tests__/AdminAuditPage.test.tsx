@@ -171,9 +171,39 @@ describe('AdminAuditPage', () => {
         ? Promise.resolve({ actions: [] })
         : Promise.reject(new Error('500: audit table unavailable')),
     )
-    renderPage()
+    const { container } = renderPage()
 
     expect(await screen.findByText('500: audit table unavailable')).toBeInTheDocument()
+    // A failed request is not an outstanding one: no skeleton, no "empty" claim.
+    expect(container.querySelector('.animate-pulse')).toBeNull()
+    expect(screen.queryByText('No audit events yet')).not.toBeInTheDocument()
+  })
+
+  it('restores filters from the URL and mirrors filter edits back into it', async () => {
+    mockAuditApi(1)
+    renderPage('/admin/audit?actor=alice&outcome=failure')
+
+    // The shared link's filters reach the first request and the inputs.
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenCalledWith(
+        '/api/admin/audit?limit=50&offset=0&actor=alice&outcome=failure',
+      ),
+    )
+    expect(screen.getByLabelText('Actor filter')).toHaveValue('alice')
+    expect(screen.getByRole('combobox', { name: 'Outcome filter' })).toHaveTextContent('failure')
+
+    fireEvent.change(screen.getByLabelText('Since date'), { target: { value: '2024-01-01' } })
+    await waitFor(() =>
+      expect(screen.getByTestId('location')).toHaveTextContent('since=2024-01-01'),
+    )
+    expect(screen.getByTestId('location')).toHaveTextContent('actor=alice')
+    expect(screen.getByTestId('location')).toHaveTextContent('outcome=failure')
+
+    // Clearing drops the filter params instead of storing empty values.
+    fireEvent.click(screen.getByText('Clear'))
+    await waitFor(() => expect(screen.getByTestId('location')).not.toHaveTextContent('actor='))
+    expect(screen.getByTestId('location')).not.toHaveTextContent('outcome=')
+    expect(screen.getByTestId('location')).not.toHaveTextContent('since=')
   })
 
   it('shows the empty state', async () => {
@@ -258,7 +288,7 @@ describe('AdminAuditPage', () => {
     expect(await screen.findByText('Showing 1–50 of 120')).toBeInTheDocument()
     fireEvent.click(screen.getByText('Next'))
     await waitFor(() =>
-      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=50'),
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=50&q=alice'),
     )
 
     const user = userEvent.setup()
@@ -266,7 +296,9 @@ describe('AdminAuditPage', () => {
     await user.click(screen.getByRole('option', { name: '100' }))
 
     // Offset back to the first page, refetched with the new page size.
-    await waitFor(() => expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=100&offset=0'))
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=100&offset=0&q=alice'),
+    )
     expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?q=alice&limit=100')
     expect(await screen.findByText('Showing 1–100 of 120')).toBeInTheDocument()
   })

@@ -453,8 +453,9 @@ class RootCozClient:
     def admin_verify_audit(self, limit: int | None = None) -> dict[str, Any]:
         """Recompute the audit hash chain. GET /api/admin/audit/verify
 
-        Returns ``{checked, legacy, ok, first_broken_id}``; ``limit`` verifies
-        only the newest N chained events.
+        Returns ``{checked, legacy, ok, first_broken_id, truncated,
+        truncated_before_id}``; ``limit`` verifies only the newest N chained
+        events.
         """
         return self._request("GET", "/api/admin/audit/verify", params={"limit": limit})
 
