@@ -353,7 +353,7 @@ export function ServerProvidersCard() {
               <span className="block text-xs text-text-tertiary">Model to verify against</span>
               <ModelCombobox value={model} onChange={(value) => { setModel(value); invalidateTest() }} options={selectedModels} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !selected} />
               <p className="text-xs text-text-tertiary">
-                {modelOptional ? DISCOVERED_MODEL_HINT : 'If the model isn&apos;t listed, enter its ID manually.'}
+                {modelOptional ? DISCOVERED_MODEL_HINT : "If the model isn't listed, enter its ID manually."}
               </p>
             </div>
             <div className="flex gap-2">
@@ -668,7 +668,7 @@ function ProviderKeyDialog({ provider, mode, models, onClose, onStored }: {
             <span className="block text-xs text-text-tertiary">Model to verify against</span>
             <ModelCombobox value={model} onChange={setModel} options={models} placeholder="Select or type a model ID" ariaLabel="Verification model" disabled={busy} />
             <p className="text-xs text-text-tertiary">
-              {modelOptional ? DISCOVERED_MODEL_HINT : 'If the model isn&apos;t listed, enter its ID manually.'}
+              {modelOptional ? DISCOVERED_MODEL_HINT : "If the model isn't listed, enter its ID manually."}
             </p>
           </div>
           {editing && (
