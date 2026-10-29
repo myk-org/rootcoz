@@ -114,6 +114,9 @@ def _split_csv(value: str) -> list[str]:
 
 
 _TAG_OPTION = typer.Option([], "--tag", help="Tag for categorization (repeatable).")
+_AUDIT_ACTION_OPTION = typer.Option(
+    [], "--action", help="Filter by action id (repeatable)."
+)
 _ANALYZE_LABEL_OPTION = typer.Option(
     [],
     "--label",
@@ -4121,6 +4124,97 @@ def _print_token_usage_csv(rows: list[dict[str, Any]]) -> None:
 
 transcripts_app = typer.Typer(help="Session transcript commands. Admin only.")
 admin_app.add_typer(transcripts_app, name="transcripts")
+
+audit_app = typer.Typer(help="Browse the audit trail. Admin only.")
+admin_app.add_typer(audit_app, name="audit")
+
+
+def _audit_target_label(event: dict[str, Any]) -> str:
+    """``job:job-1`` for a targeted event, ``-`` when it names no target."""
+    bits = [str(event.get(key) or "") for key in ("target_type", "target_id")]
+    return ":".join(bit for bit in bits if bit) or "-"
+
+
+@audit_app.command("list")
+def admin_audit_list(
+    actor: str = typer.Option(
+        "", "--actor", help="Exact actor username (case-insensitive)."
+    ),
+    action: list[str] = _AUDIT_ACTION_OPTION,
+    target_type: str = typer.Option(
+        "", "--target-type", help="Filter by target type, e.g. job."
+    ),
+    target_id: str = typer.Option(
+        "", "--target-id", help="Filter by target id, e.g. a job id."
+    ),
+    outcome: str = typer.Option(
+        "", "--outcome", help="Filter by outcome: success, failure, denied."
+    ),
+    q: str = typer.Option("", "--q", help="Substring search over event details."),
+    since: str = typer.Option("", "--since", help="ISO 8601 lower bound (inclusive)."),
+    until: str = typer.Option("", "--until", help="ISO 8601 upper bound (inclusive)."),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    offset: int = typer.Option(0, "--offset", min=0),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List recorded audit events, newest first."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_list_audit(
+            actor=actor,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            outcome=outcome,
+            q=q,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+        ),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    events = data.get("events", [])
+    print_output(
+        [
+            {
+                "time": event.get("created_at", ""),
+                "actor": event.get("actor", ""),
+                "action": event.get("action", ""),
+                "target": _audit_target_label(event),
+                "outcome": event.get("outcome", ""),
+            }
+            for event in events
+        ],
+        columns=["time", "actor", "action", "target", "outcome"],
+    )
+    typer.echo(
+        f"\nShowing {len(events)} of {data.get('total', len(events))} event(s)"
+        f" (limit {data.get('limit', limit)}, offset {data.get('offset', offset)})"
+    )
+
+
+@audit_app.command("actions")
+def admin_audit_actions(json_output: bool = _JSON_OPTION) -> None:
+    """List recorded action ids with event counts."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_audit_actions(),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    actions = data.get("actions", [])
+    if actions:
+        print_output(
+            actions,
+            columns=["action", "label", "count", "last_seen"],
+            labels={"last_seen": "LAST SEEN"},
+        )
+    else:
+        typer.echo("No audit events recorded.")
 
 
 @transcripts_app.command("list")

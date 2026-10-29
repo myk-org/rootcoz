@@ -1897,6 +1897,65 @@ class TestRootCozClientAdminUsers:
         assert "users" in result
         assert result["users"][0]["username"] == "admin"
 
+    def test_admin_list_audit_forwards_filters(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit"
+            assert request.url.params.get("actor") == "alice"
+            assert request.url.params.get("outcome") == "denied"
+            assert request.url.params.get("target_type") == "job"
+            assert request.url.params.get("target_id") == "job-1"
+            assert request.url.params.get("q") == "cleanup"
+            assert request.url.params.get("since") == "2026-01-01T00:00:00Z"
+            assert request.url.params.get("until") == "2026-02-01T00:00:00Z"
+            assert request.url.params.get("limit") == "5"
+            assert request.url.params.get("offset") == "10"
+            return httpx.Response(
+                200,
+                json={"events": [{"action": "auth.login"}], "total": 1},
+            )
+
+        client = _make_client(handler)
+        result = client.admin_list_audit(
+            actor="alice",
+            target_type="job",
+            target_id="job-1",
+            outcome="denied",
+            q="cleanup",
+            since="2026-01-01T00:00:00Z",
+            until="2026-02-01T00:00:00Z",
+            limit=5,
+            offset=10,
+        )
+        assert result["total"] == 1
+
+    def test_admin_list_audit_repeats_each_action(self):
+        def handler(request):
+            assert request.url.params.get_list("action") == ["auth.login", "job.delete"]
+            assert "actor" not in request.url.params
+            return httpx.Response(200, json={"events": [], "total": 0})
+
+        client = _make_client(handler)
+        result = client.admin_list_audit(action=["auth.login", "job.delete"])
+        assert result["total"] == 0
+
+    def test_admin_audit_actions(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit/actions"
+            return httpx.Response(
+                200,
+                json={
+                    "actions": [
+                        {"action": "auth.login", "label": "Auth Login", "count": 2}
+                    ]
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.admin_audit_actions()
+        assert result["actions"][0]["label"] == "Auth Login"
+
     def test_admin_component_versions(self):
         def handler(request):
             assert request.method == "GET"

@@ -792,6 +792,18 @@ class Settings(BaseSettings):
                 return 720
         return 720
 
+    # How long the audit trail is kept. 0 = keep every event forever.
+    audit_retention_days: int = Field(
+        default=90,
+        ge=0,
+        le=36500,
+        description=(
+            "How many days of audit events to keep on this server. "
+            "0 keeps them forever. Older events are deleted at most once "
+            "a day."
+        ),
+    )
+
     # Admin approval for new user registrations
     require_approval: bool = Field(
         default=True,

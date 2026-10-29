@@ -229,6 +229,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | `/api/chat/{job_id}/stream` | viewer | Per-job chat messages |
 | `/api/admin/token-usage/stream` | admin | Token usage changes. Enforced by middleware before the handler runs |
 | `/api/admin/logs/stream` | admin | Live server log tail; `lines` and `level` query parameters |
+| `/api/admin/audit/stream` | admin | New audit events as they are recorded, one `audit:event` SSE event per row with the same JSON shape as the list endpoint |
 | `/api/admin/settings/stream` | admin | Server setting changes |
 
 Use `/api/stream` when you want one connection instead of six. It accepts up to 50 comma-separated topics; `token-usage` and `settings` are delivered only to admins.
@@ -299,6 +300,8 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin/token-usage/{job_id}` | Per-job usage |
 | GET | `/api/admin/transcripts` | List session transcripts with joined context (`job_id` filter) |
 | GET | `/api/admin/transcripts/{session_id}` | Download one transcript JSONL (streaming, no truncation) |
+| GET | `/api/admin/audit` | Recorded audit events, newest first: `actor` (exact, case-insensitive), `action` (repeat the parameter or comma-separate), `target_type`, `target_id`, `outcome` (`success`/`failure`/`denied`), `q` (substring over `details`), `since`/`until` (ISO 8601), `limit` (50, max 500), `offset`. Returns `{events, total, limit, offset}` |
+| GET | `/api/admin/audit/actions` | Distinct recorded actions as `{actions: [{action, count, last_seen, label}]}` |
 | POST | `/api/admin/ai-models/refresh` | Re-discover models from the sidecar |
 | GET | `/api/admin/component-versions` | Backend, sidecar, and chart versions |
 | GET | `/api/admin/db/schema` | Read-only schema dump |
@@ -312,6 +315,22 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin-chat/artifacts/{artifact_id}` | Download that artifact |
 
 See [Configuration Reference](configuration-reference.html) for the full environment variable surface behind these admin settings.
+
+#### Audit events
+
+`GET /api/admin/audit` returns `{events, total, limit, offset}` newest-first. Each event carries `id`, `created_at`, `actor`, `actor_role`, `is_admin`, `action`, `target_type`, `target_id`, `outcome`, `details` (the stored JSON object, already parsed), and `request_ip`.
+
+```bash
+curl -s "$BASE/api/admin/audit?actor=alice&action=admin.job_delete&since=2026-04-01T00:00:00Z&limit=20" \
+  -H "Authorization: Bearer $KEY"
+```
+
+Filters combine with AND. `actor` must match the stored value exactly but ignores case. `action` accepts one id or several, either as a repeated parameter (`?action=a&action=b`) or comma-separated (`?action=a,b`). `q` is a substring match over the event's `details` object. `since` and `until` are inclusive and accept any ISO 8601 timestamp; a value that cannot be parsed is rejected with `400`.
+
+`GET /api/admin/audit/actions` lists the action ids seen so far with their event count, last-seen timestamp, and a display label (`auth.login_failed` becomes `Auth Login Failed`) for building filter menus.
+
+Both endpoints require `admin` and return `403 Admin access required` otherwise. `GET /api/admin/audit/stream` pushes each new event as it is written, so an audit page can stay live without polling.
+
 
 ## Advanced Usage
 

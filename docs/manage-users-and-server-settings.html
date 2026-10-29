@@ -552,7 +552,7 @@
 </tr>
 <tr>
 <td><code>Auth &amp; Security</code></td>
-<td><code>admin_key</code> (displayed masked, read-only), <code>secure_cookies</code>, <code>trust_proxy_headers</code>, <code>require_approval</code>, <code>admin_wait_approve_msg</code>, <code>allowed_users</code>, <code>default_user_role</code></td>
+<td><code>admin_key</code> (displayed masked, read-only), <code>secure_cookies</code>, <code>trust_proxy_headers</code>, <code>require_approval</code>, <code>admin_wait_approve_msg</code>, <code>allowed_users</code>, <code>default_user_role</code>, <code>audit_retention_days</code></td>
 </tr>
 <tr>
 <td><code>Prow</code></td>
@@ -652,11 +652,48 @@
 </tr>
 </tbody>
 </table></div>
+<ol>
+<li><strong>Review the audit log.</strong></li>
+</ol>
+<p>Every audited action is written as one row in the audit trail, newest first. Each event records the actor, the actor's role and admin flag, the action id, an outcome (<code>success</code>, <code>failure</code>, or <code>denied</code>), an optional target (<code>user</code>, <code>job</code>, <code>setting</code>, <code>provider</code>), the client IP when <code>trust_proxy_headers</code> is on, and a <code>details</code> object with the non-secret specifics.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>What is recorded</th>
+<th>Action ids</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sign-in, registration, and own keys</td>
+<td><code>auth.login</code>, <code>auth.login_failed</code>, <code>auth.login_blocked</code>, <code>auth.register</code>, <code>user.self_key_rotate</code>, <code>user.ai_credential_set</code>, <code>user.ai_credential_delete</code></td>
+</tr>
+<tr>
+<td>User and grant administration</td>
+<td><code>admin.user_create</code>, <code>admin.user_delete</code>, <code>admin.user_role_change</code>, <code>admin.user_key_rotate</code>, <code>admin.user_approve</code>, <code>admin.user_reject</code>, <code>admin.user_can_view_reports</code>, <code>admin.user_can_use_server_providers</code></td>
+</tr>
+<tr>
+<td>Server settings and AI providers</td>
+<td><code>settings.update</code>, <code>settings.reset</code>, <code>settings.import</code>, <code>admin.setting_persist</code>, <code>provider.key.store</code>, <code>provider.key.rotate</code>, <code>provider.remove</code>, <code>provider.models_set</code>, <code>provider.models_refresh</code>, <code>provider.deployment_refresh</code>, <code>provider.selection_seed</code>, <code>provider.free_selection_auto_include</code>, <code>free_models.set</code></td>
+</tr>
+<tr>
+<td>Jobs, results, and trackers</td>
+<td><code>admin.job_delete</code>, <code>user.job_delete</code>, <code>user.abort_job</code>, <code>review.delete</code>, <code>classification.override</code>, <code>issue.create</code>, <code>export.push</code>, <code>job.metadata_set</code></td>
+</tr>
+<tr>
+<td>Admin tooling</td>
+<td><code>transcript.list</code>, <code>transcript.download</code>, <code>admin.db_query</code></td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Sensitive values are never stored.</strong> A settings event names the setting (<code>{"key": "jenkins_password", "redacted": true}</code>) and never its value. Provider events name the provider only. A stored key, token, or password is dropped before the row is written, by the same sensitive-name check the settings page uses, so a newly added credential field needs no second list. The <code>[AUDIT]</code> line in the server log follows the same rule.</p>
+<p><code>audit_retention_days</code> (Server Settings → Auth &amp; Security, default <code>90</code>) decides how long rows are kept. <code>0</code> keeps them forever. Older rows are deleted in the background at most once a day, at startup and then hourly if a day has passed.</p>
+<p>Read the trail with <code>rootcoz admin audit list</code> / <code>rootcoz admin audit actions</code>, or over the API at <code>GET /api/admin/audit</code>, <code>GET /api/admin/audit/actions</code>, and the <code>GET /api/admin/audit/stream</code> SSE feed. All are admin-only; see <a href="api-reference.html#audit-events">API Reference</a>.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
 <ul>
 <li><strong>Reset to environment values.</strong> Database overrides always win over environment variables. Reset the setting in the UI (or delete it with <code>DELETE /api/admin/settings/{key}</code>) when you want the deployment's env var back in charge.</li>
 <li><strong>Export and import server settings.</strong> The Server Settings page has <code>Export settings</code> / <code>Import settings</code> buttons in the header. Export downloads a JSON document of the <strong>database overrides only</strong> — environment-only values are deployment config, not server settings, and stay out. Sensitive settings (API keys, tokens, passwords) are excluded unless you tick <code>Include secrets</code> and confirm the warning; the file then holds them as plaintext (re-encrypted values would only be usable with the same <code>ROOTCOZ_ENCRYPTION_KEY</code>), so store and transfer it securely and delete it once imported. Without the secrets opt-in the export is also scrubbed of embedded credentials: <code>@token</code> suffixes in <code>additional_repos</code> entries and username/password userinfo in URLs are stripped, so no credential leaves without the opt-in. Import validates every key and value with the same rules as saving a single setting, applies the whole document <strong>atomically</strong> — one invalid value rejects the entire import with <code>422</code> and nothing is applied, and the write itself is a single database transaction — and reports a per-setting diff plus which changed settings need a restart. Sensitive values are masked (<code>***</code>) in the diff, and credential substrings (URL userinfo, repo tokens) in non-sensitive values are masked too. A scrubbed export also never strips credentials from the target on import: a setting whose imported value matches the scrubbed form of its current value is skipped and reported as unchanged, so the target's credential-bearing value (for example a repo <code>@token</code>) wins. If validation fails, the confirmation dialog stays open with the error — but retrying resends the same parsed document, so fixing the file on disk changes nothing until you select the file again. The CLI mirrors both: <code>rootcoz admin settings export [--include-sensitive] [--output FILE]</code> and <code>rootcoz admin settings import --input FILE [--dry-run]</code>, where <code>--dry-run</code> validates and shows the diff without applying anything. An <code>--output</code> file is written with owner-only <code>0600</code> permissions because it can hold decrypted secrets; a missing directory or unwritable destination is a clean CLI error, not a traceback.</li>
-<li><strong>Audit trail.</strong> Logins, registrations, key rotations, approvals, role changes, report grants, and deletions are all written to the audit log with the acting admin's username, and both actions and log lines are visible on the <code>Logs</code> page.</li>
+<li><strong>Audit trail.</strong> Logins, registrations, key rotations, approvals, role changes, report grants, settings changes, and deletions are all written to the audit trail with the acting account's username, readable through <code>rootcoz admin audit</code> and <code>GET /api/admin/audit</code>. The matching <code>[AUDIT]</code> lines also show up on the <code>Logs</code> page.</li>
 <li><strong>Automate with the CLI.</strong> User creation, role changes, <code>can_view_reports</code>, and pending approvals are all available from the CLI (<code>admin users ...</code>). See <a href="cli-reference.html">CLI Command Reference</a> for details.</li>
 <li><strong>Give analysis more context.</strong> The <code>AI</code>, <code>GitHub</code>, and <code>Server</code> categories hold most of the knobs that change how much context an analysis gets. See <a href="configure-analysis-context.html">Configuring Analysis Context</a> for details.</li>
 <li><strong>Declare free models.</strong> In Server Settings → AI, the <em>Free AI models</em> card below the settings rows manages the free provider+model pair list. Pick a provider and model from the server catalog and click <code>Add</code>; remove pairs with the per-row <code>Remove</code> button. "Free" is this list — never the catalog's cost fields — and every pair is validated against the server catalog at save time. The <code>ENABLE_FREE_MODELS</code> toggle above it decides whether the list is live. The CLI mirrors it: <code>admin models free-list</code> / <code>free-add</code> / <code>free-remove</code>.</li>

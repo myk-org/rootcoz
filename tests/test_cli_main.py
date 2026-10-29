@@ -4728,6 +4728,139 @@ def test_admin_users_approve_server_provider_grant(mock_client, option, expected
     )
 
 
+# --- Audit trail browsing (#379) -------------------------------------------
+
+
+def test_admin_audit_list_prints_table(mock_client):
+    mock_client.admin_list_audit.return_value = {
+        "events": [
+            {
+                "created_at": "2026-04-18 10:00:00",
+                "actor": "admin",
+                "action": "admin.job_delete",
+                "target_type": "job",
+                "target_id": "job-1",
+                "outcome": "success",
+            }
+        ],
+        "total": 12,
+        "limit": 50,
+        "offset": 0,
+    }
+    result = runner.invoke(app, ["admin", "audit", "list"])
+    assert result.exit_code == 0, result.output
+    assert "admin.job_delete" in result.output
+    assert "job:job-1" in result.output
+    assert "TIME" in result.output
+    assert "Showing 1 of 12 event(s)" in result.output
+
+
+def test_admin_audit_list_passes_filters(mock_client):
+    mock_client.admin_list_audit.return_value = {
+        "events": [],
+        "total": 0,
+        "limit": 5,
+        "offset": 10,
+    }
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "audit",
+            "list",
+            "--actor",
+            "alice",
+            "--action",
+            "auth.login",
+            "--action",
+            "user.job_delete",
+            "--target-type",
+            "job",
+            "--target-id",
+            "job-1",
+            "--outcome",
+            "denied",
+            "--q",
+            "cleanup",
+            "--since",
+            "2026-01-01T00:00:00Z",
+            "--until",
+            "2026-02-01T00:00:00Z",
+            "--limit",
+            "5",
+            "--offset",
+            "10",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    mock_client.admin_list_audit.assert_called_once_with(
+        actor="alice",
+        action=["auth.login", "user.job_delete"],
+        target_type="job",
+        target_id="job-1",
+        outcome="denied",
+        q="cleanup",
+        since="2026-01-01T00:00:00Z",
+        until="2026-02-01T00:00:00Z",
+        limit=5,
+        offset=10,
+    )
+    assert "No results." in result.output
+
+
+def test_admin_audit_list_json(mock_client):
+    mock_client.admin_list_audit.return_value = {
+        "events": [{"action": "auth.login", "actor": "admin"}],
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+    }
+    result = runner.invoke(app, ["--json", "admin", "audit", "list"])
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert parsed["total"] == 1
+    assert parsed["events"][0]["action"] == "auth.login"
+
+
+def test_admin_audit_list_rejects_limit_over_cap(mock_client):
+    result = runner.invoke(app, ["admin", "audit", "list", "--limit", "501"])
+    assert result.exit_code != 0
+
+
+def test_admin_audit_actions_prints_table(mock_client):
+    mock_client.admin_audit_actions.return_value = {
+        "actions": [
+            {
+                "action": "auth.login",
+                "label": "Auth Login",
+                "count": 3,
+                "last_seen": "2026-04-18 10:00:00",
+            }
+        ]
+    }
+    result = runner.invoke(app, ["admin", "audit", "actions"])
+    assert result.exit_code == 0, result.output
+    assert "Auth Login" in result.output
+    assert "auth.login" in result.output
+
+
+def test_admin_audit_actions_json(mock_client):
+    mock_client.admin_audit_actions.return_value = {
+        "actions": [{"action": "auth.login", "label": "Auth Login", "count": 3}]
+    }
+    result = runner.invoke(app, ["--json", "admin", "audit", "actions"])
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.output)
+    assert parsed["actions"][0]["label"] == "Auth Login"
+
+
+def test_admin_audit_actions_empty(mock_client):
+    mock_client.admin_audit_actions.return_value = {"actions": []}
+    result = runner.invoke(app, ["admin", "audit", "actions"])
+    assert result.exit_code == 0, result.output
+    assert "No audit events recorded." in result.output
+
+
 def test_admin_models_free_list(mock_client):
     mock_client.admin_list_free_models.return_value = {
         "models": [{"provider": "EnMaaS", "model": "glm-5-3", "created_by": "admin"}]

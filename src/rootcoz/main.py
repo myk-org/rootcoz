@@ -504,6 +504,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "allowed_users",
         "default_user_role",
         "session_ttl_hours",
+        "audit_retention_days",
     ],
     "Prow": [
         "prow_url",
@@ -655,7 +656,7 @@ _PENDING_RETRY_SECONDS = 10
 
 
 async def _periodic_session_cleanup() -> None:
-    """Periodically clean up expired sessions."""
+    """Periodically clean up expired sessions and prune the audit trail."""
     while True:
         await asyncio.sleep(3600)  # Every hour
         try:
@@ -663,6 +664,7 @@ async def _periodic_session_cleanup() -> None:
             if count:
                 logger.info("Periodic cleanup: removed %d expired sessions", count)
             await _cleanup_revoked_ai_sessions()
+            await prune_audit_events_periodically()
         except Exception:
             logger.debug("Periodic session cleanup failed", exc_info=True)
 
@@ -819,6 +821,88 @@ def notify_chat_changed(job_id: str, username: str = "") -> None:
         event.set()
 
 
+# Payload-carrying SSE broadcast: the notification *is* the payload (audit
+# events, log lines), so each listener owns a queue instead of an Event.
+# Listeners are (owning_loop, queue) so a write from a non-asyncio thread can
+# wake the correct loop via call_soon_threadsafe.
+class _PayloadBroadcast:
+    """One payload broadcast channel: the SSE subscribers of a single stream."""
+
+    def __init__(self) -> None:
+        self._listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[Any]]] = (
+            set()
+        )
+        self._lock = threading.Lock()
+
+    @property
+    def has_listeners(self) -> bool:
+        """Cheap check so a hot producer skips work when nobody is listening."""
+        return bool(self._listeners)
+
+    def publish(self, payload: Any) -> None:
+        """Push one payload to every subscriber (thread-safe)."""
+        with self._lock:
+            if not self._listeners:
+                return
+            listeners = list(self._listeners)
+
+        def _enqueue(queue: asyncio.Queue[Any]) -> None:
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
+
+        for loop, queue in listeners:
+            try:
+                loop.call_soon_threadsafe(_enqueue, queue)
+            except RuntimeError:
+                logger.debug("SSE payload dropped: subscriber loop is closed")
+
+    @asynccontextmanager
+    async def subscribe(self) -> AsyncIterator[asyncio.Queue[Any]]:
+        """Register the calling connection for this channel's payloads."""
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
+        listener = (asyncio.get_running_loop(), queue)
+        with self._lock:
+            self._listeners.add(listener)
+        try:
+            yield queue
+        finally:
+            with self._lock:
+                self._listeners.discard(listener)
+
+
+_log_broadcast = _PayloadBroadcast()
+_audit_broadcast = _PayloadBroadcast()
+
+
+def notify_audit_event(event: dict[str, Any]) -> None:
+    """Broadcast one stored audit event to /api/admin/audit/stream listeners."""
+    _audit_broadcast.publish(event)
+
+
+async def _queue_sse_events(
+    request: Request,
+    queue: asyncio.Queue[Any],
+    render: Callable[[Any], str | None],
+) -> AsyncIterator[str]:
+    """Yield rendered SSE chunks from a payload queue until the client leaves.
+
+    ``render`` returns the wire chunk, or ``None`` to drop a payload the
+    subscription does not want. A quiet queue yields a keepalive comment.
+    """
+    while not await request.is_disconnected():
+        try:
+            payload = await asyncio.wait_for(
+                queue.get(), timeout=_SSE_KEEPALIVE_SECONDS
+            )
+        except TimeoutError:
+            yield ": keepalive\n\n"
+            continue
+        if (chunk := render(payload)) is not None:
+            yield chunk
+
+
 # Workspace-preparation phase per job+user, reported to the chat UI while
 # /init runs. In-memory only: init is request-scoped and the chat UI refetches
 # it from GET /api/chat/{job_id} whenever notify_chat_changed fires.
@@ -973,8 +1057,155 @@ async def _bind_job_id(job_id: str) -> None:
     job_id_var.set(job_id)
 
 
+# --- Audit trail (#379) ---
+
+# Audit detail names that carry an *identifier* (a setting/provider name), not a
+# value. ``is_sensitive_key`` matches the "key" substring in all of them, so
+# they are exempted explicitly — the value they name is never included.
+_AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset({"key", "keys", "redacted_keys"})
+
+
+def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    """Drop detail entries whose name marks them as secret.
+
+    Reuses ``is_sensitive_key`` (SENSITIVE_KEYS plus the password/token/secret/
+    key name heuristic), so a newly added credential field is scrubbed from the
+    audit trail without a second list to maintain. Values are never truncated:
+    an entry that survives is stored whole.
+    """
+    redacted: dict[str, Any] = {}
+    for name, value in (details or {}).items():
+        if name not in _AUDIT_SAFE_DETAIL_KEYS and is_sensitive_key(name):
+            continue
+        if isinstance(value, dict):
+            redacted[name] = _redact_details(value)
+        elif isinstance(value, list):
+            redacted[name] = [
+                _redact_details(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            redacted[name] = value
+    return redacted
+
+
+def _audit_setting_details(key: str) -> dict[str, Any]:
+    """Audit details for a settings event: the key name, never its value.
+
+    A sensitive key is flagged ``redacted`` so a reader knows a value was
+    written without the audit trail naming or carrying it.
+    """
+    return {"key": key, **({"redacted": True} if key in _SENSITIVE_SETTINGS else {})}
+
+
+def _audit_request_ip(request: Request | None) -> str | None:
+    """Client IP for the audit row — only when a trusted proxy sets it.
+
+    Without ``TRUST_PROXY_HEADERS`` the forwarded header can be forged, so no
+    address is recorded at all rather than a wrong one.
+    """
+    if request is None or not get_settings().trust_proxy_headers:
+        return None
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else None
+
+
+async def record_audit(
+    *,
+    action: str,
+    actor: str,
+    message: str,
+    actor_role: str | None = None,
+    is_admin: bool = False,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    outcome: Literal["success", "failure", "denied"] = "success",
+    details: dict[str, Any] | None = None,
+    request: Request | None = None,
+) -> None:
+    """Record one audited action: the ``[AUDIT]`` log line plus a DB row.
+
+    ``message`` is the human-readable half (the pre-existing wording, so log
+    consumers keep matching); ``details`` is the structured half, scrubbed by
+    :func:`_redact_details` so no secret can reach the table.
+
+    Role and admin flag default to the request's authenticated state. Never
+    raises: an audit failure must not fail the action being audited.
+    """
+    # Fully formatted on purpose: the log dedup filter suppresses consecutive
+    # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
+    logger.info(f"[AUDIT] {message}")
+    resolved_role = actor_role
+    resolved_admin = is_admin
+    if request is not None:
+        resolved_role = resolved_role or getattr(request.state, "role", None)
+        resolved_admin = resolved_admin or bool(
+            getattr(request.state, "is_admin", False)
+        )
+    try:
+        event = await storage.insert_audit_event(
+            action=action,
+            actor=actor or "anonymous",
+            actor_role=resolved_role,
+            is_admin=resolved_admin,
+            target_type=target_type,
+            target_id=target_id,
+            outcome=outcome,
+            details=_redact_details(details),
+            request_ip=_audit_request_ip(request),
+        )
+    except sqlite3.Error, OSError:
+        logger.warning(
+            "[AUDIT] Failed to persist audit event '%s' by '%s'",
+            action,
+            actor,
+            exc_info=True,
+        )
+        return
+    notify_audit_event(event)
+
+
 # Statuses that indicate the analysis is still in progress.
 IN_PROGRESS_STATUSES = ("pending", "running", "waiting")
+
+# Monotonic timestamp of the last audit prune — retention runs at most daily.
+_AUDIT_PRUNE_INTERVAL_SECONDS = 24 * 3600
+_last_audit_prune_at: float = 0.0
+
+
+async def prune_audit_events_periodically() -> int:
+    """Delete audit events older than ``AUDIT_RETENTION_DAYS``, at most daily.
+
+    ``0`` disables pruning (events kept forever). Returns the number of rows
+    deleted — zero when the interval has not elapsed or retention is off.
+    """
+    global _last_audit_prune_at
+    days = get_settings().audit_retention_days
+    if days <= 0:
+        return 0
+    now = _time.monotonic()
+    if _last_audit_prune_at and now - _last_audit_prune_at < (
+        _AUDIT_PRUNE_INTERVAL_SECONDS
+    ):
+        return 0
+    _last_audit_prune_at = now
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        deleted = await storage.prune_audit_events(cutoff)
+    except sqlite3.Error, OSError:
+        logger.warning("Audit retention pruning failed", exc_info=True)
+        return 0
+    if deleted:
+        logger.info(
+            "Audit retention: deleted %d audit event(s) older than %d days",
+            deleted,
+            days,
+        )
+    return deleted
 
 
 _VALID_GROUP_BY = frozenset(
@@ -1845,6 +2076,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     await storage.cleanup_expired_sessions()
     await _cleanup_revoked_ai_sessions()
+    await prune_audit_events_periodically()
 
     # Load DB setting overrides BEFORE config validation so
     # validate_startup_config() sees merged env + DB values.
@@ -6903,6 +7135,23 @@ async def set_reviewed(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     notify_comments_changed(job_id)
+    if not body.reviewed:
+        await record_audit(
+            action="review.delete",
+            actor=username,
+            message=(
+                f"User '{username}' cleared the review of '{body.test_name}'"
+                f" in job {job_id}"
+            ),
+            target_type="job",
+            target_id=job_id,
+            details={
+                "test_name": body.test_name,
+                "child_job_name": body.child_job_name,
+                "child_build_number": body.child_build_number,
+            },
+            request=request,
+        )
     return {
         "status": "ok",
         "reviewed_by": username if body.reviewed else "",
@@ -7911,6 +8160,16 @@ async def create_github_issue_endpoint(
         "GitHub Issue", job_id, body, result, username, tracked_type="github"
     )
 
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"User '{username}' created GitHub issue {issue_url} for job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        details={"tracker": "github", "test_name": body.test_name},
+        request=request,
+    )
+
     return {
         "url": issue_url,
         "number": result.get("number", 0),
@@ -8028,6 +8287,16 @@ async def create_jira_bug_endpoint(
 
     comment_id = await _add_tracker_comment(
         "Jira Bug", job_id, body, result, username, tracked_type="jira"
+    )
+
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"User '{username}' created Jira issue {issue_url} for job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        details={"tracker": "jira", "test_name": body.test_name},
+        request=request,
     )
 
     return {
@@ -8200,6 +8469,19 @@ async def push_to_reportportal(
             raise HTTPException(
                 status_code=422, detail=detail or "Invalid stored failures"
             )
+        await record_audit(
+            action="export.push",
+            actor=safe_username,
+            message=(
+                f"Exporter push by '{safe_username}' for job {job_id},"
+                " plugin=reportportal"
+            ),
+            target_type="job",
+            target_id=job_id,
+            outcome="success" if not push_result.get("errors") else "failure",
+            details={"plugin": "reportportal", "pushed": push_result.get("pushed")},
+            request=request,
+        )
         return push_result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -8285,6 +8567,18 @@ async def push_to_exporter(
             detail=f"Exporter '{plugin_name}' failed unexpectedly",
         ) from exc
 
+    await record_audit(
+        action="export.push",
+        actor=safe_username,
+        message=(
+            f"Exporter push by '{safe_username}' for job {job_id}, plugin={plugin_name}"
+        ),
+        target_type="job",
+        target_id=job_id,
+        outcome="success" if result.success else "failure",
+        details={"plugin": plugin_name},
+        request=request,
+    )
     return {**result.details, "success": result.success, "message": result.message}
 
 
@@ -8931,6 +9225,24 @@ async def override_classification_endpoint(
             exc_info=True,
         )
 
+    await record_audit(
+        action="classification.override",
+        actor=username,
+        message=(
+            f"User '{username}' overrode classification of '{body.test_name}'"
+            f" in job {job_id} to '{body.classification}'"
+        ),
+        target_type="job",
+        target_id=job_id,
+        details={
+            "test_name": body.test_name,
+            "classification": body.classification,
+            "child_job_name": body.child_job_name,
+            "child_build_number": body.child_build_number,
+        },
+        request=request,
+    )
+
     return {"status": "ok", "classification": body.classification}
 
 
@@ -9051,8 +9363,16 @@ async def bulk_delete_jobs_endpoint(
 
     # Audit log each deletion individually
     actor = request.state.username
+    job_action = "admin.job_delete" if request.state.is_admin else "user.job_delete"
     for job_id in result["deleted"]:
-        logger.info(f"[AUDIT] User '{actor}' deleted job {job_id}")
+        await record_audit(
+            action=job_action,
+            actor=actor,
+            message=f"User '{actor}' deleted job {job_id}",
+            target_type="job",
+            target_id=job_id,
+            request=request,
+        )
 
     return result
 
@@ -9090,7 +9410,14 @@ async def delete_job_endpoint(
 
     notify_active_count_changed()
     notify_dashboard_changed()
-    logger.info(f"[AUDIT] User '{request.state.username}' deleted job {job_id}")
+    await record_audit(
+        action="admin.job_delete" if request.state.is_admin else "user.job_delete",
+        actor=request.state.username,
+        message=f"User '{request.state.username}' deleted job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        request=request,
+    )
     return {"status": "deleted", "job_id": job_id}
 
 
@@ -9174,7 +9501,14 @@ async def abort_analysis(
     notify_dashboard_changed()
     notify_job_status_changed(job_id)
 
-    logger.info(f"[AUDIT] User '{request.state.username}' aborted job {job_id}")
+    await record_audit(
+        action="user.abort_job",
+        actor=request.state.username,
+        message=f"User '{request.state.username}' aborted job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        request=request,
+    )
     return {"status": "aborted", "job_id": job_id}
 
 
@@ -11013,7 +11347,15 @@ async def login(request: Request) -> JSONResponse:
             can_use_free_providers = await storage.can_user_use_free_providers(username)
 
     if not authenticated:
-        logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
+        await record_audit(
+            action="auth.login_failed",
+            actor=username or "anonymous",
+            message=f"Failed login attempt for username '{username}'",
+            target_type="user",
+            target_id=username,
+            outcome="failure",
+            request=request,
+        )
         raise HTTPException(status_code=401, detail="Invalid username or API key")
 
     # Check pending/rejected status before creating a session (non-admin only)
@@ -11021,7 +11363,17 @@ async def login(request: Request) -> JSONResponse:
         user_status = await storage.get_user_status(username)
         blocked = _blocked_user_status_response(user_status)
         if blocked is not None:
-            logger.info(f"[AUDIT] Login blocked for {user_status} user '{username}'")
+            await record_audit(
+                action="auth.login_blocked",
+                actor=username,
+                message=f"Login blocked for {user_status} user '{username}'",
+                actor_role=resolved_role,
+                target_type="user",
+                target_id=username,
+                outcome="denied",
+                details={"status": user_status},
+                request=request,
+            )
             return blocked
 
     session_token = await storage.create_session(
@@ -11061,7 +11413,16 @@ async def login(request: Request) -> JSONResponse:
         max_age=365 * 24 * 60 * 60,
     )
     response.delete_cookie("jji_username", path="/")
-    logger.info(f"[AUDIT] Login success: user='{username}' is_admin={is_admin}")
+    await record_audit(
+        action="auth.login",
+        actor=username,
+        message=f"Login success: user='{username}' is_admin={is_admin}",
+        actor_role=resolved_role,
+        is_admin=is_admin,
+        target_type="user",
+        target_id=username,
+        request=request,
+    )
     return response
 
 
@@ -11153,7 +11514,14 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         max_age=storage.current_session_ttl_seconds(),
     )
 
-    logger.info(f"[AUDIT] User '{username}' rotated their own API key")
+    await record_audit(
+        action="user.self_key_rotate",
+        actor=username,
+        message=f"User '{username}' rotated their own API key",
+        target_type="user",
+        target_id=username,
+        request=request,
+    )
     return response
 
 
@@ -11250,7 +11618,15 @@ async def register_user(request: Request) -> JSONResponse:
     )
     response.delete_cookie("jji_username", path="/")
 
-    logger.info(f"[AUDIT] User registered: {username} (status={user_status})")
+    await record_audit(
+        action="auth.register",
+        actor=username,
+        message=f"User registered: {username} (status={user_status})",
+        target_type="user",
+        target_id=username,
+        details={"status": user_status, "role": default_role},
+        request=request,
+    )
     return response
 
 
@@ -11521,6 +11897,18 @@ async def set_user_ai_credential(
         "rejected": "Check the key and selected model; existing credential unchanged.",
         "inconclusive": "Try again when the provider is available; existing credential unchanged.",
     }.get(outcome)
+    await record_audit(
+        action="user.ai_credential_set",
+        actor=username,
+        message=(
+            f"User '{username}' set their {provider} AI credential (outcome={outcome})"
+        ),
+        target_type="provider",
+        target_id=provider,
+        outcome="success" if outcome == "accepted" else "failure",
+        details={"provider": provider},
+        request=request,
+    )
     return JSONResponse(
         content=strip_sensitive_from_response(
             {
@@ -11557,6 +11945,15 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _revoke_ai_sessions(sessions)
+    await record_audit(
+        action="user.ai_credential_delete",
+        actor=username,
+        message=f"User '{username}' deleted their {provider} AI credential",
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider},
+        request=request,
+    )
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
 
 
@@ -11809,36 +12206,15 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-# --- Live log broadcast for SSE streaming ---
-# Each listener is (owning_loop, queue) so emit() can wake the correct loop
-# from non-asyncio logging threads via call_soon_threadsafe.
-_log_listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[str]]] = set()
-_log_listeners_lock = threading.Lock()
-
 
 class _SSELogHandler(logging.Handler):
     """Logging handler that broadcasts formatted records to SSE listeners."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        with _log_listeners_lock:
-            if not _log_listeners:
-                return
-            listeners = list(_log_listeners)
+        if not _log_broadcast.has_listeners:
+            return
         try:
-            msg = self.format(record)
-            clean = _ANSI_RE.sub("", msg)
-
-            def _enqueue(q: asyncio.Queue[str], line: str) -> None:
-                try:
-                    q.put_nowait(line)
-                except asyncio.QueueFull:
-                    pass
-
-            for loop, q in listeners:
-                try:
-                    loop.call_soon_threadsafe(_enqueue, q, clean)
-                except Exception:
-                    logger.debug("SSE log enqueue failed for a listener", exc_info=True)
+            _log_broadcast.publish(_ANSI_RE.sub("", self.format(record)))
         except Exception:
             logger.debug("SSE log emit failed", exc_info=True)
 
@@ -11949,31 +12325,126 @@ async def stream_logs(
                 except OSError:
                     pass
 
-        # Stream live logs via broadcast queue
-        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
-        loop = asyncio.get_running_loop()
-        listener = (loop, queue)
-        with _log_listeners_lock:
-            _log_listeners.add(listener)
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    line = await asyncio.wait_for(queue.get(), timeout=30)
-                    if _matches_level(line):
-                        yield f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
-                except TimeoutError:
-                    yield ": keepalive\n\n"
-        finally:
-            with _log_listeners_lock:
-                _log_listeners.discard(listener)
+        # Stream live logs via the payload broadcast queue
+        def _render(line: str) -> str | None:
+            if not _matches_level(line):
+                return None
+            return f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
+
+        async with _log_broadcast.subscribe() as queue:
+            async for chunk in _queue_sse_events(request, queue, _render):
+                yield chunk
 
     logger.info(
         "GET /api/admin/logs/stream: streaming logs (lines=%s, level=%s)",
         lines,
         level_filter or "ALL",
     )
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# --- Audit trail browsing (#379) ---
+
+
+def _audit_iso_bound(value: str | None, name: str) -> str | None:
+    """Normalize an ISO 8601 query bound to the DB's ``created_at`` format."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"{name} must be an ISO 8601 timestamp"
+        ) from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _audit_action_label(action: str) -> str:
+    """Human label for an action id: ``auth.login_failed`` → ``Auth Login Failed``."""
+    return action.replace(".", " ").replace("_", " ").title()
+
+
+@app.get("/api/admin/audit", operation_id="listAuditEvents")
+async def list_audit_events_endpoint(
+    request: Request,
+    actor: str | None = Query(
+        None, description="Exact actor username (case-insensitive)"
+    ),
+    action: Annotated[
+        list[str] | None,
+        Query(description="Action id; repeat the parameter or comma-separate"),
+    ] = None,
+    target_type: str | None = Query(None, description="Target type, e.g. job"),
+    target_id: str | None = Query(None, description="Target id, e.g. a job id"),
+    outcome: str | None = Query(None, description="success, failure, or denied"),
+    q: str | None = Query(None, description="Substring search over event details"),
+    since: str | None = Query(None, description="ISO 8601 lower bound (inclusive)"),
+    until: str | None = Query(None, description="ISO 8601 upper bound (inclusive)"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """List recorded audit events newest-first, with the total match count."""
+    _require_admin(request)
+    actions = [
+        part.strip()
+        for value in action or []
+        for part in value.split(",")
+        if part.strip()
+    ]
+    result = await storage.list_audit_events(
+        actor=actor or None,
+        action=actions or None,
+        target_type=target_type or None,
+        target_id=target_id or None,
+        outcome=outcome or None,
+        q=q or None,
+        date_from=_audit_iso_bound(since, "since"),
+        date_to=_audit_iso_bound(until, "until"),
+        limit=limit,
+        offset=offset,
+    )
+    logger.debug(
+        "GET /api/admin/audit: returning %d of %d events (limit=%d offset=%d)",
+        len(result["events"]),
+        result["total"],
+        limit,
+        offset,
+    )
+    return {**result, "limit": limit, "offset": offset}
+
+
+@app.get("/api/admin/audit/actions", operation_id="listAuditActions")
+async def list_audit_actions(request: Request) -> dict[str, Any]:
+    """Distinct recorded actions with count, last activity, and a display label."""
+    _require_admin(request)
+    actions = await storage.distinct_audit_actions()
+    return {
+        "actions": [
+            {**entry, "label": _audit_action_label(entry["action"])}
+            for entry in actions
+        ]
+    }
+
+
+@app.get("/api/admin/audit/stream", operation_id="streamAuditEvents")
+async def stream_audit_events(request: Request) -> StreamingResponse:
+    """SSE stream of audit events as they are recorded (admin only)."""
+    _require_admin(request)
+
+    def _render(event: dict[str, Any]) -> str:
+        return f"event: audit:event\ndata: {json.dumps(event, default=str)}\n\n"
+
+    async def event_generator() -> AsyncIterator[str]:
+        async with _audit_broadcast.subscribe() as queue:
+            async for chunk in _queue_sse_events(request, queue, _render):
+                yield chunk
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -12080,6 +12551,18 @@ async def list_session_transcripts(
         items.append(transcript_summary(info, context))
 
     live_recording = await sidecar_transcripts.live_recording_enabled()
+    await record_audit(
+        action="transcript.list",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' listed {len(items)} transcript(s)"
+            + (f" for job {job_id}" if job_id else "")
+        ),
+        target_type="transcript",
+        target_id=job_id or None,
+        details={"count": len(items)},
+        request=request,
+    )
     return strip_sensitive_from_response(
         {
             # Live sidecar state when reachable; the setting value otherwise.
@@ -12112,11 +12595,34 @@ async def download_session_transcript(
 
     path = transcript_path(session_id)
     if path is None:
+        await record_audit(
+            action="transcript.download",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' requested an invalid transcript id"
+            ),
+            target_type="transcript",
+            target_id=session_id,
+            outcome="failure",
+            request=request,
+        )
         raise HTTPException(
             status_code=400,
             detail="Invalid session id — expected a sidecar session UUID",
         )
     if not path.is_file():
+        await record_audit(
+            action="transcript.download",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' downloaded missing transcript"
+                f" {session_id}"
+            ),
+            target_type="transcript",
+            target_id=session_id,
+            outcome="failure",
+            request=request,
+        )
         raise HTTPException(status_code=404, detail="Transcript not found")
 
     # Sync generator: Starlette iterates sync generators in a threadpool, so
@@ -12125,6 +12631,15 @@ async def download_session_transcript(
         with path.open("rb") as handle:
             while chunk := handle.read(64 * 1024):
                 yield chunk
+
+    await record_audit(
+        action="transcript.download",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' downloaded transcript {session_id}",
+        target_type="transcript",
+        target_id=session_id,
+        request=request,
+    )
 
     return StreamingResponse(
         file_stream(),
@@ -12192,9 +12707,22 @@ async def admin_create_user_endpoint(
         logger.exception("Failed to create user '%s'", username)
         raise HTTPException(status_code=500, detail="Internal server error") from exc
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' created {role} user '{username}'"
-        f" (can_view_reports={stored_can_view_reports}, can_use_server_providers={server_grant})"
+    await record_audit(
+        action="admin.user_create",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' created {role} user '{username}'"
+            f" (can_view_reports={stored_can_view_reports}, "
+            f"can_use_server_providers={server_grant})"
+        ),
+        target_type="user",
+        target_id=username,
+        details={
+            "role": role,
+            "can_view_reports": stored_can_view_reports,
+            "can_use_server_providers": server_grant,
+        },
+        request=request,
     )
     return JSONResponse(
         content={
@@ -12226,7 +12754,14 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
 
     notify_pending_count_changed()
     await _cleanup_revoked_ai_sessions()
-    logger.info(f"[AUDIT] Admin '{request.state.username}' deleted user '{username}'")
+    await record_audit(
+        action="admin.user_delete",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' deleted user '{username}'",
+        target_type="user",
+        target_id=username,
+        request=request,
+    )
     return {"deleted": username}
 
 
@@ -12258,8 +12793,17 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
     # Promoting a pending user removes them from the pending list.
     notify_pending_count_changed()
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' changed role of '{username}' to '{new_role}'"
+    await record_audit(
+        action="admin.user_role_change",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' changed role of '{username}'"
+            f" to '{new_role}'"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"role": new_role},
+        request=request,
     )
 
     content: dict[str, Any] = {"username": username, "role": new_role}
@@ -12289,9 +12833,17 @@ async def set_user_can_view_reports_endpoint(
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' set can_view_reports={value}"
-        f" for user '{username}'"
+    await record_audit(
+        action="admin.user_can_view_reports",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set can_view_reports={value}"
+            f" for user '{username}'"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"value": value},
+        request=request,
     )
     return JSONResponse(
         content={"username": username, "can_view_reports": value},
@@ -12315,11 +12867,17 @@ async def set_user_can_use_server_providers(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
-    logger.info(
-        "[AUDIT] Admin '%s' set can_use_server_providers=%s for user '%s'",
-        request.state.username,
-        body.can_use_server_providers,
-        username,
+    await record_audit(
+        action="admin.user_can_use_server_providers",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set can_use_server_providers="
+            f"{body.can_use_server_providers} for user '{username}'"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"value": body.can_use_server_providers},
+        request=request,
     )
     return JSONResponse(
         content={
@@ -12407,25 +12965,35 @@ async def set_free_ai_models_endpoint(
                 "version": storage.free_models_version(current),
             },
         ) from exc
-    logger.info(
-        "[AUDIT] Admin '%s' set free AI models: %d pair(s)",
-        request.state.username,
-        len(stored),
+    free_pairs = [(entry.provider, entry.model) for entry in body.models]
+    await record_audit(
+        action="free_models.set",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set free AI models:"
+            f" {len(stored)} pair(s)"
+        ),
+        details={"count": len(stored)},
+        request=request,
     )
     # free ⊆ included (#347): a managed provider (stored key or selection)
     # only exposes its selection, so a free pair outside it would vanish
     # from the restricted catalog. Auto-include it — the same normalization
     # the server-providers PUT applies.
     auto_included = await storage.auto_include_free_pairs(
-        [(entry.provider, entry.model) for entry in body.models],
+        free_pairs,
         request.state.username or "admin",
     )
     if auto_included:
-        logger.info(
-            "[AUDIT] Admin '%s' auto-included %d free pair(s) into managed "
-            "provider selections",
-            request.state.username,
-            len(auto_included),
+        await record_audit(
+            action="provider.free_selection_auto_include",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' auto-included"
+                f" {len(auto_included)} free pair(s) into managed provider selections"
+            ),
+            details={"count": len(auto_included)},
+            request=request,
         )
     return {
         "models": stored,
@@ -12489,11 +13057,16 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
     )
     if entries:
         await storage.set_server_provider_models(provider, entries, updated_by)
-        logger.info(
-            "[AUDIT] Seeded full-catalog model selection for newly-keyed "
-            "provider '%s' (%d models)",
-            provider,
-            len(entries),
+        await record_audit(
+            action="provider.selection_seed",
+            actor=updated_by,
+            message=(
+                f"Seeded full-catalog model selection for newly-keyed"
+                f" provider '{provider}' ({len(entries)} models)"
+            ),
+            target_type="provider",
+            target_id=provider,
+            details={"provider": provider, "count": len(entries)},
         )
 
 
@@ -13058,13 +13631,23 @@ async def _verify_and_store_server_provider_key(
         await _seed_server_provider_selection(
             provider, request.state.username or "admin"
         )
-    logger.info(
-        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified%s)",
-        request.state.username,
-        provider,
-        f", {len(key_models)} key-scoped models"
-        if capture_status == "supported"
-        else "",
+    await record_audit(
+        action="provider.key.rotate" if replacing else "provider.key.store",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' stored server provider key"
+            f" for '{provider}' (verified"
+            + (
+                f", {len(key_models)} key-scoped models"
+                if capture_status == "supported"
+                else ""
+            )
+            + ")"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider, "outcome": "accepted"},
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
@@ -13372,13 +13955,18 @@ async def refresh_server_provider_models(
                     f"Provider '{provider}' does not support key-scoped model listing"
                 ),
             )
-        logger.info(
-            "[AUDIT] Admin '%s' refreshed deployment key-scoped models for '%s'"
-            " (%s, %d models)",
-            request.state.username,
-            provider,
-            status,
-            len(models),
+        await record_audit(
+            action="provider.deployment_refresh",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' refreshed deployment"
+                f" key-scoped models for '{provider}' ({status},"
+                f" {len(models)} models)"
+            ),
+            target_type="provider",
+            target_id=provider,
+            details={"provider": provider, "count": len(models)},
+            request=request,
         )
         return JSONResponse(
             content=strip_sensitive_from_response(
@@ -13403,12 +13991,17 @@ async def refresh_server_provider_models(
         keep_on_failure=True,
         generation=generation,
     )
-    logger.info(
-        "[AUDIT] Admin '%s' refreshed key-scoped models for '%s' (%s, %d models)",
-        request.state.username,
-        provider,
-        status,
-        len(models),
+    await record_audit(
+        action="provider.models_refresh",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' refreshed key-scoped models"
+            f" for '{provider}' ({status}, {len(models)} models)"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider, "count": len(models)},
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response(
@@ -13488,12 +14081,22 @@ async def set_server_provider_models_endpoint(
     await storage.set_server_provider_models(
         provider, entries, request.state.username or "admin"
     )
-    logger.info(
-        "[AUDIT] Admin '%s' set server provider models for '%s': %d included, %d free",
-        request.state.username,
-        provider,
-        sum(1 for e in entries if e["included"]),
-        sum(1 for e in entries if e["free"]),
+    await record_audit(
+        action="provider.models_set",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set server provider models"
+            f" for '{provider}': {sum(1 for e in entries if e['included'])} included,"
+            f" {sum(1 for e in entries if e['free'])} free"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={
+            "provider": provider,
+            "included": sum(1 for e in entries if e["included"]),
+            "free": sum(1 for e in entries if e["free"]),
+        },
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response(
@@ -13534,12 +14137,18 @@ async def delete_server_provider_endpoint(
             status_code=404, detail=f"Provider '{provider}' is not configured"
         )
     affected = await storage.delete_server_ai_provider(provider)
-    logger.info(
-        "[AUDIT] Admin '%s' deleted server provider '%s' (selected=%d, free=%d)",
-        request.state.username,
-        provider,
-        len(affected["selected_models"]),
-        len(affected["free_models"]),
+    await record_audit(
+        action="provider.remove",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' deleted server provider '{provider}'"
+            f" (selected={len(affected['selected_models'])}"
+            f", free={len(affected['free_models'])})"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider},
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response({"ok": True, "warnings": affected}),
@@ -13580,11 +14189,17 @@ async def approve_user(
         )
     effective_grant = await storage.can_user_use_server_providers(username)
     notify_pending_count_changed()
-    logger.info(
-        "[AUDIT] Admin '%s' approved user '%s' (can_use_server_providers=%s)",
-        request.state.username,
-        username,
-        effective_grant,
+    await record_audit(
+        action="admin.user_approve",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' approved user '{username}'"
+            f" (can_use_server_providers={effective_grant})"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"can_use_server_providers": effective_grant},
+        request=request,
     )
     return {
         "username": username,
@@ -13608,7 +14223,14 @@ async def reject_user(username: str, request: Request) -> dict[str, Any]:
         )
     await storage.set_user_status(username, "rejected")
     notify_pending_count_changed()
-    logger.info(f"[AUDIT] Admin '{request.state.username}' rejected user '{username}'")
+    await record_audit(
+        action="admin.user_reject",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' rejected user '{username}'",
+        target_type="user",
+        target_id=username,
+        request=request,
+    )
     return {
         "username": username,
         "status": "rejected",
@@ -13653,8 +14275,13 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
             status = 404 if "not found" in detail.lower() else 400
             raise HTTPException(status_code=status, detail=detail) from exc
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' rotated key for '{username}'"
+    await record_audit(
+        action="admin.user_key_rotate",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' rotated key for '{username}'",
+        target_type="user",
+        target_id=username,
+        request=request,
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
@@ -13980,6 +14607,19 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         list(settings_updates.keys()),
         username,
     )
+    await record_audit(
+        action="settings.update",
+        actor=username,
+        message=f"Admin settings updated: keys={list(settings_updates.keys())}, by={username}",
+        target_type="setting",
+        details={
+            "keys": list(settings_updates.keys()),
+            "redacted_keys": [
+                key for key in settings_updates if key in _SENSITIVE_SETTINGS
+            ],
+        },
+        request=request,
+    )
 
     content: dict[str, Any] = {"updated": list(settings_updates.keys())}
     if warnings:
@@ -14247,6 +14887,20 @@ async def import_server_settings(request: Request) -> JSONResponse:
         len(unchanged),
         username,
     )
+    await record_audit(
+        action="settings.import",
+        actor=username,
+        message=(
+            f"Admin settings imported: applied={len(applied)},"
+            f" unchanged={len(unchanged)}, by={username}"
+        ),
+        target_type="setting",
+        details={
+            "keys": list(applied),
+            "redacted_keys": [key for key in applied if key in _SENSITIVE_SETTINGS],
+        },
+        request=request,
+    )
     return JSONResponse(content=content)
 
 
@@ -14434,8 +15088,14 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)
 
-    logger.info(
-        "[AUDIT] Admin setting persisted from env: key=%s, by=%s", key, username
+    await record_audit(
+        action="admin.setting_persist",
+        actor=username,
+        message=f"Admin setting persisted from env: key={key}, by={username}",
+        target_type="setting",
+        target_id=key,
+        details=_audit_setting_details(key),
+        request=request,
     )
     return JSONResponse(content={"key": key, "source": "db"})
 
@@ -14500,6 +15160,15 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     _broadcast_settings_change()
 
     logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
+    await record_audit(
+        action="settings.reset",
+        actor=request.state.username or "admin",
+        message=f"Admin setting reset: key={key}, by={request.state.username}",
+        target_type="setting",
+        target_id=key,
+        details=_audit_setting_details(key),
+        request=request,
+    )
 
     return JSONResponse(content=content)
 
@@ -15001,7 +15670,7 @@ async def set_job_metadata_endpoint(
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/{job_name}/metadata")
     current = await storage.get_job_metadata(job_name) or {}
-    return await storage.set_job_metadata(
+    saved = await storage.set_job_metadata(
         job_name,
         team=body.team if "team" in body.model_fields_set else current.get("team"),
         tier=body.tier if "tier" in body.model_fields_set else current.get("tier"),
@@ -15012,6 +15681,15 @@ async def set_job_metadata_endpoint(
         if "labels" in body.model_fields_set
         else current.get("labels", []),
     )
+    await record_audit(
+        action="job.metadata_set",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' set metadata for job '{job_name}'",
+        target_type="job",
+        target_id=job_name,
+        request=request,
+    )
+    return saved
 
 
 @app.delete(
@@ -17237,8 +17915,34 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         results = [dict(row) for row in rows]
+        await record_audit(
+            action="admin.db_query",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' ran an admin chat DB query"
+                f" ({len(results)} rows)"
+            ),
+            target_type="database",
+            outcome="success",
+            # Only a hash of the SQL: the statement itself can carry row data
+            # (a WHERE literal, an INSERT value) and the rows are never stored.
+            details={
+                "sql_hash": hashlib.sha256(sql.encode()).hexdigest()[:12],
+                "rows": len(results),
+            },
+            request=request,
+        )
         return {"columns": columns, "rows": results, "count": len(results)}
     except sqlite3.OperationalError as e:
+        await record_audit(
+            action="admin.db_query",
+            actor=request.state.username,
+            message=f"Admin '{request.state.username}' admin chat DB query failed",
+            target_type="database",
+            outcome="failure",
+            details={"sql_hash": hashlib.sha256(sql.encode()).hexdigest()[:12]},
+            request=request,
+        )
         raise HTTPException(status_code=400, detail=f"SQL Error: {e}")
     finally:
         conn.close()

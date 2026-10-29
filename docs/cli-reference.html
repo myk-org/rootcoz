@@ -1048,6 +1048,16 @@
 <td>Download one transcript JSONL. Admin only.</td>
 </tr>
 <tr>
+<td><code>audit list</code></td>
+<td><code>--actor</code>, <code>--action</code> (repeatable), <code>--target-type</code>, <code>--target-id</code>, <code>--outcome</code>, <code>--q</code>, <code>--since</code>, <code>--until</code>, <code>--limit</code> (50, max 500), <code>--offset</code></td>
+<td>Recorded audit events, newest first. Prints time, actor, action, target, and outcome, then the match count. <code>--actor</code> is case-insensitive and exact; <code>--q</code> searches event details; <code>--since</code>/<code>--until</code> take ISO 8601 timestamps. Admin only.</td>
+</tr>
+<tr>
+<td><code>audit actions</code></td>
+<td>—</td>
+<td>Every recorded action id with its event count, last-seen timestamp, and display label. Admin only.</td>
+</tr>
+<tr>
 <td><code>users list</code></td>
 <td>—</td>
 <td>All users, roles, and grants.</td>
@@ -1184,6 +1194,7 @@
 <ul>
 <li><code>rootcoz results show JOB_ID --fields "result.summary,result.failures.test_name,result.failures.classification"</code> returns only what a report needs, which keeps large results cheap to poll.</li>
 <li><code>rootcoz results full JOB_ID --json</code> returns the complete picture in one call — failures with review state and effective classifications joined server-side, a precomputed summary, a paginated <code>tests</code> page, comments, and tracked-in links. Its <code>--status</code>/<code>--child-job</code>/<code>--child-build</code>/<code>--offset</code>/<code>--limit</code> flags page the <code>tests</code> section.</li>
+<li><code>rootcoz admin audit list --since 2026-04-01T00:00:00Z --action admin.job_delete --action user.job_delete --json</code> reads back who deleted what this month, in one call.</li>
 <li><code>rootcoz admin token-usage --group-by model --format csv &gt; usage.csv</code> is the only command with a first-class CSV mode; everything else uses <code>--json</code>.</li>
 <li><code>rootcoz --server staging</code> switches servers without editing any file, and <code>rootcoz config servers</code> shows which name maps to which URL.</li>
 <li><code>rootcoz analyze --source file -f results.xml</code> works with no Jenkins or Prow access at all.</li>

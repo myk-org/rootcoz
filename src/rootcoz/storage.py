@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1527,6 +1527,36 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_filter_presets_scope_page "
             "ON filter_presets (scope, page)"
+        )
+
+        # Audit trail (#379): one row per audited action, written by
+        # main.record_audit. ``details`` is a JSON object that never carries
+        # a secret (redacted before the write), so the table is safe to browse.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actor TEXT NOT NULL,
+                actor_role TEXT,
+                is_admin INTEGER NOT NULL DEFAULT 0,
+                action TEXT NOT NULL,
+                target_type TEXT,
+                target_id TEXT,
+                outcome TEXT NOT NULL DEFAULT 'success',
+                details TEXT DEFAULT '{}',
+                request_ip TEXT
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at "
+            "ON audit_events (created_at DESC)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_events_action "
+            "ON audit_events (action)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_events_actor ON audit_events (actor)"
         )
 
         # Migration: case-insensitive username uniqueness.
@@ -9761,3 +9791,156 @@ async def delete_filter_preset(preset_id: int, username: str) -> None:
         if cursor.rowcount == 0:
             raise FilterPresetNotFound("Preset not found")
         await db.commit()
+
+
+# --- Audit trail (#379) ------------------------------------------------
+#
+# One row per audited action. The write path is ``main.record_audit``: it
+# redacts ``details`` before it gets here, so a stored row can name a setting
+# or a provider but never carry its value.
+
+
+def _decode_audit_details(raw: Any) -> dict[str, Any]:
+    """Decode an ``audit_events.details`` blob, tolerating malformed JSON."""
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError, TypeError:
+        logger.warning("audit_events.details is not valid JSON; treating as empty")
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _audit_event_row(row: aiosqlite.Row) -> dict[str, Any]:
+    """Decode one ``audit_events`` row for API/CLI consumers."""
+    event = dict(row)
+    event["is_admin"] = bool(event.get("is_admin"))
+    event["details"] = _decode_audit_details(event.get("details"))
+    return event
+
+
+async def insert_audit_event(
+    *,
+    action: str,
+    actor: str,
+    actor_role: str | None = None,
+    is_admin: bool = False,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    outcome: str = "success",
+    details: dict[str, Any] | None = None,
+    request_ip: str | None = None,
+) -> dict[str, Any]:
+    """Insert one audit event and return the stored row.
+
+    ``details`` must already be redacted by the caller — this layer stores
+    what it is given. Values are serialized with ``default=str`` so an
+    unexpected type can never fail the audited action. The returned row is
+    what the DB holds (``created_at`` included), so callers can broadcast it.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "INSERT INTO audit_events (actor, actor_role, is_admin, action,"
+            " target_type, target_id, outcome, details, request_ip)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " RETURNING id, created_at, actor, actor_role, is_admin, action,"
+            " target_type, target_id, outcome, details, request_ip",
+            (
+                actor or "anonymous",
+                actor_role,
+                int(bool(is_admin)),
+                action,
+                target_type,
+                target_id,
+                outcome,
+                json.dumps(details or {}, default=str),
+                request_ip,
+            ),
+        )
+        row = await cursor.fetchone()
+        await db.commit()
+    assert row is not None  # INSERT ... RETURNING always yields the new row
+    return _audit_event_row(row)
+
+
+async def list_audit_events(
+    *,
+    actor: str | None = None,
+    action: str | Sequence[str] | None = None,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    outcome: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List audit events newest-first, with the total number of matches.
+
+    Filters are pushed into SQL so ``offset``/``limit`` page over the
+    filtered set. ``actor`` matches case-insensitively, ``action`` accepts one
+    id or a list of ids, and ``q`` is a substring search over ``details``.
+    Returns ``{"events": [...], "total": <int>}``.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    for column, value in (
+        ("target_type", target_type),
+        ("target_id", target_id),
+        ("outcome", outcome),
+    ):
+        if value is not None:
+            conditions.append(f"{column} = ?")
+            params.append(value)
+    if actor:
+        conditions.append("LOWER(actor) = LOWER(?)")
+        params.append(actor)
+    actions = [action] if isinstance(action, str) else list(action or [])
+    if actions:
+        conditions.append(f"action IN ({', '.join('?' * len(actions))})")
+        params.extend(actions)
+    if q:
+        conditions.append("details LIKE ?")
+        params.append(f"%{q}%")
+    if date_from:
+        conditions.append("created_at >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("created_at <= ?")
+        params.append(date_to)
+    where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    async with _connect_db() as db:
+        cursor = await db.execute(f"SELECT COUNT(*) FROM audit_events{where}", params)
+        total = (await cursor.fetchone())[0]
+        cursor = await db.execute(
+            "SELECT id, created_at, actor, actor_role, is_admin, action,"
+            " target_type, target_id, outcome, details, request_ip"
+            f" FROM audit_events{where} ORDER BY created_at DESC, id DESC"
+            " LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        )
+        rows = await cursor.fetchall()
+    return {"events": [_audit_event_row(row) for row in rows], "total": total}
+
+
+async def distinct_audit_actions() -> list[dict[str, Any]]:
+    """Every action id recorded so far with its event count and last timestamp."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT action, COUNT(*) AS count, MAX(created_at) AS last_seen"
+            " FROM audit_events GROUP BY action ORDER BY action"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def prune_audit_events(cutoff: str) -> int:
+    """Delete audit events created before *cutoff*; return how many were deleted."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM audit_events WHERE created_at < ?", (cutoff,)
+        )
+        await db.commit()
+        return int(cursor.rowcount or 0)

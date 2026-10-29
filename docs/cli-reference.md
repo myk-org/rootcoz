@@ -244,6 +244,8 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `token-usage` | `--period` (`today`, `week`, `month`, `all`), `--start-date`, `--end-date`, `--provider`, `--model`, `--call-type`, `--group-by` (`provider`, `model`, `call_type`, `day`, `week`, `month`, `job`), `--job-id`, `--format` (`table`, `json`, `csv`) | AI token usage and cost. No filters prints the summary dashboard. |
 | `transcripts list` | `--job` (filter to one run), `--format` (`table`, `json`) | Recorded AI session transcripts (redacted JSONL) with per-session context. Admin only. |
 | `transcripts show SESSION_ID` | `--output`/`-o` FILE | Download one transcript JSONL. Admin only. |
+| `audit list` | `--actor`, `--action` (repeatable), `--target-type`, `--target-id`, `--outcome`, `--q`, `--since`, `--until`, `--limit` (50, max 500), `--offset` | Recorded audit events, newest first. Prints time, actor, action, target, and outcome, then the match count. `--actor` is case-insensitive and exact; `--q` searches event details; `--since`/`--until` take ISO 8601 timestamps. Admin only. |
+| `audit actions` | — | Every recorded action id with its event count, last-seen timestamp, and display label. Admin only. |
 | `users list` | — | All users, roles, and grants. |
 | `users create USERNAME` | `--role` (required), `--can-view-reports`/`--no-can-view-reports`, `--can-use-server-providers`/`--no-can-use-server-providers` | Create a user; the API key is shown once. |
 | `users delete USERNAME` | `--force`/`-f` | Delete a user without the confirmation prompt. |
@@ -277,6 +279,7 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
 
 - `rootcoz results show JOB_ID --fields "result.summary,result.failures.test_name,result.failures.classification"` returns only what a report needs, which keeps large results cheap to poll.
 - `rootcoz results full JOB_ID --json` returns the complete picture in one call — failures with review state and effective classifications joined server-side, a precomputed summary, a paginated `tests` page, comments, and tracked-in links. Its `--status`/`--child-job`/`--child-build`/`--offset`/`--limit` flags page the `tests` section.
+- `rootcoz admin audit list --since 2026-04-01T00:00:00Z --action admin.job_delete --action user.job_delete --json` reads back who deleted what this month, in one call.
 - `rootcoz admin token-usage --group-by model --format csv > usage.csv` is the only command with a first-class CSV mode; everything else uses `--json`.
 - `rootcoz --server staging` switches servers without editing any file, and `rootcoz config servers` shows which name maps to which URL.
 - `rootcoz analyze --source file -f results.xml` works with no Jenkins or Prow access at all.

@@ -323,6 +323,46 @@ class RootCozClient:
             json={"role": role},
         )
 
+    def admin_list_audit(
+        self,
+        *,
+        actor: str = "",
+        action: list[str] | None = None,
+        target_type: str = "",
+        target_id: str = "",
+        outcome: str = "",
+        q: str = "",
+        since: str = "",
+        until: str = "",
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        """List recorded audit events newest-first. GET /api/admin/audit
+
+        ``action`` accepts several ids; each is sent as a repeated query
+        parameter. Empty filters are dropped by ``_request``.
+        """
+        return self._request(
+            "GET",
+            "/api/admin/audit",
+            params={
+                "actor": actor,
+                "action": action,
+                "target_type": target_type,
+                "target_id": target_id,
+                "outcome": outcome,
+                "q": q,
+                "since": since,
+                "until": until,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+
+    def admin_audit_actions(self) -> dict[str, Any]:
+        """Distinct recorded actions with counts and labels. GET /api/admin/audit/actions"""
+        return self._request("GET", "/api/admin/audit/actions")
+
     def admin_list_transcripts(self, job_id: str = "") -> dict[str, Any]:
         """List session transcripts with business context.
 
