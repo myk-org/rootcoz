@@ -19,6 +19,18 @@ def _clear_model_catalog() -> None:
     ai_client.update_model_catalog(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_host_deployment_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No host env/manifest key reaches a session apiKey behind a test (#376).
+
+    ``server_provider_key`` falls back to the deployment credential, so a
+    developer's own ``OPENAI_API_KEY``/models.json would change what these
+    tests assert about the session kwargs. CI has neither; the fallback itself
+    is covered in ``test_server_provider_keys.py``.
+    """
+    monkeypatch.setattr(ai_client, "deployment_provider_credentials", lambda: None)
+
+
 @pytest.mark.parametrize(
     ("raw", "canonical"),
     [

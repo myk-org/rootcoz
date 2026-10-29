@@ -6170,12 +6170,30 @@ async def _credential_generation_is(
     return row is not None and row[0] == expected
 
 
+async def _provider_has_stored_credential(
+    db: aiosqlite.Connection, provider: str
+) -> bool:
+    """Whether ``provider`` has a stored server key, inside a caller's txn.
+
+    A ``server_ai_providers`` row only ever exists for a stored credential
+    (selections live elsewhere), so its presence is the ownership answer.
+    """
+    row = await (
+        await db.execute(
+            "SELECT 1 FROM server_ai_providers WHERE lower(provider) = lower(?)",
+            (provider,),
+        )
+    ).fetchone()
+    return row is not None
+
+
 async def set_server_provider_key_models(
     provider: str,
     models: list[dict[str, Any]],
     *,
     expected_generation: int | None = None,
     status: str | None = None,
+    only_without_stored_credential: bool = False,
 ) -> bool:
     """Replace one provider's key-scoped model rows atomically (#350).
 
@@ -6195,8 +6213,13 @@ async def set_server_provider_key_models(
     is given and the stored credential's generation has moved on (a
     concurrent add/rotate/remove — even to the same key value), nothing is
     written and the call returns ``False``, so one key never wears another
-    key's listing. ``status`` records the capture outcome on the credential
-    row (``supported``/``unsupported``/``unavailable``) for the admin listing.
+    key's listing. ``only_without_stored_credential`` is the deployment-env
+    opt-in (#376): "this provider has no stored key" is tested inside the same
+    transaction as the row replacement, so a key stored between the caller's
+    own check and this write still returns ``False`` with nothing written —
+    a check-then-write in the caller cannot close that window. ``status``
+    records the capture outcome on the credential row
+    (``supported``/``unsupported``/``unavailable``) for the admin listing.
     """
     deduped: dict[str, dict[str, Any]] = {}
     for entry in models:
@@ -6209,6 +6232,11 @@ async def set_server_provider_key_models(
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if not await _credential_generation_is(db, provider, expected_generation):
+            await db.commit()
+            return False
+        if only_without_stored_credential and await _provider_has_stored_credential(
+            db, provider
+        ):
             await db.commit()
             return False
         await db.execute(

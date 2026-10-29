@@ -45,7 +45,7 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; can_refresh_models?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: Model[] }
 
 function providersState(): Provider[] {
   return [
@@ -64,8 +64,8 @@ function providersState(): Provider[] {
 }
 
 /** Un-keyed catalog entry — the server-providers list returns one per catalog provider. */
-function catalogEntry(provider: string, supports_key: boolean): Provider {
-  return { provider, has_key: false, verified: false, supports_key, models: [] }
+function catalogEntry(provider: string, supports_key: boolean, can_refresh_models?: boolean): Provider {
+  return { provider, has_key: false, verified: false, supports_key, can_refresh_models, models: [] }
 }
 
 /** Every catalog provider, all accepting session keys — the default addable state. */
@@ -481,6 +481,90 @@ describe('ServerProvidersCard provider list', () => {
 
     expect(await screen.findByText('No server providers configured.')).toBeInTheDocument()
     expect(screen.queryByRole('list', { name: 'Configured server providers' })).not.toBeInTheDocument()
+  })
+})
+
+describe('ServerProvidersCard deployment-credential controls', () => {
+  it('refreshes models on a keyless provider when the backend allows it', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([catalogEntry('gemini', true, true)]))
+    post.mockResolvedValue({ ok: true, status: 'supported', model_count: 2 } as never)
+    render(<ServerProvidersCard />)
+
+    // No stored key — the row runs on deployment credentials
+    expect(await screen.findByText('Deployment credentials')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Refresh gemini models' }))
+    expect(post).toHaveBeenCalledWith('/api/admin/server-providers/gemini/refresh-models')
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Refreshed key-scoped models for gemini: 2 model(s).',
+    )
+  })
+
+  it('hides Refresh models on a keyless provider the backend marks non-refreshable', async () => {
+    get.mockResolvedValue(listResult([catalogEntry('gemini', true, false)]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByText('Deployment credentials')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Refresh .* models/ })).not.toBeInTheDocument()
+  })
+
+  it('preselects a deployment-credential provider in the add form from Store API key', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      catalogEntry('openai', true),
+      { provider: 'gemini', has_key: true, verified: true, supports_key: true, models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByText('Deployment credentials')).toBeInTheDocument()
+    const store = screen.getByRole('button', { name: 'Store openai API key' })
+    expect(store).toHaveTextContent('Store API key')
+    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveValue('')
+
+    await user.click(store)
+    // Same Test→Add form, now pointed at the row's provider
+    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveValue('openai')
+    expect(screen.getByRole('button', { name: '+ Add provider' })).toBeDisabled()
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('offers Store API key for a deployment provider outside the live catalog', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      { provider: 'vertex-claude', has_key: false, verified: false, supports_key: true, can_refresh_models: true, models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Store vertex-claude API key' }))
+    // The picker still holds the provider as a real (selectable) option
+    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveValue('vertex-claude')
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'vertex-claude' })).toBeInTheDocument()
+  })
+
+  it('keeps each keyed-row control exactly once and offers no Store API key', async () => {
+    get.mockResolvedValue(listResult([{ ...providersState()[0], can_refresh_models: true }]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByText('Verified')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Refresh gemini models' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Rotate gemini key' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Remove gemini' })).toHaveLength(1)
+  })
+
+  it('shows neither Store nor key controls on a provider without key support', async () => {
+    get.mockResolvedValue(listResult([
+      { provider: 'vertex-claude', has_key: false, verified: false, supports_key: false, models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByText('Deployment credentials')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate vertex-claude key' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove vertex-claude' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Refresh vertex-claude models' })).not.toBeInTheDocument()
   })
 })
 
