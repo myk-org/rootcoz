@@ -652,13 +652,19 @@ _AUDIT_UTC_REWRITE_KEY = "audit_created_at_utc_v1"
 async def _migrate_audit_integrity(db: aiosqlite.Connection) -> None:
     """Give ``audit_events`` its chain columns and one canonical UTC timestamp.
 
-    Columns are added idempotently. The value rewrite runs once per database
+    Columns are added idempotently. ``throttle_rescue`` marks the rows the
+    login volume guard rescued past a spent budget; it is deliberately outside
+    ``_AUDIT_HASH_FIELDS`` so the chain hashes stay as they were. The value
+    rewrite runs once per database
     (claimed via ``_migrations_applied``) and only for rows still in the naive
     form; a row already ending with ``Z`` is left alone, so the statement is
     safe to repeat even without the claim.
     """
     await _migrate_add_column(db, "audit_events", "prev_hash", "TEXT")
     await _migrate_add_column(db, "audit_events", "entry_hash", "TEXT")
+    await _migrate_add_column(
+        db, "audit_events", "throttle_rescue", "INTEGER NOT NULL DEFAULT 0"
+    )
     if not await _claim_migration(db, _AUDIT_UTC_REWRITE_KEY):
         return
     cursor = await db.execute(
@@ -1569,6 +1575,9 @@ async def init_db() -> None:
         # ``audit_timestamp``) so string comparison filters stay chronological.
         # ``prev_hash``/``entry_hash`` chain the rows for tamper evidence and
         # stay NULL on rows written before the chain existed.
+        # ``throttle_rescue`` flags a row the login volume guard rescued past a
+        # spent budget; it is not part of the hash, so it is not in
+        # ``_AUDIT_COLUMNS`` either — the API never exposes it.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS audit_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1582,6 +1591,7 @@ async def init_db() -> None:
                 outcome TEXT NOT NULL DEFAULT 'success',
                 details TEXT DEFAULT '{}',
                 request_ip TEXT,
+                throttle_rescue INTEGER NOT NULL DEFAULT 0,
                 prev_hash TEXT,
                 entry_hash TEXT
             )
@@ -9950,9 +9960,11 @@ class AuditThrottle:
     """Per-minute row budget checked in the same transaction as the insert.
 
     ``limit`` applies per username N, ``limit * AUDIT_GLOBAL_THROTTLE_MULTIPLIER``
-    server-wide, and always at least one row per minute for an attempt against
-    an existing account: cycling usernames cannot give an attacker a fresh
-    budget per name, and no flood can erase the evidence for a real account.
+    server-wide, and at most ``limit`` rescued rows per window for attempts
+    against existing accounts: cycling usernames cannot give an attacker a
+    fresh budget per name, and no flood can erase the evidence for a real
+    account — while the total stays provably bounded at ``limit * 11`` rows per
+    window however many accounts exist.
     """
 
     limit: int
@@ -9960,16 +9972,17 @@ class AuditThrottle:
     since: str
 
 
-async def _audit_suppressed(
+async def _audit_throttle_decision(
     db: aiosqlite.Connection, actor: str, throttle: AuditThrottle
-) -> bool:
-    """True when this row must be dropped.
+) -> str:
+    """``"store"``, ``"rescue"`` or ``"drop"`` for this row.
 
-    Spent budgets suppress the row, except for the rescue: per username N,
-    N×10 server-wide, and always at least one row per minute for an attempt
-    against an existing account. The rescue is bounded to one row per account
-    per window because it only fires when the account has no row yet, so it
-    cannot be used to flood the table.
+    Spent budgets drop the row, except for the rescue: per username N, N×10
+    server-wide, plus at most N rescued rows per window for attempts against
+    existing accounts. The window total is therefore never more than N×11 rows.
+    The rescue also only fires when the account has no row yet in the window,
+    so one account can take at most one of the N rescued rows. Every count runs
+    in the caller's ``BEGIN IMMEDIATE`` transaction, so racers cannot overspend.
     """
     action_filter = f"action IN ({', '.join('?' * len(throttle.actions))})"
     count_sql = (
@@ -9985,18 +9998,24 @@ async def _audit_suppressed(
         if (await cursor.fetchone())[0] >= budget:
             break
     else:
-        return False
+        return "store"
     username = _normalize_username(actor)
     cursor = await db.execute(
         "SELECT 1 FROM users WHERE lower(username) = ?", (username,)
     )
     if await cursor.fetchone() is None:
-        return True
+        return "drop"
     cursor = await db.execute(
         count_sql + " AND lower(actor) = ?",
         (throttle.since, *throttle.actions, username),
     )
-    return (await cursor.fetchone())[0] > 0
+    if (await cursor.fetchone())[0] > 0:
+        return "drop"
+    cursor = await db.execute(
+        count_sql + " AND throttle_rescue = 1",
+        (throttle.since, *throttle.actions),
+    )
+    return "rescue" if (await cursor.fetchone())[0] < throttle.limit else "drop"
 
 
 async def insert_audit_event(
@@ -10026,17 +10045,23 @@ async def insert_audit_event(
     the insert is skipped (``None`` returned) once it is exhausted: parallel
     writers can no longer all read a stale count and then all insert. The one
     exception is the rescue for an existing account with no row yet in the
-    window (see :func:`_audit_suppressed`).
+    window, capped at ``limit`` rescued rows per window server-wide (see
+    :func:`_audit_throttle_decision`); rescued rows carry
+    ``throttle_rescue = 1``.
     """
     actor_value = actor or "anonymous"
     async with _connect_db() as db:
         # Take the write lock before reading the tail: two concurrent inserts
         # can then never link to the same predecessor.
         await db.execute("BEGIN IMMEDIATE")
-        if throttle is not None and await _audit_suppressed(db, actor_value, throttle):
-            # Nothing written: closing the connection rolls the empty
-            # transaction back and releases the write lock.
-            return None
+        rescue = 0
+        if throttle is not None:
+            decision = await _audit_throttle_decision(db, actor_value, throttle)
+            if decision == "drop":
+                # Nothing written: closing the connection rolls the empty
+                # transaction back and releases the write lock.
+                return None
+            rescue = int(decision == "rescue")
         cursor = await db.execute(
             "SELECT entry_hash FROM audit_events"
             " WHERE entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1"
@@ -10045,8 +10070,9 @@ async def insert_audit_event(
         prev_hash = tail[0] if tail else _AUDIT_GENESIS_HASH
         cursor = await db.execute(
             "INSERT INTO audit_events (created_at, actor, actor_role, is_admin,"
-            " action, target_type, target_id, outcome, details, request_ip, prev_hash)"
-            f" VALUES ({', '.join('?' * 11)}) RETURNING {_AUDIT_COLUMNS}",
+            " action, target_type, target_id, outcome, details, request_ip,"
+            " throttle_rescue, prev_hash)"
+            f" VALUES ({', '.join('?' * 12)}) RETURNING {_AUDIT_COLUMNS}",
             (
                 audit_timestamp(),
                 actor_value,
@@ -10058,6 +10084,7 @@ async def insert_audit_event(
                 outcome,
                 _audit_details_json(details),
                 request_ip,
+                rescue,
                 prev_hash,
             ),
         )

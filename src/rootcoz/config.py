@@ -824,10 +824,11 @@ class Settings(BaseSettings):
         ge=0,
         description=(
             "How many failed or blocked logins may be recorded in the audit "
-            "trail per minute — per username N, N×10 server-wide, and always "
-            "at least one row per minute for an attempt against an existing "
-            "account. Cycling names does not reset the budget and no flood of "
-            "junk usernames can starve the target's rows. Attempts "
+            "trail per minute — per username N, N×10 server-wide, plus at most "
+            "N rescued rows per window for attempts against existing accounts. "
+            "Cycling names does not reset the budget, no flood of junk "
+            "usernames can starve the target's rows, and the total per window "
+            "never exceeds N×11 rows however many accounts exist. Attempts "
             "beyond the limit are still logged and counted in health, but not "
             "stored as rows. 0 disables the limit."
         ),

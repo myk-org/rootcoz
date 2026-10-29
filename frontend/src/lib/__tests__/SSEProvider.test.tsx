@@ -3,9 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SSEProvider } from '@/lib/SSEProvider'
 import { useSSE } from '@/lib/useSSE'
 
-vi.mock('@/lib/auth', () => ({ useAuth: () => ({ authenticated: true }) }))
+vi.mock('@/lib/auth', () => ({ useAuth: () => ({ authenticated: auth.authenticated }) }))
 
 const EXPIRED_TEXT = /session expired/i
+
+/** Auth state the mocked useAuth reports — toggled to log out and back in. */
+const auth = vi.hoisted(() => ({ authenticated: true }))
 
 class MockEventSource {
   static instances: MockEventSource[] = []
@@ -76,6 +79,7 @@ describe('SSEProvider session expiry', () => {
     vi.stubGlobal('fetch', fetchMock)
     // No BroadcastChannel → the manager every non-multiplexed environment gets.
     vi.stubGlobal('BroadcastChannel', undefined)
+    auth.authenticated = true
   })
 
   afterEach(() => {
@@ -132,7 +136,7 @@ describe('SSEProvider session expiry', () => {
     // The browser will not retry a closed stream — the manager does it itself.
     expect(source.closed).toBe(true)
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(200)
+      await vi.advanceTimersByTimeAsync(1_000)
     })
     expect(MockEventSource.instances).toHaveLength(2)
     expect(MockEventSource.instances[1].closed).toBe(false)
@@ -146,9 +150,94 @@ describe('SSEProvider session expiry', () => {
 
     expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(200)
+      await vi.advanceTimersByTimeAsync(1_000)
     })
     expect(MockEventSource.instances).toHaveLength(2)
+  })
+
+  /** The next attempt lands exactly after `ms` — not on the 150ms debounce tick. */
+  async function expectReconnectAfter(ms: number) {
+    const before = MockEventSource.instances.length
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms - 1)
+    })
+    expect(MockEventSource.instances).toHaveLength(before)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1)
+    })
+    expect(MockEventSource.instances).toHaveLength(before + 1)
+    return MockEventSource.instances[before]
+  }
+
+  it('backs off exponentially while the server stays unreachable', async () => {
+    let source = await renderAndConnect()
+    probe('network')
+
+    await fail(source)
+    source = await expectReconnectAfter(1_000)
+    await fail(source)
+    source = await expectReconnectAfter(2_000)
+    await fail(source)
+    await expectReconnectAfter(4_000)
+  })
+
+  it('resets the backoff after a successful open', async () => {
+    let source = await renderAndConnect()
+    probe('network')
+
+    await fail(source)
+    source = await expectReconnectAfter(1_000)
+    await fail(source)
+    source = await expectReconnectAfter(2_000)
+
+    // A healthy stream proves the server is back — the next failure starts over.
+    act(() => {
+      source.open()
+    })
+    await fail(source)
+    await expectReconnectAfter(1_000)
+  })
+
+  it('ignores a 401 probe from the manager a logout destroyed', async () => {
+    const probes = deferredProbes()
+    const { rerender } = render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    await fail(MockEventSource.instances[0])
+
+    // Log out — the manager is destroyed with the probe still in flight — and
+    // back in, which builds a fresh manager for a fresh session.
+    auth.authenticated = false
+    rerender(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    auth.authenticated = true
+    rerender(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    const afterLogin = MockEventSource.instances.length
+
+    await probes.resolveAll(401)
+
+    // The dead manager's verdict belongs to a session nobody is in any more.
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    expect(MockEventSource.instances).toHaveLength(afterLogin)
   })
 })
 

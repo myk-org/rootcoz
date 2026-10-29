@@ -129,8 +129,12 @@ function createSessionGuard(onExpired: () => void) {
 
 function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
-  const guard = createSessionGuard(handleSessionExpired)
   let destroyed = false
+  // A probe can outlive the manager (logout, new login): its 401 verdict then
+  // describes a session this tab no longer has, so it must not raise the banner.
+  const guard = createSessionGuard(() => {
+    if (!destroyed) handleSessionExpired()
+  })
 
   // ---- Leader state ----
   let isLeader = false
@@ -594,11 +598,17 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
 
 function createFallbackManager(onExpired: () => void): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
-  const guard = createSessionGuard(onExpired)
+  let destroyed = false
+  // A probe can outlive the manager (logout, new login): its 401 verdict then
+  // describes a session this tab no longer has, so it must not raise the banner.
+  const guard = createSessionGuard(() => {
+    if (!destroyed) onExpired()
+  })
   let eventSource: EventSource | null = null
   let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
-  let destroyed = false
+  let backoffTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectDelay = 1000
 
   function connectEventSource() {
     if (destroyed || guard.expired) return
@@ -643,6 +653,7 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
     }
 
     eventSource.onopen = () => {
+      reconnectDelay = 1000
       guard.connected()
       for (const sub of subscriptions.values()) sub.onReconnect?.()
     }
@@ -657,7 +668,14 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
       // One 401 is enough here — the browser will never retry it.
       void guard.failed(1).then((expired) => {
         if (expired || destroyed || eventSource) return
-        scheduleReconnect()
+        // Back off like the leader path does: a down server must not be probed
+        // on every 150ms tick by every open tab.
+        if (backoffTimer) clearTimeout(backoffTimer)
+        backoffTimer = setTimeout(() => {
+          backoffTimer = null
+          if (!destroyed) connectEventSource()
+        }, reconnectDelay)
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
       })
     }
   }
@@ -683,6 +701,7 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
     destroy() {
       destroyed = true
       if (debounceTimer) clearTimeout(debounceTimer)
+      if (backoffTimer) clearTimeout(backoffTimer)
       for (const { name, handler } of activeListeners) {
         eventSource?.removeEventListener(name, handler)
       }

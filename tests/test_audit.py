@@ -2555,6 +2555,88 @@ async def test_rescue_is_one_row_per_account_per_window(
     assert monitoring._audit_suppressed_auth_events == 14
 
 
+def _rescue_flags(db_path: Path) -> dict[int, int]:
+    """``id → throttle_rescue`` for every stored audit row."""
+    with sqlite3.connect(db_path) as conn:
+        return {
+            row[0]: row[1]
+            for row in conn.execute("SELECT id, throttle_rescue FROM audit_events")
+        }
+
+
+async def test_rescue_cap_holds_when_the_attacker_creates_the_accounts(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open registration buys nothing: at most `limit` rescued rows per window.
+
+    60 junk names spend the 50-row server-wide budget, then ten registered
+    accounts each attempt once. Only the first five fit the rescue cap, so the
+    window holds 5×10 + 5 = 55 rows — never one per account.
+    """
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    for index in range(10):
+        _add_existing_user(audit_db, f"farm{index}")
+
+    await _distinct_name_logins("junk", 60)
+    for index in range(10):
+        await _failed_logins(1, actor=f"farm{index}")
+
+    events = (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+        "events"
+    ]
+    flags = _rescue_flags(audit_db)
+    counts = _counts_by_actor(events)
+    assert len(events) == 5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER + 5
+    assert list(flags.values()).count(1) == 5
+    assert [counts.get(f"farm{index}") for index in range(10)] == [
+        1,
+        1,
+        1,
+        1,
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert monitoring._audit_suppressed_auth_events == 15
+
+
+async def test_rescued_row_is_flagged_outside_the_api_and_the_hash(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag marks the rescue without changing the chain or the payload."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    _add_existing_user(audit_db, "admin")
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(1, actor="admin")
+
+    flags = _rescue_flags(audit_db)
+    assert list(flags.values()).count(1) == 1
+    event = next(
+        event
+        for event in (
+            await storage.list_audit_events(action="auth.login_failed", limit=500)
+        )["events"]
+        if event["actor"] == "admin"
+    )
+    assert flags[event["id"]] == 1
+    assert "throttle_rescue" not in event
+    assert "throttle_rescue" not in main._audit_public_event(dict(event))
+    assert (await storage.verify_audit_chain()) == {
+        "checked": 51,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+
+
 async def test_volume_guard_never_throttles_other_actions(
     audit_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

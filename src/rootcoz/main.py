@@ -1229,10 +1229,10 @@ async def record_audit(
     once one actor has ``audit_auth_failure_max_per_minute`` rows for those
     actions in the last minute — or the server as a whole has ten times that,
     so cycling usernames buys nothing — the row is skipped. The budget is
-    bounded per username N, N×10 server-wide, and always admits at least one
-    row per minute for an attempt against an existing account, so no flood of
-    junk usernames can starve the evidence for the real target. The budget is
-    checked in the same
+    bounded per username N, N×10 server-wide, plus at most N rescued rows per
+    window for attempts against existing accounts, so no flood of junk
+    usernames can starve the evidence for the real target and the window total
+    never exceeds N×11 rows. The budget is checked in the same
     transaction as the insert, so parallel attempts cannot all pass a stale
     count. The log line above still fires, a summary line is logged per window,
     and the drop is counted in health. Every other action is always stored.
