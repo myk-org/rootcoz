@@ -3814,8 +3814,9 @@ def admin_server_providers_list(json_output: bool = _JSON_OPTION) -> None:
             f"{provider['provider']}: key={'yes' if provider.get('has_key') else 'no'}"
             f" verified={'yes' if provider.get('verified') else 'no'}"
             f" key-scoped={'yes' if provider.get('key_scoped') else 'no'}"
-            # Older servers lack the field; '-' keeps the line parseable.
+            # Older servers lack these fields; '-' keeps the line parseable.
             f" key-scoped-status={provider.get('key_scoped_status') or '-'}"
+            f" key-scoped-source={provider.get('key_scoped_source') or '-'}"
             f" models={len(models)} included={len(included)} free={len(free)}"
         )
 

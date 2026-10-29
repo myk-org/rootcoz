@@ -7,11 +7,12 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ModelCombobox } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: ServerProviderModel[] }
 
 /** GET /api/admin/server-providers — one entry per catalog + stored provider. */
 type ServerProviderListResult = { providers: ServerProvider[] }
@@ -233,7 +234,23 @@ export function ServerProvidersCard() {
             {listed.map((item) => (
               <li key={item.provider} className="space-y-2 py-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="mr-auto font-mono text-sm text-text-primary break-all">{item.provider}</span>
+                  <span className="mr-auto flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-sm text-text-primary break-all">{item.provider}</span>
+                    {item.key_scoped_source === 'deployment' && (
+                      // No key is stored for this provider (has_key stays false);
+                      // the listing comes from the deployment's own credential.
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Badge variant="outline">Listing from deployment credential</Badge>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            Model list is verified live against the deployment-provided key — no key is stored here.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
+                  </span>
                   {item.has_key ? (
                     <>
                       <Badge variant={item.verified ? 'success' : 'warning'}>{item.verified ? 'Verified' : 'Unverified'}</Badge>
