@@ -607,14 +607,14 @@ async def registered_provider_ids() -> set[str] | None:
     """
     try:
         providers = await get_sidecar_client().get_providers()
-    except httpx.HTTPError, OSError, RuntimeError, ValueError:
+        return {
+            entry["provider"]
+            for entry in providers
+            if isinstance(entry.get("provider"), str)
+        }
+    except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
         logger.warning("Unable to list registered providers for credential update")
         return None
-    return {
-        entry["provider"]
-        for entry in providers
-        if isinstance(entry.get("provider"), str)
-    }
 
 
 async def list_models(provider: str = "") -> list[dict[str, Any]]:

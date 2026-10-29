@@ -10301,8 +10301,18 @@ def _cursor_status_from_model_count(model_count: int) -> dict[str, Any]:
     }
 
 
+def _has_cursor_provider(provider_ids: Iterable[str]) -> bool:
+    """Whether a Cursor provider is present, regardless of its model count (#374).
+
+    A registered Cursor provider with zero current models (expired login,
+    sidecar outage) is exactly the state ``probe_cursor_auth`` diagnoses, so
+    presence — not the visible model count — decides whether status is reported.
+    """
+    return any(is_cursor_provider(provider_id) for provider_id in provider_ids)
+
+
 def _cursor_model_count(models_by_provider: Mapping[str, Sequence[Any]]) -> int:
-    """Cursor models in a provider-keyed catalog (0 = no Cursor provider, #374)."""
+    """Cursor models in a provider-keyed catalog, for the status model_count."""
     return sum(
         len(models)
         for provider_id, models in models_by_provider.items()
@@ -10388,9 +10398,9 @@ async def list_ai_models(
         # A deployment without a Cursor provider must not report Cursor status
         # at all, and must not pay for the ``agent status`` probe (#374).
         all_models = scoped
-        cursor_count = _cursor_model_count(all_models)
         provider_status: dict[str, Any] = dict(listing_status)
-        if cursor_count:
+        if _has_cursor_provider(all_models):
+            cursor_count = _cursor_model_count(all_models)
             if is_admin:
                 cursor_status = _cursor_status_for_client(
                     await probe_cursor_auth(model_count=cursor_count),
@@ -10399,6 +10409,10 @@ async def list_ai_models(
             else:
                 cursor_status = _cursor_status_from_model_count(cursor_count)
             provider_status = {"cursor": cursor_status, **provider_status}
+        else:
+            # A user-credential listing entry must not surface a Cursor banner
+            # for a deployment with no Cursor provider (#374).
+            provider_status.pop("cursor", None)
         return strip_sensitive_from_response(
             {"providers": all_models, "provider_status": provider_status}
         )
@@ -10427,9 +10441,16 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         models = await client.refresh_models()
         update_model_catalog(models)
         clear_cursor_auth_cache()
-        # Probe Cursor only when the refreshed catalog has a Cursor provider (#374).
-        cursor_count = _cursor_model_count(build_friendly_catalog(models))
-        cursor_status = await probe_cursor_auth(force=True) if cursor_count else None
+        # Probe Cursor when the deployment has a Cursor provider, even when the
+        # refreshed catalog lists no Cursor models — that outage is what the
+        # probe reports (#374). The sidecar registry still names a registered
+        # provider whose listing came back empty.
+        cursor_providers = {
+            *build_friendly_catalog(models),
+            *(await registered_provider_ids() or ()),
+        }
+        has_cursor = _has_cursor_provider(cursor_providers)
+        cursor_status = await probe_cursor_auth(force=True) if has_cursor else None
         # A forced refresh also re-reads every deployment-credential listing
         # (#372): the admin asked for live models, and a custom provider keyed
         # from the deployment env has no stored key to refresh.
@@ -10437,7 +10458,7 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         logger.info(
             "Model refresh complete: %d models available (cursor_provider=%s, cursor_ok=%s)",
             len(models),
-            bool(cursor_count),
+            has_cursor,
             (cursor_status or {}).get("ok"),
         )
         payload: dict[str, Any] = {
