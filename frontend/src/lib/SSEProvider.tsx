@@ -30,6 +30,7 @@ interface ChannelMessage {
     | 'topics-update'
     | 'topics-request'
     | 'tab-down'
+    | 'session-expired'
   tabId?: string
   /** Full SSE event name (for sse-event). */
   name?: string
@@ -86,6 +87,12 @@ function createSessionGuard(onExpired: () => void) {
     connected() {
       failures = 0
     },
+    /** Another tab proved the session is dead — same once-only trip, no probe. */
+    markExpired() {
+      if (expired) return
+      expired = true
+      onExpired()
+    },
     /** Probe the session after a failed attempt; true once it counts as expired. */
     async failed(): Promise<boolean> {
       if (expired) return true
@@ -111,7 +118,7 @@ function createSessionGuard(onExpired: () => void) {
 
 function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
-  const guard = createSessionGuard(onExpired)
+  const guard = createSessionGuard(handleSessionExpired)
   let destroyed = false
 
   // ---- Leader state ----
@@ -355,6 +362,26 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
     if (heartbeatWatchdog) { clearTimeout(heartbeatWatchdog); heartbeatWatchdog = null }
   }
 
+  /**
+   * The session is dead. The leader hands off — it stops serving, tells the
+   * other tabs and releases the lock so one of them can take over — and this
+   * tab shows the banner. The guard runs this at most once per manager.
+   */
+  function handleSessionExpired() {
+    stopHeartbeat()
+    stopWatchdog()
+    if (isLeader) {
+      if (reconnectDebounceTimer) { clearTimeout(reconnectDebounceTimer); reconnectDebounceTimer = null }
+      if (reconnectBackoffTimer) { clearTimeout(reconnectBackoffTimer); reconnectBackoffTimer = null }
+      removeEventSourceListeners()
+      eventSource?.close()
+      eventSource = null
+      channel?.postMessage({ type: 'session-expired' })
+      if (lockReleaseResolve) { lockReleaseResolve(); lockReleaseResolve = null }
+    }
+    onExpired()
+  }
+
   function becomeLeader() {
     if (destroyed || isLeader) return
     isLeader = true
@@ -483,6 +510,12 @@ function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void
             tabEventNames.delete(m.tabId)
             scheduleReconnect()
           }
+          break
+
+        case 'session-expired':
+          // The leader's session died. Show the same banner here, and mark the
+          // guard so this tab never promotes itself into the dead session.
+          guard.markExpired()
           break
 
         case 'leader-down':

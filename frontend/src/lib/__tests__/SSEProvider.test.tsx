@@ -158,10 +158,13 @@ class MockBroadcastChannel {
   onclose: (() => void) | null = null
   onmessageerror: (() => void) | null = null
   closed = false
+  /** Everything this tab posted, for asserting on the protocol. */
+  sent: unknown[] = []
   constructor() {
     MockBroadcastChannel.instances.push(this)
   }
   postMessage(data: unknown) {
+    this.sent.push(data)
     queueMicrotask(() => {
       for (const other of MockBroadcastChannel.instances) {
         if (other !== this && !other.closed) other.onmessage?.({ data } as MessageEvent)
@@ -183,8 +186,10 @@ describe('SSEProvider follower promotion', () => {
     vi.useFakeTimers()
     MockEventSource.instances = []
     MockBroadcastChannel.instances = []
+    fetchMock.mockReset()
     vi.stubGlobal('EventSource', MockEventSource)
     vi.stubGlobal('BroadcastChannel', MockBroadcastChannel)
+    vi.stubGlobal('fetch', fetchMock)
   })
 
   afterEach(() => {
@@ -217,6 +222,10 @@ describe('SSEProvider follower promotion', () => {
     })
   }
 
+  function posted(type: string) {
+    return channel().sent.filter((m) => (m as { type?: string }).type === type)
+  }
+
   it('promotes a follower whose channel dies and never duplicates a healthy stream', async () => {
     renderTab()
     await settle()
@@ -236,5 +245,77 @@ describe('SSEProvider follower promotion', () => {
     const streams = openStreams()
     expect(streams).toHaveLength(1)
     expect(streams[0].url).toContain('/api/stream?topics=')
+  })
+
+  it('hands the expired session off from the leader exactly once', async () => {
+    renderTab()
+    await settle()
+    const source = openStreams()[0]
+    expect(source).toBeDefined()
+    probe(401)
+    const heartbeats = posted('leader').length
+
+    await act(async () => {
+      for (let i = 0; i < 3; i += 1) source.fail()
+    })
+
+    // One handoff on the channel, and this tab shows the banner too.
+    expect(posted('session-expired')).toHaveLength(1)
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+    expect(openStreams()).toHaveLength(0)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+    // A dead leader stops claiming to be alive, and never re-handsoffs.
+    expect(posted('leader')).toHaveLength(heartbeats)
+    expect(posted('session-expired')).toHaveLength(1)
+    expect(openStreams()).toHaveLength(0)
+  })
+
+  it('shows the banner on a follower that hears of the expiry and opens no stream', async () => {
+    renderTab()
+    await settle()
+    hear({ type: 'leader', tabId: '0' })
+    await settle()
+    expect(openStreams()).toHaveLength(0)
+
+    hear({ type: 'session-expired' })
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    // No promotion into the dead session, and no second banner.
+    expect(openStreams()).toHaveLength(0)
+    expect(screen.getAllByText(EXPIRED_TEXT)).toHaveLength(1)
+  })
+
+  it('keeps heartbeating and relaying events to a follower on a healthy session', async () => {
+    const onEvent = vi.fn()
+    function Listener() {
+      useSSE('navbar', { 'active-count': onEvent })
+      return <div>listener</div>
+    }
+
+    render(
+      <SSEProvider>
+        <Listener />
+      </SSEProvider>,
+    )
+    await settle()
+    expect(posted('leader')).toHaveLength(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    expect(posted('leader').length).toBeGreaterThan(1)
+    expect(posted('session-expired')).toHaveLength(0)
+
+    // The other tab keeps leadership; this one gets its events off the channel.
+    hear({ type: 'leader', tabId: '0' })
+    await settle()
+    hear({ type: 'sse-event', name: 'navbar:active-count', data: '{"count":3}' })
+    expect(onEvent).toHaveBeenCalledWith('{"count":3}')
   })
 })

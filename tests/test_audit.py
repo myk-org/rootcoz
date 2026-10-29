@@ -2120,12 +2120,35 @@ def test_redact_details_scrubs_long_opaque_token_with_digits() -> None:
     assert "[redacted]" in redacted["note"]
 
 
-def test_redact_details_scrubs_long_mixed_case_token_without_digits() -> None:
-    """40+ characters of mixed case is credential-shaped even with no digit."""
-    token = "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMn"  # pragma: allowlist secret
-    assert len(token) == 40
+@pytest.mark.parametrize(
+    "token",
+    [
+        "AbCdEfGhIjKlMnOpQrStUvWx",  # 24 characters, no digit
+        "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMn",  # 40 characters, no digit
+    ],
+)
+def test_redact_details_scrubs_random_mixed_case_token_without_digits(
+    token: str,
+) -> None:
+    """Random case alternation is credential-shaped at any length >= 24."""
     redacted = main._redact_details({"note": f"pasted {token} here"})
     assert redacted == {"note": "pasted [redacted] here"}
+
+
+def test_redact_details_keeps_a_long_pascal_case_identifier() -> None:
+    """Few case changes mark an identifier, even at 40+ characters."""
+    identifier = "PaymentServiceTestChargeDeclinesWhenCardExpired"
+    assert len(identifier) == 47
+    details = {"test_name": identifier}
+    assert main._redact_details(details) == details
+
+
+def test_redact_details_keeps_a_lowercase_hex_digest() -> None:
+    """A digest we store on purpose survives even though it contains digits."""
+    digest = "4f9c2b7d1e6a8c3f5b0d2e7a9c4b6f8d"  # pragma: allowlist secret
+    assert len(digest) == 32
+    details = {"sql_hash": digest}
+    assert main._redact_details(details) == details
 
 
 def test_redact_details_keeps_a_long_lowercase_word() -> None:

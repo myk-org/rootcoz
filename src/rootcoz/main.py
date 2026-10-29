@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import io
 import ipaddress
+import itertools
 import json
 import logging
 import logging.handlers
@@ -1094,28 +1095,55 @@ _AUDIT_AUTH_FAILURE_ACTIONS: frozenset[str] = frozenset(
 
 # Credential-shaped content inside a free-text detail value (#379). Each
 # alternative matches only the secret itself, so the sentence around it survives:
-# a PEM private key block, a known credential prefix, or a long bearer-ish token.
+# a PEM private key block or a known credential prefix.
 _AUDIT_SECRET_RE = re.compile(
     r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
-    r"|(?:sk-|ddsat_|ddapp_|ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]+"
-    # A long run is credential-shaped when it contains a digit, or when it is
-    # at least 40 characters of mixed case: pytest node ids are dot-separated
-    # and ordinary words are short or single-case, so neither is touched.
-    r"|\b(?=[A-Za-z0-9_-]{24,}\b)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b"
-    r"|\b(?=[A-Za-z0-9_-]{40,}\b)(?=[A-Za-z0-9_-]*[a-z])"
-    r"(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]+\b",
+    r"|(?:sk-|ddsat_|ddapp_|ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]+",
     re.DOTALL,
 )
+# A long bare run is only credential-shaped if it *looks* random (see the
+# predicate below): pytest node ids are dot-separated and identifiers are
+# camelCase, so neither is a single random-looking run.
+_AUDIT_RUN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
 # A bare lowercase hex string is a digest we record on purpose (an SQL hash, a
 # revoked key fingerprint), not a credential: leave the whole value alone.
 _AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
+
+
+def _looks_like_secret_run(run: str) -> bool:
+    """Is this bare run a random token rather than a camelCase identifier?
+
+    A random token almost always changes letter case from one character to the
+    next (``AbCdEf...``); a camelCase/PascalCase identifier changes case only at
+    word boundaries (``testChargeDeclinesWhenCardExpired``: 5 of 32). So: a
+    digit anywhere, or case changing on at least half the letter-to-letter
+    transitions.
+    """
+    if any(char.isdigit() for char in run):
+        return True
+    letters = [char for char in run if char.isalpha()]
+    transitions = len(letters) - 1
+    if transitions < 1:
+        return False
+    changes = sum(
+        1
+        for previous, current in itertools.pairwise(letters)
+        if previous.isupper() != current.isupper()
+    )
+    return changes / transitions >= 0.5
 
 
 def _scrub_audit_text(value: str) -> str:
     """Replace credential-shaped substrings in one free-text detail value."""
     if _AUDIT_HEX_DIGEST_RE.match(value):
         return value
-    return _AUDIT_SECRET_RE.sub("[redacted]", value)
+    scrubbed = _AUDIT_SECRET_RE.sub("[redacted]", value)
+    return _AUDIT_RUN_RE.sub(
+        lambda match: (
+            "[redacted]" if _looks_like_secret_run(match.group()) else match.group()
+        ),
+        scrubbed,
+    )
 
 
 def _redact_audit_value(value: Any) -> Any:
