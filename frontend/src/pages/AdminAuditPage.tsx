@@ -1,5 +1,6 @@
-import { Fragment, useCallback, useEffect, useReducer, useState } from 'react'
+import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
+import { EMPTY_FILTERS, matchesFilters, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
 import { formatRelativeTime, formatTimestamp } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -25,20 +26,6 @@ import {
 } from '@/components/ui/table'
 import { ChevronDown, ChevronLeft, ChevronRight, Check } from 'lucide-react'
 
-interface AuditEvent {
-  id: number
-  created_at: string
-  actor: string
-  actor_role: string | null
-  is_admin: boolean
-  action: string
-  target_type: string | null
-  target_id: string | null
-  outcome: string
-  details: Record<string, unknown>
-  request_ip: string | null
-}
-
 interface AuditListResponse {
   events: AuditEvent[]
   total: number
@@ -62,24 +49,6 @@ const OUTCOME_BADGE_VARIANT: Record<string, 'success' | 'destructive' | 'warning
   success: 'success',
   failure: 'destructive',
   denied: 'warning',
-}
-
-interface AuditFilters {
-  actor: string
-  action: string
-  outcome: string
-  since: string
-  until: string
-  q: string
-}
-
-const EMPTY_FILTERS: AuditFilters = {
-  actor: '',
-  action: '',
-  outcome: '',
-  since: '',
-  until: '',
-  q: '',
 }
 
 interface AuditState {
@@ -243,7 +212,10 @@ export function AdminAuditPage() {
     api
       .get<AuditListResponse>(`/api/admin/audit?${query}`)
       .then((payload) => {
-        if (!cancelled) setResult({ key: query, data: payload })
+        if (cancelled) return
+        setResult({ key: query, data: payload })
+        // A query that failed earlier is recovered — do not keep its banner.
+        setErrorState({ key: '', text: '' })
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -259,11 +231,25 @@ export function AdminAuditPage() {
     }
   }, [query])
 
+  // Latest view for the stable stream handler: reconnecting SSE on every filter
+  // or page change would drop the events emitted in the gap.
+  const viewRef = useRef({ filters, offset })
+  useEffect(() => {
+    viewRef.current = { filters, offset }
+  }, [filters, offset])
+
   // Newest events stream in from the live tail; the buffer stays at one page
   // so "showing X–Y of N" keeps describing what is on screen.
   const prependEvent = useCallback((event: AuditEvent) => {
+    const view = viewRef.current
+    if (!matchesFilters(event, view.filters)) return
     setResult((prev) => {
       if (!prev) return prev
+      // A newer event belongs before the current window: keep the rows, move
+      // only the count so "of N" stays truthful.
+      if (view.offset > 0) {
+        return { key: prev.key, data: { ...prev.data, total: prev.data.total + 1 } }
+      }
       const duplicate = prev.data.events.some((e) => e.id === event.id)
       return {
         key: prev.key,

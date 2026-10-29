@@ -87,6 +87,20 @@ function renderPage() {
   )
 }
 
+/** Type in the actor box and wait for the debounced request it produces. */
+async function setActor(value: string, offset = 0) {
+  fireEvent.change(screen.getByLabelText('Actor filter'), { target: { value } })
+  const suffix = value ? `&actor=${value}` : ''
+  await waitFor(() =>
+    expect(apiGet).toHaveBeenLastCalledWith(`/api/admin/audit?limit=50&offset=${offset}${suffix}`),
+  )
+}
+
+function enableLive() {
+  const liveSwitch = screen.getByRole('switch', { name: 'Live tail' })
+  fireEvent.click(liveSwitch)
+  return { liveSwitch, source: MockEventSource.instances[MockEventSource.instances.length - 1] }
+}
 describe('AdminAuditPage', () => {
   beforeEach(() => {
     apiGet.mockReset()
@@ -193,12 +207,9 @@ describe('AdminAuditPage', () => {
     await screen.findByText('alice')
     expect(MockEventSource.instances).toHaveLength(0)
 
-    const liveSwitch = screen.getByRole('switch', { name: 'Live tail' })
-    fireEvent.click(liveSwitch)
+    const { liveSwitch, source } = enableLive()
     expect(MockEventSource.instances).toHaveLength(1)
-    expect(MockEventSource.instances[0].url).toBe('/api/admin/audit/stream')
-
-    const source = MockEventSource.instances[0]
+    expect(source.url).toBe('/api/admin/audit/stream')
     act(() => {
       source.emit('audit:event', event({ id: 2, actor: 'bob', action: 'user.role.change' }))
     })
@@ -214,5 +225,74 @@ describe('AdminAuditPage', () => {
     const second = MockEventSource.instances[1]
     unmount()
     expect(second.closed).toBe(true)
+  })
+
+  it('clears the error banner when the same query succeeds after a failure', async () => {
+    let failed = false
+    apiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/admin/audit/actions')) return Promise.resolve({ actions: ACTIONS })
+      if (path.includes('actor=alice')) {
+        return Promise.resolve({
+          events: [event({ id: 2, actor: 'bob', action: 'user.role.change' })],
+          total: 1,
+          limit: 50,
+          offset: 0,
+        })
+      }
+      if (!failed) {
+        failed = true
+        return Promise.reject(new Error('500: audit table unavailable'))
+      }
+      return Promise.resolve({ events: [event()], total: 1, limit: 50, offset: 0 })
+    })
+    renderPage()
+
+    expect(await screen.findByText('500: audit table unavailable')).toBeInTheDocument()
+
+    await setActor('alice')
+    expect(await screen.findByText('Role changed')).toBeInTheDocument()
+
+    // Back to the query that failed before: its banner must not come back.
+    await setActor('')
+    expect(await screen.findByText('Settings updated')).toBeInTheDocument()
+    expect(screen.queryByText('500: audit table unavailable')).not.toBeInTheDocument()
+  })
+
+  it('ignores a streamed event that does not match the active filters', async () => {
+    mockAuditApi(1)
+    renderPage()
+    await screen.findByText('alice')
+
+    await setActor('bob')
+    const { source } = enableLive()
+
+    act(() => {
+      source.emit('audit:event', event({ id: 9, action: 'user.role.change' }))
+    })
+
+    expect(screen.queryByText('Role changed')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(screen.getByText('Showing 1–1 of 1')).toBeInTheDocument()
+  })
+
+  it('counts but does not insert a matching streamed event on a later page', async () => {
+    mockAuditApi(120, (offset) => [event({ id: offset + 1 })])
+    renderPage()
+    expect(await screen.findByText('Showing 1–1 of 120')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Next'))
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=50'),
+    )
+    expect(await screen.findByText('Showing 51–51 of 120')).toBeInTheDocument()
+
+    const { source } = enableLive()
+    act(() => {
+      source.emit('audit:event', event({ id: 5000, actor: 'bob', action: 'user.role.change' }))
+    })
+
+    expect(screen.queryByText('Role changed')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(screen.getByText('Showing 51–51 of 121')).toBeInTheDocument()
   })
 })

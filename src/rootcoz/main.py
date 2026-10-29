@@ -1062,7 +1062,9 @@ async def _bind_job_id(job_id: str) -> None:
 # Audit detail names that carry an *identifier* (a setting/provider name), not a
 # value. ``is_sensitive_key`` matches the "key" substring in all of them, so
 # they are exempted explicitly — the value they name is never included.
-_AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset({"key", "keys", "redacted_keys"})
+_AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset(
+    {"key", "keys", "changed_keys", "redacted_keys"}
+)
 
 
 def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
@@ -1092,10 +1094,15 @@ def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
 def _audit_setting_details(key: str) -> dict[str, Any]:
     """Audit details for a settings event: the key name, never its value.
 
-    A sensitive key is flagged ``redacted`` so a reader knows a value was
-    written without the audit trail naming or carrying it.
+    A single-key event always carries ``changed``; a sensitive key is also
+    flagged ``redacted`` so a reader knows a value was written without the
+    audit trail naming or carrying it.
     """
-    return {"key": key, **({"redacted": True} if key in _SENSITIVE_SETTINGS else {})}
+    return {
+        "key": key,
+        "changed": True,
+        **({"redacted": True} if key in _SENSITIVE_SETTINGS else {}),
+    }
 
 
 def _audit_request_ip(request: Request | None) -> str | None:
@@ -1192,13 +1199,15 @@ async def prune_audit_events_periodically() -> int:
         _AUDIT_PRUNE_INTERVAL_SECONDS
     ):
         return 0
-    _last_audit_prune_at = now
     cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     try:
         deleted = await storage.prune_audit_events(cutoff)
     except sqlite3.Error, OSError:
         logger.warning("Audit retention pruning failed", exc_info=True)
         return 0
+    # Stamped only on success: a failed prune must not consume the daily
+    # slot, so the next hourly call retries instead of skipping 24 hours.
+    _last_audit_prune_at = now
     if deleted:
         logger.info(
             "Audit retention: deleted %d audit event(s) older than %d days",
@@ -2076,7 +2085,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await init_db()
     await storage.cleanup_expired_sessions()
     await _cleanup_revoked_ai_sessions()
-    await prune_audit_events_periodically()
 
     # Load DB setting overrides BEFORE config validation so
     # validate_startup_config() sees merged env + DB values.
@@ -2084,6 +2092,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await load_db_settings()
     _apply_log_level_setting()
+
+    # After load_db_settings, so the persisted audit_retention_days applies:
+    # a saved 0 (keep forever) must not be overridden by the env/default value.
+    await prune_audit_events_periodically()
 
     # Keep the transcript recording state in sync everywhere: the env bridge
     # persists the DB value for the next boot, and the sidecar runtime toggle
@@ -12340,6 +12352,20 @@ async def stream_logs(
         lines,
         level_filter or "ALL",
     )
+    # Recorded once per connection, not per streamed line: the stream is
+    # long-lived, and the initial tail is the same request.
+    username = request.state.username or "anonymous"
+    await record_audit(
+        action="logs.stream",
+        actor=username,
+        message=(
+            f"Admin '{username}' streamed server logs"
+            f" (lines={lines}, level={level_filter or 'ALL'})"
+        ),
+        target_type="logs",
+        details={"lines": lines, "level": level_filter or "ALL"},
+        request=request,
+    )
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -12350,19 +12376,42 @@ async def stream_logs(
 # --- Audit trail browsing (#379) ---
 
 
-def _audit_iso_bound(value: str | None, name: str) -> str | None:
-    """Normalize an ISO 8601 query bound to the DB's ``created_at`` format."""
+def _audit_iso_bound(
+    value: str | None, name: str, *, end_of_day: bool = False
+) -> str | None:
+    """Normalize an ISO 8601 query bound to the DB's ``created_at`` format.
+
+    A date-only value means the whole day: ``since`` starts at midnight and
+    ``until`` (``end_of_day``) runs to the last microsecond. A full timestamp
+    is used as given.
+    """
     if not value:
         return None
+    raw = value.strip()
     try:
-        parsed = datetime.fromisoformat(value.strip())
+        parsed = datetime.fromisoformat(raw)
     except ValueError as exc:
         raise HTTPException(
             status_code=400, detail=f"{name} must be an ISO 8601 timestamp"
         ) from exc
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    if end_of_day and len(raw) == 10:  # date-only YYYY-MM-DD
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S.%f")
     return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _audit_public_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Strip credential fields from an audit event before it leaves the API.
+
+    ``details`` can nest a ``request_params`` blob, which the shared
+    :func:`strip_sensitive_from_response` (a no-op one level up) redacts.
+    """
+    details = event.get("details")
+    if isinstance(details, dict):
+        event = {**event, "details": strip_sensitive_from_response(details)}
+    return strip_sensitive_from_response(event)
 
 
 def _audit_action_label(action: str) -> str:
@@ -12370,7 +12419,7 @@ def _audit_action_label(action: str) -> str:
     return action.replace(".", " ").replace("_", " ").title()
 
 
-@app.get("/api/admin/audit", operation_id="listAuditEvents")
+@app.get("/api/admin/audit", operation_id="listAuditEventsEndpoint")
 async def list_audit_events_endpoint(
     request: Request,
     actor: str | None = Query(
@@ -12405,10 +12454,11 @@ async def list_audit_events_endpoint(
         outcome=outcome or None,
         q=q or None,
         date_from=_audit_iso_bound(since, "since"),
-        date_to=_audit_iso_bound(until, "until"),
+        date_to=_audit_iso_bound(until, "until", end_of_day=True),
         limit=limit,
         offset=offset,
     )
+    result["events"] = [_audit_public_event(event) for event in result["events"]]
     logger.debug(
         "GET /api/admin/audit: returning %d of %d events (limit=%d offset=%d)",
         len(result["events"]),
@@ -12416,7 +12466,7 @@ async def list_audit_events_endpoint(
         limit,
         offset,
     )
-    return {**result, "limit": limit, "offset": offset}
+    return strip_sensitive_from_response({**result, "limit": limit, "offset": offset})
 
 
 @app.get("/api/admin/audit/actions", operation_id="listAuditActions")
@@ -12424,12 +12474,14 @@ async def list_audit_actions(request: Request) -> dict[str, Any]:
     """Distinct recorded actions with count, last activity, and a display label."""
     _require_admin(request)
     actions = await storage.distinct_audit_actions()
-    return {
-        "actions": [
-            {**entry, "label": _audit_action_label(entry["action"])}
-            for entry in actions
-        ]
-    }
+    return strip_sensitive_from_response(
+        {
+            "actions": [
+                {**entry, "label": _audit_action_label(entry["action"])}
+                for entry in actions
+            ]
+        }
+    )
 
 
 @app.get("/api/admin/audit/stream", operation_id="streamAuditEvents")
@@ -14601,27 +14653,30 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     username = request.state.username or "admin"
     warnings = await _save_settings_to_db(settings_updates, username)
+    changed_keys = list(settings_updates.keys())
 
     logger.info(
         "Admin settings updated: keys=%s, by=%s",
-        list(settings_updates.keys()),
+        changed_keys,
         username,
     )
     await record_audit(
         action="settings.update",
         actor=username,
-        message=f"Admin settings updated: keys={list(settings_updates.keys())}, by={username}",
+        message=f"Admin settings updated: keys={changed_keys}, by={username}",
         target_type="setting",
         details={
-            "keys": list(settings_updates.keys()),
+            "changed_keys": changed_keys,
             "redacted_keys": [
-                key for key in settings_updates if key in _SENSITIVE_SETTINGS
+                key for key in changed_keys if key in _SENSITIVE_SETTINGS
             ],
+            # Kept for consumers of the original shape.
+            "keys": changed_keys,
         },
         request=request,
     )
 
-    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
+    content: dict[str, Any] = {"updated": changed_keys}
     if warnings:
         content["warnings"] = warnings
     return JSONResponse(
@@ -14887,6 +14942,9 @@ async def import_server_settings(request: Request) -> JSONResponse:
         len(unchanged),
         username,
     )
+    # Key names only — ``applied`` carries the old/new values of every change,
+    # which must not be copied into the audit trail.
+    changed_keys = list(applied)
     await record_audit(
         action="settings.import",
         actor=username,
@@ -14896,8 +14954,12 @@ async def import_server_settings(request: Request) -> JSONResponse:
         ),
         target_type="setting",
         details={
-            "keys": list(applied),
-            "redacted_keys": [key for key in applied if key in _SENSITIVE_SETTINGS],
+            "changed_keys": changed_keys,
+            "redacted_keys": [
+                key for key in changed_keys if key in _SENSITIVE_SETTINGS
+            ],
+            # Kept for consumers of the original shape.
+            "keys": changed_keys,
         },
         request=request,
     )
@@ -17908,6 +17970,7 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
             detail=f"Write operations not allowed (got {first_word})",
         )
 
+    sql_hash = hashlib.sha256(sql.encode()).hexdigest()
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -17927,7 +17990,7 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
             # Only a hash of the SQL: the statement itself can carry row data
             # (a WHERE literal, an INSERT value) and the rows are never stored.
             details={
-                "sql_hash": hashlib.sha256(sql.encode()).hexdigest()[:12],
+                "sql_hash": sql_hash,
                 "rows": len(results),
             },
             request=request,
@@ -17940,7 +18003,7 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
             message=f"Admin '{request.state.username}' admin chat DB query failed",
             target_type="database",
             outcome="failure",
-            details={"sql_hash": hashlib.sha256(sql.encode()).hexdigest()[:12]},
+            details={"sql_hash": sql_hash},
             request=request,
         )
         raise HTTPException(status_code=400, detail=f"SQL Error: {e}")

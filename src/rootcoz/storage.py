@@ -9854,7 +9854,9 @@ async def insert_audit_event(
                 target_type,
                 target_id,
                 outcome,
-                json.dumps(details or {}, default=str),
+                # ensure_ascii=False keeps non-ASCII text searchable as typed
+                # (the ``q`` filter matches the raw text, not \uXXXX escapes).
+                json.dumps(details or {}, default=str, ensure_ascii=False),
                 request_ip,
             ),
         )
@@ -9862,6 +9864,13 @@ async def insert_audit_event(
         await db.commit()
     assert row is not None  # INSERT ... RETURNING always yields the new row
     return _audit_event_row(row)
+
+
+def _audit_like_escape(fragment: str) -> str:
+    """Escape LIKE metacharacters so ``%``/``_`` in a search term match literally."""
+    for char in ("\\", "%", "_"):
+        fragment = fragment.replace(char, f"\\{char}")
+    return fragment
 
 
 async def list_audit_events(
@@ -9902,8 +9911,18 @@ async def list_audit_events(
         conditions.append(f"action IN ({', '.join('?' * len(actions))})")
         params.extend(actions)
     if q:
-        conditions.append("details LIKE ?")
-        params.append(f"%{q}%")
+        # Escape LIKE metacharacters — a literal "%" must not act as a wildcard.
+        # Rows written before #379 kept json.dumps' default ASCII escaping, so
+        # that variant is matched too and old events stay searchable.
+        patterns = list(
+            dict.fromkeys(
+                f"%{_audit_like_escape(fragment)}%"
+                for fragment in (q, json.dumps(q)[1:-1])
+            )
+        )
+        like = "details LIKE ? ESCAPE '\\'"
+        conditions.append(f"({' OR '.join([like] * len(patterns))})")
+        params.extend(patterns)
     if date_from:
         conditions.append("created_at >= ?")
         params.append(date_from)

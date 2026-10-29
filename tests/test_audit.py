@@ -8,6 +8,7 @@ secrets out of both.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import sqlite3
@@ -294,9 +295,13 @@ def test_redact_details_drops_sensitive_names() -> None:
 
 
 def test_audit_setting_details_flags_sensitive_keys() -> None:
-    assert main._audit_setting_details("ai_model") == {"key": "ai_model"}
+    assert main._audit_setting_details("ai_model") == {
+        "key": "ai_model",
+        "changed": True,
+    }
     assert main._audit_setting_details("jenkins_password") == {
         "key": "jenkins_password",
+        "changed": True,
         "redacted": True,
     }
 
@@ -374,6 +379,35 @@ async def test_prune_periodically_deletes_old_keeps_recent(
     assert [e["action"] for e in remaining["events"]] == ["action.new"]
 
 
+async def test_prune_failure_does_not_consume_the_daily_slot(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed prune must leave the timestamp unset so the next call retries."""
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+    monkeypatch.setattr(
+        main, "get_settings", lambda: SimpleNamespace(audit_retention_days=90)
+    )
+    with patch.object(
+        storage,
+        "prune_audit_events",
+        AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
+    ):
+        assert await main.prune_audit_events_periodically() == 0
+    assert main._last_audit_prune_at == 0.0
+
+    old = await storage.insert_audit_event(action="action.old", actor="alice")
+    await storage.insert_audit_event(action="action.new", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            (old["id"],),
+        )
+
+    # No 24h wait: the retry happens on the very next call.
+    assert await main.prune_audit_events_periodically() == 1
+    assert main._last_audit_prune_at > 0
+
+
 async def test_prune_periodically_runs_at_most_daily(
     audit_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -411,6 +445,47 @@ async def test_prune_disabled_when_retention_is_zero(
 @pytest.fixture
 def temp_db_path(tmp_path: Path) -> Path:
     return tmp_path / "app.db"
+
+
+def test_startup_prune_respects_saved_retention(tmp_path: Path, monkeypatch) -> None:
+    """A saved ``audit_retention_days=0`` (keep forever) survives a restart."""
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(storage, "DB_PATH", db_path)
+    asyncio.run(storage.init_db())
+    asyncio.run(storage.set_server_setting("audit_retention_days", "0"))
+    old = asyncio.run(storage.insert_audit_event(action="action.old", actor="alice"))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            (old["id"],),
+        )
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+
+    gen = make_app_client(db_path)
+    next(gen)  # app startup runs the lifespan (and the startup prune)
+    try:
+        events = asyncio.run(storage.list_audit_events())["events"]
+        assert [event["action"] for event in events] == ["action.old"]
+    finally:
+        with contextlib.suppress(StopIteration):
+            next(gen)
+
+
+async def test_log_stream_is_audited(audit_db: Path) -> None:
+    request = SimpleNamespace(
+        state=SimpleNamespace(role="admin", is_admin=True, username="admin"),
+        headers={},
+        client=None,
+    )
+
+    response = await main.stream_logs(request, lines=5, level="error")
+    await response.body_iterator.aclose()
+
+    events = (await storage.list_audit_events(action="logs.stream"))["events"]
+    assert len(events) == 1
+    assert events[0]["target_type"] == "logs"
+    assert events[0]["actor"] == "admin"
+    assert events[0]["details"] == {"lines": 5, "level": "ERROR"}
 
 
 @pytest.fixture
@@ -458,10 +533,28 @@ def test_settings_update_audits_keys_without_values(app_client) -> None:
     events = _events(action="settings.update")
     assert len(events) == 1
     details = events[0]["details"]
-    assert details["keys"] == ["ai_model", "jenkins_password"]
+    assert details["changed_keys"] == ["ai_model", "jenkins_password"]
     assert details["redacted_keys"] == ["jenkins_password"]
+    # The pre-existing key list stays for consumers of the original shape.
+    assert details["keys"] == ["ai_model", "jenkins_password"]
     assert _SECRET not in json.dumps(events[0])
     assert events[0]["target_type"] == "setting"
+
+
+def test_settings_import_audits_changed_keys(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.post(
+        "/api/admin/settings/import",
+        json={"version": 1, "settings": {"ai_call_timeout": "25"}},
+    )
+    assert response.status_code == 200, response.text
+
+    details = _events(action="settings.import")[0]["details"]
+    assert details == {
+        "changed_keys": ["ai_call_timeout"],
+        "redacted_keys": [],
+        "keys": ["ai_call_timeout"],
+    }
 
 
 def test_settings_reset_is_audited(app_client) -> None:
@@ -476,7 +569,7 @@ def test_settings_reset_is_audited(app_client) -> None:
     events = _events(action="settings.reset")
     assert len(events) == 1
     assert events[0]["target_id"] == "ai_model"
-    assert events[0]["details"] == {"key": "ai_model"}
+    assert events[0]["details"] == {"key": "ai_model", "changed": True}
 
 
 def test_provider_key_store_audits_provider_not_key(app_client) -> None:
@@ -627,7 +720,7 @@ def test_admin_db_query_is_audited_without_raw_sql(
     details = events[0]["details"]
     assert set(details) == {"sql_hash", "rows"}
     assert details["rows"] == 1
-    assert len(details["sql_hash"]) == 12
+    assert len(details["sql_hash"]) == 64
     assert "secret-value" not in json.dumps(events[0])
 
 
@@ -746,6 +839,75 @@ def test_audit_endpoint_date_range(app_client, temp_db_path: Path) -> None:
 
     bad = app_client.get("/api/admin/audit", params={"since": "yesterday"})
     assert bad.status_code == 400
+
+    # A date-only bound covers the whole day, both ends.
+    midday = _insert_audit(action="action.midday", actor="alice")
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2022-06-15 15:00:00' WHERE id = ?",
+            (midday["id"],),
+        )
+    same_day = app_client.get(
+        "/api/admin/audit", params={"since": "2022-06-15", "until": "2022-06-15"}
+    ).json()
+    assert [event["action"] for event in same_day["events"]] == ["action.midday"]
+
+
+def test_audit_endpoint_strips_sensitive_detail_fields(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    # Written straight to storage to simulate a row that escaped write-time
+    # redaction (older version, manual edit).
+    _insert_audit(
+        action="admin.db_query",
+        actor="alice",
+        details={
+            "sql_hash": "abc",
+            "request_params": {"github_token": _SECRET, "job_name": "keep"},
+        },
+    )
+
+    response = app_client.get("/api/admin/audit")
+    assert response.status_code == 200, response.text
+    assert _SECRET not in response.text
+    assert response.json()["events"][0]["details"] == {
+        "sql_hash": "abc",
+        "request_params": {"job_name": "keep"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("term", "expected"),
+    [
+        ("100%", ["action.literal"]),
+        ("naïve", ["action.unicode", "action.legacy"]),
+        ("cleanup", ["action.literal"]),
+    ],
+)
+async def test_list_details_search_treats_input_literally(
+    audit_db: Path, term: str, expected: list[str]
+) -> None:
+    await storage.insert_audit_event(
+        action="action.literal", actor="alice", details={"reason": "cleanup 100% done"}
+    )
+    await storage.insert_audit_event(
+        action="action.unicode", actor="alice", details={"note": "naïve path"}
+    )
+    # Pre-#379 rows stored json.dumps' ASCII-escaped form.
+    await storage.insert_audit_event(
+        action="action.other", actor="alice", details={"reason": "nothing here"}
+    )
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "INSERT INTO audit_events (actor, action, details)"
+            " VALUES ('alice', 'action.legacy', ?)",
+            (json.dumps({"note": "naïve path"}),),
+        )
+
+    result = await storage.list_audit_events(q=term)
+    assert sorted(event["action"] for event in result["events"]) == sorted(expected)
 
 
 def test_audit_endpoint_pagination_and_ordering(app_client, temp_db_path: Path) -> None:
