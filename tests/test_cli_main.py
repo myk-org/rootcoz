@@ -7087,6 +7087,7 @@ class TestAdminServerProvidersCommands:
                     "key_scoped": True,
                     "key_scoped_status": "supported",
                     "key_scoped_source": "stored",
+                    "can_refresh_models": True,
                     "models": [
                         {"id": "gemini-2.5-pro", "included": True, "free": True},
                         {"id": "gemini-2.5-flash", "included": False, "free": False},
@@ -7106,6 +7107,7 @@ class TestAdminServerProvidersCommands:
                     "key_scoped": True,
                     "key_scoped_status": None,
                     "key_scoped_source": "deployment",
+                    "can_refresh_models": True,
                     "models": [{"id": "mygateway/gpt-4o", "included": True}],
                 },
             ]
@@ -7114,15 +7116,19 @@ class TestAdminServerProvidersCommands:
         assert result.exit_code == 0
         assert (
             "google: key=yes verified=yes key-scoped=yes key-scoped-status=supported"
-            " key-scoped-source=stored models=2 included=1 free=1" in result.output
+            " key-scoped-source=stored can-refresh=yes models=2 included=1 free=1"
+            in result.output
         )
+        # Older servers omit can_refresh_models; the line still reads "no".
         assert (
             "openai: key=no verified=no key-scoped=no key-scoped-status=-"
-            " key-scoped-source=- models=0 included=0 free=0" in result.output
+            " key-scoped-source=- can-refresh=no models=0 included=0 free=0"
+            in result.output
         )
         assert (
             "mygateway: key=no verified=no key-scoped=yes key-scoped-status=-"
-            " key-scoped-source=deployment models=1 included=1 free=0" in result.output
+            " key-scoped-source=deployment can-refresh=yes models=1 included=1 free=0"
+            in result.output
         )
         mock_client.admin_list_server_providers.assert_called_once()
 

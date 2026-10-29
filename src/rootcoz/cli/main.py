@@ -3817,6 +3817,7 @@ def admin_server_providers_list(json_output: bool = _JSON_OPTION) -> None:
             # Older servers lack these fields; '-' keeps the line parseable.
             f" key-scoped-status={provider.get('key_scoped_status') or '-'}"
             f" key-scoped-source={provider.get('key_scoped_source') or '-'}"
+            f" can-refresh={'yes' if provider.get('can_refresh_models') else 'no'}"
             f" models={len(models)} included={len(included)} free={len(free)}"
         )
 
