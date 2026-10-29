@@ -22,6 +22,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from aiosqlite import Connection as AiosqliteConnection
 
 from rootcoz import main, monitoring, storage
 from rootcoz.encryption import encrypt_sensitive_fields
@@ -644,6 +645,36 @@ def test_login_username_that_is_a_hex_token_is_scrubbed(
     assert events[0]["target_id"] == "[redacted]"
     assert token not in json.dumps(events)
     assert token not in caplog.text
+
+
+def test_login_username_over_the_length_limit_is_refused_like_a_bad_key(
+    app_client,
+) -> None:
+    """An absurd username is a bad credential: same 401, never walked."""
+    wrong_key = {"username": "nobody", "api_key": "wrong"}  # pragma: allowlist secret
+    baseline = app_client.post("/api/auth/login", json=wrong_key)
+
+    runs = _token_runs(13)
+    username = " ".join(runs)
+    assert len(username) > main._LOGIN_MAX_USERNAME_LENGTH
+    resolver = AsyncMock(return_value=set())
+    with patch.object(storage, "known_usernames", resolver):
+        response = app_client.post(
+            "/api/auth/login",
+            json={"username": username, "api_key": "wrong"},  # pragma: allowlist secret
+        )
+
+    assert response.status_code == 401
+    assert response.json() == baseline.json()
+    # Refused at the boundary, so the audit path never looked a run up.
+    assert resolver.await_count == 0
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 2
+    over_long = next(event for event in events if event["actor"] == "[redacted]")
+    assert over_long["target_id"] == "[redacted]"
+    for run in runs:
+        assert run not in json.dumps(events)
 
 
 def test_logout_is_audited(app_client) -> None:
@@ -3151,6 +3182,77 @@ async def test_record_audit_scrubs_a_token_shaped_name_with_no_account(
     assert event["actor"] == "[redacted]"
     assert event["target_id"] == "[redacted]"
     assert account not in json.dumps(event)
+
+
+def _token_runs(count: int) -> list[str]:
+    """``count`` distinct token-shaped runs (mixed case plus digits)."""
+    return [f"Tok{index:04d}AbCdEfGhIjKlMnOpQrSt" for index in range(count)]
+
+
+async def test_audit_identity_lookups_are_capped_and_batched(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A username made of 500 tokens costs one bounded lookup, not 500."""
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    runs = _token_runs(500)
+    username = " ".join(runs)
+    resolver = AsyncMock(return_value=set())
+    try:
+        with patch.object(storage, "known_usernames", resolver):
+            await main.record_audit(
+                action="auth.login_failed",
+                actor=username,
+                message=f"Failed login attempt for username '{username}'",
+                target_type="user",
+                target_id=username,
+                outcome="failure",
+                request=_fake_request(),
+            )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    assert resolver.await_count == 1
+    (candidates,) = resolver.await_args.args
+    assert len(candidates) == main._AUDIT_MAX_IDENTITY_LOOKUPS
+    # Document order, so the same input always resolves the same runs.
+    assert candidates == runs[: main._AUDIT_MAX_IDENTITY_LOOKUPS]
+
+    event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
+    stored = json.dumps(event)
+    assert set(event["actor"].split()) == {"[redacted]"}
+    assert set(event["target_id"].split()) == {"[redacted]"}
+    assert main._AUDIT_RUN_RE.findall(f"{event['actor']} {event['target_id']}") == []
+    for run in runs:
+        assert run not in stored
+        assert run not in caplog.text
+
+
+async def test_known_usernames_batches_past_one_in_clause(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More candidates than one ``IN`` chunk still resolve, case-insensitively."""
+    monkeypatch.setattr(storage, "_SQL_VARIABLE_CHUNK", 3)
+    names = [f"user{index:02d}" for index in range(7)]
+    with sqlite3.connect(audit_db) as conn:
+        conn.executemany(
+            "INSERT INTO users (username) VALUES (?)", [(name,) for name in names]
+        )
+
+    statements: list[str] = []
+    real_execute = AiosqliteConnection.execute
+
+    async def counting_execute(self: AiosqliteConnection, sql: str, *args: Any) -> Any:
+        if "FROM users" in sql:
+            statements.append(sql)
+        return await real_execute(self, sql, *args)
+
+    monkeypatch.setattr(AiosqliteConnection, "execute", counting_execute)
+    found = await storage.known_usernames([*names, "ghost", names[0]])
+
+    assert found == set(names)
+    # 9 candidates at a chunk of 3: three statements, never one per name.
+    assert len(statements) == 3
 
 
 # --- volume guard for auth failures ---------------------------------------

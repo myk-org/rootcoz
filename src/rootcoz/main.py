@@ -1144,6 +1144,16 @@ _AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
 _AUDIT_BARE_BLOB_MIN_LENGTH = 32
 _AUDIT_LOWER_ALNUM_RE = re.compile(r"\A[0-9a-z]+\Z")
 
+# Identity lookups per audit row (#379 review). ``_known_account_runs`` resolves
+# credential-shaped runs against ``users``, and a login username is attacker
+# text: without a cap one failed attempt could ask for thousands of rows. Runs
+# past the cap are treated as unknown, i.e. redacted — never skipped.
+_AUDIT_MAX_IDENTITY_LOOKUPS = 8
+# Longest username the login endpoint will consider. Anything longer cannot
+# name an account, so it is refused like a bad credential instead of being
+# carried into the audit path.
+_LOGIN_MAX_USERNAME_LENGTH = 256
+
 
 def _looks_like_secret_run(run: str) -> bool:
     """Is this bare run a random token rather than an identifier or an id?
@@ -1214,27 +1224,29 @@ async def _known_account_runs(*values: str) -> set[str]:
 
     Redaction is identity-aware: a run the generic rule would redact is a
     token, unless it resolves to a ``users`` row — then it is the username a
-    real account signs in with and must survive. Only such a run costs a
-    lookup, so a normal username, message or target pays none. A failed lookup
-    keeps nothing, so an unreadable ``users`` table scrubs everything rather
-    than raising out of :func:`record_audit`.
+    real account signs in with and must survive. Only such a run is a lookup
+    candidate, so a normal username, message or target costs none. At most the
+    first :data:`_AUDIT_MAX_IDENTITY_LOOKUPS` in document order are resolved,
+    in one batched query: everything beyond the cap stays unknown, so it is
+    redacted rather than trusted. A failed lookup keeps nothing, so an
+    unreadable ``users`` table scrubs everything rather than raising out of
+    :func:`record_audit`.
     """
-    candidates = {
-        run
-        for value in values
-        for run in _AUDIT_RUN_RE.findall(value or "")
-        if _looks_like_secret_run(run)
-    }
-    known: set[str] = set()
-    for run in candidates:
-        try:
-            # ``get_user_by_username`` normalizes, so the lookup is
-            # case-insensitive and the stored name is kept verbatim.
-            if await storage.get_user_by_username(run) is not None:
-                known.add(run)
-        except sqlite3.Error, OSError:
-            break
-    return known
+    candidates = list(
+        dict.fromkeys(
+            run
+            for value in values
+            for run in _AUDIT_RUN_RE.findall(value or "")
+            if _looks_like_secret_run(run)
+        )
+    )[:_AUDIT_MAX_IDENTITY_LOOKUPS]
+    if not candidates:
+        return set()
+    try:
+        resolved = await storage.known_usernames(candidates)
+    except sqlite3.Error, OSError:
+        return set()
+    return {run for run in candidates if run.lower() in resolved}
 
 
 def _redact_audit_value(value: Any, *, digest: bool = False) -> Any:
@@ -11737,6 +11749,11 @@ async def login(request: Request) -> JSONResponse:
 
     username = str(body.get("username", "")).strip().lower()
     api_key = str(body.get("api_key", ""))
+
+    if len(username) > _LOGIN_MAX_USERNAME_LENGTH:
+        # An absurd username cannot name an account: refuse it like any bad
+        # credential and keep it out of the trail, so nothing walks it.
+        username = "[redacted]"
 
     if not username or not api_key:
         raise HTTPException(status_code=400, detail="Username and api_key are required")

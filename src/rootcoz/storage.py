@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -5748,6 +5748,36 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
         )
         row = await cursor.fetchone()
         return _user_row_to_dict(row) if row else None
+
+
+# SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999; stay under it so a
+# batched ``IN`` never has to be split by the driver.
+_SQL_VARIABLE_CHUNK = 900
+
+
+async def known_usernames(candidates: Iterable[str]) -> set[str]:
+    """The normalized names among *candidates* that name an existing account.
+
+    One connection and one ``IN`` statement per placeholder chunk, so a caller
+    resolving an untrusted list pays a bounded number of statements instead of
+    one connection per entry. Duplicates and empty candidates are dropped; the
+    result is normalized, so compare it case-insensitively.
+    """
+    names = sorted({_normalize_username(name) for name in candidates if name})
+    found: set[str] = set()
+    if not names:
+        return found
+    async with _connect_db() as db:
+        for start in range(0, len(names), _SQL_VARIABLE_CHUNK):
+            chunk = names[start : start + _SQL_VARIABLE_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = await db.execute(
+                "SELECT lower(username) AS username FROM users"
+                f" WHERE lower(username) IN ({placeholders})",
+                chunk,
+            )
+            found.update(row["username"] for row in await cursor.fetchall())
+    return found
 
 
 async def delete_user(username: str) -> bool:
