@@ -42,6 +42,15 @@ function boundValue(value: string, endOfDay: boolean): string {
 }
 
 /**
+ * Serializations of `details` the list endpoint can match: the server stores Python's
+ * `json.dumps` output (spaced after ":" and ","), the client would produce compact JSON.
+ */
+export function detailsSearchTexts(details: Record<string, unknown> | null | undefined): string[] {
+  const compact = JSON.stringify(details ?? {})
+  return [compact, compact.replace(/","/g, '", "').replace(/":"/g, '": "')]
+}
+
+/**
  * True when a streamed event satisfies the filters shown in the UI.
  * The list endpoint filters server-side but the SSE stream does not, so the same
  * rules have to be applied here before a live row enters the table.
@@ -65,7 +74,9 @@ export function matchesFilters(event: AuditEvent, filters: AuditFilters): boolea
   if (until && event.created_at > until) return false
 
   const needle = filters.q.trim().toLowerCase()
-  if (needle && !JSON.stringify(event.details ?? {}).toLowerCase().includes(needle)) return false
+  if (needle && !detailsSearchTexts(event.details).some((text) => text.toLowerCase().includes(needle))) {
+    return false
+  }
 
   return true
 }

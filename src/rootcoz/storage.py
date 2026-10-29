@@ -9812,6 +9812,19 @@ def _decode_audit_details(raw: Any) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def _audit_details_json(details: dict[str, Any] | None) -> str:
+    """Serialize ``details`` the one canonical way: compact, non-ASCII as typed.
+
+    Compact separators make the stored text byte-identical to the browser's
+    ``JSON.stringify`` of the same object, so the admin page can filter live
+    events with the query the list endpoint runs here. ``default=str`` keeps an
+    unexpected type from failing the audited action.
+    """
+    return json.dumps(
+        details or {}, default=str, ensure_ascii=False, separators=(",", ":")
+    )
+
+
 def _audit_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     """Decode one ``audit_events`` row for API/CLI consumers."""
     event = dict(row)
@@ -9854,9 +9867,7 @@ async def insert_audit_event(
                 target_type,
                 target_id,
                 outcome,
-                # ensure_ascii=False keeps non-ASCII text searchable as typed
-                # (the ``q`` filter matches the raw text, not \uXXXX escapes).
-                json.dumps(details or {}, default=str, ensure_ascii=False),
+                _audit_details_json(details),
                 request_ip,
             ),
         )
@@ -9871,6 +9882,24 @@ def _audit_like_escape(fragment: str) -> str:
     for char in ("\\", "%", "_"):
         fragment = fragment.replace(char, f"\\{char}")
     return fragment
+
+
+def _audit_like_patterns(q: str) -> list[str]:
+    """LIKE patterns covering every serialization an ``details`` row may use.
+
+    Rows written before details became compact kept ``json.dumps`` defaults:
+    spaced separators (``{"key": "value"}``) and ``\\uXXXX``-escaped
+    non-ASCII. Each query is therefore searched in all four historical forms
+    so old events stay reachable; the spaced/escaped variants exist only for
+    those pre-compact rows.
+    """
+    # ``":"``/``","`` of a JSON fragment are the only separators the spacing
+    # change touched, so re-spacing the query rebuilds the old row text.
+    spaced = q.replace('","', '", "').replace('":"', '": "')
+    variants = (q, spaced, json.dumps(q)[1:-1], json.dumps(spaced)[1:-1])
+    return list(
+        dict.fromkeys(f"%{_audit_like_escape(variant)}%" for variant in variants)
+    )
 
 
 async def list_audit_events(
@@ -9912,14 +9941,7 @@ async def list_audit_events(
         params.extend(actions)
     if q:
         # Escape LIKE metacharacters — a literal "%" must not act as a wildcard.
-        # Rows written before #379 kept json.dumps' default ASCII escaping, so
-        # that variant is matched too and old events stay searchable.
-        patterns = list(
-            dict.fromkeys(
-                f"%{_audit_like_escape(fragment)}%"
-                for fragment in (q, json.dumps(q)[1:-1])
-            )
-        )
+        patterns = _audit_like_patterns(q)
         like = "details LIKE ? ESCAPE '\\'"
         conditions.append(f"({' OR '.join([like] * len(patterns))})")
         params.extend(patterns)

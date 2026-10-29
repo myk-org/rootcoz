@@ -92,6 +92,43 @@ async def test_insert_and_list_round_trip(audit_db: Path) -> None:
     assert events[1]["target_id"] == "job-1"
 
 
+async def test_details_stored_compact_and_non_ascii_unescaped(audit_db: Path) -> None:
+    """The stored text is exactly what the browser's JSON.stringify produces."""
+    await storage.insert_audit_event(
+        action="admin.setting_persist",
+        actor="alice",
+        details={"key": "value", "note": "naïve"},
+    )
+
+    with sqlite3.connect(audit_db) as conn:
+        (raw,) = conn.execute(
+            "SELECT details FROM audit_events WHERE action = 'admin.setting_persist'"
+        ).fetchone()
+    assert raw == '{"key":"value","note":"naïve"}'
+
+
+async def test_details_search_covers_compact_and_legacy_rows(audit_db: Path) -> None:
+    await storage.insert_audit_event(
+        action="action.compact", actor="alice", details={"key": "value"}
+    )
+    # Pre-compact rows kept json.dumps' spaced defaults.
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "INSERT INTO audit_events (actor, action, details) VALUES ('alice', ?, ?)",
+            ("action.legacy", json.dumps({"key": "value"})),
+        )
+
+    compact = await storage.list_audit_events(q='"key":"value"')
+    assert sorted(event["action"] for event in compact["events"]) == [
+        "action.compact",
+        "action.legacy",
+    ]
+
+    # A spaced fragment matches the legacy row (and only it).
+    spaced = await storage.list_audit_events(q='"key": "')
+    assert [event["action"] for event in spaced["events"]] == ["action.legacy"]
+
+
 @pytest.mark.parametrize(
     ("filters", "expected_action"),
     [
@@ -217,6 +254,26 @@ async def test_record_audit_writes_row_and_log_line(
     assert event["target_id"] == "carol"
     assert event["details"] == {"role": "reviewer"}
     assert event["outcome"] == "success"
+
+
+async def test_record_audit_stores_compact_details(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    _capture_main_logs(caplog)
+
+    await main.record_audit(
+        action="admin.setting_persist",
+        actor="admin",
+        message="Admin 'admin' stored a setting",
+        details={"key": "value", "note": "naïve"},
+    )
+
+    with sqlite3.connect(audit_db) as conn:
+        (raw,) = conn.execute(
+            "SELECT details FROM audit_events WHERE action = 'admin.setting_persist'"
+        ).fetchone()
+    assert raw == '{"key":"value","note":"naïve"}'
 
 
 async def test_record_audit_swallows_db_failure(

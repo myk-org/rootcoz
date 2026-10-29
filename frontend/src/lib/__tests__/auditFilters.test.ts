@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EMPTY_FILTERS, matchesFilters, type AuditEvent } from '@/lib/auditFilters'
+import { EMPTY_FILTERS, detailsSearchTexts, matchesFilters, type AuditEvent } from '@/lib/auditFilters'
 
 function event(overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
@@ -43,6 +43,17 @@ describe('matchesFilters', () => {
   it('matches q case-insensitively inside the serialized details', () => {
     expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'AI_CALL_TIMEOUT' })).toBe(true)
     expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'not-there' })).toBe(false)
+  })
+
+  it('matches q written with the server-side (spaced) JSON or the compact JSON', () => {
+    const e = event({ details: { key: 'value' } })
+    expect(matchesFilters(e, { ...EMPTY_FILTERS, q: '"key": "value"' })).toBe(true)
+    expect(matchesFilters(e, { ...EMPTY_FILTERS, q: '"key":"value"' })).toBe(true)
+  })
+
+  it('offers both serializations of details for search', () => {
+    expect(detailsSearchTexts({ key: 'value' })).toEqual(['{"key":"value"}', '{"key": "value"}'])
+    expect(detailsSearchTexts({ key: 'value' })).toHaveLength(2)
   })
 
   it('applies actor, action set and outcome the way the server does', () => {
