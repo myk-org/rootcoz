@@ -756,6 +756,80 @@ async def models_for_api_key(provider: str, api_key: str) -> dict[str, Any]:
     }
 
 
+def _sidecar_agent_dir() -> Path | None:
+    """Sidecar agent dir from ``PI_SIDECAR_AGENT_DIR``; ``None`` when unset.
+
+    The sidecar resolves the same variable at start (unset: its own ephemeral
+    scratch dir, which registers no custom providers), so an unset variable
+    means there is no manifest to read. Rootcoz runs in the sidecar's
+    container, so the deployment env that exported a referenced API key is in
+    ``os.environ`` too.
+    """
+    path = os.environ.get("PI_SIDECAR_AGENT_DIR", "").strip()
+    return Path(path) if path else None
+
+
+def _env_reference_var(reference: object) -> str | None:
+    """Variable name of a models.json apiKey reference (``$VAR``/``${VAR}``)."""
+    if not isinstance(reference, str):
+        return None
+    name = reference.strip()
+    if name.startswith("${") and name.endswith("}"):
+        name = name[2:-1]
+    elif name.startswith("$"):
+        name = name[1:]
+    else:
+        return None
+    return name if name.isidentifier() else None
+
+
+def deployment_provider_credentials() -> dict[str, str]:
+    """Deployment-env keys of providers flagged ``trustKeyScopedListing`` (#372).
+
+    A custom provider whose ``models.json`` ``apiKey`` is an environment
+    reference (``"$VAR"`` / ``"${VAR}"``) authenticates from the deployment
+    env, so it has no stored server key and the add/rotate capture (#350)
+    never runs for it — its live key-scoped listing has to be captured with
+    the env-resolved key instead.
+
+    Only flagged providers are returned: the flag is what makes the listing
+    trustworthy for a custom host, and the sidecar honors it solely from the
+    admin-controlled manifest. Unset/empty variables and literal keys are
+    skipped. Key material is never logged — provider names only, at DEBUG so
+    a page-load read does not log the same names on every request.
+    """
+    try:
+        agent_dir = _sidecar_agent_dir()
+        if agent_dir is None:
+            return {}
+        manifest = json.loads((agent_dir / "models.json").read_text())
+    except OSError, ValueError:
+        # No agent dir / custom providers, or a manifest the sidecar also
+        # could not parse: nothing to resolve, not an error here.
+        return {}
+    providers = manifest.get("providers") if isinstance(manifest, dict) else None
+    if not isinstance(providers, dict):
+        return {}
+    resolved: dict[str, str] = {}
+    for provider, config in providers.items():
+        if not isinstance(provider, str) or not isinstance(config, dict):
+            continue
+        if config.get("trustKeyScopedListing") is not True:
+            continue
+        var = _env_reference_var(config.get("apiKey"))
+        key = os.environ.get(var, "").strip() if var else ""
+        if not key:
+            logger.debug(
+                "Deployment credential unavailable for provider=%s (%s unset)",
+                provider,
+                var or "no env reference",
+            )
+            continue
+        resolved[provider] = key
+    logger.debug("Deployment credentials resolved for providers: %s", sorted(resolved))
+    return resolved
+
+
 def _listing_entry_usable(entry: dict[str, Any]) -> bool:
     """A discovered entry is usable unless it declares broken capability limits.
 
