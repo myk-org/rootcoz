@@ -254,6 +254,22 @@ class RootCozClient:
             },
         )
 
+    def admin_store_deployment_server_provider_key(
+        self, provider: str, verification_model: str
+    ) -> dict[str, Any]:
+        """Store the provider's deployment credential as a server key (#378).
+
+        No key in the body: the server promotes the credential it already
+        resolves for the provider (manifest env reference or ambient
+        ``<PROVIDER_ID>_API_KEY``).
+        """
+        return self._request(
+            "POST",
+            f"/api/admin/server-providers/{quote(provider, safe='')}"
+            "/store-deployment-key",
+            json={"verification_model": verification_model},
+        )
+
     def admin_rotate_server_provider_key(
         self, provider: str, api_key: str, verification_model: str
     ) -> dict[str, Any]:

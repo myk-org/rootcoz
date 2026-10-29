@@ -60,6 +60,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from rootcoz import storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
+    _cached_catalog_provider_ids,
     _get_model_catalog,
     _setup_usage_recorder,
     ai_username,
@@ -202,6 +203,7 @@ from rootcoz.models import (
     SetReviewedRequest,
     SetServerProviderModelsRequest,
     SetTrackedInRequest,
+    StoreDeploymentProviderKeyRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
     UpdateFilterPresetRequest,
@@ -389,6 +391,10 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
+        # Operator detail, not a per-analysis default: it drives
+        # supported_key_providers() (which providers may ever touch a user
+        # API key) and is edited via env/CLI, never in Server Settings.
+        "ambient_auth_providers",
     }
 )
 
@@ -12612,6 +12618,21 @@ async def _stored_provider_ids() -> set[str]:
     }
 
 
+async def _has_stored_server_key(provider: str) -> bool:
+    """Whether this provider already has a stored key (admin write endpoints).
+
+    Case-insensitive exact spelling — the same match the storage layer uses
+    (``lower(provider) = lower(?)``). Distinct from
+    :func:`_stored_provider_ids`, which normalizes legacy aliases for the
+    capture scope; an admin write must not answer "409 already stored" for a
+    differently-named alias.
+    """
+    return any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_server_ai_providers()
+    )
+
+
 async def _capture_deployment_provider_listing(
     provider: str, key: str
 ) -> tuple[list[dict[str, Any]], str]:
@@ -12948,8 +12969,14 @@ async def _verify_and_store_server_provider_key(
     request: Request,
     *,
     replacing: bool,
+    include_model_count: bool = False,
 ) -> JSONResponse:
-    """Shared add/rotate path: verify the key with a real turn, then store."""
+    """Shared add/rotate/store path: verify the key with a real turn, then store.
+
+    ``include_model_count`` adds the captured key-scoped model count to the
+    success payload (#378) — reported only when the capture actually produced
+    a listing, so a caller never presents a zero as "this key reaches nothing".
+    """
     # Resolve to the sidecar's exact-case id up front (#347): verification,
     # the duplicate check, and storage all see the canonical spelling, so
     # a lowercase add behaves identically to the catalog's ``EnMaaS`` and
@@ -12989,9 +13016,7 @@ async def _verify_and_store_server_provider_key(
     # sidecar round-trip above can take seconds, and a concurrent add during
     # it must not be silently overwritten by this one, nor a concurrent
     # removal resurrected without its model selections.
-    exists = provider.lower() in {
-        row["provider"].lower() for row in await storage.list_server_ai_providers()
-    }
+    exists = await _has_stored_server_key(provider)
     if exists and not replacing:
         raise HTTPException(
             status_code=409,
@@ -13035,7 +13060,17 @@ async def _verify_and_store_server_provider_key(
         else "",
     )
     return JSONResponse(
-        content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
+        content=strip_sensitive_from_response(
+            {
+                "outcome": "accepted",
+                "ok": True,
+                **(
+                    {"model_count": len(key_models)}
+                    if include_model_count and capture_status == "supported"
+                    else {}
+                ),
+            }
+        ),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -13044,11 +13079,13 @@ async def _verify_and_store_server_provider_key(
 async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     """List server provider key state and per-model selection (admin only).
 
-    Never returns keys. One entry per catalog provider (plus stored
-    providers that left the catalog), each with key presence, verification
-    state, a ``managed`` flag, and its models with ``included`` + ``free``
-    flags — unmanaged providers (no stored key, no selection rows) report
-    their whole catalog as included, matching what the server pool
+    Never returns keys. One entry per catalog provider, plus stored
+    providers that left the catalog and every provider the sidecar registers
+    as key-capable (#378 — a provider with no catalog model would otherwise
+    be invisible and could never be offered a key), each with key presence,
+    verification state, a ``managed`` flag, and its models with ``included`` +
+    ``free`` flags — unmanaged providers (no stored key, no selection rows)
+    report their whole catalog as included, matching what the server pool
     actually exposes for them.
     """
     _require_admin(request)
@@ -13159,6 +13196,15 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     listed_ids = {p.lower(): p for p in models_by_provider}
     for stored_id in stored:
         listed_ids.setdefault(stored_id.lower(), stored_id)
+    # Registry-only providers (#378): the sidecar registers ~30 key-capable
+    # providers, but only one with a model in the catalog reaches the UI's
+    # "Find a provider" picker — an admin could never store a key for the
+    # rest. Union the capability answer already fetched above (one lookup per
+    # request, never a second call); the sidecar's exact spelling wins, and
+    # the case-insensitive join keeps a catalog/stored entry's casing. A
+    # ``supportsSessionApiKey: false`` provider is not in this list at all.
+    for key_provider in key_providers:
+        listed_ids.setdefault(key_provider.lower(), key_provider)
     for provider in sorted(listed_ids.values()):
         provider_lower = provider.lower()
         # Managed = stored selection rows or a stored key — the same rule
@@ -13244,15 +13290,79 @@ async def add_server_provider(
     """Add a server provider key (admin only) — verified before storing."""
     _require_admin(request)
     provider = body.provider.strip()
-    if provider.lower() in {
-        row["provider"].lower() for row in await storage.list_server_ai_providers()
-    }:
+    if await _has_stored_server_key(provider):
         raise HTTPException(
             status_code=409,
             detail=f"Provider '{provider}' already has a stored key; use rotate-key",
         )
     return await _verify_and_store_server_provider_key(
         provider, body, request, replacing=False
+    )
+
+
+@app.post(
+    "/api/admin/server-providers/{provider:path}/store-deployment-key",
+    operation_id="storeDeploymentProviderKey",
+)
+async def store_deployment_provider_key(
+    provider: str, request: Request, body: StoreDeploymentProviderKeyRequest
+) -> JSONResponse:
+    """Promote a deployment credential into the stored key store (admin only, #378).
+
+    A provider keyed from the deployment env (``models.json`` ``"$VAR"`` or an
+    ambient ``<PROVIDER_ID>_API_KEY``) already resolves a working credential,
+    so the admin never re-enters it: this reads the same in-memory resolution
+    and hands it to the shared add path, which verifies with a real turn,
+    encrypts, bumps the credential generation, captures the key-scoped listing,
+    seeds the selection, and writes the ``[AUDIT]`` line naming the admin and
+    the provider. Nothing here reads, returns or logs key material, a prefix of
+    it, or the resolved value of the variable behind it.
+
+    Only the states that make the action impossible are HTTP errors: a key
+    already stored (``409`` — rotate instead) and no deployment credential
+    resolved (``404``; an unreadable manifest resolves nothing either, which is
+    never a ``500``). A rejected or inconclusive verification follows the
+    add/rotate convention — ``200`` with ``ok: false`` and nothing stored.
+    """
+    _require_admin(request)
+    # Stored first: that answer needs no credential, so it must not hide
+    # behind a "no deployment credential" 404.
+    if await _has_stored_server_key(provider):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    from rootcoz.ai_client import deployment_provider_credentials
+
+    credentials = deployment_provider_credentials()
+    # ``None`` is an unreadable manifest (the resolver logged why): it resolves
+    # nothing right now, so it answers like "no credential", never a 500.
+    match = next(
+        (
+            (name, key)
+            for name, key in (credentials or {}).items()
+            if normalize_provider(name) == normalize_provider(provider)
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Provider '{provider}' has no deployment credential to store",
+        )
+    name, key = match
+    # The resolved credential is handed over as the submitted key, so the add
+    # path does every part of the store exactly once, for both entry points.
+    return await _verify_and_store_server_provider_key(
+        name,
+        ServerProviderKeyInput(
+            provider=name,
+            api_key=SecretStr(key),
+            verification_model=body.verification_model,
+        ),
+        request,
+        replacing=False,
+        include_model_count=True,
     )
 
 
@@ -13265,9 +13375,7 @@ async def rotate_server_provider_key(
 ) -> JSONResponse:
     """Replace a server provider key (admin only) — re-verified before storing."""
     _require_admin(request)
-    if provider.lower() not in {
-        row["provider"].lower() for row in await storage.list_server_ai_providers()
-    }:
+    if not await _has_stored_server_key(provider):
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
@@ -13785,7 +13893,49 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
-def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
+# Known-provider listing in an AMBIENT_AUTH_PROVIDERS rejection is capped: the
+# sidecar registers ~30 providers and the whole list in a 400 body is unreadable.
+_KNOWN_PROVIDER_LIST_LIMIT = 12
+
+
+def _ambient_auth_provider_ids(value: str) -> list[str]:
+    """Parse the AMBIENT_AUTH_PROVIDERS CSV the way the consumer reads it.
+
+    Split on comma, strip, drop empties, de-duplicate case-insensitively; the
+    caller's spelling of the first occurrence wins so a save round-trips.
+    """
+    seen: set[str] = set()
+    ids: list[str] = []
+    for part in value.split(","):
+        provider = part.strip()
+        if provider and provider.lower() not in seen:
+            seen.add(provider.lower())
+            ids.append(provider)
+    return ids
+
+
+async def _live_provider_ids() -> set[str]:
+    """Lowercased provider IDs the deployment currently knows about.
+
+    Union of the current model catalog and the sidecar's key-capable providers.
+    An empty result means both sources are unavailable — a cold catalog plus no
+    discovery answer — and must never be read as "no provider exists".
+    """
+    catalog = _cached_catalog_provider_ids()
+    discovered = await supported_key_providers()
+    return {provider.lower() for provider in (*catalog, *discovered)}
+
+
+def _known_providers_hint(known: set[str]) -> str:
+    """Readable, capped ``known: a, b, ...`` listing for a rejection message."""
+    names = sorted(known)
+    hint = ", ".join(names[:_KNOWN_PROVIDER_LIST_LIMIT])
+    if len(names) > _KNOWN_PROVIDER_LIST_LIMIT:
+        hint += f", ... (+{len(names) - _KNOWN_PROVIDER_LIST_LIMIT} more)"
+    return hint
+
+
+async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
     """Validate admin settings updates; return per-entry error messages.
 
     Shared by the PUT update and the settings import endpoints so every
@@ -13921,6 +14071,40 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
+
+    # AMBIENT_AUTH_PROVIDERS is consumed as raw provider IDs by
+    # supported_key_providers(): a typo is stored silently and never excludes
+    # anything (the provider it was meant to exclude keeps offering key UI),
+    # while a real ID typed there silently disables a provider's key UI. Check
+    # every ID against the providers that actually exist. The stored value is
+    # always the canonical parse — padding and duplicates never persist.
+    if "ambient_auth_providers" in settings_updates:
+        raw = settings_updates["ambient_auth_providers"]
+        ids = _ambient_auth_provider_ids("" if raw is None else str(raw))
+        known = await _live_provider_ids()
+        # An empty known set means a cold catalog *and* no key-capable answer
+        # from discovery — far more likely a transient sidecar gap than a real
+        # "no providers exist". Accept the value unchanged: a discovery blip
+        # must never turn into a save failure. With any known provider the
+        # check runs catalog-only, as the ambient IDs already stored stay valid
+        # (``supported_key_providers()`` excludes them from its own answer, so
+        # an unchanged re-save must not fail).
+        if known:
+            known.update(
+                provider.lower()
+                for provider in _ambient_auth_provider_ids(
+                    get_settings().ambient_auth_providers or ""
+                )
+            )
+            if unknown := [p for p in ids if p.lower() not in known]:
+                errors.append(
+                    "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS: "
+                    f"{', '.join(unknown)} (known: {_known_providers_hint(known)})"
+                )
+        if raw is not None:
+            # Canonical form is stored even when the check is skipped — padding
+            # and duplicates never reach the setting's consumer.
+            settings_updates["ambient_auth_providers"] = ", ".join(ids)
     return errors
 
 
@@ -13934,7 +14118,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     if not settings_updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    errors = _validate_settings_updates(settings_updates)
+    errors = await _validate_settings_updates(settings_updates)
     if errors:
         raise HTTPException(
             status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
@@ -14172,7 +14356,7 @@ async def import_server_settings(request: Request) -> JSONResponse:
     # rules the per-setting PUT enforces, plus the empty-override gates
     # the shared save path applies (checked here so a rejection is a 422
     # before any DB write, keeping the import atomic).
-    errors = _validate_settings_updates(updates)
+    errors = await _validate_settings_updates(updates)
     for key, value in updates.items():
         if key in _DERIVED_SETTINGS:
             # Same rule the persist endpoint enforces: a derived value is

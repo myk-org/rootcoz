@@ -2,13 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { api, ApiError } from '@/lib/api'
+import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { ServerProvidersCard } from './ServerProvidersCard'
 
 Element.prototype.scrollIntoView = vi.fn()
 
 vi.mock('@/lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() },
-  extractApiDetail: () => null,
+  extractApiDetail: (err: unknown) => {
+    const detail = (err as { body?: { detail?: unknown } } | null)?.body?.detail
+    return typeof detail === 'string' ? detail : null
+  },
   ApiError: class ApiError extends Error {
     status: number
     statusText: string
@@ -68,9 +72,34 @@ function catalogEntry(provider: string, supports_key: boolean, can_refresh_model
   return { provider, has_key: false, verified: false, supports_key, can_refresh_models, models: [] }
 }
 
+/** Registry-only entry: no key, no deployment listing, no models — addable, never a row. */
+function registryEntry(provider: string): Provider {
+  return { ...catalogEntry(provider, true), key_scoped_source: null }
+}
+
+/** Keyless provider running on the deployment's credential — a row with Store API key. */
+function deploymentEntry(provider: string, supports_key = true, can_refresh_models?: boolean, models: Model[] = []): Provider {
+  return { ...catalogEntry(provider, supports_key, can_refresh_models), key_scoped_source: 'deployment', models }
+}
+
 /** Every catalog provider, all accepting session keys — the default addable state. */
 function keyableState(): Provider[] {
   return [catalogEntry('gemini', true), catalogEntry('openai', true), catalogEntry('enmaas', true)]
+}
+
+/** Keyed gemini row + keyless openai on deployment credentials — what the Store/Edit key dialogs act on. */
+function keyDialogState(): Provider[] {
+  return [providersState()[0], deploymentEntry('openai')]
+}
+
+async function openStoreDialog(user: ReturnType<typeof userEvent.setup>, provider = 'openai') {
+  await user.click(await screen.findByRole('button', { name: `Store ${provider} API key` }))
+  return screen.findByRole('dialog')
+}
+
+async function openEditDialog(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: 'Edit gemini key' }))
+  return screen.findByRole('dialog')
 }
 
 /** GET response shape: {providers: [...]} — the real backend envelope. */
@@ -221,11 +250,12 @@ describe('ServerProvidersCard add flow gate', () => {
 })
 
 describe('ServerProvidersCard provider list', () => {
-  it('lists keyless providers with a deployment-credentials hint and no key controls; they stay addable', async () => {
+  it('lists keyless providers with a deployment-credentials hint and no key controls; not offered in Find a provider', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
-      catalogEntry('gemini', true),
+      deploymentEntry('gemini'),
       { provider: 'openai', has_key: true, verified: true, supports_key: true, models: [] },
+      registryEntry('anthropic'),
     ]))
     render(<ServerProvidersCard />)
 
@@ -233,14 +263,16 @@ describe('ServerProvidersCard provider list', () => {
     // without rotate/remove buttons or a verified state
     expect(await screen.findByText('gemini')).toBeInTheDocument()
     expect(screen.getByText('Deployment credentials')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Rotate gemini key' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit gemini key' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove gemini' })).not.toBeInTheDocument()
     expect(screen.queryByText('Unverified')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Rotate openai key' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit openai key' })).toBeInTheDocument()
 
-    // A stored key can still be added for the keyless provider
+    // Both rows already own their key action — only the unconfigured registry
+    // provider is left to add.
     await user.click(screen.getByRole('combobox', { name: 'Provider' }))
-    expect(await screen.findByRole('option', { name: 'gemini' })).toBeInTheDocument()
+    expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'gemini' })).not.toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
   })
 
@@ -255,7 +287,7 @@ describe('ServerProvidersCard provider list', () => {
     // has_key is false for deployment credentials — no verified/stored-key state
     expect(screen.getByText('Deployment credentials')).toBeInTheDocument()
     expect(screen.queryByText('Verified')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Rotate EnMaaS key' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit EnMaaS key' })).not.toBeInTheDocument()
 
     await user.hover(hint)
     expect(await screen.findByRole('tooltip')).toHaveTextContent(
@@ -428,22 +460,16 @@ describe('ServerProvidersCard provider list', () => {
   it('gives keyless providers model selection and free management without key buttons', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
-      {
-        provider: 'vertex-claude',
-        has_key: false,
-        verified: false,
-        supports_key: false,
-        models: [
-          { id: 'claude-x', name: 'Claude X', included: true, free: true },
-          { id: 'claude-y', name: 'Claude Y', included: false, free: false },
-        ],
-      },
+      deploymentEntry('vertex-claude', false, undefined, [
+        { id: 'claude-x', name: 'Claude X', included: true, free: true },
+        { id: 'claude-y', name: 'Claude Y', included: false, free: false },
+      ]),
     ]))
     render(<ServerProvidersCard />)
 
     expect(await screen.findByText('vertex-claude')).toBeInTheDocument()
     expect(screen.getByText('Deployment credentials')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Rotate vertex-claude key' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit vertex-claude key' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove vertex-claude' })).not.toBeInTheDocument()
 
     // Model scoping works
@@ -475,7 +501,110 @@ describe('ServerProvidersCard provider list', () => {
     expect(screen.getByRole('button', { name: 'Toggle claude-x free' })).toHaveAttribute('aria-pressed', 'false')
   })
 
-  it('shows the empty state only when the server reports no providers at all', async () => {
+  it('offers a registry-only key-capable provider that has no catalog models', async () => {
+    const user = userEvent.setup()
+    // anthropic is registered in the sidecar but absent from the live catalog
+    get.mockResolvedValue(listResult([registryEntry('anthropic')]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+    // It has no catalog models, so the verification picker has no options —
+    // free-text entry still works.
+    await user.click(screen.getByRole('option', { name: 'anthropic' }))
+    const modelField = screen.getByRole('combobox', { name: 'Verification model' })
+    expect(modelField).toBeEnabled()
+    await user.type(modelField, 'claude-x')
+    expect(modelField).toHaveValue('claude-x')
+  })
+
+  it('does not offer a registry-only provider that cannot take session keys', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([catalogEntry('anthropic', false), registryEntry('openai')]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'openai' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'anthropic' })).not.toBeInTheDocument()
+  })
+
+  it('does not offer a provider that already has a stored key', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      { provider: 'anthropic', has_key: true, verified: true, supports_key: true, models: [] },
+      catalogEntry('openai', true),
+    ]))
+    render(<ServerProvidersCard />)
+
+    // anthropic has Edit instead of an add option
+    expect(await screen.findByRole('button', { name: 'Edit anthropic key' })).toBeInTheDocument()
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'openai' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'anthropic' })).not.toBeInTheDocument()
+  })
+
+  it('lists a provider present in both the catalog and the listing exactly once', async () => {
+    const user = userEvent.setup()
+    // openai is in the catalog and in the listing — the union must not duplicate it
+    get.mockResolvedValue(listResult([registryEntry('openai'), registryEntry('anthropic')]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await screen.findByRole('option', { name: 'anthropic' })
+    expect(screen.getAllByRole('option', { name: 'openai' })).toHaveLength(1)
+    expect(screen.getAllByRole('option', { name: 'anthropic' })).toHaveLength(1)
+  })
+
+  it('renders no row for a registry-only provider but still offers it in Find a provider', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([registryEntry('anthropic')]))
+    render(<ServerProvidersCard />)
+
+    // Nothing in play: no row, no misleading Deployment credentials badge or
+    // Store API key button that would 404 — just the empty state.
+    expect(await screen.findByText('No server providers configured.')).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Configured server providers' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Deployment credentials')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+  })
+
+  it('renders only the in-play rows of a registry-heavy listing', async () => {
+    get.mockResolvedValue(listResult([
+      ...['amazon-bedrock', 'ant-ling', 'anthropic', 'azure', 'baseten', 'cerebras', 'cloudflare-ai-gateway'].map(registryEntry),
+      providersState()[0],
+      deploymentEntry('openai', true, true, [{ id: 'gpt-4o', name: 'GPT-4o', included: true, free: false }]),
+    ]))
+    render(<ServerProvidersCard />)
+
+    const list = await screen.findByRole('list', { name: 'Configured server providers' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(list).getByText('gemini')).toBeInTheDocument()
+    expect(within(list).getByText('openai')).toBeInTheDocument()
+    for (const junk of ['amazon-bedrock', 'ant-ling', 'anthropic', 'azure', 'baseten', 'cerebras', 'cloudflare-ai-gateway']) {
+      expect(within(list).queryByText(junk)).not.toBeInTheDocument()
+    }
+    // No wall of "Models (0 of 0)" rows
+    expect(screen.queryByText('Models (0 of 0)')).not.toBeInTheDocument()
+  })
+
+  it('renders no Store API key on a row without a deployment credential', async () => {
+    // Models make it a row, but nothing exists to promote into the store.
+    get.mockResolvedValue(listResult([{
+      ...catalogEntry('openai', true, true),
+      models: [{ id: 'gpt-4o', name: 'GPT-4o', included: true, free: false }],
+    }]))
+    render(<ServerProvidersCard />)
+
+    const list = await screen.findByRole('list', { name: 'Configured server providers' })
+    expect(within(list).getByText('openai')).toBeInTheDocument()
+    expect(screen.queryByText('Deployment credentials')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
+  })
+
+  it('shows the empty state when no provider is in play', async () => {
     get.mockResolvedValue(listResult([]))
     render(<ServerProvidersCard />)
 
@@ -484,10 +613,64 @@ describe('ServerProvidersCard provider list', () => {
   })
 })
 
+describe('ServerProvidersCard Find a provider de-duplication', () => {
+  it('does not offer a deployment-credential row; its row actions stay', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([deploymentEntry('openai', true, true), registryEntry('anthropic')]))
+    render(<ServerProvidersCard />)
+
+    // The row owns the key action — the admin uses Store API key, not add
+    expect(await screen.findByRole('button', { name: 'Store openai API key' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh openai models' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
+  })
+
+  it('does not offer a catalog provider that is a row because of its models', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      { ...catalogEntry('openai', true, true), models: [{ id: 'gpt-4o', name: 'GPT-4o', included: true, free: false }] },
+      registryEntry('anthropic'),
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('openai')
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
+  })
+
+  it('offers only the providers that have no row', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      providersState()[0], // gemini, stored key
+      deploymentEntry('openai', true, true), // openai on deployment credentials
+      { ...catalogEntry('cerebras', true), models: [{ id: 'llama-x', included: false, free: false }] },
+      registryEntry('google'),
+      registryEntry('openrouter'),
+      registryEntry('amazon-bedrock'),
+      registryEntry('ant-ling'),
+    ]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await screen.findByRole('option', { name: 'google' })
+    for (const unconfigured of ['google', 'openrouter', 'amazon-bedrock', 'ant-ling']) {
+      expect(screen.getByRole('option', { name: unconfigured })).toBeInTheDocument()
+    }
+    for (const row of ['gemini', 'openai', 'cerebras']) {
+      expect(screen.queryByRole('option', { name: row })).not.toBeInTheDocument()
+    }
+    expect(screen.getAllByRole('option')).toHaveLength(4)
+  })
+})
+
 describe('ServerProvidersCard deployment-credential controls', () => {
   it('refreshes models on a keyless provider when the backend allows it', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([catalogEntry('gemini', true, true)]))
+    get.mockResolvedValue(listResult([deploymentEntry('gemini', true, true)]))
     post.mockResolvedValue({ ok: true, status: 'supported', model_count: 2 } as never)
     render(<ServerProvidersCard />)
 
@@ -501,46 +684,122 @@ describe('ServerProvidersCard deployment-credential controls', () => {
   })
 
   it('hides Refresh models on a keyless provider the backend marks non-refreshable', async () => {
-    get.mockResolvedValue(listResult([catalogEntry('gemini', true, false)]))
+    get.mockResolvedValue(listResult([deploymentEntry('gemini', true, false)]))
     render(<ServerProvidersCard />)
 
     expect(await screen.findByText('Deployment credentials')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Refresh .* models/ })).not.toBeInTheDocument()
   })
 
-  it('preselects a deployment-credential provider in the add form from Store API key', async () => {
+  it('opens the store dialog with an empty model field and a closed picker (#378)', async () => {
     const user = userEvent.setup()
-    get.mockResolvedValue(listResult([
-      catalogEntry('openai', true),
-      { provider: 'gemini', has_key: true, verified: true, supports_key: true, models: [] },
-    ]))
+    get.mockResolvedValue(listResult(keyDialogState()))
     render(<ServerProvidersCard />)
 
-    expect(await screen.findByText('Deployment credentials')).toBeInTheDocument()
-    const store = screen.getByRole('button', { name: 'Store openai API key' })
-    expect(store).toHaveTextContent('Store API key')
-    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveValue('')
+    const dialog = await openStoreDialog(user)
+    const modelField = within(dialog).getByRole('combobox', { name: 'Verification model' })
+    // No default model and nothing autofocused the combobox, so the
+    // focus-triggered dropdown is not already open.
+    expect(modelField).toHaveValue('')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(screen.queryByRole('option')).not.toBeInTheDocument()
+
+    const store = within(dialog).getByRole('button', { name: 'Store key' })
+    expect(store).toBeDisabled()
+    await user.type(modelField, 'gpt-4o')
+    expect(store).toBeEnabled()
 
     await user.click(store)
-    // Same Test→Add form, now pointed at the row's provider
-    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveValue('openai')
-    expect(screen.getByRole('button', { name: '+ Add provider' })).toBeDisabled()
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
-    expect(post).not.toHaveBeenCalled()
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/admin/server-providers/openai/store-deployment-key',
+        { verification_model: 'gpt-4o' },
+      ),
+    )
+    // Nothing pasted: the body carries the model only
+    expect(Object.keys(post.mock.calls[0][1] as object)).toEqual(['verification_model'])
+    // Success closes the dialog, refreshes the list and reports the notice
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(await screen.findByRole('status')).toHaveTextContent('openai deployment credential stored.')
+    expect(resetProviderCatalogCache).toHaveBeenCalled()
+    expect(get).toHaveBeenCalledTimes(2)
   })
 
-  it('offers Store API key for a deployment provider outside the live catalog', async () => {
+  it('keeps the store dialog open with the server message when nothing is stored (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult(keyDialogState()))
+    post.mockResolvedValueOnce({
+      ok: false,
+      outcome: 'rejected',
+      message: 'Check the selected model; nothing was stored.',
+    } as never)
+    render(<ServerProvidersCard />)
+
+    const dialog = await openStoreDialog(user)
+    await user.type(within(dialog).getByRole('combobox', { name: 'Verification model' }), 'wrong-model')
+    await user.click(within(dialog).getByRole('button', { name: 'Store key' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('nothing was stored')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the store dialog open with the server detail on a 404/409 (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult(keyDialogState()))
+    post.mockRejectedValueOnce(new ApiError(409, 'Conflict', {
+      detail: "Provider 'openai' already has a stored key; use rotate-key",
+    }) as never)
+    render(<ServerProvidersCard />)
+
+    const dialog = await openStoreDialog(user)
+    await user.type(within(dialog).getByRole('combobox', { name: 'Verification model' }), 'gpt-4o')
+    await user.click(within(dialog).getByRole('button', { name: 'Store key' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('already has a stored key')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('stores the deployment credential of a provider outside the live catalog (#378)', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
-      { provider: 'vertex-claude', has_key: false, verified: false, supports_key: true, can_refresh_models: true, models: [] },
+      { provider: 'vertex-claude', has_key: false, verified: false, supports_key: true, can_refresh_models: true, key_scoped_source: 'deployment', models: [] },
     ]))
     render(<ServerProvidersCard />)
 
-    await user.click(await screen.findByRole('button', { name: 'Store vertex-claude API key' }))
-    // The picker still holds the provider as a real (selectable) option
-    expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveValue('vertex-claude')
-    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
-    expect(await screen.findByRole('option', { name: 'vertex-claude' })).toBeInTheDocument()
+    // The dialog is bound to the row's provider — no provider picker needed
+    const dialog = await openStoreDialog(user, 'vertex-claude')
+    expect(within(dialog).queryByRole('combobox', { name: 'Provider' })).not.toBeInTheDocument()
+    await user.type(within(dialog).getByRole('combobox', { name: 'Verification model' }), 'claude-x')
+    await user.click(within(dialog).getByRole('button', { name: 'Store key' }))
+
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/admin/server-providers/vertex-claude/store-deployment-key',
+        { verification_model: 'claude-x' },
+      ),
+    )
+  })
+
+  it('hints Store API key with what it promotes (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([deploymentEntry('openai', true, true)]))
+    render(<ServerProvidersCard />)
+
+    await user.hover(await screen.findByRole('button', { name: 'Store openai API key' }))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Promotes the deployment credential')
+  })
+
+  it('leaves Refresh models without a tooltip (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([deploymentEntry('openai', true, true)]))
+    render(<ServerProvidersCard />)
+
+    await user.hover(await screen.findByRole('button', { name: 'Refresh openai models' }))
+    // Longer than the row's tooltip delay — nothing should appear
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
   it('keeps each keyed-row control exactly once and offers no Store API key', async () => {
@@ -550,19 +809,17 @@ describe('ServerProvidersCard deployment-credential controls', () => {
     expect(await screen.findByText('Verified')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Refresh gemini models' })).toHaveLength(1)
-    expect(screen.getAllByRole('button', { name: 'Rotate gemini key' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Edit gemini key' })).toHaveLength(1)
     expect(screen.getAllByRole('button', { name: 'Remove gemini' })).toHaveLength(1)
   })
 
   it('shows neither Store nor key controls on a provider without key support', async () => {
-    get.mockResolvedValue(listResult([
-      { provider: 'vertex-claude', has_key: false, verified: false, supports_key: false, models: [] },
-    ]))
+    get.mockResolvedValue(listResult([deploymentEntry('vertex-claude', false)]))
     render(<ServerProvidersCard />)
 
     expect(await screen.findByText('Deployment credentials')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Rotate vertex-claude key' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit vertex-claude key' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove vertex-claude' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Refresh vertex-claude models' })).not.toBeInTheDocument()
   })
@@ -631,11 +888,12 @@ describe('ServerProvidersCard model multi-select', () => {
 
     // A rotation refetches the provider list → the draft is replaced from
     // the refreshed models
-    await user.click(await screen.findByRole('button', { name: 'Rotate gemini key' }))
-    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
-    await user.type(screen.getByLabelText('API key'), 'new-secret')
+    await user.click(await screen.findByRole('button', { name: 'Edit gemini key' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByRole('combobox', { name: 'Verification model' }), 'manual-model')
+    await user.type(within(dialog).getByLabelText('New API key'), 'new-secret')
     refetched = true
-    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Save key' }))
     expect(await screen.findByRole('status')).toHaveTextContent('API key verified and rotated.')
 
     put.mockRejectedValueOnce(new Error('save failed') as never)
@@ -773,7 +1031,7 @@ describe('ServerProvidersCard free pill', () => {
   })
 })
 
-describe('ServerProvidersCard remove and rotate', () => {
+describe('ServerProvidersCard remove and key dialogs', () => {
   it('confirms removal from loaded state before sending a single DELETE', async () => {
     const user = userEvent.setup()
     let removed = false
@@ -857,38 +1115,76 @@ describe('ServerProvidersCard remove and rotate', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 
-  it('rotates a key via the rotate-key endpoint with the provider in the body', async () => {
+  it('opens the edit dialog empty and posts the rotation body (#378)', async () => {
     const user = userEvent.setup()
     render(<ServerProvidersCard />)
-    await user.click(await screen.findByRole('button', { name: 'Rotate gemini key' }))
+    const dialog = await openEditDialog(user)
 
-    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
-    await user.type(screen.getByLabelText('API key'), 'new-secret')
-    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+    const modelField = within(dialog).getByRole('combobox', { name: 'Verification model' })
+    const keyField = within(dialog).getByLabelText('New API key')
+    const save = within(dialog).getByRole('button', { name: 'Save key' })
+    // No default model, no autofocused dropdown, no key carried over
+    expect(modelField).toHaveValue('')
+    expect(keyField).toHaveValue('')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(save).toBeDisabled()
+
+    await user.type(modelField, 'gemini-2.5-pro')
+    expect(save).toBeDisabled()
+    await user.type(keyField, 'new-secret')
+    expect(save).toBeEnabled()
+    await user.click(save)
 
     await waitFor(() =>
       expect(post).toHaveBeenCalledWith('/api/admin/server-providers/gemini/rotate-key', {
         provider: 'gemini',
         api_key: 'new-secret', // pragma: allowlist secret
-        verification_model: 'manual-model',
+        verification_model: 'gemini-2.5-pro',
       }),
     )
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(await screen.findByRole('status')).toHaveTextContent('API key verified and rotated.')
+    expect(get).toHaveBeenCalledTimes(2)
   })
 
-  it('reports an ok:false rotation without clearing the editing form', async () => {
+  it('reports an ok:false rotation without closing the dialog (#378)', async () => {
     const user = userEvent.setup()
     post.mockResolvedValueOnce({ ok: false, outcome: 'rejected' } as never)
     render(<ServerProvidersCard />)
-    await user.click(await screen.findByRole('button', { name: 'Rotate gemini key' }))
+    const dialog = await openEditDialog(user)
 
-    await user.type(screen.getByRole('combobox', { name: 'Verification model' }), 'manual-model')
-    await user.type(screen.getByLabelText('API key'), 'bad-secret')
-    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+    await user.type(within(dialog).getByRole('combobox', { name: 'Verification model' }), 'manual-model')
+    await user.type(within(dialog).getByLabelText('New API key'), 'bad-secret')
+    await user.click(within(dialog).getByRole('button', { name: 'Save key' }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Key rejected')
-    // Still editing: the rotate form is not closed on a rejected key
-    expect(screen.getByText('Rotate gemini key')).toBeInTheDocument()
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Key rejected')
+    // Still editing: the dialog stays open on a rejected key
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('reopens the edit dialog with an empty key field (#378)', async () => {
+    const user = userEvent.setup()
+    render(<ServerProvidersCard />)
+    const dialog = await openEditDialog(user)
+
+    await user.type(within(dialog).getByRole('combobox', { name: 'Verification model' }), 'manual-model')
+    await user.type(within(dialog).getByLabelText('New API key'), 'new-secret')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    const reopened = await openEditDialog(user)
+    expect(within(reopened).getByRole('combobox', { name: 'Verification model' })).toHaveValue('')
+    expect(within(reopened).getByLabelText('New API key')).toHaveValue('')
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument()
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  it('hints Edit key with what it does (#378)', async () => {
+    const user = userEvent.setup()
+    render(<ServerProvidersCard />)
+
+    await user.hover(await screen.findByRole('button', { name: 'Edit gemini key' }))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Replaces the stored API key')
   })
 })

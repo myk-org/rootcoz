@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ComponentProps, type FormEvent } from 'react'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { resetProviderCatalogCache, useProviderCatalog } from '@/lib/useProviderOptions'
 import { normalizeProvider } from '@/lib/aiProviders'
@@ -8,7 +8,8 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { ModelCombobox } from './ModelCombobox'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { ModelCombobox, type ModelOption } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
@@ -19,6 +20,15 @@ type ServerProviderListResult = { providers: ServerProvider[] }
 
 /** POST add/rotate-key — HTTP 200 with ok:false when the key is rejected. */
 type VerifyKeyResult = { ok: boolean; outcome?: string; message?: string }
+
+type KeyDialogMode = 'store' | 'edit'
+
+/** A row only exists for a provider actually in play: a stored key, a
+ * deployment-credential listing, or a model selection. Registry-only entries
+ * are listed so Find a provider can offer them, but must not render as rows. */
+function isProviderRow(item: ServerProvider): boolean {
+  return item.has_key || item.key_scoped_source === 'deployment' || (item.models?.length ?? 0) > 0
+}
 
 /** POST refresh-models — re-run of key-scoped discovery with the stored key. */
 type RefreshModelsResult = { ok: boolean; status: string; model_count: number }
@@ -43,12 +53,13 @@ export function ServerProvidersCard() {
   // Gate: "+ Add provider" stays disabled until the POST test passes. The
   // POST tests and adds server-side, so Add only finalizes the form.
   const [tested, setTested] = useState(false)
-  const [editing, setEditing] = useState<string | null>(null)
+  // Store/Edit key run in a dialog, so the model field starts empty and the
+  // picker stays closed instead of inheriting form state.
+  const [keyDialog, setKeyDialog] = useState<{ provider: string; mode: KeyDialogMode } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [removeTarget, setRemoveTarget] = useState<{ provider: string; warning: RemoveWarning } | null>(null)
-  const formRef = useRef<HTMLFormElement>(null)
   const { providers: catalog, originalIds } = useProviderCatalog()
 
   function refreshProviders(): Promise<ServerProvider[] | null> {
@@ -75,55 +86,52 @@ export function ServerProvidersCard() {
     setError('')
   }
 
-  // GET lists every catalog provider; keyless entries run on deployment
-  // credentials (env keys, gcloud/Vertex mount) and keep model + free
-  // management without key controls.
+  // GET lists every catalog + registry provider; rows are filtered to the ones
+  // in play. Keyless entries that run on deployment credentials (env keys,
+  // gcloud/Vertex mount) keep model + free management without key controls.
   const listed = providers ?? []
-  const added = new Set(listed.filter((item) => item.has_key).map((item) => normalizeProvider(item.provider)))
+  const rows = listed.filter(isProviderRow)
+  // A provider already shown as a row is managed from that row (Store/Edit
+  // key, Models) — offering it in Find a provider would duplicate the path.
+  const added = new Set(rows.map((item) => normalizeProvider(item.provider)))
   // Only providers the server accepts keys for are offered — ambient/
   // deployment-credential providers would just 400 on key verification.
   const keySupported = new Set(listed.filter((item) => item.supports_key).map((item) => normalizeProvider(item.provider)))
   // The catalog hook folds keys for lookups; submissions must use the
-  // exact-case ID the backend's supported-provider check expects.
-  // Deployment-credential providers that accept a key stay pickable even when
-  // the live catalog does not list them — "Store API key" preselects them.
-  const addable = [
-    ...Object.keys(catalog)
-      .filter((id) => !added.has(id) && keySupported.has(id))
-      .map((id) => originalIds[id] ?? id),
-    ...listed
-      .filter((item) => !item.has_key && item.supports_key && !(normalizeProvider(item.provider) in catalog))
-      .map((item) => item.provider),
-  ]
-  const provider = editing ?? selected
+  // exact-case ID the backend's supported-provider check expects. The
+  // listing now carries registry-only providers (models: []), so the union of
+  // catalog and listing is what the admin can add a key for: catalog order
+  // first, then the remaining listed providers alphabetically. Folded-key
+  // de-duplication keeps a provider present in both sources once.
+  const candidates = new Map<string, string>(
+    Object.keys(catalog).map((id) => [id, originalIds[id] ?? id]),
+  )
+  for (const id of listed.map((item) => item.provider).sort((a, b) => normalizeProvider(a).localeCompare(normalizeProvider(b)))) {
+    const folded = normalizeProvider(id)
+    if (!candidates.has(folded)) candidates.set(folded, id)
+  }
+  const addable = [...candidates]
+    .filter(([folded]) => !added.has(folded) && keySupported.has(folded))
+    .map(([, id]) => id)
 
-  // Preselect the row's provider in the add form; the Test→Add flow is the
-  // same one a manually picked provider uses.
-  function startStoreKey(providerId: string) {
-    clearKey()
-    setModel('')
-    setTested(false)
-    setEditing(null)
+  // Both key actions open a dialog with an empty model field — nothing is
+  // preselected on the admin's behalf.
+  function openKeyDialog(providerId: string, mode: KeyDialogMode) {
     setError('')
     setNotice('')
-    setSelected(providerId)
-    formRef.current?.scrollIntoView({ block: 'nearest' })
+    setKeyDialog({ provider: providerId, mode })
   }
 
   async function runTest() {
     const value = keyRef.current
-    if (!provider || !value.trim() || !model.trim() || busy) return
+    if (!selected || !value.trim() || !model.trim() || busy) return
     clearKey()
-    setBusy(provider)
+    setBusy(selected)
     setError('')
     setNotice('')
     try {
-      const res = editing
-        ? await api.post<VerifyKeyResult>(
-            `/api/admin/server-providers/${encodeURIComponent(editing)}/rotate-key`,
-            { provider: editing, api_key: value, verification_model: model.trim() })
-        : await api.post<VerifyKeyResult>('/api/admin/server-providers',
-            { provider: selected, api_key: value, verification_model: model.trim() })
+      const res = await api.post<VerifyKeyResult>('/api/admin/server-providers',
+        { provider: selected, api_key: value, verification_model: model.trim() })
       // The backend reports rejected/inconclusive keys as HTTP 200 ok:false.
       if (!res.ok) {
         setTested(false)
@@ -132,15 +140,8 @@ export function ServerProvidersCard() {
       }
       resetProviderCatalogCache()
       await refreshProviders()
-      if (editing) {
-        setEditing(null)
-        setSelected('')
-        setModel('')
-        setNotice('API key verified and rotated.')
-      } else {
-        setTested(true)
-        setNotice('Provider verified — add it to finish.')
-      }
+      setTested(true)
+      setNotice('Provider verified — add it to finish.')
     } catch (err) {
       setTested(false)
       setError(extractApiDetail(err) ?? 'Provider verification failed; nothing was added.')
@@ -199,7 +200,6 @@ export function ServerProvidersCard() {
   async function afterRemoved(providerId: string) {
     resetProviderCatalogCache()
     await refreshProviders()
-    if (editing === providerId) setEditing(null)
     setNotice(`${providerId} removed.`)
   }
 
@@ -249,10 +249,10 @@ export function ServerProvidersCard() {
         </div>
         {error && <p role="alert" className="text-xs text-signal-red">{error}</p>}
         {notice && <p role="status" className="text-xs text-signal-green">{notice}</p>}
-        {providers !== null && listed.length === 0 && <p className="text-sm text-text-tertiary">No server providers configured.</p>}
-        {listed.length > 0 && (
+        {providers !== null && rows.length === 0 && <p className="text-sm text-text-tertiary">No server providers configured.</p>}
+        {rows.length > 0 && (
           <ul aria-label="Configured server providers" className="divide-y divide-border-muted border-t border-border-muted">
-            {listed.map((item) => {
+            {rows.map((item) => {
               // has_key implies a stored key the backend can always refresh
               // with; older servers omit can_refresh_models on keyless rows.
               const canRefresh = item.can_refresh_models ?? item.has_key
@@ -261,13 +261,13 @@ export function ServerProvidersCard() {
               )
               return (
                 <li key={item.provider} className="space-y-2 py-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="mr-auto flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm text-text-primary break-all">{item.provider}</span>
-                      {item.key_scoped_source === 'deployment' && (
-                        // No key is stored for this provider (has_key stays false);
-                        // the listing comes from the deployment's own credential.
-                        <TooltipProvider delayDuration={200}>
+                  <TooltipProvider delayDuration={200}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="mr-auto flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-sm text-text-primary break-all">{item.provider}</span>
+                        {item.key_scoped_source === 'deployment' && (
+                          // No key is stored for this provider (has_key stays false);
+                          // the listing comes from the deployment's own credential.
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Badge variant="outline">Listing from deployment credential</Badge>
@@ -276,72 +276,65 @@ export function ServerProvidersCard() {
                               Model list is verified live against the deployment-provided key — no key is stored here.
                             </TooltipContent>
                           </Tooltip>
-                        </TooltipProvider>
+                        )}
+                      </span>
+                      {item.has_key ? (
+                        <>
+                          <Badge variant={item.verified ? 'success' : 'warning'}>{item.verified ? 'Verified' : 'Unverified'}</Badge>
+                          {item.key_scoped ? (
+                            <>
+                              <Badge variant="outline" title="Model selection is restricted to what the stored key can access">Key-scoped</Badge>
+                              {item.key_scoped_status === 'unavailable' && (
+                                // A failed refresh kept the snapshot (#350 r3) —
+                                // surface the failure even though rows exist.
+                                <span
+                                  className="text-xs text-text-tertiary"
+                                  title="Model listing failed — showing the last captured list; try Refresh models"
+                                >
+                                  listing failed — showing last capture
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <span
+                              className="text-xs text-text-tertiary"
+                              title={item.key_scoped_status === 'unavailable'
+                                ? 'Model listing failed — try Refresh models; until then selection uses the static catalog'
+                                : 'Model listing unavailable for this key — selection uses the static catalog; try Refresh models'}
+                            >
+                              {item.key_scoped_status === 'unavailable' ? 'listing failed' : 'static catalog'}
+                            </span>
+                          )}
+                          {canRefresh && refreshButton}
+                          <HintButton variant="outline" size="sm" disabled={busy !== null} onClick={() => openKeyDialog(item.provider, 'edit')} aria-label={`Edit ${item.provider} key`} hint="Replaces the stored API key for this provider; the new key is verified before it is stored.">Edit key</HintButton>
+                          <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => requestRemove(item.provider)} aria-label={`Remove ${item.provider}`}>Remove</Button>
+                        </>
+                      ) : (
+                        <>
+                          {item.key_scoped_source === 'deployment' && <Badge variant="outline">Deployment credentials</Badge>}
+                          {canRefresh && refreshButton}
+                          {item.supports_key && item.key_scoped_source === 'deployment' && (
+                            <HintButton variant="outline" size="sm" disabled={busy !== null} onClick={() => openKeyDialog(item.provider, 'store')} aria-label={`Store ${item.provider} API key`} hint="Promotes the deployment credential into RootCoz's encrypted store — pick a model to verify it; nothing is typed.">Store API key</HintButton>
+                          )}
+                        </>
                       )}
-                    </span>
-                    {item.has_key ? (
-                      <>
-                        <Badge variant={item.verified ? 'success' : 'warning'}>{item.verified ? 'Verified' : 'Unverified'}</Badge>
-                        {item.key_scoped ? (
-                          <>
-                            <Badge variant="outline" title="Model selection is restricted to what the stored key can access">Key-scoped</Badge>
-                            {item.key_scoped_status === 'unavailable' && (
-                              // A failed refresh kept the snapshot (#350 r3) —
-                              // surface the failure even though rows exist.
-                              <span
-                                className="text-xs text-text-tertiary"
-                                title="Model listing failed — showing the last captured list; try Refresh models"
-                              >
-                                listing failed — showing last capture
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          <span
-                            className="text-xs text-text-tertiary"
-                            title={item.key_scoped_status === 'unavailable'
-                              ? 'Model listing failed — try Refresh models; until then selection uses the static catalog'
-                              : 'Model listing unavailable for this key — selection uses the static catalog; try Refresh models'}
-                          >
-                            {item.key_scoped_status === 'unavailable' ? 'listing failed' : 'static catalog'}
-                          </span>
-                        )}
-                        {canRefresh && refreshButton}
-                        <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setSelected(''); setModel(''); setTested(false); setEditing(item.provider); setError('') }} aria-label={`Rotate ${item.provider} key`}>Rotate key</Button>
-                        <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => requestRemove(item.provider)} aria-label={`Remove ${item.provider}`}>Remove</Button>
-                      </>
-                    ) : (
-                      <>
-                        <Badge variant="outline">Deployment credentials</Badge>
-                        {canRefresh && refreshButton}
-                        {item.supports_key && (
-                          <Button variant="outline" size="sm" disabled={busy !== null} onClick={() => startStoreKey(item.provider)} aria-label={`Store ${item.provider} API key`}>Store API key</Button>
-                        )}
-                      </>
-                    )}
-                  </div>
+                    </div>
+                  </TooltipProvider>
                   <ProviderModels provider={item.provider} models={item.models} />
                 </li>
               )
             })}
           </ul>
         )}
-        {(addable.length > 0 || editing) && (
-          <form ref={formRef} onSubmit={(event) => { event.preventDefault(); finishAdd() }} className="space-y-3 border-t border-border-muted pt-4">
-            {editing ? (
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm text-text-primary">Rotate {editing} key</span>
-                <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => { clearKey(); setModel(''); setTested(false); setEditing(null); setError('') }}>Cancel</Button>
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                <span className="block text-xs text-text-tertiary">AI provider</span>
-                <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); invalidateTest(); setSelected(value) }} options={addable.map((id) => ({ id, name: id }))} placeholder="Find a provider" ariaLabel="Provider" disabled={busy !== null} />
-              </div>
-            )}
+        {(addable.length > 0) && (
+          <form onSubmit={(event) => { event.preventDefault(); finishAdd() }} className="space-y-3 border-t border-border-muted pt-4">
+            <div className="space-y-1.5">
+              <span className="block text-xs text-text-tertiary">AI provider</span>
+              <ModelCombobox value={selected} onChange={(value) => { clearKey(); setModel(''); invalidateTest(); setSelected(value) }} options={addable.map((id) => ({ id, name: id }))} placeholder="Find a provider" ariaLabel="Provider" disabled={busy !== null} />
+            </div>
             <div className="space-y-1.5">
               <span className="block text-xs text-text-tertiary">Model to verify against</span>
-              <ModelCombobox value={model} onChange={(value) => { setModel(value); invalidateTest() }} options={catalog[normalizeProvider(provider ?? '')] ?? []} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !provider} />
+              <ModelCombobox value={model} onChange={(value) => { setModel(value); invalidateTest() }} options={catalog[normalizeProvider(selected)] ?? []} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !selected} />
               <p className="text-xs text-text-tertiary">If the model isn&apos;t listed, enter its ID manually.</p>
             </div>
             <div className="flex gap-2">
@@ -353,14 +346,26 @@ export function ServerProvidersCard() {
                 value={key}
                 disabled={busy !== null}
                 onChange={(event) => { keyRef.current = event.target.value; setKey(event.target.value); invalidateTest() }}
-                placeholder={editing ? 'New API key' : 'Enter API key'}
+                placeholder="Enter API key"
               />
-              <Button type="button" size="sm" disabled={busy !== null || !provider || !model.trim() || !key.trim()} onClick={runTest}>{busy ? 'Testing…' : 'Test provider'}</Button>
-              {!editing && (
-                <Button type="submit" size="sm" disabled={busy !== null || !tested}>+ Add provider</Button>
-              )}
+              <Button type="button" size="sm" disabled={busy !== null || !selected || !model.trim() || !key.trim()} onClick={runTest}>{busy ? 'Testing…' : 'Test provider'}</Button>
+              <Button type="submit" size="sm" disabled={busy !== null || !tested}>+ Add provider</Button>
             </div>
           </form>
+        )}
+        {keyDialog && (
+          <ProviderKeyDialog
+            provider={keyDialog.provider}
+            mode={keyDialog.mode}
+            models={catalog[normalizeProvider(keyDialog.provider)] ?? []}
+            onClose={() => setKeyDialog(null)}
+            onStored={(message) => {
+              setKeyDialog(null)
+              setNotice(message)
+              resetProviderCatalogCache()
+              refreshProviders()
+            }}
+          />
         )}
         <ConfirmDialog
           open={removeTarget !== null}
@@ -537,5 +542,125 @@ function ProviderModels({ provider, models }: { provider: string; models: Server
       {notice && <span role="status" className="text-xs text-signal-green">{notice}</span>}
       {error && <span role="alert" className="text-xs text-signal-red">{error}</span>}
     </div>
+  )
+}
+
+/**
+ * Row action button with a hover hint. shadcn tooltip, never a native title:
+ * the row already uses tooltips for its badges.
+ */
+function HintButton({ hint, ...props }: { hint: string } & ComponentProps<typeof Button>) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button {...props} />
+      </TooltipTrigger>
+      <TooltipContent>{hint}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/**
+ * Store / Edit key dialog for one server provider (#378).
+ *
+ * The parent mounts it only while open, so the model field starts empty and
+ * the picker starts closed on every open — nothing is defaulted to the first
+ * model, and no key survives a close/reopen. The dialog content takes the
+ * initial focus instead of the combobox: ModelCombobox opens its list on
+ * focus, so an autofocused input would pop the dropdown before the admin
+ * touched anything.
+ */
+function ProviderKeyDialog({ provider, mode, models, onClose, onStored }: {
+  provider: string
+  mode: KeyDialogMode
+  models: ModelOption[]
+  onClose: () => void
+  onStored: (notice: string) => void
+}) {
+  const [model, setModel] = useState('')
+  const [apiKey, setApiKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const contentRef = useRef<HTMLDivElement>(null)
+  const editing = mode === 'edit'
+  const canSubmit = model.trim() !== '' && (!editing || apiKey.trim() !== '')
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (busy || !canSubmit) return
+    setBusy(true)
+    setError('')
+    try {
+      // Store carries no key at all — the server promotes the credential the
+      // deployment already resolves. Rotate takes the newly typed one.
+      const res = editing
+        ? await api.post<VerifyKeyResult>(
+            `/api/admin/server-providers/${encodeURIComponent(provider)}/rotate-key`,
+            { provider, api_key: apiKey, verification_model: model.trim() })
+        : await api.post<VerifyKeyResult>(
+            `/api/admin/server-providers/${encodeURIComponent(provider)}/store-deployment-key`,
+            { verification_model: model.trim() })
+      // Rejected/inconclusive verification is HTTP 200 ok:false — keep the
+      // dialog open with the server's message so the admin can fix the model.
+      if (!res.ok) {
+        setError(res.message ?? `Key ${res.outcome ?? 'rejected'}`)
+        return
+      }
+      onStored(editing ? 'API key verified and rotated.' : `${provider} deployment credential stored.`)
+    } catch (err) {
+      // 404 (no deployment credential) and 409 (key already stored) carry the
+      // server's explanation; anything else is a plain retry.
+      setError(extractApiDetail(err)
+        ?? (editing ? 'Could not update the API key' : 'Could not store the deployment credential'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent
+        ref={contentRef}
+        tabIndex={-1}
+        onOpenAutoFocus={(event) => { event.preventDefault(); contentRef.current?.focus() }}
+      >
+        <DialogHeader>
+          <DialogTitle>{editing ? `Edit ${provider} key` : `Store ${provider} API key`}</DialogTitle>
+          <DialogDescription>
+            {editing
+              ? 'Replaces the stored API key for this provider. The new key is verified with a real sidecar turn before it is stored.'
+              : 'Promotes the deployment credential RootCoz already resolves for this provider into its encrypted store — nothing is pasted. Pick a model to verify it against; the model must be one the credential actually reaches.'}
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-3">
+          <div className="space-y-1.5">
+            <span className="block text-xs text-text-tertiary">Model to verify against</span>
+            <ModelCombobox value={model} onChange={setModel} options={models} placeholder="Select or type a model ID" ariaLabel="Verification model" disabled={busy} />
+            <p className="text-xs text-text-tertiary">If the model isn&apos;t listed, enter its ID manually.</p>
+          </div>
+          {editing && (
+            <div className="space-y-1.5">
+              <label htmlFor="server-provider-new-key" className="block text-xs text-text-tertiary">New API key</label>
+              <Input
+                id="server-provider-new-key"
+                type="password"
+                autoComplete="new-password"
+                value={apiKey}
+                disabled={busy}
+                onChange={(event) => setApiKey(event.target.value)}
+                placeholder="New API key"
+              />
+            </div>
+          )}
+          {error && <p role="alert" className="text-xs text-signal-red">{error}</p>}
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+            <Button type="submit" disabled={busy || !canSubmit}>
+              {busy ? 'Verifying…' : editing ? 'Save key' : 'Store key'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }

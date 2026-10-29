@@ -1590,6 +1590,18 @@ class ServerProviderKeyInput(BaseModel):
     verification_model: Annotated[str, Strict(), StringConstraints(min_length=1)]
 
 
+class StoreDeploymentProviderKeyRequest(BaseModel):
+    """Admin store-deployment-key body (#378).
+
+    Carries no key: the credential is the one the deployment already resolves
+    (manifest ``"$VAR"`` or an ambient ``<PROVIDER_ID>_API_KEY``), promoted
+    into the encrypted store server-side. Only the verification model is the
+    caller's choice.
+    """
+
+    verification_model: Annotated[str, Strict(), StringConstraints(min_length=1)]
+
+
 # Which credential a provider's key-scoped model listing was captured with
 # (#372): the stored server key, or the deployment env's env-referenced
 # models.json key. ``None`` means no key-scoped listing was captured.

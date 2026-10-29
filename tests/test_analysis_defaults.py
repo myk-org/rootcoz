@@ -201,6 +201,9 @@ class TestDefaultServerSettingsResponse:
             "smtp_host",
             "sidecar_host",
             "sidecar_url",
+            # #378: an operator detail (which providers may touch user keys),
+            # not a per-analysis default — no UI row, no defaults payload.
+            "ambient_auth_providers",
         }
         for field in server_only_fields:
             assert field not in data, f"Server-only field '{field}' found in response"
