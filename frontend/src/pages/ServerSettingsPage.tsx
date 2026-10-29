@@ -1196,12 +1196,14 @@ export function ServerSettingsPage() {
                       notConfiguredLabel="Not configured (uses AI_MODEL env var)"
                     >
                       <div className="flex items-center gap-2">
+                        {/* Grows with the row so ~40-char model ids are readable;
+                            the refresh button beside it keeps its own size. */}
                         <ModelCombobox
                           value={aiModelValue}
                           onChange={setAiModelValue}
                           options={aiModels}
                           placeholder="Select model..."
-                          className="max-w-md"
+                          className="min-w-0 flex-1 max-w-3xl"
                         />
                         <Tooltip>
                           <TooltipTrigger asChild>

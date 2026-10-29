@@ -45,7 +45,7 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: Model[] }
 
 function providersState(): Provider[] {
   return [
@@ -242,6 +242,76 @@ describe('ServerProvidersCard provider list', () => {
     await user.click(screen.getByRole('combobox', { name: 'Provider' }))
     expect(await screen.findByRole('option', { name: 'gemini' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
+  })
+
+  it('hints the deployment-credential listing source without implying a stored key', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([
+      { provider: 'EnMaaS', has_key: false, verified: false, supports_key: false, key_scoped_source: 'deployment', models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    const hint = await screen.findByText('Listing from deployment credential')
+    // has_key is false for deployment credentials — no verified/stored-key state
+    expect(screen.getByText('Deployment credentials')).toBeInTheDocument()
+    expect(screen.queryByText('Verified')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rotate EnMaaS key' })).not.toBeInTheDocument()
+
+    await user.hover(hint)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(
+      'Model list is verified live against the deployment-provided key — no key is stored here.',
+    )
+  })
+
+  it('shows the deployment hint only for the deployment listing source', async () => {
+    get.mockResolvedValue(listResult([
+      { ...providersState()[0], key_scoped_source: 'stored' },
+      { provider: 'openai', has_key: true, verified: true, supports_key: true, key_scoped_source: null, models: [] },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('gemini')
+    expect(screen.queryByText('Listing from deployment credential')).not.toBeInTheDocument()
+  })
+
+  it('keeps the unavailable-listing warning alongside a stored listing source', async () => {
+    get.mockResolvedValue(listResult([
+      {
+        ...providersState()[0],
+        key_scoped: true,
+        key_scoped_status: 'unavailable',
+        key_scoped_source: 'stored',
+      },
+    ]))
+    render(<ServerProvidersCard />)
+
+    await screen.findByText('gemini')
+    expect(screen.getByText('Key-scoped')).toBeInTheDocument()
+    expect(screen.getByText('listing failed — showing last capture')).toBeInTheDocument()
+    expect(screen.queryByText('Listing from deployment credential')).not.toBeInTheDocument()
+  })
+
+  it('renders every model of a full deployment listing (#372: 23 for EnMaaS)', async () => {
+    const user = userEvent.setup()
+    const models = Array.from({ length: 23 }, (_, i) => ({
+      id: `enmaas-model-${i + 1}`,
+      name: `EnMaaS Model ${i + 1}`,
+      included: true,
+      free: false,
+    }))
+    get.mockResolvedValue(listResult([
+      { provider: 'EnMaaS', has_key: false, verified: false, supports_key: false, key_scoped_source: 'deployment', models },
+    ]))
+    render(<ServerProvidersCard />)
+
+    expect(await screen.findByRole('button', { name: 'EnMaaS models' })).toHaveTextContent('Models (23 of 23)')
+    await user.click(screen.getByRole('button', { name: 'EnMaaS models' }))
+    await screen.findByRole('checkbox', { name: 'Select all' })
+
+    // Select all + one checkbox per model — no slicing anywhere
+    expect(screen.getAllByRole('checkbox')).toHaveLength(24)
+    expect(screen.getByRole('checkbox', { name: 'enmaas-model-1' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'enmaas-model-23' })).toBeInTheDocument()
   })
 
   it('badges a key-scoped provider and hints the static-catalog fallback otherwise (#350)', async () => {

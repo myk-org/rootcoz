@@ -446,6 +446,10 @@ By default the sidecar refuses to send a user's request-scoped key to any host t
 
 For a flagged provider, the listing response is the union of the live gateway listing and the manifest-configured `models[]` — admin-declared models appear even when the gateway's `/models` endpoint does not list them. When the native listing fails, the flag has no effect.
 
+RootCoz reuses the flag for the **server** credential pool. When the manifest `apiKey` is an environment reference (`"$VAR"` / `"${VAR}"`), RootCoz resolves the variable from its own process environment (the sidecar's container) and captures the provider's key-scoped listing at startup, when an admin opens Server Settings → Server providers (at most once every five minutes), and on a forced model refresh. That listing becomes the provider's offered model set — the same effect a stored key has — with **no stored server key needed**: the credential stays in the deployment env, is never written to the database, and never appears in a log line or API response. A failed or unsupported re-capture leaves the last captured listing in place, so a sidecar hiccup never reverts the offered models to the static manifest.
+
+In `GET /api/admin/server-providers`, `key_scoped_source` says which credential produced the listing: `"deployment"` for an env-referenced manifest key, `"stored"` for a key added in the UI, and `null` when no key-scoped listing was captured. `has_key` stays `false` for the deployment case because nothing is stored. `Refresh models` on such a provider re-runs the listing with the deployment key, exactly as it does with a stored one. A literal (non-env) `apiKey`, an unflagged provider, or an unset variable produces no capture at all.
+
 #### Adding a custom provider
 
 An end-to-end walkthrough for registering a custom provider behind an OpenAI-compatible gateway. The `models.json` below registers the provider, wires its credential to an environment variable, and opts it into key-scoped listing in one snippet:
