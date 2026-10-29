@@ -51,23 +51,36 @@ _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = Context
 
 
 def _provider_registry_entries(payload: object) -> list[Mapping[str, Any]] | None:
-    """Sidecar ``/providers`` entries that carry a usable provider ID.
+    """Sidecar ``/providers`` entries that carry a usable provider ID, or ``None``.
 
-    Returns None when the payload is not a list (unusable response, caller must
-    treat registration as unknown). Individually malformed entries — non-mapping
-    items, or a missing/empty/non-string ``provider`` — are dropped so one bad
-    entry cannot fail the whole lookup.
+    Fails closed: a payload that is not a list, or a list holding *any*
+    malformed entry (non-mapping, or a missing/empty/non-string ``provider``),
+    returns None — registration is unknown, never a filtered subset of the
+    valid entries. A subset would make an omitted provider look unregistered,
+    and credential rotation would then delete a case-variant provider's stored
+    key and drop its sessions. Only a fully valid list returns its entries.
+
+    The warning names no entry contents: malformed entries are counted, and
+    only valid provider IDs are listed.
     """
     if not isinstance(payload, list):
         logger.warning("Sidecar provider registry payload is not a list")
         return None
-    return [
+    entries = [
         entry
         for entry in payload
         if isinstance(entry, Mapping)
         and isinstance(entry.get("provider"), str)
         and entry["provider"]
     ]
+    if len(entries) != len(payload):
+        logger.warning(
+            "Sidecar provider registry has %d malformed entries; usable providers=%s",
+            len(payload) - len(entries),
+            sorted({entry["provider"] for entry in entries}),
+        )
+        return None
+    return entries
 
 
 async def _discover_session_key_providers() -> list[str] | None:
@@ -646,9 +659,11 @@ async def registered_provider_ids() -> set[str] | None:
     and treating it as unregistered would wrongly consolidate a case-distinct
     credential. Credential rotation uses this to decide whether a case-variant
     spelling is a registered, distinct provider (keep the credentials separate)
-    or a drifted spelling of the same one (consolidate). A failed lookup
-    returns None — the caller must treat unknown registration as "keep
-    separate", never as evidence that a spelling is unregistered.
+    or a drifted spelling of the same one (consolidate). Fails closed: a failed
+    lookup, or a registry payload with any malformed entry, returns None —
+    registration is unknown, never a confirmed partial set. The caller must
+    treat unknown registration as "keep separate", never as evidence that a
+    spelling is unregistered.
     """
     try:
         providers = await get_sidecar_client().get_providers()

@@ -500,10 +500,14 @@ async def test_registered_provider_ids_unavailable_returns_none(
 
 
 @pytest.mark.asyncio
-async def test_registered_provider_ids_filters_malformed_entries(
+async def test_registered_provider_ids_malformed_entry_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One malformed entry must not fail the lookup for the valid ones."""
+    """Any malformed entry makes registration unknown, never a filtered subset.
+
+    A partial set reads an omitted provider as unregistered, and credential
+    rotation would then delete its stored key and drop its sessions.
+    """
 
     class FakeClient:
         async def get_providers(self):
@@ -517,7 +521,7 @@ async def test_registered_provider_ids_filters_malformed_entries(
             ]
 
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
-    assert await ai_client.registered_provider_ids() == {"Foo"}
+    assert await ai_client.registered_provider_ids() is None
 
 
 @pytest.mark.asyncio
