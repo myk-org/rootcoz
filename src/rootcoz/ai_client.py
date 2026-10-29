@@ -9,6 +9,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
@@ -48,6 +49,26 @@ _selected_key_generation: ContextVar[tuple[str, str, str, int] | None] = Context
 )
 
 
+def _provider_registry_entries(payload: object) -> list[Mapping[str, Any]] | None:
+    """Sidecar ``/providers`` entries that carry a usable provider ID.
+
+    Returns None when the payload is not a list (unusable response, caller must
+    treat registration as unknown). Individually malformed entries — non-mapping
+    items, or a missing/empty/non-string ``provider`` — are dropped so one bad
+    entry cannot fail the whole lookup.
+    """
+    if not isinstance(payload, list):
+        logger.warning("Sidecar provider registry payload is not a list")
+        return None
+    return [
+        entry
+        for entry in payload
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("provider"), str)
+        and entry["provider"]
+    ]
+
+
 async def _discover_session_key_providers() -> list[str] | None:
     """Sidecar key-capable providers minus the ambient set; ``None`` on failure.
 
@@ -60,6 +81,9 @@ async def _discover_session_key_providers() -> list[str] | None:
     except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
         logger.warning("Unable to discover session-key providers")
         return None
+    entries = _provider_registry_entries(providers)
+    if entries is None:
+        return None
     from rootcoz.config import get_settings
 
     ambient = {
@@ -70,9 +94,8 @@ async def _discover_session_key_providers() -> list[str] | None:
     return sorted(
         {
             entry["provider"]
-            for entry in providers
-            if isinstance(entry.get("provider"), str)
-            and entry.get("supportsSessionApiKey") is True
+            for entry in entries
+            if entry.get("supportsSessionApiKey") is True
         }
         - ambient
     )
@@ -607,14 +630,14 @@ async def registered_provider_ids() -> set[str] | None:
     """
     try:
         providers = await get_sidecar_client().get_providers()
-        return {
-            entry["provider"]
-            for entry in providers
-            if isinstance(entry.get("provider"), str)
-        }
     except httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError:
         logger.warning("Unable to list registered providers for credential update")
         return None
+    entries = _provider_registry_entries(providers)
+    if entries is None:
+        logger.warning("Unable to list registered providers: unusable payload")
+        return None
+    return {entry["provider"] for entry in entries}
 
 
 async def list_models(provider: str = "") -> list[dict[str, Any]]:

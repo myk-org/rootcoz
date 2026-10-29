@@ -12073,6 +12073,38 @@ class TestCursorProviderStatusGating:
         assert "provider_status" not in data
         probe.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        "registry_payload",
+        [
+            None,
+            "providers",
+            [None, "junk", {"provider": ""}, {"provider": 3}],
+            [None, "junk", {"provider": "EnMaaS"}],
+        ],
+    )
+    def test_refresh_survives_unusable_provider_registry(
+        self, test_client, monkeypatch, registry_payload: object
+    ) -> None:
+        """A malformed /providers payload cannot fail the whole refresh (200)."""
+        from rootcoz import ai_client
+
+        mock_models = [{"provider": "EnMaaS", "id": "m1", "name": "M1"}]
+        monkeypatch.setattr(
+            ai_client,
+            "get_sidecar_client",
+            lambda: SimpleNamespace(
+                get_providers=AsyncMock(return_value=registry_payload)
+            ),
+        )
+        with patch("pi_sidecar_client.get_sidecar_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.refresh_models.return_value = mock_models
+            mock_get_client.return_value = mock_client
+            response = test_client.post("/api/admin/ai-models/refresh")
+
+        assert response.status_code == 200
+        assert response.json()["models"] == mock_models
+
     @pytest.mark.parametrize("cursor_provider", ["cursor", "acpx-cursor"])
     @pytest.mark.asyncio
     async def test_refresh_reports_registered_cursor_with_zero_models(

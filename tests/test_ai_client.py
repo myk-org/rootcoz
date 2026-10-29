@@ -488,6 +488,42 @@ async def test_registered_provider_ids_unavailable_returns_none(
 
 
 @pytest.mark.asyncio
+async def test_registered_provider_ids_filters_malformed_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One malformed entry must not fail the lookup for the valid ones."""
+
+    class FakeClient:
+        async def get_providers(self):
+            return [
+                None,
+                "not-a-mapping",
+                {"provider": ""},
+                {"provider": 7},
+                "also-not-a-mapping",
+                {"provider": "Foo"},
+            ]
+
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
+    assert await ai_client.registered_provider_ids() == {"Foo"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["providers", {"provider": "Foo"}, None, 3])
+async def test_registered_provider_ids_non_list_payload_returns_none(
+    monkeypatch: pytest.MonkeyPatch, payload: object
+) -> None:
+    """A payload that is not a list is unknown registration, never a set."""
+
+    class FakeClient:
+        async def get_providers(self):
+            return payload
+
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: FakeClient())
+    assert await ai_client.registered_provider_ids() is None
+
+
+@pytest.mark.asyncio
 async def test_revocation_discovery_indexes_exist(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
