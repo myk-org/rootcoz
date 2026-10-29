@@ -63,6 +63,7 @@ from rootcoz.ai_client import (
     _get_model_catalog,
     _setup_usage_recorder,
     ai_username,
+    build_friendly_catalog,
     call_ai_once,
     clear_cursor_auth_cache,
     force_server_credentials,
@@ -10300,6 +10301,15 @@ def _cursor_status_from_model_count(model_count: int) -> dict[str, Any]:
     }
 
 
+def _cursor_model_count(models_by_provider: Mapping[str, Sequence[Any]]) -> int:
+    """Cursor models in a provider-keyed catalog (0 = no Cursor provider, #374)."""
+    return sum(
+        len(models)
+        for provider_id, models in models_by_provider.items()
+        if is_cursor_provider(provider_id)
+    )
+
+
 async def scoped_models_for_request(
     request: Request,
     force_server: bool | None = None,
@@ -10375,24 +10385,22 @@ async def list_ai_models(
             return strip_sensitive_from_response(payload)
 
         # No provider specified — use the shared successful sidecar catalog.
+        # A deployment without a Cursor provider must not report Cursor status
+        # at all, and must not pay for the ``agent status`` probe (#374).
         all_models = scoped
-        cursor_count = sum(
-            len(models)
-            for provider_id, models in all_models.items()
-            if is_cursor_provider(provider_id)
-        )
-        if is_admin:
-            cursor_status = _cursor_status_for_client(
-                await probe_cursor_auth(model_count=cursor_count),
-                is_admin=True,
-            )
-        else:
-            cursor_status = _cursor_status_from_model_count(cursor_count)
+        cursor_count = _cursor_model_count(all_models)
+        provider_status: dict[str, Any] = dict(listing_status)
+        if cursor_count:
+            if is_admin:
+                cursor_status = _cursor_status_for_client(
+                    await probe_cursor_auth(model_count=cursor_count),
+                    is_admin=True,
+                )
+            else:
+                cursor_status = _cursor_status_from_model_count(cursor_count)
+            provider_status = {"cursor": cursor_status, **provider_status}
         return strip_sensitive_from_response(
-            {
-                "providers": all_models,
-                "provider_status": {"cursor": cursor_status, **listing_status},
-            }
+            {"providers": all_models, "provider_status": provider_status}
         )
     except HTTPException:
         raise
@@ -10419,24 +10427,27 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         models = await client.refresh_models()
         update_model_catalog(models)
         clear_cursor_auth_cache()
-        cursor_status = await probe_cursor_auth(force=True)
+        # Probe Cursor only when the refreshed catalog has a Cursor provider (#374).
+        cursor_count = _cursor_model_count(build_friendly_catalog(models))
+        cursor_status = await probe_cursor_auth(force=True) if cursor_count else None
         # A forced refresh also re-reads every deployment-credential listing
         # (#372): the admin asked for live models, and a custom provider keyed
         # from the deployment env has no stored key to refresh.
         deployment_counts = await capture_deployment_provider_listings(force=True)
         logger.info(
-            "Model refresh complete: %d models available (cursor_ok=%s)",
+            "Model refresh complete: %d models available (cursor_provider=%s, cursor_ok=%s)",
             len(models),
-            cursor_status.get("ok"),
+            bool(cursor_count),
+            (cursor_status or {}).get("ok"),
         )
-        return strip_sensitive_from_response(
-            {
-                "models": models,
-                "count": len(models),
-                "provider_status": {"cursor": cursor_status},
-                "deployment_providers": deployment_counts,
-            }
-        )
+        payload: dict[str, Any] = {
+            "models": models,
+            "count": len(models),
+            "deployment_providers": deployment_counts,
+        }
+        if cursor_status is not None:
+            payload["provider_status"] = {"cursor": cursor_status}
+        return strip_sensitive_from_response(payload)
     except Exception:
         logger.exception("Failed to refresh AI models")
         raise HTTPException(
