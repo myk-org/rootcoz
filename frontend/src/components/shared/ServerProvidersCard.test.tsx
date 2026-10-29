@@ -810,6 +810,81 @@ describe('ServerProvidersCard deployment-credential controls', () => {
     )
   })
 
+  it('stores a key for a provider with no models listed, letting the server discover one (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([deploymentEntry('vertex-claude', true, true)]))
+    render(<ServerProvidersCard />)
+
+    const dialog = await openStoreDialog(user, 'vertex-claude')
+    // Nothing to choose from — the field stays empty and submit is not blocked
+    expect(within(dialog).getByRole('combobox', { name: 'Verification model' })).toHaveValue('')
+    expect(within(dialog).getByText(/a model will be discovered from the credential/)).toBeInTheDocument()
+    const store = within(dialog).getByRole('button', { name: 'Store key' })
+    expect(store).toBeEnabled()
+
+    await user.click(store)
+    // The field is omitted entirely — never sent empty — so the server picks one
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/admin/server-providers/vertex-claude/store-deployment-key',
+        {},
+      ),
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(await screen.findByRole('status')).toHaveTextContent('vertex-claude deployment credential stored.')
+    expect(get).toHaveBeenCalledTimes(2)
+  })
+
+  it('saves a rotated key for a provider with no models listed without a verification model (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([{ ...providersState()[0], provider: 'vertex-claude', models: [] }]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('button', { name: 'Edit vertex-claude key' }))
+    const dialog = await screen.findByRole('dialog')
+    const save = within(dialog).getByRole('button', { name: 'Save key' })
+    // The key still gates submit; the missing model does not
+    expect(save).toBeDisabled()
+    await user.type(within(dialog).getByLabelText('New API key'), 'new-secret')
+    expect(save).toBeEnabled()
+
+    await user.click(save)
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/admin/server-providers/vertex-claude/rotate-key',
+        { provider: 'vertex-claude', api_key: 'new-secret' }, // pragma: allowlist secret
+      ),
+    )
+    expect(Object.keys(post.mock.calls[0][1] as object)).not.toContain('verification_model')
+  })
+
+  it('still requires a model when the provider lists models to choose from (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult(keyDialogState()))
+    render(<ServerProvidersCard />)
+
+    const dialog = await openStoreDialog(user)
+    expect(within(dialog).queryByText(/a model will be discovered from the credential/)).not.toBeInTheDocument()
+    expect(within(dialog).getByText(/enter its ID manually/)).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Store key' })).toBeDisabled()
+  })
+
+  it('keeps the dialog open with the server message when no model is discoverable (#378)', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([deploymentEntry('vertex-claude', true, true)]))
+    post.mockRejectedValueOnce(new ApiError(400, 'Bad Request', {
+      detail: "Could not discover a model with this credential for 'vertex-claude'; enter a model id to verify against.",
+    }) as never)
+    render(<ServerProvidersCard />)
+
+    const dialog = await openStoreDialog(user, 'vertex-claude')
+    await user.click(within(dialog).getByRole('button', { name: 'Store key' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('enter a model id to verify against')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
   it('hints Store API key with what it promotes (#378)', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([deploymentEntry('openai', true, true)]))

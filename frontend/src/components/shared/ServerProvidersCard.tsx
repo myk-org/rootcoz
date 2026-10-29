@@ -585,7 +585,13 @@ function ProviderKeyDialog({ provider, mode, models, onClose, onStored }: {
   const [error, setError] = useState('')
   const contentRef = useRef<HTMLDivElement>(null)
   const editing = mode === 'edit'
-  const canSubmit = model.trim() !== '' && (!editing || apiKey.trim() !== '')
+  // A provider with nothing to offer in the picker (registry-only listing,
+  // listing not captured yet) must still be storable: the server then picks a
+  // model with the very credential being verified and rejects with "enter a
+  // model id" when it finds none. Requiring a model here would leave the key
+  // unstoreable, so the field is optional only when the picker is empty.
+  const modelOptional = models.length === 0
+  const canSubmit = (modelOptional || model.trim() !== '') && (!editing || apiKey.trim() !== '')
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -595,13 +601,19 @@ function ProviderKeyDialog({ provider, mode, models, onClose, onStored }: {
     try {
       // Store carries no key at all — the server promotes the credential the
       // deployment already resolves. Rotate takes the newly typed one.
+      // verification_model is omitted (never sent empty) when the admin left
+      // the field blank: the server discovers one instead.
+      const payload = {
+        ...(editing ? { provider, api_key: apiKey } : {}),
+        ...(model.trim() ? { verification_model: model.trim() } : {}),
+      }
       const res = editing
         ? await api.post<VerifyKeyResult>(
             `/api/admin/server-providers/${encodeURIComponent(provider)}/rotate-key`,
-            { provider, api_key: apiKey, verification_model: model.trim() })
+            payload)
         : await api.post<VerifyKeyResult>(
             `/api/admin/server-providers/${encodeURIComponent(provider)}/store-deployment-key`,
-            { verification_model: model.trim() })
+            payload)
       // Rejected/inconclusive verification is HTTP 200 ok:false — keep the
       // dialog open with the server's message so the admin can fix the model.
       if (!res.ok) {
@@ -638,7 +650,11 @@ function ProviderKeyDialog({ provider, mode, models, onClose, onStored }: {
           <div className="space-y-1.5">
             <span className="block text-xs text-text-tertiary">Model to verify against</span>
             <ModelCombobox value={model} onChange={setModel} options={models} placeholder="Select or type a model ID" ariaLabel="Verification model" disabled={busy} />
-            <p className="text-xs text-text-tertiary">If the model isn&apos;t listed, enter its ID manually.</p>
+            <p className="text-xs text-text-tertiary">
+              {modelOptional
+                ? 'No models listed for this provider — a model will be discovered from the credential to verify against.'
+                : 'If the model isn&apos;t listed, enter its ID manually.'}
+            </p>
           </div>
           {editing && (
             <div className="space-y-1.5">

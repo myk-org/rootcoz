@@ -12997,6 +12997,52 @@ async def capture_deployment_provider_listings(
     return captured
 
 
+async def _resolve_verification_model(
+    provider: str, key: str, requested: str | None
+) -> tuple[str | None, str | None]:
+    """The model id to verify a key with — ``(model, error)``, one always set.
+
+    Shared by add, rotate and store-deployment-key (#378). A caller-supplied
+    model always wins and never triggers discovery. Without one, the key's own
+    scoped listing supplies the model, which is the only way a key-capable
+    provider with no catalog model template can be verified at all — a
+    hand-typed id would be rejected by the sidecar. An unsupported listing or
+    an empty/failed discovery is an error detail, so the admin can still type
+    a model id instead of the key being unstoreable. Manifest-only entries are
+    skipped: they are not key-verified. The key never reaches the logs.
+    """
+    model = (requested or "").strip()
+    if model:
+        return model, None
+    try:
+        from rootcoz.ai_client import models_for_api_key
+
+        discovery = await models_for_api_key(provider, key)
+        models = [
+            entry["id"]
+            for entry in discovery["models"]
+            if entry.get("source") != "manifest"
+        ]
+    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+        logger.debug(
+            "Key-scoped model discovery unavailable for provider=%s;"
+            " verification needs an explicit model id",
+            provider,
+        )
+        models = []
+    if not models:
+        return None, (
+            f"Provider '{provider}' exposes no models for this credential;"
+            " enter a model id to verify against"
+        )
+    logger.debug(
+        "Verifying server provider key for %s with discovered model id %s",
+        provider,
+        models[0],
+    )
+    return models[0], None
+
+
 async def _verify_and_store_server_provider_key(
     provider: str,
     body: ServerProviderKeyInput,
@@ -13026,9 +13072,14 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(status_code=400, detail=error)
     from rootcoz.ai_client import verify_ai_key
 
-    model = body.verification_model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Select a model to verify the key")
+    # Never absent: capability and key are validated above, and discovery only
+    # runs for a key-capable provider (#378).
+    model, model_error = await _resolve_verification_model(
+        provider, key, body.verification_model
+    )
+    if model_error is not None:
+        raise HTTPException(status_code=400, detail=model_error)
+    assert model is not None
     outcome = await verify_ai_key(provider, model, key)
     if outcome != "accepted":
         # Mirror the user flow: report the outcome, never store an untested key.
@@ -13372,6 +13423,9 @@ async def store_deployment_provider_key(
     resolved (``404``; an unreadable manifest resolves nothing either, which is
     never a ``500``). A rejected or inconclusive verification follows the
     add/rotate convention — ``200`` with ``ok: false`` and nothing stored.
+    ``verification_model`` is optional: omitted, the credential's own first
+    discovered model verifies it, and a ``400`` asks for one when discovery
+    exposes none (#378).
     """
     _require_admin(request)
     # Stored first: that answer needs no credential, so it must not hide

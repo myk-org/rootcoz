@@ -3526,10 +3526,11 @@ async def test_capability_lookup_failure_keeps_captured_rows(
 
 
 def _store_deployment_key(client, provider, model="gpt-5.6-luna"):
+    """POST store-deployment-key; ``model=None`` omits the field entirely."""
     return client.post(
         f"/api/admin/server-providers/{provider}/store-deployment-key",
         headers=_admin_headers(),
-        json={"verification_model": model},
+        json={} if model is None else {"verification_model": model},
     )
 
 
@@ -3653,3 +3654,130 @@ async def test_store_deployment_key_matches_provider_case_insensitively(
     assert [row["provider"] for row in await storage.list_server_ai_providers()] == [
         "MyGateway"
     ]
+
+
+# --- Verification model discovery (#378 r2) ---
+
+
+def _zero_model_provider(monkeypatch, tmp_path, provider="mygateway"):
+    """A key-capable provider with a deployment credential and no catalog model."""
+    _point_agent_dir(monkeypatch, tmp_path, {provider: _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(monkeypatch, [])
+    _mock_supported(monkeypatch, [provider])
+
+
+@pytest.mark.parametrize("posted_model", [None, ""])
+async def test_store_deployment_key_discovers_the_verification_model(
+    client, monkeypatch, tmp_path, caplog, posted_model
+):
+    """No model supplied: the credential's own first listing model verifies.
+
+    A zero-model provider has no catalog template to type in, and the sidecar
+    rejects an invented id, so discovery is the only path that can store it.
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gw-first"}, {"id": "gw-second"}])
+
+    with _captured_logs(caplog, "rootcoz.main", level=logging.DEBUG) as logs:
+        response = _store_deployment_key(client, "mygateway", posted_model)
+
+    assert response.status_code == 200
+    assert response.json() == {"outcome": "accepted", "ok": True, "model_count": 2}
+    assert verified == [("mygateway", "gw-first", DEPLOYMENT_KEY)]
+    assert await storage.get_server_ai_credential("mygateway") == DEPLOYMENT_KEY
+    # The chosen id is a DEBUG detail; the key is never logged at any level.
+    assert "gw-first" in logs.text
+    assert DEPLOYMENT_KEY not in logs.text
+    assert DEPLOYMENT_KEY not in response.text
+
+
+@pytest.mark.parametrize("models,listing", [([], True), ([], False)])
+async def test_store_deployment_key_without_a_discoverable_model_is_400(
+    client, monkeypatch, tmp_path, models, listing
+):
+    """Unsupported or empty discovery is a 400 naming the manual model, no write."""
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, models, listing_supported=listing)
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 400
+    assert "enter a model id to verify against" in response.json()["detail"]
+    assert verified == []
+    assert await storage.list_server_ai_providers() == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
+async def test_explicit_verification_model_never_discovers(
+    client, monkeypatch, tmp_path
+):
+    """A caller-supplied model always wins — no discovery before verification.
+
+    The key is rejected so the post-verification capture (which legitimately
+    re-runs discovery once a key is stored) never runs: an empty call list
+    proves the model itself was never discovered.
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "rejected")
+    calls = _mock_key_discovery(monkeypatch, [{"id": "gw-first"}])
+
+    response = _store_deployment_key(client, "mygateway", "gw-typed")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert verified == [("mygateway", "gw-typed", DEPLOYMENT_KEY)]
+    assert calls == []
+    assert await storage.list_server_ai_providers() == []
+
+
+async def test_add_and_rotate_discover_the_verification_model(client, monkeypatch):
+    """Plain add and rotate discover the model too — same shared rule."""
+    _fake_catalog(monkeypatch, [])
+    _mock_supported(monkeypatch, ["mygateway"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gw-first"}, {"id": "gw-second"}])
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={"provider": "mygateway", "api_key": SECRET},
+    )
+    assert added.status_code == 200
+    assert added.json()["ok"] is True
+    assert await storage.get_server_ai_credential("mygateway") == SECRET
+
+    rotated_key = "rotated-key-456"  # pragma: allowlist secret  # gitleaks:allow
+    rotated = client.post(
+        "/api/admin/server-providers/mygateway/rotate-key",
+        headers=_admin_headers(),
+        json={"provider": "mygateway", "api_key": rotated_key},
+    )
+    assert rotated.status_code == 200
+    assert rotated.json()["ok"] is True
+    assert await storage.get_server_ai_credential("mygateway") == rotated_key
+    assert verified == [
+        ("mygateway", "gw-first", SECRET),
+        ("mygateway", "gw-first", rotated_key),
+    ]
+    assert SECRET not in added.text and rotated_key not in rotated.text
+
+
+def test_add_without_a_model_on_an_unsupported_provider_never_discovers(
+    client, monkeypatch
+):
+    """The capability gate answers first — no discovery for an unsupported id."""
+    _mock_supported(monkeypatch, ["openai"])
+    calls = _mock_key_discovery(monkeypatch, [{"id": "gw-first"}])
+
+    response = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={"provider": "mygateway", "api_key": SECRET},
+    )
+
+    assert response.status_code == 400
+    assert "does not support session API keys" in response.json()["detail"]
+    assert calls == []
