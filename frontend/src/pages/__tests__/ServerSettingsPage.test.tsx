@@ -26,7 +26,11 @@ vi.mock('@/lib/useProviderOptions', () => ({ useCursorAuthStatus: () => null }))
 vi.mock('@/components/shared/ServerProvidersCard', () => ({ ServerProvidersCard: () => null }))
 vi.mock('@/components/shared/CursorAuthBanner', () => ({ CursorAuthBanner: () => null }))
 vi.mock('@/components/shared/ProviderSelect', () => ({ ProviderSelect: () => null }))
-vi.mock('@/components/shared/ModelCombobox', () => ({ ModelCombobox: () => null }))
+vi.mock('@/components/shared/ModelCombobox', () => ({
+  ModelCombobox: ({ className }: { className?: string }) => (
+    <div data-testid="model-combobox" className={className} />
+  ),
+}))
 vi.mock('@/components/shared/PeerConfigList', () => ({ PeerConfigList: () => null }))
 vi.mock('@/components/shared/AdditionalReposList', () => ({ AdditionalReposList: () => null }))
 
@@ -980,6 +984,18 @@ describe('ServerSettingsPage active server providers', () => {
     for (const provider of ['gemini', 'openai', 'vertex-claude']) {
       expect(screen.getByRole('checkbox', { name: provider })).toBeChecked()
     }
+  })
+})
+
+describe('ServerSettingsPage AI model field width (#372)', () => {
+  it('lets the AI model combobox grow instead of capping it at max-w-md', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure model' }))
+
+    const combobox = await screen.findByTestId('model-combobox')
+    expect(combobox).toHaveClass('flex-1', 'min-w-0', 'max-w-3xl')
+    expect(combobox).not.toHaveClass('max-w-md')
   })
 })
 

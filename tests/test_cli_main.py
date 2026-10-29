@@ -7086,6 +7086,7 @@ class TestAdminServerProvidersCommands:
                     "verified": True,
                     "key_scoped": True,
                     "key_scoped_status": "supported",
+                    "key_scoped_source": "stored",
                     "models": [
                         {"id": "gemini-2.5-pro", "included": True, "free": True},
                         {"id": "gemini-2.5-flash", "included": False, "free": False},
@@ -7097,17 +7098,31 @@ class TestAdminServerProvidersCommands:
                     "verified": False,
                     "key_scoped": False,
                 },
+                {
+                    # Deployment credential (#372): listed live, nothing stored.
+                    "provider": "mygateway",
+                    "has_key": False,
+                    "verified": False,
+                    "key_scoped": True,
+                    "key_scoped_status": None,
+                    "key_scoped_source": "deployment",
+                    "models": [{"id": "mygateway/gpt-4o", "included": True}],
+                },
             ]
         }
         result = runner.invoke(app, ["admin", "server-providers", "list"])
         assert result.exit_code == 0
         assert (
             "google: key=yes verified=yes key-scoped=yes key-scoped-status=supported"
-            " models=2 included=1 free=1" in result.output
+            " key-scoped-source=stored models=2 included=1 free=1" in result.output
         )
         assert (
             "openai: key=no verified=no key-scoped=no key-scoped-status=-"
-            " models=0 included=0 free=0" in result.output
+            " key-scoped-source=- models=0 included=0 free=0" in result.output
+        )
+        assert (
+            "mygateway: key=no verified=no key-scoped=yes key-scoped-status=-"
+            " key-scoped-source=deployment models=1 included=1 free=0" in result.output
         )
         mock_client.admin_list_server_providers.assert_called_once()
 

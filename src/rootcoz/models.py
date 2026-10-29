@@ -1596,6 +1596,12 @@ class ServerProviderKeyInput(BaseModel):
     verification_model: Annotated[str, Strict(), StringConstraints(min_length=1)]
 
 
+# Which credential a provider's key-scoped model listing was captured with
+# (#372): the stored server key, or the deployment env's env-referenced
+# models.json key. ``None`` means no key-scoped listing was captured.
+ServerProviderKeyScopedSource = Literal["deployment", "stored"]
+
+
 class ServerProviderModelEntry(BaseModel):
     """One model in a per-provider server model selection (#347)."""
 
