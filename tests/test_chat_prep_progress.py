@@ -10,7 +10,12 @@ from rootcoz import ai_client, main, storage
 from rootcoz.models import ChatInitRequest
 
 
-async def _setup_job(monkeypatch, tmp_path, gate: asyncio.Event | None = None):
+async def _setup_job(
+    monkeypatch,
+    tmp_path,
+    gate: asyncio.Event | None = None,
+    cloning_started: asyncio.Event | None = None,
+):
     """Prepare an analyzed job whose chat init blocks inside clone_chat_repos."""
     from rootcoz.engine import chat
     from rootcoz.sources import chat_workspace
@@ -32,6 +37,8 @@ async def _setup_job(monkeypatch, tmp_path, gate: asyncio.Event | None = None):
         if on_repo:
             on_repo("tests-repo")
         seen.append("cloning")
+        if cloning_started is not None:
+            cloning_started.set()
         if gate is not None:
             await gate.wait()
         return True
@@ -72,20 +79,18 @@ async def test_history_reports_phase_while_init_runs_and_clears_after(
     monkeypatch, tmp_path
 ):
     gate = asyncio.Event()
-    await _setup_job(monkeypatch, tmp_path, gate=gate)
+    cloning_started = asyncio.Event()
+    await _setup_job(monkeypatch, tmp_path, gate=gate, cloning_started=cloning_started)
     body = ChatInitRequest(
         ai_provider="openai", ai_model="chosen", force_server_credentials=False
     )
 
     init = asyncio.create_task(main.init_chat("job", _request(), body))
     # Blocked inside clone_chat_repos: history must still answer with the phase.
-    for _ in range(200):
-        await asyncio.sleep(0.01)
-        history = await asyncio.wait_for(
-            main.get_chat_history("job", _request(), limit=200, offset=0), 2
-        )
-        if history.get("preparing"):
-            break
+    await asyncio.wait_for(cloning_started.wait(), 5)
+    history = await asyncio.wait_for(
+        main.get_chat_history("job", _request(), limit=200, offset=0), 2
+    )
     assert history["preparing"] == {"phase": "cloning", "detail": "tests-repo"}
 
     gate.set()
