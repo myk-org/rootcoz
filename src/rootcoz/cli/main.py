@@ -3860,6 +3860,38 @@ def admin_server_providers_add(
     raise typer.Exit(code=1)
 
 
+@admin_server_providers_app.command("store-deployment-key")
+def admin_server_providers_store_deployment_key(
+    provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),
+    model: str = typer.Option(
+        ...,
+        "--model",
+        help="Model used to verify the deployment credential before storing it.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Store the deployment credential as a server key (#378)."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_store_deployment_server_provider_key(provider, model),
+        emit_output=False,
+    )
+    if data.get("ok"):
+        if not _state.get("json", False):
+            # Older servers omit the count; "- model(s)" would read as none.
+            count = data.get("model_count")
+            typer.echo(
+                f"Stored the deployment credential for {provider}"
+                + (f" ({count} key-scoped model(s))" if count is not None else "")
+            )
+        return
+    # A rejected/inconclusive check fails the command in BOTH output modes —
+    # --json still prints the payload, then exits 1.
+    if not _state.get("json", False):
+        typer.echo(f"Key NOT stored ({data.get('outcome')}): {data.get('message', '')}")
+    raise typer.Exit(code=1)
+
+
 @admin_server_providers_app.command("rotate-key")
 def admin_server_providers_rotate(
     provider: str = typer.Option(..., "--provider", help="Exact sidecar provider ID."),

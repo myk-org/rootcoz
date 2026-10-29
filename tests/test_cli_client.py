@@ -2162,6 +2162,26 @@ class TestRootCozClientAdminUsers:
         assert removed["ok"] is True
         assert state["seen"]["DELETE"][0] == "/api/admin/server-providers/google"
 
+    def test_admin_store_deployment_server_provider_key(self):
+        """No key in the body: the server promotes its own credential (#378)."""
+        state = {}
+
+        def handler(request):
+            state["path"] = request.url.path
+            state["body"] = json.loads(request.content or "{}")
+            return httpx.Response(
+                200,
+                json={"outcome": "accepted", "ok": True, "model_count": 3},
+            )
+
+        client = _make_client(handler)
+        result = client.admin_store_deployment_server_provider_key("EnMaaS", "glm-5-3")
+        assert result["model_count"] == 3
+        assert (
+            state["path"] == "/api/admin/server-providers/EnMaaS/store-deployment-key"
+        )
+        assert state["body"] == {"verification_model": "glm-5-3"}
+
     def test_admin_delete_user(self):
         def handler(request):
             assert request.method == "DELETE"

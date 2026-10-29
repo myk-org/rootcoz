@@ -83,6 +83,43 @@ def _provider_registry_entries(payload: object) -> list[Mapping[str, Any]] | Non
     return entries
 
 
+def parse_ambient_auth_provider_ids(value: str) -> list[str]:
+    """Parse an AMBIENT_AUTH_PROVIDERS CSV the way its consumers read it.
+
+    Split on comma, strip, drop empties, de-duplicate case-insensitively; the
+    first occurrence's spelling wins so a stored value round-trips. Shared by
+    the settings write paths (which canonicalise and store the result) and the
+    exclusion set below.
+    """
+    seen: set[str] = set()
+    ids: list[str] = []
+    for part in value.split(","):
+        provider = part.strip()
+        if provider and provider.lower() not in seen:
+            seen.add(provider.lower())
+            ids.append(provider)
+    return ids
+
+
+def ambient_auth_provider_exclusions() -> set[str]:
+    """Normalized provider IDs excluded from the per-user key flow.
+
+    ``AMBIENT_AUTH_PROVIDERS`` is admin/env-typed, so its spelling is not
+    guaranteed to match the sidecar's registry: compare through
+    :func:`normalize_provider` on both sides, or an ID saved as
+    ``Google-Vertex-Claude`` would never exclude ``google-vertex-claude`` and
+    the provider would keep offering keys that do nothing.
+    """
+    from rootcoz.config import get_settings
+
+    return {
+        normalize_provider(provider)
+        for provider in parse_ambient_auth_provider_ids(
+            get_settings().ambient_auth_providers or ""
+        )
+    }
+
+
 async def _discover_session_key_providers() -> list[str] | None:
     """Sidecar key-capable providers minus the ambient set; ``None`` on failure.
 
@@ -98,20 +135,14 @@ async def _discover_session_key_providers() -> list[str] | None:
     entries = _provider_registry_entries(providers)
     if entries is None:
         return None
-    from rootcoz.config import get_settings
-
-    ambient = {
-        provider.strip()
-        for provider in get_settings().ambient_auth_providers.split(",")
-        if provider.strip()
-    }
+    ambient = ambient_auth_provider_exclusions()
     return sorted(
         {
             entry["provider"]
             for entry in entries
             if entry.get("supportsSessionApiKey") is True
+            and normalize_provider(entry["provider"]) not in ambient
         }
-        - ambient
     )
 
 
@@ -697,6 +728,52 @@ async def list_models(provider: str = "") -> list[dict[str, Any]]:
 _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
     Path(__file__).with_name("pi_model_suggestions.json").read_text()
 )
+
+
+# Unambiguous auth phrases only. A bare word like "rejected" also occurs in
+# unrelated failures ("model rejected by provider"), and blaming the key for
+# those sends the admin after the wrong cause.
+_AUTH_FAILURE_MARKERS: dict[str, int] = {
+    "unauthorized": 401,
+    "forbidden": 403,
+    "invalid api key": 401,
+    "api key is invalid": 401,
+    "incorrect api key": 401,
+    "authentication failed": 401,
+}
+
+# The sidecar client flattens an HTTP status into the message text, so only the
+# explicit ``(HTTP 401)``/``(HTTP 403)`` suffix is evidence — never a bare digit.
+_AUTH_STATUS_SUFFIX = re.compile(r"\(http\s+(401|403)\)")
+
+
+def auth_failure_status(exc: BaseException | None) -> int | None:
+    """HTTP status when ``exc`` says the credential was rejected, else ``None``.
+
+    Distinguishes a bad key from every other failure: a model-discovery error
+    for an unrelated reason (unusable model, provider outage) must not be
+    reported as a credential rejection. Structured evidence only — an
+    ``httpx.HTTPStatusError`` still in the chain, the sidecar's explicit
+    ``(HTTP 401)``/``(HTTP 403)`` suffix (``Sidecar API key model discovery
+    failed (HTTP 401)``, raised ``from None``), or an unambiguous auth phrase.
+    """
+    seen: set[int] = set()
+    error = exc
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (
+            401,
+            403,
+        ):
+            return error.response.status_code
+        text = str(error).lower()
+        if status := _AUTH_STATUS_SUFFIX.search(text):
+            return int(status.group(1))
+        for marker, status_code in _AUTH_FAILURE_MARKERS.items():
+            if marker in text:
+                return status_code
+        error = error.__cause__ or error.__context__
+    return None
 
 
 async def verify_ai_key(provider: str, model: str, key: str) -> str:
