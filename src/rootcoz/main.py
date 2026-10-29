@@ -12997,50 +12997,81 @@ async def capture_deployment_provider_listings(
     return captured
 
 
+# Each candidate costs a real sidecar turn, so verification is bounded; this is
+# an attempt bound, not data truncation.
+# shortcut: verification tries at most 5 discovered models; raise this if a
+# provider ever front-loads more than 5 unusable models.
+_MAX_VERIFICATION_CANDIDATES = 5
+
+
 async def _resolve_verification_model(
     provider: str, key: str, requested: str | None
-) -> tuple[str | None, str | None]:
-    """The model id to verify a key with — ``(model, error)``, one always set.
+) -> tuple[list[str], HTTPException | None]:
+    """Model ids to verify a key with — ``(models, error)``, one always set.
 
     Shared by add, rotate and store-deployment-key (#378). A caller-supplied
     model always wins and never triggers discovery. Without one, the key's own
-    scoped listing supplies the model, which is the only way a key-capable
+    scoped listing supplies the candidates, which is the only way a key-capable
     provider with no catalog model template can be verified at all — a
-    hand-typed id would be rejected by the sidecar. An unsupported listing or
-    an empty/failed discovery is an error detail, so the admin can still type
-    a model id instead of the key being unstoreable. Manifest-only entries are
-    skipped: they are not key-verified. The key never reaches the logs.
+    hand-typed id would be rejected by the sidecar. Every usable entry is
+    returned, usable first, so one unusable id cannot block a key that a later
+    listed model verifies (#378). Manifest-only entries are skipped: they are
+    not key-verified. An unsupported/empty listing is an error telling the
+    admin to type a model id; a rejected credential is an error telling them to
+    fix the key, since discovery fails the same way as verification would. The
+    key never reaches the logs.
     """
     model = (requested or "").strip()
     if model:
-        return model, None
-    try:
-        from rootcoz.ai_client import models_for_api_key
+        return [model], None
+    from rootcoz.ai_client import (
+        _listing_entry_usable,
+        auth_failure_status,
+        models_for_api_key,
+    )
 
+    try:
         discovery = await models_for_api_key(provider, key)
-        models = [
-            entry["id"]
-            for entry in discovery["models"]
-            if entry.get("source") != "manifest"
+        entries = [
+            entry for entry in discovery["models"] if entry.get("source") != "manifest"
         ]
-    except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        if auth_status := auth_failure_status(exc):
+            logger.info(
+                "Key-scoped model discovery rejected the credential for"
+                " provider=%s (HTTP %s)",
+                provider,
+                auth_status,
+            )
+            return [], HTTPException(
+                status_code=400,
+                detail=(
+                    "The credential was rejected by the provider"
+                    f" (HTTP {auth_status}); check the key before retrying"
+                ),
+            )
         logger.debug(
             "Key-scoped model discovery unavailable for provider=%s;"
             " verification needs an explicit model id",
             provider,
         )
-        models = []
+        entries = []
+    ordered = sorted(entries, key=lambda entry: not _listing_entry_usable(entry))
+    models = list(dict.fromkeys(entry["id"] for entry in ordered))
     if not models:
-        return None, (
-            f"Provider '{provider}' exposes no models for this credential;"
-            " enter a model id to verify against"
+        return [], HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider '{provider}' exposes no models for this credential;"
+                " enter a model id to verify against"
+            ),
         )
     logger.debug(
-        "Verifying server provider key for %s with discovered model id %s",
+        "Verifying server provider key for %s against discovered model ids %s",
         provider,
-        models[0],
+        models[:_MAX_VERIFICATION_CANDIDATES],
     )
-    return models[0], None
+    return models, None
 
 
 async def _verify_and_store_server_provider_key(
@@ -13072,15 +13103,21 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(status_code=400, detail=error)
     from rootcoz.ai_client import verify_ai_key
 
-    # Never absent: capability and key are validated above, and discovery only
+    # Never empty: capability and key are validated above, and discovery only
     # runs for a key-capable provider (#378).
-    model, model_error = await _resolve_verification_model(
+    models, model_error = await _resolve_verification_model(
         provider, key, body.verification_model
     )
     if model_error is not None:
-        raise HTTPException(status_code=400, detail=model_error)
-    assert model is not None
-    outcome = await verify_ai_key(provider, model, key)
+        raise model_error
+    # Try the discovered candidates in order: a listed id pi-config cannot open
+    # a session for must not block a key a later listed model verifies (#378).
+    # The last outcome is the answer once every attempt failed.
+    outcome = "inconclusive"
+    for model in models[:_MAX_VERIFICATION_CANDIDATES]:
+        outcome = await verify_ai_key(provider, model, key)
+        if outcome == "accepted":
+            break
     if outcome != "accepted":
         # Mirror the user flow: report the outcome, never store an untested key.
         message = {

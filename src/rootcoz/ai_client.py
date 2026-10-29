@@ -730,6 +730,45 @@ _PI_MODEL_SUGGESTIONS: dict[str, list[str]] = json.loads(
 )
 
 
+# Text markers for an error that means "the credential was rejected", used when
+# the sidecar client has already flattened an HTTP status into a message.
+_AUTH_FAILURE_MARKERS = (
+    "unauthorized",
+    "forbidden",
+    "rejected",
+    "invalid_api_key",
+    "invalid api key",
+)
+
+
+def auth_failure_status(exc: BaseException | None) -> int | None:
+    """HTTP status when ``exc`` says the credential was rejected, else ``None``.
+
+    Distinguishes a bad key from every other failure. The sidecar client
+    flattens the status into a ``RuntimeError`` message (``Sidecar API key
+    model discovery failed (HTTP 401)``, raised ``from None``), so the status
+    is read from the text or from an ``httpx.HTTPStatusError`` still in the
+    chain. A message naming an auth failure without a status reports 401.
+    """
+    seen: set[int] = set()
+    error = exc
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (
+            401,
+            403,
+        ):
+            return error.response.status_code
+        text = str(error).lower()
+        for status in (401, 403):
+            if re.search(rf"\b{status}\b", text):
+                return status
+        if any(marker in text for marker in _AUTH_FAILURE_MARKERS):
+            return 401
+        error = error.__cause__ or error.__context__
+    return None
+
+
 async def verify_ai_key(provider: str, model: str, key: str) -> str:
     """Probe a submitted key with a real sidecar turn, without storing it."""
     client = get_sidecar_client()

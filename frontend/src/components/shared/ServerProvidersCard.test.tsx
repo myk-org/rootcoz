@@ -247,6 +247,65 @@ describe('ServerProvidersCard add flow gate', () => {
     await user.type(screen.getByLabelText('API key'), '2')
     expect(screen.getByRole('button', { name: '+ Add provider' })).toBeDisabled()
   })
+
+  it('adds a provider with no models to choose from, letting the server discover one', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([...keyableState(), registryEntry('vertex-claude')]))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(await screen.findByRole('option', { name: 'vertex-claude' }))
+
+    // Nothing to pick: the discovery hint replaces the manual-ID hint and the
+    // model no longer gates the test — the key still does.
+    expect(screen.getByText(/a model will be discovered from the credential/)).toBeInTheDocument()
+    expect(screen.queryByText(/enter its ID manually/)).not.toBeInTheDocument()
+    const testButton = screen.getByRole('button', { name: 'Test provider' })
+    expect(testButton).toBeDisabled()
+
+    await user.type(screen.getByLabelText('API key'), 'sk-test')
+    expect(testButton).toBeEnabled()
+    await user.click(testButton)
+
+    // verification_model is omitted entirely — never sent empty
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith('/api/admin/server-providers', {
+        provider: 'vertex-claude',
+        api_key: 'sk-test', // pragma: allowlist secret
+      }),
+    )
+    expect(await screen.findByRole('status')).toHaveTextContent('Provider verified')
+    expect(screen.getByRole('button', { name: '+ Add provider' })).toBeEnabled()
+  })
+
+  it('keeps Test disabled while a provider with models has no model chosen', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult(keyableState()))
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(await screen.findByRole('option', { name: 'openai' }))
+    expect(screen.getByText(/enter its ID manually/)).toBeInTheDocument()
+    expect(screen.queryByText(/a model will be discovered from the credential/)).not.toBeInTheDocument()
+
+    await user.type(screen.getByLabelText('API key'), 'sk-test')
+    expect(screen.getByRole('button', { name: 'Test provider' })).toBeDisabled()
+  })
+
+  it('keeps Add disabled and reports the failure when a zero-model test fails', async () => {
+    const user = userEvent.setup()
+    get.mockResolvedValue(listResult([...keyableState(), registryEntry('vertex-claude')]))
+    post.mockRejectedValueOnce(new Error('verification failed') as never)
+    render(<ServerProvidersCard />)
+
+    await user.click(await screen.findByRole('combobox', { name: 'Provider' }))
+    await user.click(await screen.findByRole('option', { name: 'vertex-claude' }))
+    await user.type(screen.getByLabelText('API key'), 'sk-bad')
+    await user.click(screen.getByRole('button', { name: 'Test provider' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Provider verification failed')
+    expect(screen.getByRole('button', { name: '+ Add provider' })).toBeDisabled()
+  })
 })
 
 describe('ServerProvidersCard provider list', () => {

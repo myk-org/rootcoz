@@ -35,6 +35,11 @@ type RefreshModelsResult = { ok: boolean; status: string; model_count: number }
 
 type RemoveWarning = { models: string[]; free: string[] }
 
+/** A provider with nothing in the picker (registry-only, listing not captured)
+ * is still verifiable: the server discovers a model with the credential it is
+ * verifying. Shared by the add form and the key dialogs. */
+const DISCOVERED_MODEL_HINT = 'No models listed for this provider — a model will be discovered from the credential to verify against.'
+
 /**
  * Admin management of server AI providers (Server Settings → AI).
  *
@@ -122,16 +127,26 @@ export function ServerProvidersCard() {
     setKeyDialog({ provider: providerId, mode })
   }
 
+  const selectedModels = catalog[normalizeProvider(selected)] ?? []
+  // Same optional-model rule as the key dialogs: only a provider with models
+  // to choose from may require one.
+  const modelOptional = selected !== '' && selectedModels.length === 0
+
   async function runTest() {
     const value = keyRef.current
-    if (!selected || !value.trim() || !model.trim() || busy) return
+    if (!selected || !value.trim() || (!modelOptional && !model.trim()) || busy) return
     clearKey()
     setBusy(selected)
     setError('')
     setNotice('')
     try {
-      const res = await api.post<VerifyKeyResult>('/api/admin/server-providers',
-        { provider: selected, api_key: value, verification_model: model.trim() })
+      const res = await api.post<VerifyKeyResult>('/api/admin/server-providers', {
+        provider: selected,
+        api_key: value,
+        // Omitted (never sent empty) when there was nothing to pick — the
+        // server discovers one with the key being verified.
+        ...(model.trim() ? { verification_model: model.trim() } : {}),
+      })
       // The backend reports rejected/inconclusive keys as HTTP 200 ok:false.
       if (!res.ok) {
         setTested(false)
@@ -336,8 +351,10 @@ export function ServerProvidersCard() {
             </div>
             <div className="space-y-1.5">
               <span className="block text-xs text-text-tertiary">Model to verify against</span>
-              <ModelCombobox value={model} onChange={(value) => { setModel(value); invalidateTest() }} options={catalog[normalizeProvider(selected)] ?? []} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !selected} />
-              <p className="text-xs text-text-tertiary">If the model isn&apos;t listed, enter its ID manually.</p>
+              <ModelCombobox value={model} onChange={(value) => { setModel(value); invalidateTest() }} options={selectedModels} placeholder="Select or enter model ID" ariaLabel="Verification model" disabled={busy !== null || !selected} />
+              <p className="text-xs text-text-tertiary">
+                {modelOptional ? DISCOVERED_MODEL_HINT : 'If the model isn&apos;t listed, enter its ID manually.'}
+              </p>
             </div>
             <div className="flex gap-2">
               <label htmlFor="server-provider-key" className="sr-only">API key</label>
@@ -350,7 +367,7 @@ export function ServerProvidersCard() {
                 onChange={(event) => { keyRef.current = event.target.value; setKey(event.target.value); invalidateTest() }}
                 placeholder="Enter API key"
               />
-              <Button type="button" size="sm" disabled={busy !== null || !selected || !model.trim() || !key.trim()} onClick={runTest}>{busy ? 'Testing…' : 'Test provider'}</Button>
+              <Button type="button" size="sm" disabled={busy !== null || !selected || (!modelOptional && !model.trim()) || !key.trim()} onClick={runTest}>{busy ? 'Testing…' : 'Test provider'}</Button>
               <Button type="submit" size="sm" disabled={busy !== null || !tested}>+ Add provider</Button>
             </div>
           </form>
@@ -651,9 +668,7 @@ function ProviderKeyDialog({ provider, mode, models, onClose, onStored }: {
             <span className="block text-xs text-text-tertiary">Model to verify against</span>
             <ModelCombobox value={model} onChange={setModel} options={models} placeholder="Select or type a model ID" ariaLabel="Verification model" disabled={busy} />
             <p className="text-xs text-text-tertiary">
-              {modelOptional
-                ? 'No models listed for this provider — a model will be discovered from the credential to verify against.'
-                : 'If the model isn&apos;t listed, enter its ID manually.'}
+              {modelOptional ? DISCOVERED_MODEL_HINT : 'If the model isn&apos;t listed, enter its ID manually.'}
             </p>
           </div>
           {editing && (

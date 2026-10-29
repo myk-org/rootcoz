@@ -3781,3 +3781,90 @@ def test_add_without_a_model_on_an_unsupported_provider_never_discovers(
     assert response.status_code == 400
     assert "does not support session API keys" in response.json()["detail"]
     assert calls == []
+
+
+async def test_rejected_credential_is_not_reported_as_a_missing_model(
+    client, monkeypatch, tmp_path
+):
+    """Discovery answering 401 means a bad key, not a provider with no models.
+
+    The sidecar client flattens the HTTP status into a ``RuntimeError``, so the
+    message must name the credential, never suggest typing a model id (#378).
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(
+        monkeypatch,
+        RuntimeError("Sidecar API key model discovery failed (HTTP 401)"),
+    )
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "rejected by the provider (HTTP 401)" in detail
+    assert "check the key" in detail
+    assert "enter a model id" not in detail
+    assert verified == []
+    assert await storage.list_server_ai_providers() == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
+@pytest.mark.parametrize(
+    "bad_entry,expected_attempts",
+    [
+        # A usable id pi-config cannot open a session for: tried, then the next.
+        ({"id": "gw-bad"}, ["gw-bad", "gw-good"]),
+        # A declared-but-broken capability limit: deprioritized, never blocking.
+        (
+            {"id": "gw-bad", "capabilities": {"inputTokenLimit": 10}},
+            ["gw-good"],
+        ),
+    ],
+)
+async def test_verification_falls_back_to_the_next_listed_model(
+    client, monkeypatch, tmp_path, bad_entry, expected_attempts
+):
+    """An unusable first listing id must not block a key a later id verifies."""
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = []
+
+    async def fake(provider, model, key):
+        verified.append((provider, model, key))
+        return "accepted" if model == "gw-good" else "inconclusive"
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", fake)
+    _mock_key_discovery(monkeypatch, [bad_entry, {"id": "gw-good"}])
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    # Tried in order, stopping at the first success.
+    assert [model for _, model, _ in verified] == expected_attempts
+    assert await storage.get_server_ai_credential("mygateway") == DEPLOYMENT_KEY
+
+
+async def test_every_candidate_failing_reports_the_last_outcome(
+    client, monkeypatch, tmp_path
+):
+    """All attempts fail: the last one answers, and attempts stay bounded."""
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = []
+    outcomes = ["rejected"] + ["inconclusive"] * 5
+
+    async def fake(provider, model, key):
+        verified.append(model)
+        return outcomes[len(verified) - 1]
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", fake)
+    _mock_key_discovery(monkeypatch, [{"id": f"gw-{index}"} for index in range(6)])
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["outcome"] == "inconclusive"
+    # Bounded to _MAX_VERIFICATION_CANDIDATES attempts, in listing order.
+    assert verified == ["gw-0", "gw-1", "gw-2", "gw-3", "gw-4"]
+    assert await storage.list_server_ai_providers() == []
