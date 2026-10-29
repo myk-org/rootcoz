@@ -1,6 +1,7 @@
 """HTTP client for the rootcoz REST API."""
 
 import re
+import sys
 from typing import Any
 from urllib.parse import quote
 
@@ -20,6 +21,16 @@ class RootCozError(Exception):
         if detail:
             msg += f": {detail}"
         super().__init__(msg)
+
+
+def _copy_stream(response: httpx.Response, sink: Any) -> int:
+    """Write a streamed response body to *sink*; return bytes written."""
+    written = 0
+    for chunk in response.iter_bytes():
+        sink.write(chunk)
+        written += len(chunk)
+    sink.flush()
+    return written
 
 
 class RootCozClient:
@@ -362,18 +373,90 @@ class RootCozClient:
             "GET",
             "/api/admin/audit",
             params={
-                "actor": actor,
-                "action": action,
-                "target_type": target_type,
-                "target_id": target_id,
-                "outcome": outcome,
-                "q": q,
-                "since": since,
-                "until": until,
+                **self._audit_filters(
+                    actor=actor,
+                    action=action,
+                    target_type=target_type,
+                    target_id=target_id,
+                    outcome=outcome,
+                    q=q,
+                    since=since,
+                    until=until,
+                ),
                 "limit": limit,
                 "offset": offset,
             },
         )
+
+    @staticmethod
+    def _audit_filters(
+        *,
+        actor: str,
+        action: list[str] | None,
+        target_type: str,
+        target_id: str,
+        outcome: str,
+        q: str,
+        since: str,
+        until: str,
+    ) -> dict[str, Any]:
+        """The list and export endpoints take the same filters — send them alike."""
+        return {
+            "actor": actor,
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "outcome": outcome,
+            "q": q,
+            "since": since,
+            "until": until,
+        }
+
+    def admin_export_audit(
+        self,
+        *,
+        fmt: str = "json",
+        output: str = "-",
+        actor: str = "",
+        action: list[str] | None = None,
+        target_type: str = "",
+        target_id: str = "",
+        outcome: str = "",
+        q: str = "",
+        since: str = "",
+        until: str = "",
+    ) -> int:
+        """Export the matching audit events to *output* (``-`` = stdout).
+
+        GET /api/admin/audit/export — streams the full matched set, so no page
+        limit caps the export. This is how evidence is retained before
+        retention or the row cap deletes it. Returns bytes written.
+        """
+        return self._stream_to_file(
+            "/api/admin/audit/export",
+            output,
+            params={
+                "format": fmt,
+                **self._audit_filters(
+                    actor=actor,
+                    action=action,
+                    target_type=target_type,
+                    target_id=target_id,
+                    outcome=outcome,
+                    q=q,
+                    since=since,
+                    until=until,
+                ),
+            },
+        )
+
+    def admin_verify_audit(self, limit: int | None = None) -> dict[str, Any]:
+        """Recompute the audit hash chain. GET /api/admin/audit/verify
+
+        Returns ``{checked, legacy, ok, first_broken_id}``; ``limit`` verifies
+        only the newest N chained events.
+        """
+        return self._request("GET", "/api/admin/audit/verify", params={"limit": limit})
 
     def admin_audit_actions(self) -> dict[str, Any]:
         """Distinct recorded actions with counts and labels. GET /api/admin/audit/actions"""
@@ -415,14 +498,23 @@ class RootCozClient:
         return response.text
 
     def admin_download_transcript_to_file(self, session_id: str, path: str) -> int:
-        """Stream one transcript JSONL to a file. Admin only.
+        """Stream one transcript JSONL to a file. Admin only."""
+        return self._stream_to_file(
+            f"/api/admin/transcripts/{quote(session_id, safe='')}", path
+        )
+
+    def _stream_to_file(
+        self, url: str, path: str, params: dict[str, Any] | None = None
+    ) -> int:
+        """Stream one GET response to *path* (``-`` = stdout); bytes written.
 
         Consumes the server's streamed chunks instead of buffering the whole
-        download in memory. Returns the number of bytes written.
+        download in memory.
         """
-        url = f"/api/admin/transcripts/{quote(session_id, safe='')}"
+        if params:
+            params = {k: v for k, v in params.items() if v is not None and v != ""}
         try:
-            with self._client.stream("GET", url) as response:
+            with self._client.stream("GET", url, params=params) as response:
                 if response.status_code != 200:
                     response.read()
                     detail = ""
@@ -433,10 +525,11 @@ class RootCozClient:
                     raise RootCozError(status_code=response.status_code, detail=detail)
                 written = 0
                 try:
-                    with open(path, "wb") as handle:
-                        for chunk in response.iter_bytes():
-                            handle.write(chunk)
-                            written += len(chunk)
+                    if path == "-":
+                        written = _copy_stream(response, sys.stdout.buffer)
+                    else:
+                        with open(path, "wb") as handle:
+                            written = _copy_stream(response, handle)
                 except OSError as exc:
                     raise RootCozError(
                         status_code=0, detail=f"Cannot write {path}: {exc}"

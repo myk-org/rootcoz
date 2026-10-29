@@ -1,5 +1,6 @@
-import { useEffect, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { useAuth } from '@/lib/auth'
+import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 import {
   SSEContext,
   getSSEManagerSnapshot,
@@ -50,13 +51,47 @@ const RECONNECT_DEBOUNCE_MS = 150
 const LEADER_HEARTBEAT_MS = 5_000
 const LEADER_TIMEOUT_MS = 12_000
 const MAX_RECONNECT_DELAY_MS = 30_000
+/** Failures this close together, with no successful open in between, mean the session died. */
+const EXPIRY_FAILURE_LIMIT = 3
+const EXPIRY_FAILURE_WINDOW_MS = 30_000
+
+/**
+ * Watches the stream's connect attempts. The server answers an expired session
+ * with 401 on every reconnect, so an unbroken run of failures is the signal —
+ * once tripped the manager stops reconnecting until the manager is recreated
+ * (page reload or a new login).
+ */
+function createSessionGuard(onExpired: () => void) {
+  let failures: number[] = []
+  let expired = false
+  return {
+    get expired() {
+      return expired
+    },
+    /** The stream opened — the session is alive and the run is broken. */
+    connected() {
+      failures = []
+    },
+    /** Record a failed attempt; true once the session counts as expired. */
+    failed(): boolean {
+      const now = Date.now()
+      failures = [...failures, now].filter((at) => now - at <= EXPIRY_FAILURE_WINDOW_MS)
+      if (failures.length < EXPIRY_FAILURE_LIMIT) return false
+      failures = []
+      expired = true
+      onExpired()
+      return true
+    },
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Manager implementation (navigator.locks-based leader election)
 // ---------------------------------------------------------------------------
 
-function createSSEManager(): SSEManager & { destroy(): void } {
+function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
+  const guard = createSessionGuard(onExpired)
   let destroyed = false
 
   // ---- Leader state ----
@@ -143,7 +178,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
   }
 
   function connectEventSource() {
-    if (destroyed) return
+    if (destroyed || guard.expired) return
     const topics = getCombinedTopics()
 
     // Close existing
@@ -195,6 +230,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 
     eventSource.onopen = () => {
       reconnectDelay = 1000
+      guard.connected()
       notifyReconnect()
       channel?.postMessage({ type: 'sse-open' })
     }
@@ -207,6 +243,9 @@ function createSSEManager(): SSEManager & { destroy(): void } {
       removeEventSourceListeners()
       es?.close()
       eventSource = null
+
+      // An expired session keeps answering 401 — stop retrying it.
+      if (guard.failed()) return
 
       if (!destroyed && isLeader) {
         if (reconnectBackoffTimer) clearTimeout(reconnectBackoffTimer)
@@ -221,7 +260,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 
   /** Schedule a debounced reconnection. */
   function scheduleReconnect() {
-    if (destroyed) return
+    if (destroyed || guard.expired) return
     if (reconnectDebounceTimer) clearTimeout(reconnectDebounceTimer)
     reconnectDebounceTimer = setTimeout(() => {
       reconnectDebounceTimer = null
@@ -476,15 +515,16 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 // Fallback manager (no BroadcastChannel — e.g., JSDOM tests)
 // ---------------------------------------------------------------------------
 
-function createFallbackManager(): SSEManager & { destroy(): void } {
+function createFallbackManager(onExpired: () => void): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
+  const guard = createSessionGuard(onExpired)
   let eventSource: EventSource | null = null
   let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
   let destroyed = false
 
   function connectEventSource() {
-    if (destroyed) return
+    if (destroyed || guard.expired) return
 
     // Cleanup old
     for (const { name, handler } of activeListeners) {
@@ -526,13 +566,19 @@ function createFallbackManager(): SSEManager & { destroy(): void } {
     }
 
     eventSource.onopen = () => {
+      guard.connected()
       for (const sub of subscriptions.values()) sub.onReconnect?.()
     }
-    eventSource.onerror = () => { /* auto-reconnects */ }
+    eventSource.onerror = () => {
+      // The browser auto-reconnects; close it for good once the session is gone.
+      if (!guard.failed()) return
+      eventSource?.close()
+      eventSource = null
+    }
   }
 
   function scheduleReconnect() {
-    if (destroyed) return
+    if (destroyed || guard.expired) return
     if (debounceTimer) clearTimeout(debounceTimer)
     debounceTimer = setTimeout(() => {
       debounceTimer = null
@@ -566,6 +612,12 @@ function createFallbackManager(): SSEManager & { destroy(): void } {
 
 export function SSEProvider({ children }: { children: ReactNode }) {
   const { authenticated } = useAuth()
+  // Surfaced to the user as a re-login prompt; nothing is redirected or cleared.
+  // Tied to the auth state it was reported for, so a login/logout starts clean.
+  const [expiry, setExpiry] = useState({ authenticated, expired: false })
+  if (expiry.authenticated !== authenticated) {
+    setExpiry({ authenticated, expired: false })
+  }
 
   // Create/destroy the manager based on authentication state.
   // When the user logs out, the manager is destroyed so a logged-out
@@ -575,9 +627,11 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   // so publishing it never cascades a synchronous render from the effect.
   useEffect(() => {
     if (!authenticated) return
+    // New credentials — the fresh manager gets a new budget of attempts.
+    const onExpired = () => setExpiry({ authenticated, expired: true })
     const manager = typeof BroadcastChannel !== 'undefined'
-      ? createSSEManager()
-      : createFallbackManager()
+      ? createSSEManager(onExpired)
+      : createFallbackManager(onExpired)
     setCurrentSSEManager(manager)
     return () => {
       setCurrentSSEManager(null)
@@ -589,5 +643,15 @@ export function SSEProvider({ children }: { children: ReactNode }) {
 
   const value = authenticated ? manager : null
 
-  return <SSEContext.Provider value={value}>{children}</SSEContext.Provider>
+  return (
+    <SSEContext.Provider value={value}>
+      {expiry.expired && (
+        <CustomMessageBanner
+          className="fixed inset-x-0 top-0 z-50 rounded-none text-center"
+          message="Your session expired — live updates are paused. Reload the page and sign in again to resume them."
+        />
+      )}
+      {children}
+    </SSEContext.Provider>
+  )
 }

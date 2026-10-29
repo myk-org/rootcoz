@@ -59,8 +59,8 @@ That single authenticated GET returns the stored analysis for one job, including
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
-| GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable |
-| GET | `/metrics` | Prometheus metrics |
+| GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable. `checks.audit` reports `{status, write_failures}`: `degraded` once an audit row has failed to persist since process start |
+| GET | `/metrics` | Prometheus metrics, including `rootcoz_audit_write_failures` |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
 | POST | `/api/auth/register` | Create a user, returns the raw API key once |
@@ -303,6 +303,8 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin/transcripts/{session_id}` | Download one transcript JSONL (streaming, no truncation) |
 | GET | `/api/admin/audit` | Recorded audit events, newest first: `actor` (exact, case-insensitive), `action` (repeat the parameter or comma-separate), `target_type`, `target_id`, `outcome` (`success`/`failure`/`denied`), `q` (substring over `details`), `since`/`until` (ISO 8601), `limit` (50, max 500), `offset`. Returns `{events, total, limit, offset}` |
 | GET | `/api/admin/audit/actions` | Distinct recorded actions as `{actions: [{action, count, last_seen, label}]}` |
+| GET | `/api/admin/audit/verify` | Recompute the audit hash chain: `{checked, legacy, ok, first_broken_id}`; `limit` verifies only the newest N events |
+| GET | `/api/admin/audit/export` | Stream every event matching the list filters: `format` (`json`/`csv`) plus the same filters as `/api/admin/audit`. Uncapped — the way to retain evidence before retention deletes it |
 | POST | `/api/admin/ai-models/refresh` | Re-discover models from the sidecar |
 | GET | `/api/admin/component-versions` | Backend, sidecar, and chart versions |
 | GET | `/api/admin/db/schema` | Read-only schema dump |
@@ -319,7 +321,7 @@ See [Configuration Reference](configuration-reference.html) for the full environ
 
 #### Audit events
 
-`GET /api/admin/audit` returns `{events, total, limit, offset}` newest-first. Each event carries `id`, `created_at`, `actor`, `actor_role`, `is_admin`, `action`, `target_type`, `target_id`, `outcome`, `details` (the stored JSON object, already parsed), and `request_ip`.
+`GET /api/admin/audit` returns `{events, total, limit, offset}` newest-first. Each event carries `id`, `created_at` (UTC ISO-8601 with a trailing `Z`), `actor`, `actor_role`, `is_admin`, `action`, `target_type`, `target_id`, `outcome`, `details` (the stored JSON object, already parsed), `request_ip`, and the chain columns `prev_hash` and `entry_hash`.
 
 ```bash
 curl -s "$BASE/api/admin/audit?actor=alice&action=admin.job_delete&since=2026-04-01T00:00:00Z&limit=20" \
@@ -328,9 +330,15 @@ curl -s "$BASE/api/admin/audit?actor=alice&action=admin.job_delete&since=2026-04
 
 Filters combine with AND. `actor` must match the stored value exactly but ignores case. `action` accepts one id or several, either as a repeated parameter (`?action=a&action=b`) or comma-separated (`?action=a,b`). `q` is a substring match over the event's `details` object. `since` and `until` are inclusive and accept any ISO 8601 timestamp; a value that cannot be parsed is rejected with `400`.
 
+Time bounds are timezone-correct. A bare `YYYY-MM-DD` means a UTC day, so `since=2026-06-15` starts at `00:00:00Z` and `until=2026-06-15` covers through `23:59:59.999999Z`. An explicit offset (`2026-06-15T22:00:00+02:00`) is honoured and converted to UTC; a timestamp with no offset is read as UTC. Every stored `created_at` carries an explicit `Z`, so a filtered result means the same instant no matter which timezone you built the query in.
+
 `GET /api/admin/audit/actions` lists the action ids seen so far with their event count, last-seen timestamp, and a display label (`auth.login_failed` becomes `Auth Login Failed`) for building filter menus.
 
-Both endpoints require `admin` and return `403 Admin access required` otherwise. `GET /api/admin/audit/stream` pushes each new event as it is written, so an audit page can stay live without polling.
+`GET /api/admin/audit/verify` recomputes the chain: each row's `entry_hash` is `sha256(canonical_json(row) + prev_hash)` and its `prev_hash` is the previous row's `entry_hash`. It returns `{checked, legacy, ok, first_broken_id}`. `checked` is how many chained rows were verified and `legacy` how many rows predate the chain (NULL hashes) — those are counted separately, never reported as broken. `ok` is false when a row was edited or deleted, and `first_broken_id` names the oldest offending row.
+
+`GET /api/admin/audit/export` streams every event the same filters match — `format=json` (a JSON array) or `format=csv`, with columns `id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, entry_hash`. Responses are streamed in batches, so the export is never capped by the list page size and memory stays bounded. This is the supported way to retain audit evidence before retention pruning or the row cap deletes it.
+
+All audit read endpoints require `admin` and return `403 Admin access required` otherwise. `GET /api/admin/audit/stream` pushes each new event as it is written, so an audit page can stay live without polling.
 
 
 ## Advanced Usage

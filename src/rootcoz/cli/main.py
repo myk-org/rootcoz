@@ -4249,6 +4249,85 @@ def admin_audit_actions(json_output: bool = _JSON_OPTION) -> None:
         typer.echo("No audit events recorded.")
 
 
+@audit_app.command("verify")
+def admin_audit_verify(
+    limit: int | None = typer.Option(
+        None, "--limit", min=1, help="Verify only the newest N chained events."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Recompute the audit hash chain and report the first broken event."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_verify_audit(limit=limit),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    checked = data.get("checked", 0)
+    legacy = data.get("legacy", 0)
+    legacy_note = f", {legacy} legacy row(s) skipped" if legacy else ""
+    if data.get("ok"):
+        typer.echo(f"Audit chain OK: {checked} event(s) verified{legacy_note}")
+        return
+    typer.echo(
+        f"Audit chain BROKEN at event {data.get('first_broken_id')}"
+        f" ({checked} event(s) checked{legacy_note})",
+        err=True,
+    )
+    raise typer.Exit(1)
+
+
+@audit_app.command("export")
+def admin_audit_export(
+    output_format: str = typer.Option(
+        "json", "--format", help="Export format: json or csv."
+    ),
+    output: str = typer.Option(
+        "-", "--output", "-o", help="Write to a file, or - for stdout."
+    ),
+    actor: str = typer.Option(
+        "", "--actor", help="Exact actor username (case-insensitive)."
+    ),
+    action: list[str] = _AUDIT_ACTION_OPTION,
+    target_type: str = typer.Option(
+        "", "--target-type", help="Filter by target type, e.g. job."
+    ),
+    target_id: str = typer.Option(
+        "", "--target-id", help="Filter by target id, e.g. a job id."
+    ),
+    outcome: str = typer.Option(
+        "", "--outcome", help="Filter by outcome: success, failure, denied."
+    ),
+    q: str = typer.Option("", "--q", help="Substring search over event details."),
+    since: str = typer.Option("", "--since", help="ISO 8601 lower bound (inclusive)."),
+    until: str = typer.Option("", "--until", help="ISO 8601 upper bound inclusive."),
+) -> None:
+    """Export the matching audit events before retention deletes them."""
+    if output_format not in {"json", "csv"}:
+        typer.echo("Invalid --format. Valid: json, csv", err=True)
+        raise typer.Exit(1)
+    try:
+        client = _get_client()
+        written = client.admin_export_audit(
+            fmt=output_format,
+            output=output,
+            actor=actor,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            outcome=outcome,
+            q=q,
+            since=since,
+            until=until,
+        )
+    except RootCozError as exc:
+        _handle_error(exc)
+        raise typer.Exit(1)
+    if output != "-":
+        typer.echo(f"Saved {written} bytes to {output}")
+
+
 @transcripts_app.command("list")
 def transcripts_list_cmd(
     job_id: str = typer.Option("", "--job", help="Filter to transcripts of one run"),

@@ -1956,6 +1956,58 @@ class TestRootCozClientAdminUsers:
         result = client.admin_audit_actions()
         assert result["actions"][0]["label"] == "Auth Login"
 
+    def test_admin_verify_audit(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit/verify"
+            assert request.url.params.get("limit") == "5"
+            return httpx.Response(
+                200,
+                json={"checked": 5, "legacy": 0, "ok": True, "first_broken_id": None},
+            )
+
+        client = _make_client(handler)
+        result = client.admin_verify_audit(limit=5)
+        assert result["ok"] is True
+        assert result["checked"] == 5
+
+    def test_admin_verify_audit_omits_an_absent_limit(self):
+        def handler(request):
+            assert "limit" not in request.url.params
+            return httpx.Response(
+                200,
+                json={"checked": 1, "legacy": 0, "ok": True, "first_broken_id": None},
+            )
+
+        assert _make_client(handler).admin_verify_audit()["ok"] is True
+
+    def test_admin_export_audit_streams_to_a_file(self, tmp_path):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit/export"
+            assert request.url.params.get("format") == "csv"
+            assert request.url.params.get("actor") == "alice"
+            assert request.url.params.get_list("action") == ["auth.login"]
+            assert "limit" not in request.url.params
+            return httpx.Response(200, content=b"id,action\n1,auth.login\n")
+
+        target = tmp_path / "audit.csv"
+        written = _make_client(handler).admin_export_audit(
+            fmt="csv", output=str(target), actor="alice", action=["auth.login"]
+        )
+        assert written == len(target.read_bytes())
+        assert target.read_text() == "id,action\n1,auth.login\n"
+
+    def test_admin_export_audit_rejects_a_bad_status(self, tmp_path):
+        client = _make_client(
+            lambda request: httpx.Response(
+                403, json={"detail": "Admin access required"}
+            )
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.admin_export_audit(output=str(tmp_path / "audit.json"))
+        assert exc_info.value.status_code == 403
+
     def test_admin_component_versions(self):
         def handler(request):
             assert request.method == "GET"

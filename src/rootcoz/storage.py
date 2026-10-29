@@ -641,6 +641,38 @@ async def _migrate_failure_history_build_id(db: aiosqlite.Connection) -> None:
     )
 
 
+# Audit rows written before #379 used CURRENT_TIMESTAMP: UTC, but as a naive
+# "YYYY-MM-DD HH:MM:SS" string. Reinterpreting them as UTC (which is what
+# CURRENT_TIMESTAMP is) and rewriting them once keeps them comparable with the
+# Z-suffixed values new rows carry.
+_AUDIT_UTC_REWRITE_KEY = "audit_created_at_utc_v1"
+
+
+async def _migrate_audit_integrity(db: aiosqlite.Connection) -> None:
+    """Give ``audit_events`` its chain columns and one canonical UTC timestamp.
+
+    Columns are added idempotently. The value rewrite runs once per database
+    (claimed via ``_migrations_applied``) and only for rows still in the naive
+    form; a row already ending with ``Z`` is left alone, so the statement is
+    safe to repeat even without the claim.
+    """
+    await _migrate_add_column(db, "audit_events", "prev_hash", "TEXT")
+    await _migrate_add_column(db, "audit_events", "entry_hash", "TEXT")
+    if not await _claim_migration(db, _AUDIT_UTC_REWRITE_KEY):
+        return
+    cursor = await db.execute(
+        "UPDATE audit_events"
+        " SET created_at = strftime('%Y-%m-%dT%H:%M:%f000Z', created_at)"
+        " WHERE created_at IS NOT NULL AND created_at NOT LIKE '%Z'"
+        " AND datetime(created_at) IS NOT NULL"
+    )
+    if cursor.rowcount:
+        logger.info(
+            "Migration: rewrote %d audit_events.created_at value(s) as UTC ISO-8601",
+            cursor.rowcount,
+        )
+
+
 async def _migrate_jenkins_url_to_build_url(db: aiosqlite.Connection) -> None:
     """Rename results.jenkins_url column to build_url (CI-agnostic naming)."""
     cursor = await db.execute("PRAGMA table_info(results)")
@@ -1532,6 +1564,10 @@ async def init_db() -> None:
         # Audit trail (#379): one row per audited action, written by
         # main.record_audit. ``details`` is a JSON object that never carries
         # a secret (redacted before the write), so the table is safe to browse.
+        # ``created_at`` is UTC ISO-8601 with a trailing ``Z`` (see
+        # ``audit_timestamp``) so string comparison filters stay chronological.
+        # ``prev_hash``/``entry_hash`` chain the rows for tamper evidence and
+        # stay NULL on rows written before the chain existed.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS audit_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1544,9 +1580,12 @@ async def init_db() -> None:
                 target_id TEXT,
                 outcome TEXT NOT NULL DEFAULT 'success',
                 details TEXT DEFAULT '{}',
-                request_ip TEXT
+                request_ip TEXT,
+                prev_hash TEXT,
+                entry_hash TEXT
             )
         """)
+        await _migrate_audit_integrity(db)
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at "
             "ON audit_events (created_at DESC)"
@@ -9812,6 +9851,63 @@ def _decode_audit_details(raw: Any) -> dict[str, Any]:
     return decoded if isinstance(decoded, dict) else {}
 
 
+def audit_timestamp(moment: datetime | None = None) -> str:
+    """The one ``created_at`` format: UTC ISO-8601, microseconds, trailing ``Z``.
+
+    Fixed width on purpose — ``created_at`` is filtered with string comparison,
+    so every stored value must sort chronologically. Naive input is read as UTC
+    (see ``_migrate_audit_integrity`` for the pre-#379 rows).
+    """
+    moment = moment or datetime.now(UTC)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return (
+        moment.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    )
+
+
+# Tamper evidence: every chained row carries the previous row's ``entry_hash``,
+# so editing or deleting one row invalidates every row after it. The first
+# chained row links to this all-zero hash; rows written before the chain existed
+# keep NULL hashes and are reported as ``legacy`` instead of faked into it.
+_AUDIT_GENESIS_HASH = "0" * 64
+
+# The row fields covered by ``entry_hash`` — everything but the hash columns
+# themselves. ``details`` is hashed as the stored text, not as a re-serialized
+# object, so verification checks the bytes the database actually holds.
+_AUDIT_HASH_FIELDS = (
+    "id",
+    "created_at",
+    "actor",
+    "actor_role",
+    "is_admin",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "details",
+    "request_ip",
+)
+
+# One column list for every reader (insert/list/verify/export) so they agree.
+_AUDIT_COLUMNS = (
+    "id, created_at, actor, actor_role, is_admin, action, target_type,"
+    " target_id, outcome, details, request_ip, prev_hash, entry_hash"
+)
+
+
+def _audit_entry_hash(row: dict[str, Any], prev_hash: str) -> str:
+    """``sha256(canonical_json(fields) + prev_hash)`` for one audit row."""
+    canonical = json.dumps(
+        {name: row[name] for name in _AUDIT_HASH_FIELDS},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256((canonical + prev_hash).encode()).hexdigest()
+
+
 def _audit_details_json(details: dict[str, Any] | None) -> str:
     """Serialize ``details`` the one canonical way: compact, non-ASCII as typed.
 
@@ -9848,19 +9944,31 @@ async def insert_audit_event(
     """Insert one audit event and return the stored row.
 
     ``details`` must already be redacted by the caller — this layer stores
-    what it is given. Values are serialized with ``default=str`` so an
-    unexpected type can never fail the audited action. The returned row is
-    what the DB holds (``created_at`` included), so callers can broadcast it.
+    what it is given. The row is written with the chain hashes in one
+    ``BEGIN IMMEDIATE`` transaction, which serializes the tail read against
+    concurrent inserts: two writers can never link to the same predecessor.
+    ``created_at`` is set here (not by a column default) so it is always the
+    canonical UTC form the hash covers. The returned row is what the DB holds,
+    so callers can broadcast it.
     """
+    actor_value = actor or "anonymous"
     async with _connect_db() as db:
+        # Take the write lock before reading the tail: two concurrent inserts
+        # can then never link to the same predecessor.
+        await db.execute("BEGIN IMMEDIATE")
         cursor = await db.execute(
-            "INSERT INTO audit_events (actor, actor_role, is_admin, action,"
-            " target_type, target_id, outcome, details, request_ip)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            " RETURNING id, created_at, actor, actor_role, is_admin, action,"
-            " target_type, target_id, outcome, details, request_ip",
+            "SELECT entry_hash FROM audit_events"
+            " WHERE entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1"
+        )
+        tail = await cursor.fetchone()
+        prev_hash = tail[0] if tail else _AUDIT_GENESIS_HASH
+        cursor = await db.execute(
+            "INSERT INTO audit_events (created_at, actor, actor_role, is_admin,"
+            " action, target_type, target_id, outcome, details, request_ip, prev_hash)"
+            f" VALUES ({', '.join('?' * 11)}) RETURNING {_AUDIT_COLUMNS}",
             (
-                actor or "anonymous",
+                audit_timestamp(),
+                actor_value,
                 actor_role,
                 int(bool(is_admin)),
                 action,
@@ -9869,12 +9977,20 @@ async def insert_audit_event(
                 outcome,
                 _audit_details_json(details),
                 request_ip,
+                prev_hash,
             ),
         )
         row = await cursor.fetchone()
+        assert row is not None  # INSERT ... RETURNING always yields the row
+        stored = dict(row)
+        entry_hash = _audit_entry_hash(stored, prev_hash)
+        await db.execute(
+            "UPDATE audit_events SET entry_hash = ? WHERE id = ?",
+            (entry_hash, stored["id"]),
+        )
         await db.commit()
-    assert row is not None  # INSERT ... RETURNING always yields the new row
-    return _audit_event_row(row)
+    stored["entry_hash"] = entry_hash
+    return _audit_event_row(stored)
 
 
 def _audit_like_escape(fragment: str) -> str:
@@ -9957,14 +10073,103 @@ async def list_audit_events(
         cursor = await db.execute(f"SELECT COUNT(*) FROM audit_events{where}", params)
         total = (await cursor.fetchone())[0]
         cursor = await db.execute(
-            "SELECT id, created_at, actor, actor_role, is_admin, action,"
-            " target_type, target_id, outcome, details, request_ip"
+            f"SELECT {_AUDIT_COLUMNS}"
             f" FROM audit_events{where} ORDER BY created_at DESC, id DESC"
             " LIMIT ? OFFSET ?",
             [*params, limit, offset],
         )
         rows = await cursor.fetchall()
     return {"events": [_audit_event_row(row) for row in rows], "total": total}
+
+
+async def count_audit_events_recent(
+    *, actor: str, actions: Sequence[str], since: str
+) -> int:
+    """Count one actor's rows for ``actions`` at or after ``since``.
+
+    One indexed query (``idx_audit_events_actor``) — the volume guard in
+    ``main.record_audit`` runs it before every auth-failure write.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM audit_events"
+            " WHERE actor = ? AND created_at >= ?"
+            f" AND action IN ({', '.join('?' * len(actions))})",
+            (actor, since, *actions),
+        )
+        return (await cursor.fetchone())[0]
+
+
+async def iter_audit_events(
+    *, batch_size: int = 500, **filters: Any
+) -> AsyncIterator[list[dict[str, Any]]]:
+    """Yield audit events newest-first in batches of ``batch_size``.
+
+    A full export must not be capped by the list endpoint's page size, so this
+    walks every match in bounded memory. Offset paging is safe here: pruning
+    only ever deletes the oldest rows, i.e. the tail this walk has not reached
+    yet, so nothing already yielded can push an unvisited row out of reach.
+    """
+    offset = 0
+    while True:
+        page = await list_audit_events(**filters, limit=batch_size, offset=offset)
+        events = page["events"]
+        if not events:
+            return
+        yield events
+        if len(events) < batch_size:
+            return
+        offset += len(events)
+
+
+async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
+    """Recompute the audit hash chain, newest ``limit`` events when given.
+
+    Returns ``{checked, legacy, ok, first_broken_id}``: ``checked`` is how many
+    chained rows were verified, ``legacy`` how many pre-chain rows (NULL hashes)
+    were skipped — they are reported, never faked into the chain — and
+    ``first_broken_id`` the oldest row whose stored ``prev_hash`` or
+    ``entry_hash`` does not match the recomputation (``None`` when intact).
+    """
+    sql = f"SELECT {_AUDIT_COLUMNS} FROM audit_events ORDER BY id DESC"
+    params: tuple[Any, ...] = ()
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (limit,)
+    async with _connect_db() as db:
+        cursor = await db.execute(sql, params)
+        rows = [dict(row) for row in await cursor.fetchall()][::-1]
+        prev_hash = _AUDIT_GENESIS_HASH
+        if limit is not None and rows:
+            # The window's first row links to a row outside it: seed the walk
+            # with that row's hash instead of calling a truncated view broken.
+            cursor = await db.execute(
+                "SELECT entry_hash FROM audit_events"
+                " WHERE id < ? AND entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (rows[0]["id"],),
+            )
+            seed = await cursor.fetchone()
+            prev_hash = seed[0] if seed else _AUDIT_GENESIS_HASH
+
+    checked = legacy = 0
+    first_broken_id: int | None = None
+    for row in rows:
+        if row["entry_hash"] is None:
+            legacy += 1
+            continue
+        if (
+            row["prev_hash"] != prev_hash
+            or row["entry_hash"] != _audit_entry_hash(row, prev_hash)
+        ) and first_broken_id is None:
+            first_broken_id = row["id"]
+        prev_hash = row["entry_hash"]
+        checked += 1
+    return {
+        "checked": checked,
+        "legacy": legacy,
+        "ok": first_broken_id is None,
+        "first_broken_id": first_broken_id,
+    }
 
 
 async def distinct_audit_actions() -> list[dict[str, Any]]:
@@ -9982,6 +10187,24 @@ async def prune_audit_events(cutoff: str) -> int:
     async with _connect_db() as db:
         cursor = await db.execute(
             "DELETE FROM audit_events WHERE created_at < ?", (cutoff,)
+        )
+        await db.commit()
+        return int(cursor.rowcount or 0)
+
+
+async def enforce_audit_row_cap(max_rows: int) -> int:
+    """Delete the oldest audit events beyond *max_rows*; return how many.
+
+    The newest ``max_rows`` events are always kept, so the trail never loses
+    its most recent evidence to the size ceiling. ``0`` disables the cap.
+    """
+    if max_rows <= 0:
+        return 0
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM audit_events WHERE id NOT IN ("
+            " SELECT id FROM audit_events ORDER BY created_at DESC, id DESC LIMIT ?)",
+            (max_rows,),
         )
         await db.commit()
         return int(cursor.rowcount or 0)

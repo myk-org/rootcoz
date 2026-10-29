@@ -4861,6 +4861,105 @@ def test_admin_audit_actions_empty(mock_client):
     assert "No audit events recorded." in result.output
 
 
+def test_admin_audit_verify_ok(mock_client):
+    mock_client.admin_verify_audit.return_value = {
+        "checked": 12,
+        "legacy": 2,
+        "ok": True,
+        "first_broken_id": None,
+    }
+    result = runner.invoke(app, ["admin", "audit", "verify", "--limit", "20"])
+    assert result.exit_code == 0, result.output
+    assert "Audit chain OK: 12 event(s) verified, 2 legacy row(s) skipped" in (
+        result.output
+    )
+    mock_client.admin_verify_audit.assert_called_once_with(limit=20)
+
+
+def test_admin_audit_verify_reports_a_broken_chain(mock_client):
+    mock_client.admin_verify_audit.return_value = {
+        "checked": 3,
+        "legacy": 0,
+        "ok": False,
+        "first_broken_id": 7,
+    }
+    result = runner.invoke(app, ["admin", "audit", "verify"])
+    assert result.exit_code == 1
+    assert "BROKEN at event 7" in result.output
+
+
+def test_admin_audit_verify_json(mock_client):
+    mock_client.admin_verify_audit.return_value = {
+        "checked": 1,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+    }
+    result = runner.invoke(app, ["--json", "admin", "audit", "verify"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["ok"] is True
+
+
+def test_admin_audit_export_writes_the_file(mock_client, tmp_path):
+    mock_client.admin_export_audit.return_value = 42
+    target = tmp_path / "audit.csv"
+    result = runner.invoke(
+        app,
+        [
+            "admin",
+            "audit",
+            "export",
+            "--format",
+            "csv",
+            "--output",
+            str(target),
+            "--actor",
+            "alice",
+            "--action",
+            "auth.login",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Saved 42 bytes" in result.output
+    mock_client.admin_export_audit.assert_called_once_with(
+        fmt="csv",
+        output=str(target),
+        actor="alice",
+        action=["auth.login"],
+        target_type="",
+        target_id="",
+        outcome="",
+        q="",
+        since="",
+        until="",
+    )
+
+
+def test_admin_audit_export_defaults_to_stdout(mock_client):
+    mock_client.admin_export_audit.return_value = 0
+    result = runner.invoke(app, ["admin", "audit", "export"])
+    assert result.exit_code == 0, result.output
+    assert "Saved" not in result.output
+    assert mock_client.admin_export_audit.call_args.kwargs["output"] == "-"
+    assert mock_client.admin_export_audit.call_args.kwargs["fmt"] == "json"
+
+
+def test_admin_audit_export_rejects_an_unknown_format(mock_client):
+    result = runner.invoke(app, ["admin", "audit", "export", "--format", "xml"])
+    assert result.exit_code == 1
+    assert "Invalid --format" in result.output
+    mock_client.admin_export_audit.assert_not_called()
+
+
+def test_admin_audit_export_reports_an_api_error(mock_client):
+    mock_client.admin_export_audit.side_effect = RootCozError(
+        status_code=403, detail="Admin access required"
+    )
+    result = runner.invoke(app, ["admin", "audit", "export"])
+    assert result.exit_code == 1
+    assert "Admin access required" in result.output
+
+
 def test_admin_models_free_list(mock_client):
     mock_client.admin_list_free_models.return_value = {
         "models": [{"provider": "EnMaaS", "model": "glm-5-3", "created_by": "admin"}]

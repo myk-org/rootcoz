@@ -371,6 +371,69 @@ async def get_component_versions() -> dict[str, Any]:
     return _component_versions_cache
 
 
+# Audit writes that failed since process start (#379). A missing audit row is a
+# compliance hole, not a transient warning, so it is counted here and surfaced
+# in /api/health and /metrics instead of only in a log line.
+_audit_write_failures = 0
+# One lock for both in-process audit counters (write failures, suppressed
+# auth events); they are only ever incremented together-held.
+_audit_counters_lock = threading.Lock()
+
+
+def record_audit_write_failure() -> int:
+    """Count one failed audit write; return the new process-lifetime total."""
+    global _audit_write_failures
+    with _audit_counters_lock:
+        _audit_write_failures += 1
+        return _audit_write_failures
+
+
+# Auth-failure events the volume guard dropped since process start (#379). A
+# brute-force run must not fill the trail, but a silent drop would hide the
+# attack, so the count is surfaced in health next to the write failures.
+_audit_suppressed_auth_events = 0
+# username -> (window_start_monotonic, suppressed in that window)
+_audit_auth_suppression_windows: dict[str, tuple[float, int]] = {}
+_AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS = 60
+
+
+def record_audit_auth_suppression(actor: str, limit: int) -> int:
+    """Count one throttled auth-failure row; log one summary line per window.
+
+    Returns the new process-lifetime suppressed total. The per-actor window
+    keeps the log honest without a line per attempt: the first drop of each
+    minute explains itself, the rest are counted into the next summary.
+    """
+    global _audit_suppressed_auth_events
+    now = time.monotonic()
+    with _audit_counters_lock:
+        _audit_suppressed_auth_events += 1
+        total = _audit_suppressed_auth_events
+        window_start, seen = _audit_auth_suppression_windows.get(actor, (0.0, 0))
+        if now - window_start < _AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS:
+            _audit_auth_suppression_windows[actor] = (window_start, seen + 1)
+            return total
+        _audit_auth_suppression_windows[actor] = (now, 1)
+    # Fully formatted on purpose: the log dedup filter drops a repeat of the
+    # same ``msg``, and the window summary must survive a later actor's line.
+    logger.warning(
+        f"[AUDIT] Auth-failure volume guard: suppressing further stored audit"
+        f" rows for '{actor}' beyond {limit} per minute"
+        f" (previous window dropped {seen})"
+    )
+    return total
+
+
+def audit_health_check() -> dict[str, Any]:
+    """Health entry for the audit trail: degraded once a write has failed."""
+    failures = _audit_write_failures
+    return {
+        "status": "degraded" if failures else "ok",
+        "write_failures": failures,
+        "suppressed_auth_events": _audit_suppressed_auth_events,
+    }
+
+
 async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     """Build full health response with checks and error rates.
 
@@ -414,6 +477,9 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     checks["jenkins"] = _safe(jenkins_check)
     checks["ai_provider"] = _safe(ai_check)
     checks["reportportal"] = _safe(rp_check)
+    # In-process state, no probe needed; a degraded entry makes the whole
+    # response degraded without turning /api/health into a 503.
+    checks["audit"] = audit_health_check()
 
     # Determine overall status. The sidecar is a hard dependency — every AI
     # feature routes through it and the container entrypoint tears the
@@ -793,6 +859,7 @@ def render_prometheus_metrics(
     *,
     health_up: int | None = None,
     active_analyses: int | None = None,
+    audit_write_failures: int | None = None,
 ) -> str:
     """Render metrics in Prometheus text exposition format.
 
@@ -801,6 +868,8 @@ def render_prometheus_metrics(
             metric is omitted.
         active_analyses: Number of currently active (pending/running/waiting)
             analyses. When None the metric is omitted.
+        audit_write_failures: Audit rows that could not be written since
+            process start. When None the metric is omitted.
 
     Returns a string ready to serve from /metrics.
     """
@@ -839,6 +908,13 @@ def render_prometheus_metrics(
         )
         lines.append("# TYPE rootcoz_active_analyses gauge")
         lines.append(f"rootcoz_active_analyses {active_analyses}")
+
+    if audit_write_failures is not None:
+        lines.append(
+            "# HELP rootcoz_audit_write_failures Audit rows that failed to persist since process start."
+        )
+        lines.append("# TYPE rootcoz_audit_write_failures gauge")
+        lines.append(f"rootcoz_audit_write_failures {audit_write_failures}")
 
     lines.append("")
     return "\n".join(lines)

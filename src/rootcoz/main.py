@@ -1,8 +1,10 @@
 import asyncio
 import contextlib
 import copy
+import csv
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import logging
@@ -214,10 +216,13 @@ from rootcoz.models import (
 )
 from rootcoz.monitoring import (
     _get_app_version,
+    audit_health_check,
     build_health_response,
     dispatch_alert,
     error_tracker,
     get_component_versions,
+    record_audit_auth_suppression,
+    record_audit_write_failure,
     render_prometheus_metrics,
     validate_startup_config,
 )
@@ -513,6 +518,8 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "default_user_role",
         "session_ttl_hours",
         "audit_retention_days",
+        "audit_max_rows",
+        "audit_auth_failure_max_per_minute",
     ],
     "Prow": [
         "prow_url",
@@ -899,6 +906,10 @@ async def _queue_sse_events(
     ``render`` returns the wire chunk, or ``None`` to drop a payload the
     subscription does not want. A quiet queue yields a keepalive comment.
     """
+    # Flush a comment immediately: the browser fires EventSource.onopen on the
+    # first bytes, so without this the client shows "connecting" until the first
+    # event or the keepalive window elapses.
+    yield ": connected\n\n"
     while not await request.is_disconnected():
         try:
             payload = await asyncio.wait_for(
@@ -1074,29 +1085,62 @@ _AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset(
     {"key", "keys", "changed_keys", "redacted_keys"}
 )
 
+# The only actions the volume guard throttles (#379): a brute-force run can
+# emit one per attempt, and none of them may push a real event out of the trail.
+_AUDIT_AUTH_FAILURE_ACTIONS: frozenset[str] = frozenset(
+    {"auth.login_failed", "auth.login_blocked"}
+)
+
+
+# Credential-shaped content inside a free-text detail value (#379). Each
+# alternative matches only the secret itself, so the sentence around it survives:
+# a PEM private key block, a known credential prefix, or a long bearer-ish token.
+_AUDIT_SECRET_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+    r"|(?:sk-|ddsat_|ddapp_|ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]+"
+    # A long run only counts as a credential when it also contains a digit:
+    # identifiers such as pytest node ids and CamelCase class names are long
+    # but carry no digits, and redacting them destroys the audit record.
+    r"|\b(?=[A-Za-z0-9_-]{24,}\b)(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b",
+    re.DOTALL,
+)
+# A bare lowercase hex string is a digest we record on purpose (an SQL hash, a
+# revoked key fingerprint), not a credential: leave the whole value alone.
+_AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
+
+
+def _scrub_audit_text(value: str) -> str:
+    """Replace credential-shaped substrings in one free-text detail value."""
+    if _AUDIT_HEX_DIGEST_RE.match(value):
+        return value
+    return _AUDIT_SECRET_RE.sub("[redacted]", value)
+
+
+def _redact_audit_value(value: Any) -> Any:
+    """Scrub one detail value: names for dicts, text for strings, else as-is."""
+    if isinstance(value, dict):
+        return _redact_details(value)
+    if isinstance(value, list):
+        return [_redact_audit_value(item) for item in value]
+    if isinstance(value, str):
+        return _scrub_audit_text(value)
+    return value
+
 
 def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
-    """Drop detail entries whose name marks them as secret.
+    """Drop detail entries whose name marks them as secret, scrub the rest.
 
     Reuses ``is_sensitive_key`` (SENSITIVE_KEYS plus the password/token/secret/
     key name heuristic), so a newly added credential field is scrubbed from the
     audit trail without a second list to maintain. Values are never truncated:
-    an entry that survives is stored whole.
+    an entry that survives is stored whole; a secret pasted into free text
+    (no credential-shaped key name) is replaced in place, never the entry.
     """
-    redacted: dict[str, Any] = {}
-    for name, value in (details or {}).items():
-        if name not in _AUDIT_SAFE_DETAIL_KEYS and is_sensitive_key(name):
-            continue
-        if isinstance(value, dict):
-            redacted[name] = _redact_details(value)
-        elif isinstance(value, list):
-            redacted[name] = [
-                _redact_details(item) if isinstance(item, dict) else item
-                for item in value
-            ]
-        else:
-            redacted[name] = value
-    return redacted
+    return {
+        name: _redact_audit_value(value)
+        for name, value in (details or {}).items()
+        if name in _AUDIT_SAFE_DETAIL_KEYS or not is_sensitive_key(name)
+    }
 
 
 def _audit_setting_details(key: str) -> dict[str, Any]:
@@ -1150,10 +1194,34 @@ async def record_audit(
 
     Role and admin flag default to the request's authenticated state. Never
     raises: an audit failure must not fail the action being audited.
+
+    ``auth.login_failed`` / ``auth.login_blocked`` are volume-guarded (#379):
+    once one actor has ``audit_auth_failure_max_per_minute`` rows for those
+    actions in the last minute, the row is skipped — the log line above still
+    fires, a summary line is logged per window, and the drop is counted in
+    health. Every other action is always stored.
     """
     # Fully formatted on purpose: the log dedup filter suppresses consecutive
     # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
     logger.info(f"[AUDIT] {message}")
+    resolved_actor = actor or "anonymous"
+    if action in _AUDIT_AUTH_FAILURE_ACTIONS:
+        limit = get_settings().audit_auth_failure_max_per_minute
+        if limit > 0:
+            since = storage.audit_timestamp(datetime.now(UTC) - timedelta(seconds=60))
+            try:
+                recent = await storage.count_audit_events_recent(
+                    actor=resolved_actor,
+                    actions=sorted(_AUDIT_AUTH_FAILURE_ACTIONS),
+                    since=since,
+                )
+            except sqlite3.Error, OSError:
+                # A broken count must never drop a security row: store it.
+                logger.warning("Audit volume guard could not count recent events")
+                recent = 0
+            if recent >= limit:
+                record_audit_auth_suppression(resolved_actor, limit)
+                return
     resolved_role = actor_role
     resolved_admin = is_admin
     if request is not None:
@@ -1164,7 +1232,7 @@ async def record_audit(
     try:
         event = await storage.insert_audit_event(
             action=action,
-            actor=actor or "anonymous",
+            actor=resolved_actor,
             actor_role=resolved_role,
             is_admin=resolved_admin,
             target_type=target_type,
@@ -1174,11 +1242,13 @@ async def record_audit(
             request_ip=_audit_request_ip(request),
         )
     except sqlite3.Error, OSError:
-        logger.warning(
-            "[AUDIT] Failed to persist audit event '%s' by '%s'",
+        failures = record_audit_write_failure()
+        logger.exception(
+            "[AUDIT] Failed to persist audit event '%s' by '%s'"
+            " (%d audit write failure(s) this process)",
             action,
             actor,
-            exc_info=True,
+            failures,
         )
         return
     notify_audit_event(event)
@@ -1193,35 +1263,51 @@ _last_audit_prune_at: float = 0.0
 
 
 async def prune_audit_events_periodically() -> int:
-    """Delete audit events older than ``AUDIT_RETENTION_DAYS``, at most daily.
+    """Delete expired audit events and enforce ``AUDIT_MAX_ROWS``, at most daily.
 
-    ``0`` disables pruning (events kept forever). Returns the number of rows
-    deleted — zero when the interval has not elapsed or retention is off.
+    ``audit_retention_days`` = 0 disables age pruning (events kept forever) and
+    ``audit_max_rows`` = 0 disables the size ceiling; with both off nothing is
+    deleted. Returns the number of rows deleted — zero when the interval has
+    not elapsed or both limits are off.
     """
     global _last_audit_prune_at
-    days = get_settings().audit_retention_days
-    if days <= 0:
+    settings = get_settings()
+    days = settings.audit_retention_days
+    max_rows = settings.audit_max_rows
+    if days <= 0 and max_rows <= 0:
         return 0
     now = _time.monotonic()
     if _last_audit_prune_at and now - _last_audit_prune_at < (
         _AUDIT_PRUNE_INTERVAL_SECONDS
     ):
         return 0
-    cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    deleted = 0
     try:
-        deleted = await storage.prune_audit_events(cutoff)
+        if days > 0:
+            cutoff = storage.audit_timestamp(datetime.now(UTC) - timedelta(days=days))
+            expired = await storage.prune_audit_events(cutoff)
+            deleted += expired
+            if expired:
+                logger.info(
+                    "Audit retention: deleted %d audit event(s) older than %d days",
+                    expired,
+                    days,
+                )
+        over_cap = await storage.enforce_audit_row_cap(max_rows)
+        deleted += over_cap
+        if over_cap:
+            logger.info(
+                "Audit size cap: deleted %d oldest audit event(s) beyond"
+                " AUDIT_MAX_ROWS=%d",
+                over_cap,
+                max_rows,
+            )
     except sqlite3.Error, OSError:
-        logger.warning("Audit retention pruning failed", exc_info=True)
+        logger.warning("Audit pruning failed", exc_info=True)
         return 0
     # Stamped only on success: a failed prune must not consume the daily
     # slot, so the next hourly call retries instead of skipping 24 hours.
     _last_audit_prune_at = now
-    if deleted:
-        logger.info(
-            "Audit retention: deleted %d audit event(s) older than %d days",
-            deleted,
-            days,
-        )
     return deleted
 
 
@@ -5476,6 +5562,59 @@ async def submit(
     )
 
 
+def _dominant_classification(result_data: dict[str, Any]) -> str | None:
+    """The most common failure classification in a stored result, if any.
+
+    What the previous run concluded, computed from the stored failures the
+    re-analyze path already holds — no extra query, no failure bodies.
+    """
+    counts: Counter[str] = Counter()
+    for failure, _child_job, _child_build in _iter_scoped_failures(result_data):
+        analysis = failure.get("analysis")
+        if isinstance(analysis, dict) and analysis.get("classification"):
+            counts[analysis["classification"]] += 1
+    return counts.most_common(1)[0][0] if counts else None
+
+
+async def _audit_analysis_rerun(
+    *,
+    request: Request,
+    job_id: str,
+    result_data: dict[str, Any],
+    provider: str,
+    model: str,
+    outcome: Literal["success", "failure"],
+) -> None:
+    """Record one ``analysis.rerun`` — who re-ran a job, with what, and why.
+
+    ``provider``/``model`` are the pair the run was queued with (empty when it
+    defers to the tests repo's ``settings.json``). ``previous_classification``
+    is absent when the job had no classified failure to override.
+    """
+    previous_classification = _dominant_classification(result_data)
+    details: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "trigger": "manual",
+    }
+    if previous_classification:
+        details["previous_classification"] = previous_classification
+    await record_audit(
+        action="analysis.rerun",
+        actor=request.state.username,
+        message=(
+            f"User '{request.state.username}' re-ran the analysis of job {job_id}"
+            f" with {provider or '<deferred>'}/{model or '<deferred>'}"
+            f" (manual, {outcome})"
+        ),
+        target_type="job",
+        target_id=job_id,
+        outcome=outcome,
+        details=details,
+        request=request,
+    )
+
+
 @app.post(
     "/results/{job_id}/analyze",
     status_code=202,
@@ -5556,8 +5695,15 @@ async def analyze_submitted_job(
             status_code=409,
             detail="Job is already being analyzed or is no longer submitted.",
         )
+    rerun = {
+        "request": request,
+        "job_id": job_id,
+        "result_data": result_data,
+        "provider": unified_body.ai_provider or "",
+        "model": unified_body.ai_model or "",
+    }
     try:
-        return await _enqueue_ci_source_analysis(
+        queued = await _enqueue_ci_source_analysis(
             body=unified_body,
             merged=merged,
             resolved_peers=resolved_peers,
@@ -5572,7 +5718,10 @@ async def analyze_submitted_job(
         )
     except Exception:
         await release_submitted_job_analyze_claim(job_id, previous_status)
+        await _audit_analysis_rerun(**rerun, outcome="failure")
         raise
+    await _audit_analysis_rerun(**rerun, outcome="success")
+    return queued
 
 
 def _unified_fields_from_stored_params(
@@ -5681,27 +5830,42 @@ async def re_analyze(
     unified_body.tags = existing_tags
 
     # Validate and merge settings
-    await _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
+    provider, model = await _resolve_ai_config_allow_defer(
+        unified_body, get_settings(), request
+    )
     merged = _merge_settings(unified_body, get_settings())
     resolved_peers = await _validate_peer_configs(unified_body, merged)
 
     # Resolve display name — prefer original name, then plugin fallback
     display_name = unified_body.name or source_cls.default_display_name(unified_body)
 
-    return await _enqueue_ci_source_analysis(
-        body=unified_body,
-        merged=merged,
-        resolved_peers=resolved_peers,
-        display_name=display_name,
-        analysis_type=analysis_type,
-        base_url=base_url,
-        username=request.state.username,
-        tags=unified_body.tags,
-        message_prefix="Re-analysis",
-        reanalyzed_from_job_id=job_id,
-        reanalyzed_from_job_name=origin_job_display_name,
-        is_admin=bool(request.state.is_admin),
-    )
+    rerun = {
+        "request": request,
+        "job_id": job_id,
+        "result_data": result_data,
+        "provider": provider,
+        "model": model,
+    }
+    try:
+        queued = await _enqueue_ci_source_analysis(
+            body=unified_body,
+            merged=merged,
+            resolved_peers=resolved_peers,
+            display_name=display_name,
+            analysis_type=analysis_type,
+            base_url=base_url,
+            username=request.state.username,
+            tags=unified_body.tags,
+            message_prefix="Re-analysis",
+            reanalyzed_from_job_id=job_id,
+            reanalyzed_from_job_name=origin_job_display_name,
+            is_admin=bool(request.state.is_admin),
+        )
+    except Exception:
+        await _audit_analysis_rerun(**rerun, outcome="failure")
+        raise
+    await _audit_analysis_rerun(**rerun, outcome="success")
+    return queued
 
 
 def _iter_scoped_failures(
@@ -7122,6 +7286,15 @@ async def delete_comment_endpoint(
         )
         raise HTTPException(status_code=404, detail=detail)
 
+    await record_audit(
+        action="comment.delete",
+        actor=username,
+        message=f"User '{username}' deleted comment {comment_id} in job {job_id}",
+        target_type="comment",
+        target_id=str(comment_id),
+        details={"job_id": job_id},
+        request=request,
+    )
     return {"status": "deleted"}
 
 
@@ -10895,7 +11068,9 @@ async def prometheus_metrics() -> Response:
 
     return Response(
         content=render_prometheus_metrics(
-            health_up=health_up, active_analyses=active_analyses
+            health_up=health_up,
+            active_analyses=active_analyses,
+            audit_write_failures=audit_health_check()["write_failures"],
         ),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
@@ -11465,6 +11640,15 @@ async def logout(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
+    )
+    await record_audit(
+        action="auth.logout",
+        actor=request.state.username,
+        message=f"Logout: user='{request.state.username or 'anonymous'}'",
+        target_type="user",
+        target_id=request.state.username,
+        details={"session_cleared": bool(session_token)},
+        request=request,
     )
     return response
 
@@ -12138,6 +12322,15 @@ async def delete_filter_preset_endpoint(preset_id: int, request: Request) -> Non
 
 # --- User token endpoints ---
 
+# Which tracker each stored credential field belongs to, so the audit row can
+# name the tracker without the token (#379). ``jira_email`` is deliberately
+# absent: it is not a credential.
+_TRACKER_TOKEN_FIELDS: dict[str, str] = {
+    "github_token": "github",
+    "jira_token": "jira",
+    "jira_sa_token": "jira",
+}
+
 
 @app.get("/api/user/tokens", operation_id="getUserTokensEndpoint")
 async def get_user_tokens_endpoint(request: Request) -> JSONResponse:
@@ -12218,6 +12411,26 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
 
     await storage.save_user_tokens(username, **kwargs)
     logger.debug(f"Saved tokens for user '{username}': {sorted(kwargs)}")
+    # One row per (tracker, kind): setting a Jira token and clearing the other
+    # Jira token in one request is a set and a delete, but never a third row
+    # per field — the detail names the tracker only, never the field's value.
+    audited: set[tuple[str, str]] = set()
+    for field, tracker in _TRACKER_TOKEN_FIELDS.items():
+        if field not in kwargs:
+            continue
+        kind = "set" if kwargs[field] else "delete"
+        if (tracker, kind) in audited:
+            continue
+        audited.add((tracker, kind))
+        await record_audit(
+            action=f"user.tracker_token_{kind}",
+            actor=username,
+            message=f"User '{username}' {kind} the {tracker} tracker token",
+            target_type="user",
+            target_id=username,
+            details={"tracker": tracker},
+            request=request,
+        )
     return JSONResponse(content={"ok": True, "saved": True})
 
 
@@ -12387,11 +12600,13 @@ async def stream_logs(
 def _audit_iso_bound(
     value: str | None, name: str, *, end_of_day: bool = False
 ) -> str | None:
-    """Normalize an ISO 8601 query bound to the DB's ``created_at`` format.
+    """Normalize an ISO 8601 query bound to the stored ``created_at`` format.
 
-    A date-only value means the whole day: ``since`` starts at midnight and
-    ``until`` (``end_of_day``) runs to the last microsecond. A full timestamp
-    is used as given.
+    A bare ``YYYY-MM-DD`` means a UTC day: ``since`` starts at 00:00:00 UTC and
+    ``until`` (``end_of_day``) runs to the last microsecond of that UTC day. An
+    explicit offset is honoured; a naive timestamp is read as UTC. Either way the
+    value is converted to UTC and rendered by ``storage.audit_timestamp``, the
+    one format the rows are stored in.
     """
     if not value:
         return None
@@ -12402,12 +12617,101 @@ def _audit_iso_bound(
         raise HTTPException(
             status_code=400, detail=f"{name} must be an ISO 8601 timestamp"
         ) from exc
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
     if end_of_day and len(raw) == 10:  # date-only YYYY-MM-DD
         parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
-        return parsed.strftime("%Y-%m-%d %H:%M:%S.%f")
-    return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    return storage.audit_timestamp(parsed)
+
+
+# CSV column order for the audit export — the documented header.
+_AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
+    "id",
+    "created_at",
+    "actor",
+    "actor_role",
+    "is_admin",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "request_ip",
+    "details",
+    "entry_hash",
+)
+# Rows per storage round-trip and the CSV buffer size that triggers a flush:
+# an export streams the whole matched set without holding it in memory.
+_AUDIT_EXPORT_BATCH = 500
+_AUDIT_EXPORT_FLUSH_BYTES = 64 * 1024
+
+
+def _audit_filter_params(
+    actor: Annotated[
+        str | None, Query(description="Exact actor username (case-insensitive)")
+    ] = None,
+    action: Annotated[
+        list[str] | None,
+        Query(description="Action id; repeat the parameter or comma-separate"),
+    ] = None,
+    target_type: Annotated[
+        str | None, Query(description="Target type, e.g. job")
+    ] = None,
+    target_id: Annotated[
+        str | None, Query(description="Target id, e.g. a job id")
+    ] = None,
+    outcome: Annotated[
+        str | None, Query(description="success, failure, or denied")
+    ] = None,
+    q: Annotated[
+        str | None, Query(description="Substring search over event details")
+    ] = None,
+    since: Annotated[
+        str | None,
+        Query(
+            description=(
+                "ISO 8601 lower bound (inclusive). A date-only value means 00:00 "
+                "UTC that day; a naive timestamp is read as UTC."
+            )
+        ),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "ISO 8601 upper bound (inclusive). A date-only value means the "
+                "last microsecond of that UTC day; a naive timestamp is read as UTC."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Shared list/export filters, normalized for ``storage.list_audit_events``."""
+    actions = [
+        part.strip()
+        for value in action or []
+        for part in value.split(",")
+        if part.strip()
+    ]
+    return {
+        "actor": actor or None,
+        "action": actions or None,
+        "target_type": target_type or None,
+        "target_id": target_id or None,
+        "outcome": outcome or None,
+        "q": q or None,
+        "date_from": _audit_iso_bound(since, "since"),
+        "date_to": _audit_iso_bound(until, "until", end_of_day=True),
+    }
+
+
+def _audit_export_record(event: dict[str, Any]) -> dict[str, Any]:
+    """One CSV row: the export columns, ``details`` as its stored JSON text."""
+    record: dict[str, Any] = {}
+    for name in _AUDIT_EXPORT_COLUMNS:
+        value = event.get(name)
+        if name == "details":
+            value = json.dumps(value or {}, ensure_ascii=False, separators=(",", ":"))
+        elif name == "is_admin":
+            value = int(bool(value))
+        record[name] = "" if value is None else value
+    return record
 
 
 def _audit_public_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -12430,42 +12734,13 @@ def _audit_action_label(action: str) -> str:
 @app.get("/api/admin/audit", operation_id="listAuditEventsEndpoint")
 async def list_audit_events_endpoint(
     request: Request,
-    actor: str | None = Query(
-        None, description="Exact actor username (case-insensitive)"
-    ),
-    action: Annotated[
-        list[str] | None,
-        Query(description="Action id; repeat the parameter or comma-separate"),
-    ] = None,
-    target_type: str | None = Query(None, description="Target type, e.g. job"),
-    target_id: str | None = Query(None, description="Target id, e.g. a job id"),
-    outcome: str | None = Query(None, description="success, failure, or denied"),
-    q: str | None = Query(None, description="Substring search over event details"),
-    since: str | None = Query(None, description="ISO 8601 lower bound (inclusive)"),
-    until: str | None = Query(None, description="ISO 8601 upper bound (inclusive)"),
+    filters: Annotated[dict[str, Any], Depends(_audit_filter_params)],
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
     """List recorded audit events newest-first, with the total match count."""
     _require_admin(request)
-    actions = [
-        part.strip()
-        for value in action or []
-        for part in value.split(",")
-        if part.strip()
-    ]
-    result = await storage.list_audit_events(
-        actor=actor or None,
-        action=actions or None,
-        target_type=target_type or None,
-        target_id=target_id or None,
-        outcome=outcome or None,
-        q=q or None,
-        date_from=_audit_iso_bound(since, "since"),
-        date_to=_audit_iso_bound(until, "until", end_of_day=True),
-        limit=limit,
-        offset=offset,
-    )
+    result = await storage.list_audit_events(**filters, limit=limit, offset=offset)
     result["events"] = [_audit_public_event(event) for event in result["events"]]
     logger.debug(
         "GET /api/admin/audit: returning %d of %d events (limit=%d offset=%d)",
@@ -12475,6 +12750,94 @@ async def list_audit_events_endpoint(
         offset,
     )
     return strip_sensitive_from_response({**result, "limit": limit, "offset": offset})
+
+
+@app.get("/api/admin/audit/verify", operation_id="verifyAuditChainEndpoint")
+async def verify_audit_chain_endpoint(
+    request: Request,
+    limit: int | None = Query(
+        None, ge=1, description="Verify only the newest N chained events"
+    ),
+) -> dict[str, Any]:
+    """Recompute the audit hash chain and report the first tampered event.
+
+    ``legacy`` counts rows written before the chain existed (NULL hashes): they
+    are reported separately, never counted as broken and never given a
+    fabricated hash.
+    """
+    _require_admin(request)
+    result = await storage.verify_audit_chain(limit=limit)
+    logger.info(
+        "Audit chain verification: ok=%s checked=%d legacy=%d first_broken_id=%s",
+        result["ok"],
+        result["checked"],
+        result["legacy"],
+        result["first_broken_id"],
+    )
+    return strip_sensitive_from_response(result)
+
+
+@app.get("/api/admin/audit/export", operation_id="exportAuditEventsEndpoint")
+async def export_audit_events(
+    request: Request,
+    filters: Annotated[dict[str, Any], Depends(_audit_filter_params)],
+    format: Literal["json", "csv"] = Query(
+        "json", description="Export format: json or csv"
+    ),
+) -> StreamingResponse:
+    """Export every audit event matching the list filters, streamed in batches.
+
+    The way to retain evidence before retention or the row cap deletes it: the
+    full matched set is streamed, so no page size limits the export and memory
+    stays bounded. CSV columns are ``id, created_at, actor, actor_role,
+    is_admin, action, target_type, target_id, outcome, request_ip, details,
+    entry_hash``.
+    """
+    _require_admin(request)
+    logger.info(
+        "Admin '%s' exported the audit trail as %s",
+        request.state.username,
+        format,
+    )
+
+    async def _events() -> AsyncIterator[dict[str, Any]]:
+        async for batch in storage.iter_audit_events(
+            batch_size=_AUDIT_EXPORT_BATCH, **filters
+        ):
+            for event in batch:
+                yield _audit_public_event(event)
+
+    async def _json_chunks() -> AsyncIterator[str]:
+        yield "["
+        separator = "\n"
+        async for event in _events():
+            yield separator + json.dumps(event, default=str)
+            separator = ",\n"
+        yield "]\n"
+
+    async def _csv_chunks() -> AsyncIterator[str]:
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=list(_AUDIT_EXPORT_COLUMNS))
+        writer.writeheader()
+        async for event in _events():
+            writer.writerow(_audit_export_record(event))
+            if buffer.tell() >= _AUDIT_EXPORT_FLUSH_BYTES:
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate()
+        if buffer.tell():
+            yield buffer.getvalue()
+
+    return StreamingResponse(
+        _json_chunks() if format == "json" else _csv_chunks(),
+        media_type=(
+            "application/json" if format == "json" else "text/csv; charset=utf-8"
+        ),
+        headers={
+            "Content-Disposition": f"attachment; filename=audit-export.{format}",
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/admin/audit/actions", operation_id="listAuditActions")
@@ -13705,9 +14068,15 @@ async def _verify_and_store_server_provider_key(
     request: Request,
     *,
     replacing: bool,
+    promoted: bool = False,
     include_model_count: bool = False,
 ) -> JSONResponse:
     """Shared add/rotate/store path: verify the key with a real turn, then store.
+
+    ``promoted`` is set by ``store-deployment-key``, which hands over the
+    credential the deployment already resolves instead of one an admin typed:
+    the audit action then distinguishes it (``provider.key.promote``) while the
+    target/outcome/details shape stays identical to add/rotate (#379).
 
     ``include_model_count`` adds the captured key-scoped model count to the
     success payload (#378) — reported only when the capture actually produced
@@ -13798,12 +14167,24 @@ async def _verify_and_store_server_provider_key(
         await _seed_server_provider_selection(
             provider, request.state.username or "admin"
         )
+    action = (
+        "provider.key.rotate"
+        if replacing
+        else "provider.key.promote"
+        if promoted
+        else "provider.key.store"
+    )
     await record_audit(
-        action="provider.key.rotate" if replacing else "provider.key.store",
+        action=action,
         actor=request.state.username,
         message=(
-            f"Admin '{request.state.username}' stored server provider key"
-            f" for '{provider}' (verified"
+            f"Admin '{request.state.username}' "
+            + (
+                "promoted the deployment credential"
+                if promoted
+                else "stored server provider key"
+            )
+            + f" for '{provider}' (verified"
             + (
                 f", {len(key_models)} key-scoped models"
                 if capture_status == "supported"
@@ -14137,6 +14518,7 @@ async def store_deployment_provider_key(
         ),
         request,
         replacing=False,
+        promoted=True,
         include_model_count=True,
     )
 

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import csv
+import io
 import json
 import logging
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,7 +22,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from rootcoz import main, storage
+from rootcoz import main, monitoring, storage
+from rootcoz.encryption import encrypt_sensitive_fields
 from tests.conftest import admin_login, make_app_client
 
 _ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret  # gitleaks:allow
@@ -178,7 +182,7 @@ async def test_list_date_range_filter(audit_db: Path) -> None:
     await storage.insert_audit_event(action="action.new", actor="alice")
     with sqlite3.connect(audit_db) as conn:
         conn.execute(
-            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
             (old["id"],),
         )
 
@@ -205,7 +209,7 @@ async def test_prune_audit_events_by_cutoff(audit_db: Path) -> None:
     await storage.insert_audit_event(action="action.new", actor="alice")
     with sqlite3.connect(audit_db) as conn:
         conn.execute(
-            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
             (old["id"],),
         )
 
@@ -277,8 +281,12 @@ async def test_record_audit_stores_compact_details(
 
 
 async def test_record_audit_swallows_db_failure(
-    audit_db: Path, caplog: pytest.LogCaptureFixture
+    audit_db: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The failure counter is process-wide; reset it so health tests stay hermetic.
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
     caplog.set_level(logging.INFO)
     main_logger = _capture_main_logs(caplog)
 
@@ -423,12 +431,14 @@ async def test_prune_periodically_deletes_old_keeps_recent(
     await storage.insert_audit_event(action="action.new", actor="alice")
     with sqlite3.connect(audit_db) as conn:
         conn.execute(
-            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
             (old["id"],),
         )
     monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
     monkeypatch.setattr(
-        main, "get_settings", lambda: SimpleNamespace(audit_retention_days=90)
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=90, audit_max_rows=0),
     )
 
     assert await main.prune_audit_events_periodically() == 1
@@ -442,7 +452,9 @@ async def test_prune_failure_does_not_consume_the_daily_slot(
     """A failed prune must leave the timestamp unset so the next call retries."""
     monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
     monkeypatch.setattr(
-        main, "get_settings", lambda: SimpleNamespace(audit_retention_days=90)
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=90, audit_max_rows=0),
     )
     with patch.object(
         storage,
@@ -456,7 +468,7 @@ async def test_prune_failure_does_not_consume_the_daily_slot(
     await storage.insert_audit_event(action="action.new", actor="alice")
     with sqlite3.connect(audit_db) as conn:
         conn.execute(
-            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
             (old["id"],),
         )
 
@@ -471,7 +483,9 @@ async def test_prune_periodically_runs_at_most_daily(
     await storage.insert_audit_event(action="action.keep", actor="alice")
     monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
     monkeypatch.setattr(
-        main, "get_settings", lambda: SimpleNamespace(audit_retention_days=90)
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=90, audit_max_rows=0),
     )
 
     first = await main.prune_audit_events_periodically()
@@ -487,7 +501,9 @@ async def test_prune_disabled_when_retention_is_zero(
     await storage.insert_audit_event(action="action.keep", actor="alice")
     monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
     monkeypatch.setattr(
-        main, "get_settings", lambda: SimpleNamespace(audit_retention_days=0)
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=0, audit_max_rows=0),
     )
 
     assert await main.prune_audit_events_periodically() == 0
@@ -513,7 +529,7 @@ def test_startup_prune_respects_saved_retention(tmp_path: Path, monkeypatch) -> 
     old = asyncio.run(storage.insert_audit_event(action="action.old", actor="alice"))
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
             (old["id"],),
         )
     monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
@@ -577,6 +593,22 @@ def test_login_failure_is_audited(app_client) -> None:
     assert len(events) == 1
     assert events[0]["actor"] == "nobody"
     assert events[0]["outcome"] == "failure"
+
+
+def test_logout_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.post("/api/auth/logout")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="auth.logout")
+    assert len(events) == 1
+    event = events[0]
+    assert event["actor"] == "admin"
+    assert event["target_type"] == "user"
+    assert event["target_id"] == "admin"
+    assert event["outcome"] == "success"
+    # The session cookie is cleared, but its value is never a detail.
+    assert event["details"] == {"session_cleared": True}
 
 
 def test_settings_update_audits_keys_without_values(app_client) -> None:
@@ -659,6 +691,234 @@ def test_provider_key_store_audits_provider_not_key(app_client) -> None:
     assert events[0]["target_id"] == "claude"
     assert events[0]["details"] == {"provider": "claude", "outcome": "accepted"}
     assert _SECRET not in json.dumps(events[0])
+
+
+def test_deployment_key_promotion_has_its_own_action(app_client) -> None:
+    """A promoted deployment credential is not a manually entered key (#379)."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main, "_canonical_key_provider_id", AsyncMock(return_value="claude")
+        ),
+        patch("rootcoz.ai_client.verify_ai_key", AsyncMock(return_value="accepted")),
+        patch(
+            "rootcoz.ai_client.deployment_provider_credentials",
+            lambda: {"claude": _SECRET},
+        ),
+        patch.object(
+            main,
+            "_capture_key_scoped_models",
+            AsyncMock(return_value=([], "unsupported")),
+        ),
+        patch.object(main, "_seed_server_provider_selection", AsyncMock()),
+    ):
+        response = app_client.post(
+            "/api/admin/server-providers/claude/store-deployment-key",
+            json={"verification_model": "test-model"},
+        )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="provider.key.promote")
+    assert len(events) == 1
+    event = events[0]
+    assert event["target_type"] == "provider"
+    assert event["target_id"] == "claude"
+    assert event["outcome"] == "success"
+    assert event["details"] == {"provider": "claude", "outcome": "accepted"}
+    assert _SECRET not in json.dumps(event)
+    # The manual-entry action is not written for a promotion.
+    assert _events(action="provider.key.store") == []
+
+
+def test_analysis_rerun_is_audited_with_previous_classification(
+    app_client,
+) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-rerun",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "analysis_state": "submitted",
+                "failures": [
+                    {"test_name": "t1", "analysis": {"classification": "CODE"}},
+                    {"test_name": "t2", "analysis": {"classification": "CODE"}},
+                    {"test_name": "t3", "analysis": {"classification": "INFRA"}},
+                ],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                    }
+                ),
+            },
+        )
+    )
+    with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+        response = app_client.post(
+            "/results/job-rerun/analyze",
+            json={"ai_provider": "claude", "ai_model": "test-model"},
+        )
+    assert response.status_code == 202, response.text
+
+    events = _events(action="analysis.rerun")
+    assert len(events) == 1
+    event = events[0]
+    assert event["target_type"] == "job"
+    assert event["target_id"] == "job-rerun"
+    assert event["outcome"] == "success"
+    assert event["actor"] == "admin"
+    assert event["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "trigger": "manual",
+        "previous_classification": "CODE",
+    }
+
+
+def test_analysis_rerun_without_a_classification_omits_the_detail(
+    app_client,
+) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-fresh",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "analysis_state": "submitted",
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                    }
+                ),
+            },
+        )
+    )
+    with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+        response = app_client.post(
+            "/results/job-fresh/analyze",
+            json={"ai_provider": "claude", "ai_model": "test-model"},
+        )
+    assert response.status_code == 202, response.text
+    assert _events(action="analysis.rerun")[0]["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "trigger": "manual",
+    }
+
+
+def test_analysis_rerun_failure_is_audited(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-boom",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "analysis_state": "submitted",
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                    }
+                ),
+            },
+        )
+    )
+    with (
+        patch(
+            "rootcoz.main._enqueue_ci_source_analysis",
+            AsyncMock(side_effect=RuntimeError("queue down")),
+        ),
+        # The client re-raises: the audit row is written before the error escapes.
+        pytest.raises(RuntimeError),
+    ):
+        app_client.post(
+            "/results/job-boom/analyze",
+            json={"ai_provider": "claude", "ai_model": "test-model"},
+        )
+    assert _events(action="analysis.rerun")[0]["outcome"] == "failure"
+
+
+def test_tracker_token_set_and_delete_audit_the_tracker_only(app_client) -> None:
+    registered = app_client.post("/api/auth/register", json={"username": "carol"})
+    assert registered.status_code == 200, registered.text
+    session = registered.cookies.get("rootcoz_session")
+    headers = {"Authorization": ""}
+    cookies = {"rootcoz_session": session}
+
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    response = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token, "github_token": "gh-token-0123456789"},
+        headers=headers,
+        cookies=cookies,
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": ""},
+        headers=headers,
+        cookies=cookies,
+    )
+    assert response.status_code == 200, response.text
+
+    sets = _events(action="user.tracker_token_set")
+    assert {event["details"]["tracker"] for event in sets} == {"github", "jira"}
+    assert all(event["target_type"] == "user" for event in sets)
+    assert all(event["target_id"] == "carol" for event in sets)
+    deletes = _events(action="user.tracker_token_delete")
+    assert len(deletes) == 1
+    assert deletes[0]["details"] == {"tracker": "jira"}
+    stored = json.dumps(sets + deletes)
+    assert token not in stored
+    assert "gh-token-0123456789" not in stored
+
+
+def test_comment_delete_is_audited_without_the_body(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-comments",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "failures": [{"test_name": "test_a", "analysis": {}}],
+            },
+        )
+    )
+    created = app_client.post(
+        "/results/job-comments/comments",
+        json={"test_name": "test_a", "comment": "body text that must not be audited"},
+    )
+    assert created.status_code == 201, created.text
+    comment_id = created.json()["id"]
+
+    deleted = app_client.delete(f"/results/job-comments/comments/{comment_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    events = _events(action="comment.delete")
+    assert len(events) == 1
+    event = events[0]
+    assert event["target_type"] == "comment"
+    assert event["target_id"] == str(comment_id)
+    assert event["details"] == {"job_id": "job-comments"}
+    assert "body text" not in json.dumps(event)
 
 
 def test_job_delete_is_audited(app_client) -> None:
@@ -880,7 +1140,7 @@ def test_audit_endpoint_date_range(app_client, temp_db_path: Path) -> None:
     _insert_audit(action="action.new", actor="alice")
     with sqlite3.connect(temp_db_path) as conn:
         conn.execute(
-            "UPDATE audit_events SET created_at = '2020-01-01 00:00:00' WHERE id = ?",
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
             (old["id"],),
         )
 
@@ -901,7 +1161,7 @@ def test_audit_endpoint_date_range(app_client, temp_db_path: Path) -> None:
     midday = _insert_audit(action="action.midday", actor="alice")
     with sqlite3.connect(temp_db_path) as conn:
         conn.execute(
-            "UPDATE audit_events SET created_at = '2022-06-15 15:00:00' WHERE id = ?",
+            "UPDATE audit_events SET created_at = '2022-06-15T15:00:00.000000Z' WHERE id = ?",
             (midday["id"],),
         )
     same_day = app_client.get(
@@ -1048,6 +1308,9 @@ async def test_audit_stream_emits_new_event(audit_db: Path) -> None:
 
     response = await main.stream_audit_events(request)
     body = response.body_iterator
+    # First chunk is the immediate connect comment so the browser fires
+    # EventSource.onopen without waiting for an event or the keepalive.
+    assert await asyncio.wait_for(anext(body), timeout=1) == ": connected\n\n"
     pending = asyncio.create_task(anext(body))
     await asyncio.sleep(0)  # let the generator register its listener
     try:
@@ -1076,3 +1339,767 @@ async def test_audit_stream_requires_admin() -> None:
     with pytest.raises(Exception) as exc_info:
         await main.stream_audit_events(request)
     assert getattr(exc_info.value, "status_code", None) == 403
+
+
+# --- tamper evidence: the hash chain --------------------------------------
+
+_LEGACY_AUDIT_SCHEMA = """
+    CREATE TABLE audit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        actor TEXT NOT NULL,
+        actor_role TEXT,
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        outcome TEXT NOT NULL DEFAULT 'success',
+        details TEXT DEFAULT '{}',
+        request_ip TEXT
+    )
+"""
+
+
+def _chain_rows(db_path: Path) -> list[tuple[int, str | None, str | None]]:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT id, prev_hash, entry_hash FROM audit_events ORDER BY id"
+        ).fetchall()
+
+
+async def test_chain_links_each_row_to_its_predecessor(audit_db: Path) -> None:
+    for index in range(3):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+
+    rows = _chain_rows(audit_db)
+    assert rows[0][1] == storage._AUDIT_GENESIS_HASH
+    assert rows[1][1] == rows[0][2]
+    assert rows[2][1] == rows[1][2]
+    assert all(row[2] for row in rows)
+
+    assert await storage.verify_audit_chain() == {
+        "checked": 3,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+    }
+
+
+async def test_verify_chain_flags_a_tampered_row(audit_db: Path) -> None:
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    middle = await storage.insert_audit_event(action="action.two", actor="alice")
+    await storage.insert_audit_event(action="action.three", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory' WHERE id = ?", (middle["id"],)
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == middle["id"]
+    assert result["checked"] == 3
+
+
+async def test_verify_chain_flags_a_deleted_row(audit_db: Path) -> None:
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    middle = await storage.insert_audit_event(action="action.two", actor="alice")
+    last = await storage.insert_audit_event(action="action.three", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute("DELETE FROM audit_events WHERE id = ?", (middle["id"],))
+
+    # The gap breaks the successor's prev_hash link, not the deleted row.
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == last["id"]
+
+
+async def test_verify_chain_reports_legacy_rows_separately(audit_db: Path) -> None:
+    with sqlite3.connect(audit_db) as conn:
+        for _ in range(2):
+            conn.execute(
+                "INSERT INTO audit_events (created_at, actor, action)"
+                " VALUES ('2021-03-04T05:06:07.000000Z', 'alice', 'auth.login')"
+            )
+    await storage.insert_audit_event(action="action.chained", actor="alice")
+
+    # Pre-chain rows are counted, not called broken, and not faked into it.
+    result = await storage.verify_audit_chain()
+    assert result == {
+        "checked": 1,
+        "legacy": 2,
+        "ok": True,
+        "first_broken_id": None,
+    }
+    assert _chain_rows(audit_db)[0][2] is None
+
+
+async def test_verify_chain_limit_checks_only_the_newest_rows(audit_db: Path) -> None:
+    first = await storage.insert_audit_event(action="action.one", actor="alice")
+    for index in range(2, 6):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory' WHERE id = ?", (first["id"],)
+        )
+
+    window = await storage.verify_audit_chain(limit=2)
+    assert window == {"checked": 2, "legacy": 0, "ok": True, "first_broken_id": None}
+
+    everything = await storage.verify_audit_chain()
+    assert everything["ok"] is False
+    assert everything["first_broken_id"] == first["id"]
+
+
+async def test_concurrent_inserts_keep_one_linear_chain(audit_db: Path) -> None:
+    await asyncio.gather(
+        *(
+            storage.insert_audit_event(action=f"action.{index}", actor="alice")
+            for index in range(6)
+        )
+    )
+
+    result = await storage.verify_audit_chain()
+    assert result["checked"] == 6
+    assert result["ok"] is True
+
+
+# --- created_at is explicit UTC -------------------------------------------
+
+
+async def test_stored_created_at_carries_an_explicit_utc_marker(
+    audit_db: Path,
+) -> None:
+    event = await storage.insert_audit_event(action="auth.login", actor="alice")
+    assert event["created_at"].endswith("Z")
+    parsed = datetime.fromisoformat(event["created_at"])
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+
+
+def test_init_db_migrates_a_legacy_audit_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing DB gets the chain columns; naive UTC timestamps are rewritten."""
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(storage, "DB_PATH", db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(_LEGACY_AUDIT_SCHEMA)
+        conn.execute(
+            "INSERT INTO audit_events (created_at, actor, action)"
+            " VALUES ('2021-03-04 05:06:07', 'alice', 'auth.login')"
+        )
+
+    asyncio.run(storage.init_db())
+    with sqlite3.connect(db_path) as conn:
+        migrated = conn.execute(
+            "SELECT created_at, prev_hash, entry_hash FROM audit_events"
+        ).fetchone()
+    assert migrated == ("2021-03-04T05:06:07.000000Z", None, None)
+
+    # Idempotent: a second startup neither re-adds nor re-rewrites anything.
+    asyncio.run(storage.init_db())
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute("SELECT created_at FROM audit_events").fetchone()[0]
+            == "2021-03-04T05:06:07.000000Z"
+        )
+
+    assert asyncio.run(storage.verify_audit_chain())["legacy"] == 1
+
+
+def test_audit_timestamp_treats_naive_input_as_utc() -> None:
+    assert storage.audit_timestamp(datetime(2026, 6, 15, 12)) == (
+        "2026-06-15T12:00:00.000000Z"
+    )
+    # An explicit offset is converted, not dropped.
+    assert (
+        storage.audit_timestamp(
+            datetime(2026, 6, 15, 14, tzinfo=timezone(timedelta(hours=2)))
+        )
+        == "2026-06-15T12:00:00.000000Z"
+    )
+
+
+# --- timezone-correct filtering -------------------------------------------
+
+
+def _set_created_at(db_path: Path, event_id: int, value: str) -> None:
+    """Rewrite one row's ``created_at`` (to place it on a known instant)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = ? WHERE id = ?", (value, event_id)
+        )
+
+
+def test_audit_endpoint_honours_explicit_offsets(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    late = _insert_audit(action="action.late", actor="alice")
+    _set_created_at(temp_db_path, late["id"], "2026-06-15T22:30:00.000000Z")
+
+    # 2026-06-16T00:30+02:00 is the same instant as the row: included.
+    same = app_client.get(
+        "/api/admin/audit",
+        params={
+            "since": "2026-06-16T00:30:00+02:00",
+            "until": "2026-06-16T01:00:00+02:00",
+        },
+    ).json()
+    assert [event["action"] for event in same["events"]] == ["action.late"]
+
+    # An hour later in the same offset excludes it.
+    after = app_client.get(
+        "/api/admin/audit", params={"since": "2026-06-16T01:30:00+02:00"}
+    ).json()
+    assert after["events"] == []
+
+
+def test_audit_endpoint_date_only_bounds_are_utc_days(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    first = _insert_audit(action="action.early", actor="alice")
+    _set_created_at(temp_db_path, first["id"], "2026-06-15T00:00:00.000000Z")
+    last = _insert_audit(action="action.late", actor="alice")
+    _set_created_at(temp_db_path, last["id"], "2026-06-15T23:59:59.999999Z")
+
+    day = app_client.get(
+        "/api/admin/audit", params={"since": "2026-06-15", "until": "2026-06-15"}
+    ).json()
+    assert [event["action"] for event in day["events"]] == [
+        "action.late",
+        "action.early",
+    ]
+
+
+def test_audit_endpoint_reads_a_naive_bound_as_utc(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    event = _insert_audit(action="action.only", actor="alice")
+    _set_created_at(temp_db_path, event["id"], "2026-06-15T22:30:00.000000Z")
+
+    naive = app_client.get(
+        "/api/admin/audit", params={"until": "2026-06-15T22:30:00"}
+    ).json()
+    assert [entry["action"] for entry in naive["events"]] == ["action.only"]
+
+
+# --- GET /api/admin/audit/verify ------------------------------------------
+
+
+def test_audit_verify_endpoint_reports_an_intact_and_a_broken_chain(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    first = _insert_audit(action="action.one", actor="alice")
+    _insert_audit(action="action.two", actor="alice")
+
+    intact = app_client.get("/api/admin/audit/verify")
+    assert intact.status_code == 200, intact.text
+    assert intact.json() == {
+        "checked": 2,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+    }
+
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET outcome = 'denied' WHERE id = ?", (first["id"],)
+        )
+    broken = app_client.get("/api/admin/audit/verify").json()
+    assert broken["ok"] is False
+    assert broken["first_broken_id"] == first["id"]
+
+    # A window that excludes the tampered row is intact; its link is seeded.
+    window = app_client.get("/api/admin/audit/verify", params={"limit": 1}).json()
+    assert window == {"checked": 1, "legacy": 0, "ok": True, "first_broken_id": None}
+
+
+def test_audit_verify_requires_admin(app_client) -> None:
+    app_client.cookies.clear()
+    assert app_client.get("/api/admin/audit/verify").status_code == 403
+
+
+# --- GET /api/admin/audit/export ------------------------------------------
+
+
+def _export(client, **params: Any) -> Any:
+    return client.get("/api/admin/audit/export", params=params)
+
+
+def test_audit_export_json_returns_every_match_in_order(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    for index in range(3):
+        _insert_audit(action=f"action.{index}", actor="alice", details={"n": index})
+
+    response = _export(app_client, format="json")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-disposition"] == (
+        "attachment; filename=audit-export.json"
+    )
+    events = json.loads(response.text)
+    assert [event["action"] for event in events] == [
+        "action.2",
+        "action.1",
+        "action.0",
+    ]
+    assert all(len(event["entry_hash"]) == 64 for event in events)
+    assert events[0]["prev_hash"] == events[1]["entry_hash"]
+    assert events[2]["details"] == {"n": 0}
+
+
+def test_audit_export_streams_past_the_batch_size(
+    app_client, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    for index in range(5):
+        _insert_audit(action=f"action.{index}", actor="alice")
+    monkeypatch.setattr(main, "_AUDIT_EXPORT_BATCH", 2)
+
+    events = _export(app_client, format="json").json()
+    assert len(events) == 5
+    assert [event["action"] for event in events] == [
+        f"action.{index}" for index in range(4, -1, -1)
+    ]
+
+
+def test_audit_export_csv_has_the_documented_columns(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    _insert_audit(
+        action="user.job_delete",
+        actor="alice",
+        actor_role="operator",
+        target_type="job",
+        target_id="job-1",
+        details={"reason": "cleanup"},
+        request_ip="203.0.113.9",
+    )
+
+    response = _export(app_client, format="csv")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-disposition"] == (
+        "attachment; filename=audit-export.csv"
+    )
+    reader = csv.DictReader(io.StringIO(response.text))
+    rows = list(reader)
+    assert reader.fieldnames == [
+        "id",
+        "created_at",
+        "actor",
+        "actor_role",
+        "is_admin",
+        "action",
+        "target_type",
+        "target_id",
+        "outcome",
+        "request_ip",
+        "details",
+        "entry_hash",
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["actor"] == "alice"
+    assert row["actor_role"] == "operator"
+    assert row["is_admin"] == "0"
+    assert row["action"] == "user.job_delete"
+    assert row["target_id"] == "job-1"
+    assert row["outcome"] == "success"
+    assert row["request_ip"] == "203.0.113.9"
+    assert row["details"] == '{"reason":"cleanup"}'
+    assert len(row["entry_hash"]) == 64
+
+
+def test_audit_export_honours_the_list_filters(app_client, temp_db_path: Path) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    keep = _insert_audit(action="action.keep", actor="alice", outcome="denied")
+    _insert_audit(action="action.skip", actor="bob")
+
+    events = _export(app_client, format="json", outcome="denied").json()
+    assert [event["id"] for event in events] == [keep["id"]]
+
+
+def test_audit_export_strips_sensitive_detail_fields(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    _insert_audit(
+        action="admin.db_query",
+        actor="alice",
+        details={"request_params": {"github_token": _SECRET, "job_name": "keep"}},
+    )
+
+    response = _export(app_client, format="csv")
+    assert response.status_code == 200, response.text
+    assert _SECRET not in response.text
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert rows[0]["details"] == '{"request_params":{"job_name":"keep"}}'
+
+
+def test_audit_export_rejects_non_admin(app_client) -> None:
+    registered = app_client.post("/api/auth/register", json={"username": "bob"})
+    assert registered.status_code == 200
+    session = registered.cookies.get("rootcoz_session")
+
+    response = app_client.get(
+        "/api/admin/audit/export",
+        params={"format": "json"},
+        headers={"Authorization": ""},
+        cookies={"rootcoz_session": session},
+    )
+    assert response.status_code == 403
+
+
+def test_audit_export_rejects_an_unknown_format(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.get("/api/admin/audit/export", params={"format": "xml"})
+    assert response.status_code == 422
+
+
+# --- AUDIT_MAX_ROWS size ceiling ------------------------------------------
+
+
+async def test_row_cap_deletes_the_oldest_rows(audit_db: Path) -> None:
+    for index in range(5):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+
+    assert await storage.enforce_audit_row_cap(3) == 2
+    remaining = await storage.list_audit_events()
+    assert [event["action"] for event in remaining["events"]] == [
+        "action.4",
+        "action.3",
+        "action.2",
+    ]
+
+
+async def test_row_cap_zero_disables_the_ceiling(audit_db: Path) -> None:
+    for index in range(3):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+
+    assert await storage.enforce_audit_row_cap(0) == 0
+    assert (await storage.list_audit_events())["total"] == 3
+
+
+async def test_prune_enforces_the_row_cap_with_retention_off(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(4):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=0, audit_max_rows=2),
+    )
+
+    assert await main.prune_audit_events_periodically() == 2
+    remaining = await storage.list_audit_events()
+    assert [event["action"] for event in remaining["events"]] == [
+        "action.3",
+        "action.2",
+    ]
+
+
+# --- audit write failure signal -------------------------------------------
+
+
+def _health_settings() -> SimpleNamespace:
+    return SimpleNamespace(jenkins_url="", reportportal_enabled=False)
+
+
+async def test_audit_write_failure_degrades_health(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    monkeypatch.setattr(monitoring, "_audit_suppressed_auth_events", 0)
+    with patch.object(
+        storage,
+        "insert_audit_event",
+        AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
+    ):
+        await main.record_audit(action="auth.login", actor="alice", message="m")
+    assert monitoring._audit_write_failures == 1
+
+    with patch.object(
+        monitoring, "check_ai_provider", AsyncMock(return_value={"status": "ok"})
+    ):
+        health = await monitoring.build_health_response(
+            _health_settings(), str(audit_db)
+        )
+    assert health["checks"]["audit"] == {
+        "status": "degraded",
+        "write_failures": 1,
+        "suppressed_auth_events": 0,
+    }
+    assert health["status"] == "degraded"
+
+
+async def test_audit_write_failure_is_logged_at_error(
+    audit_db: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    try:
+        with patch.object(
+            storage,
+            "insert_audit_event",
+            AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
+        ):
+            await main.record_audit(action="auth.login", actor="alice", message="m")
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    record = next(
+        entry
+        for entry in caplog.records
+        if "Failed to persist audit event" in entry.getMessage()
+    )
+    assert record.levelno == logging.ERROR
+    assert "1 audit write failure(s)" in record.getMessage()
+
+
+async def test_successful_audit_write_keeps_health_ok(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    monkeypatch.setattr(monitoring, "_audit_suppressed_auth_events", 0)
+    await main.record_audit(action="auth.login", actor="alice", message="m")
+
+    with patch.object(
+        monitoring, "check_ai_provider", AsyncMock(return_value={"status": "ok"})
+    ):
+        health = await monitoring.build_health_response(
+            _health_settings(), str(audit_db)
+        )
+    assert health["checks"]["audit"] == {
+        "status": "ok",
+        "write_failures": 0,
+        "suppressed_auth_events": 0,
+    }
+    assert health["status"] == "healthy"
+
+
+def test_metrics_expose_the_audit_write_failure_gauge(
+    app_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 3)
+    text = app_client.get("/metrics").text
+    assert "rootcoz_audit_write_failures 3" in text
+
+
+# --- redaction of credential-shaped text ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "sk-live-4f9c2b7d1e6a8c3f5b0d2e7a9c4b6f8d",  # pragma: allowlist secret  # gitleaks:allow
+        "ddsat_9f8e7d6c5b4a39281706f5e4d3c2b1a0",  # pragma: allowlist secret  # gitleaks:allow
+        "ddapp_4f9c2b7d1e6a8c3f5b0d",  # pragma: allowlist secret  # gitleaks:allow
+        "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee",  # pragma: allowlist secret  # gitleaks:allow
+        "github_pat_11ABCDEFG0abcdefghijklmnop",  # pragma: allowlist secret  # gitleaks:allow
+        "xoxb-123456789012-abcdefghijkl",  # pragma: allowlist secret  # gitleaks:allow
+        "AKIAIOSFODNN7EXAMPLE",  # pragma: allowlist secret  # gitleaks:allow
+        "dGhpcy1pcy1hLXZlcnktbG9uZy1zZWNyZXQtdG9rZW4",
+        # Split so the private-key scanner does not treat this sample as a key.
+        "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n"
+        "-----END RSA " + "PRIVATE KEY-----",
+    ],
+)
+def test_redact_details_scrubs_credential_shaped_text(secret: str) -> None:
+    redacted = main._redact_details({"reason": f"rotated {secret} for alice"})
+    # Only the matched substring goes; the sentence around it survives.
+    assert redacted == {"reason": "rotated [redacted] for alice"}
+
+
+def test_redact_details_keeps_normal_text_and_non_strings() -> None:
+    details = {
+        "reason": "Admin alice deleted job 42 after the review finished",
+        "count": 3,
+        "is_admin": True,
+        "nothing": None,
+        "keys": ["ai_model"],
+        "notes": ["no secret here either"],
+    }
+    assert main._redact_details(details) == details
+
+
+def test_redact_details_keeps_long_identifiers_without_digits() -> None:
+    """A long CamelCase/node id is an identifier, not a credential."""
+    details = {
+        "test_name": "com.example.PaymentServiceTest.testChargeDeclinesWhenCardExpired"
+    }
+    assert main._redact_details(details) == details
+
+
+def test_redact_details_scrubs_long_opaque_token_with_digits() -> None:
+    token = (
+        "AbCdEf0123456789AbCdEf0123456789"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    redacted = main._redact_details({"note": f"pasted {token} here"})
+    assert token not in redacted["note"]
+    assert "[redacted]" in redacted["note"]
+
+
+def test_redact_details_scrubs_secrets_inside_lists() -> None:
+    redacted = main._redact_details(
+        {"notes": ["first is fine", "second has sk-live-abc123def456ghi789jkl012"]}
+    )
+    assert redacted == {"notes": ["first is fine", "second has [redacted]"]}
+
+
+async def test_record_audit_scrubs_a_secret_pasted_into_free_text(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    secret = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+    try:
+        await main.record_audit(
+            action="provider.key.rotate",
+            actor="admin",
+            message="Admin 'admin' rotated a server provider key",
+            details={"reason": f"rotated {secret} manually"},
+            request=_fake_request(),
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    event = (await storage.list_audit_events(action="provider.key.rotate"))["events"][0]
+    assert event["details"] == {"reason": "rotated [redacted] manually"}
+    assert secret not in json.dumps(event)
+    assert secret not in caplog.text
+
+
+# --- volume guard for auth failures ---------------------------------------
+
+
+def _throttle_settings(limit: int) -> SimpleNamespace:
+    """Settings stub with only what the guard reads."""
+    return SimpleNamespace(audit_auth_failure_max_per_minute=limit)
+
+
+def _reset_suppression(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(monitoring, "_audit_suppressed_auth_events", 0)
+    monkeypatch.setattr(monitoring, "_audit_auth_suppression_windows", {})
+
+
+async def _failed_logins(count: int, action: str = "auth.login_failed") -> None:
+    for index in range(count):
+        await main.record_audit(
+            action=action,
+            actor="mallory",
+            message=f"Failed login attempt #{index} for username 'mallory'",
+            outcome="failure" if action == "auth.login_failed" else "denied",
+        )
+
+
+async def test_auth_failure_guard_caps_stored_rows_per_actor(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(3))
+
+    await _failed_logins(5)
+
+    stored = await storage.list_audit_events(action="auth.login_failed")
+    assert stored["total"] == 3
+    assert monitoring._audit_suppressed_auth_events == 2
+
+    with patch.object(
+        monitoring, "check_ai_provider", AsyncMock(return_value={"status": "ok"})
+    ):
+        health = await monitoring.build_health_response(
+            _health_settings(), str(audit_db)
+        )
+    assert health["checks"]["audit"]["suppressed_auth_events"] == 2
+
+
+async def test_auth_failure_guard_counts_failed_and_blocked_together(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One budget for the actor, not one per action id."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(2))
+
+    await _failed_logins(2, "auth.login_failed")
+    await _failed_logins(2, "auth.login_blocked")
+
+    failed = await storage.list_audit_events(action="auth.login_failed")
+    blocked = await storage.list_audit_events(action="auth.login_blocked")
+    assert (failed["total"], blocked["total"]) == (2, 0)
+    assert monitoring._audit_suppressed_auth_events == 2
+
+
+async def test_auth_failure_guard_zero_disables_it(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(0))
+
+    await _failed_logins(5)
+
+    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == 5
+    assert monitoring._audit_suppressed_auth_events == 0
+
+
+async def test_volume_guard_never_throttles_other_actions(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
+
+    for index in range(4):
+        await main.record_audit(
+            action="user.job_delete", actor="mallory", message=f"delete {index}"
+        )
+        await main.record_audit(
+            action="auth.login", actor="mallory", message=f"login {index}"
+        )
+
+    assert (await storage.list_audit_events(action="user.job_delete"))["total"] == 4
+    assert (await storage.list_audit_events(action="auth.login"))["total"] == 4
+    assert monitoring._audit_suppressed_auth_events == 0
+
+
+async def test_suppressed_auth_failures_still_log_once_per_window(
+    audit_db: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    # The one-per-window summary is logged by the monitoring module.
+    monitoring_logger = monitoring.logger
+    monitoring_logger.setLevel(logging.INFO)
+    monitoring_logger.addHandler(caplog.handler)
+    try:
+        await _failed_logins(4)
+    finally:
+        main_logger.removeHandler(caplog.handler)
+        monitoring_logger.removeHandler(caplog.handler)
+
+    # The existing per-event line survives for every attempt, stored or not.
+    for index in range(4):
+        assert f"Failed login attempt #{index}" in caplog.text
+    summaries = [r for r in caplog.records if "volume guard" in r.getMessage()]
+    assert len(summaries) == 1
+    assert summaries[0].levelno == logging.WARNING
+    assert "beyond 1 per minute" in summaries[0].getMessage()

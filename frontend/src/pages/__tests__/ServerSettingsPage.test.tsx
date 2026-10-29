@@ -162,6 +162,46 @@ describe('ServerSettingsPage tabs and search', () => {
     expect(screen.getByText('JENKINS_URL')).toBeInTheDocument()
     expect(screen.queryByText('JIRA_PROJECT_KEY')).not.toBeInTheDocument()
   })
+
+  it('matches every whitespace-separated word of the query', async () => {
+    get.mockResolvedValue([
+      // Real shape: the words of the key are one token apart and the
+      // description carries the rest.
+      mk('audit_retention_days', 'Auth & Security', '90', {
+        type: 'integer',
+        description: 'How many days of audit events to keep on this server.',
+      }),
+      mk('jenkins_url', 'Jenkins', 'https://jenkins.example.com'),
+    ] as never)
+    renderPage()
+    await screen.findByText('JENKINS_URL')
+    const search = screen.getByLabelText('Search settings')
+
+    // Two tokens of the key — the raw substring 'audit retention' is not present.
+    fireEvent.change(search, { target: { value: '  audit   retention ' } })
+    await waitFor(() => expect(screen.getByText('Search results')).toBeInTheDocument())
+    expect(screen.getByText('AUDIT_RETENTION_DAYS')).toBeInTheDocument()
+    expect(screen.queryByText('JENKINS_URL')).not.toBeInTheDocument()
+
+    // Tokens from the key and the description match together too.
+    fireEvent.change(search, { target: { value: 'retention days' } })
+    await waitFor(() => expect(screen.getByText('Search results')).toBeInTheDocument())
+    expect(screen.getByText('AUDIT_RETENTION_DAYS')).toBeInTheDocument()
+
+    // 'data' appears in no searchable field of this setting, so AND semantics
+    // must keep it out — this is the documented behaviour, not a miss.
+    fireEvent.change(search, { target: { value: 'data retention' } })
+    expect(await screen.findByText('No settings match your search.')).toBeInTheDocument()
+
+    // Single token is unchanged.
+    fireEvent.change(search, { target: { value: 'audit' } })
+    await waitFor(() => expect(screen.getByText('AUDIT_RETENTION_DAYS')).toBeInTheDocument())
+
+    // Whitespace-only is still no query at all.
+    fireEvent.change(search, { target: { value: '   ' } })
+    await waitFor(() => expect(screen.getByText('JENKINS_URL')).toBeInTheDocument())
+    expect(screen.getByText('AUDIT_RETENTION_DAYS')).toBeInTheDocument()
+  })
 })
 
 describe('ServerSettingsPage silent refetch on save', () => {

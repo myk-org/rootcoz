@@ -3567,7 +3567,10 @@ async def test_store_deployment_key_promotes_the_resolved_credential(
         assert AMBIENT_KEY.encode() not in path.read_bytes()
     assert AMBIENT_KEY not in response.text
     assert AMBIENT_KEY not in logs.text
-    assert "[AUDIT] Admin 'admin' stored server provider key for 'openai'" in logs.text
+    assert (
+        "[AUDIT] Admin 'admin' promoted the deployment credential for 'openai'"
+        in logs.text
+    )
 
 
 def test_store_deployment_key_without_a_credential_is_404(client, monkeypatch):

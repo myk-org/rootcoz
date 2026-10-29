@@ -948,12 +948,14 @@ export function ServerSettingsPage() {
   }, [state.settings])
 
   const groups: CategoryGroup[] = useMemo(() => {
-    const query = state.search.toLowerCase()
-    if (!query) return allGroups
-    const matches = (s: ServerSetting) =>
-      s.key.toLowerCase().includes(query) ||
-      s.env_var.toLowerCase().includes(query) ||
-      s.description.toLowerCase().includes(query)
+    // Every whitespace-separated word must appear somewhere: "audit retention"
+    // matches AUDIT_RETENTION_DAYS even though the words are not adjacent.
+    const tokens = state.search.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (tokens.length === 0) return allGroups
+    const matches = (s: ServerSetting) => {
+      const text = `${s.key} ${s.env_var} ${s.description}`.toLowerCase()
+      return tokens.every(token => text.includes(token))
+    }
     return allGroups
       .map(({ category, settings }) => ({ category, settings: settings.filter(matches) }))
       .filter(g => g.settings.length > 0)

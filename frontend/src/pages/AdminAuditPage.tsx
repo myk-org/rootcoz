@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, extractApiDetail } from '@/lib/api'
 import { EMPTY_FILTERS, matchesFilters, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
 import { formatRelativeTime, formatTimestamp } from '@/lib/utils'
@@ -9,6 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   Select,
   SelectContent,
@@ -40,7 +42,9 @@ interface AuditActionEntry {
   label: string
 }
 
-const PAGE_SIZE = 50
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 250, 500] as const
+type PageSize = (typeof PAGE_SIZE_OPTIONS)[number]
+const DEFAULT_PAGE_SIZE: PageSize = 50
 const SEARCH_DEBOUNCE_MS = 300
 
 const OUTCOME_FILTER_OPTIONS = ['success', 'failure', 'denied'] as const
@@ -54,14 +58,14 @@ const OUTCOME_BADGE_VARIANT: Record<string, 'success' | 'destructive' | 'warning
 interface AuditState {
   filters: AuditFilters
   offset: number
-  live: boolean
+  limit: PageSize
 }
 
 type AuditAction =
   | { type: 'filter'; key: keyof AuditFilters; value: string }
   | { type: 'offset'; value: number }
+  | { type: 'limit'; value: PageSize }
   | { type: 'clear' }
-  | { type: 'live'; value: boolean }
 
 function reducer(state: AuditState, action: AuditAction): AuditState {
   switch (action.type) {
@@ -70,16 +74,48 @@ function reducer(state: AuditState, action: AuditAction): AuditState {
       return { ...state, filters: { ...state.filters, [action.key]: action.value }, offset: 0 }
     case 'offset':
       return { ...state, offset: action.value }
+    // A new page size makes the old offset meaningless.
+    case 'limit':
+      return { ...state, limit: action.value, offset: 0 }
     case 'clear':
       return { ...state, filters: EMPTY_FILTERS, offset: 0 }
-    case 'live':
-      return { ...state, live: action.value }
   }
 }
 
+/** ?limit must be one of the offered page sizes — anything else means 50. */
+function parsePageSize(raw: string | null): PageSize {
+  const value = Number(raw)
+  return PAGE_SIZE_OPTIONS.includes(value as PageSize) ? (value as PageSize) : DEFAULT_PAGE_SIZE
+}
+
+/**
+ * One value drives the whole live-tail UI: the switch, the dot and the label.
+ * `failed` is the switch-off state that still has to look red, so it cannot be
+ * derived from the switch alone.
+ */
+type LivePhase = 'off' | 'connecting' | 'streaming' | 'failed'
+
+// No text label: the dot plus its tooltip carry the state (off / connecting /
+// streaming / failed). A label of varying length shifted the switch around.
+const LIVE_VIEW: Record<LivePhase, { dot: string; tooltip: string }> = {
+  off: { dot: 'bg-border-default', tooltip: 'Live tail is off' },
+  connecting: {
+    dot: 'bg-signal-amber',
+    tooltip: 'Connecting to the live audit stream',
+  },
+  streaming: {
+    dot: 'animate-pulse bg-signal-green',
+    tooltip: 'Receiving live audit events',
+  },
+  failed: {
+    dot: 'bg-signal-red',
+    tooltip: 'Live stream failed — switch Live on to try again',
+  },
+}
+
 /** Query string for GET /api/admin/audit — empty filters are omitted. */
-function buildAuditQuery(filters: AuditFilters, offset: number): string {
-  const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+function buildAuditQuery(filters: AuditFilters, offset: number, limit: PageSize): string {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
   for (const [key, value] of Object.entries(filters)) {
     if (value.trim()) params.set(key, value.trim())
   }
@@ -172,8 +208,37 @@ function ActionFilter({
 }
 
 export function AdminAuditPage() {
-  const [state, dispatch] = useReducer(reducer, { filters: EMPTY_FILTERS, offset: 0, live: false })
-  const { filters, offset, live } = state
+  const [searchParams, setSearchParams] = useSearchParams()
+  // ?limit and ?live=1 survive a refresh.
+  const [state, dispatch] = useReducer(reducer, {
+    filters: EMPTY_FILTERS,
+    offset: 0,
+    limit: parsePageSize(searchParams.get('limit')),
+  })
+  const { filters, offset, limit } = state
+
+  const [livePhase, setLivePhase] = useState<LivePhase>(() =>
+    searchParams.get('live') === '1' ? 'connecting' : 'off',
+  )
+  const live = livePhase === 'connecting' || livePhase === 'streaming'
+
+  // setSearchParams changes identity with the query string; a ref keeps the
+  // stream effect from tearing the stream down every time the URL changes.
+  const setSearchParamsRef = useRef(setSearchParams)
+  useEffect(() => {
+    setSearchParamsRef.current = setSearchParams
+  }, [setSearchParams])
+  const writeParam = useCallback((key: string, value: string | null) => {
+    setSearchParamsRef.current(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        if (value === null) next.delete(key)
+        else next.set(key, value)
+        return next
+      },
+      { replace: true },
+    )
+  }, [])
 
   // Text inputs are drafts; the reducer only sees them after the debounce.
   const [actorDraft, setActorDraft] = useState('')
@@ -183,11 +248,10 @@ export function AdminAuditPage() {
   const [errorState, setErrorState] = useState<{ key: string; text: string }>({ key: '', text: '' })
   const [actions, setActions] = useState<AuditActionEntry[]>([])
   const [expandedId, setExpandedId] = useState<number | null>(null)
-  const [liveConnected, setLiveConnected] = useState(false)
 
   // The request key doubles as the loading flag: a response for the current
   // key means the shown page matches the filters, anything else is stale.
-  const query = buildAuditQuery(filters, offset)
+  const query = buildAuditQuery(filters, offset, limit)
   const loaded = result?.key === query ? result.data : null
   const loading = loaded === null
   const error = errorState.key === query ? errorState.text : ''
@@ -233,10 +297,10 @@ export function AdminAuditPage() {
 
   // Latest view for the stable stream handler: reconnecting SSE on every filter
   // or page change would drop the events emitted in the gap.
-  const viewRef = useRef({ filters, offset })
+  const viewRef = useRef({ filters, offset, limit })
   useEffect(() => {
-    viewRef.current = { filters, offset }
-  }, [filters, offset])
+    viewRef.current = { filters, offset, limit }
+  }, [filters, offset, limit])
 
   // Newest events stream in from the live tail; the buffer stays at one page
   // so "showing X–Y of N" keeps describing what is on screen.
@@ -256,10 +320,7 @@ export function AdminAuditPage() {
         data: {
           ...prev.data,
           total: prev.data.total + (duplicate ? 0 : 1),
-          events: [event, ...prev.data.events.filter((e) => e.id !== event.id)].slice(
-            0,
-            prev.data.limit,
-          ),
+          events: [event, ...prev.data.events.filter((e) => e.id !== event.id)].slice(0, view.limit),
         },
       }
     })
@@ -276,14 +337,21 @@ export function AdminAuditPage() {
         // A malformed frame must not kill the stream.
       }
     })
-    source.onopen = () => setLiveConnected(true)
-    source.onerror = () => setLiveConnected(false)
-
-    return () => {
+    source.onopen = () => setLivePhase('streaming')
+    // No automatic reconnect: the switch goes off and the admin re-enables it.
+    source.onerror = () => {
       source.close()
-      setLiveConnected(false)
+      setLivePhase('failed')
+      writeParam('live', null)
     }
-  }, [live, prependEvent])
+
+    return () => source.close()
+  }, [live, prependEvent, writeParam])
+
+  const setLive = (checked: boolean) => {
+    setLivePhase(checked ? 'connecting' : 'off')
+    writeParam('live', checked ? '1' : null)
+  }
 
   const clearFilters = () => {
     setActorDraft('')
@@ -364,16 +432,44 @@ export function AdminAuditPage() {
           </Button>
         )}
         <div className="ml-auto flex items-center gap-2">
-          <span
-            className={`h-2 w-2 rounded-full ${live && liveConnected ? 'animate-pulse bg-signal-green' : 'bg-border-default'}`}
-          />
-          <span className="text-xs text-text-secondary">Live</span>
-          <Switch
-            aria-label="Live tail"
-            checked={live}
-            onCheckedChange={(checked) => dispatch({ type: 'live', value: checked })}
-          />
+          <Select
+            value={String(limit)}
+            onValueChange={(value) => {
+              const next = Number(value) as PageSize
+              dispatch({ type: 'limit', value: next })
+              writeParam('limit', String(next))
+            }}
+          >
+            <SelectTrigger aria-label="Rows per page" className="h-8 w-20">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAGE_SIZE_OPTIONS.map((size) => (
+                <SelectItem key={size} value={String(size)}>
+                  {size}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
+        <TooltipProvider delayDuration={200}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div data-testid="live-status" className="flex items-center gap-1.5">
+                <span
+                  data-testid="live-dot"
+                  className={`h-2 w-2 rounded-full ${LIVE_VIEW[livePhase].dot}`}
+                />
+                <Switch
+                  aria-label={`Live tail — ${LIVE_VIEW[livePhase].tooltip}`}
+                  checked={live}
+                  onCheckedChange={setLive}
+                />
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>{LIVE_VIEW[livePhase].tooltip}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </div>
 
       {error && (
@@ -414,19 +510,25 @@ export function AdminAuditPage() {
                 events.map((event) => {
                   const expanded = expandedId === event.id
                   const label = actions.find((a) => a.action === event.action)?.label ?? event.action
+                  // A row with no details has nothing to expand; making it look
+                  // clickable only to reveal "{}" is a dead affordance.
+                  const hasDetails = Object.keys(event.details ?? {}).length > 0
+                  const toggle = () => {
+                    if (hasDetails) setExpandedId(expanded ? null : event.id)
+                  }
                   return (
                     <Fragment key={event.id}>
                       <TableRow
-                        aria-expanded={expanded}
-                        tabIndex={0}
-                        onClick={() => setExpandedId(expanded ? null : event.id)}
+                        {...(hasDetails ? { 'aria-expanded': expanded, tabIndex: 0 } : {})}
+                        onClick={toggle}
                         onKeyDown={(e) => {
+                          if (!hasDetails) return
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault()
-                            setExpandedId(expanded ? null : event.id)
+                            toggle()
                           }
                         }}
-                        className="cursor-pointer"
+                        className={hasDetails ? 'cursor-pointer' : undefined}
                       >
                         <TableCell
                           className="whitespace-nowrap text-sm text-text-secondary"
@@ -443,7 +545,14 @@ export function AdminAuditPage() {
                             <span className="ml-2 text-xs font-medium text-signal-blue">admin</span>
                           )}
                         </TableCell>
-                        <TableCell className="text-sm">{label}</TableCell>
+                        <TableCell className="text-sm">
+                          {label}
+                          {!hasDetails && (
+                            <span className="mt-0.5 block text-xs text-text-tertiary">
+                              No details recorded
+                            </span>
+                          )}
+                        </TableCell>
                         <TableCell className="font-mono text-xs text-text-secondary">
                           {targetLabel(event)}
                         </TableCell>
@@ -484,7 +593,7 @@ export function AdminAuditPage() {
             variant="outline"
             size="sm"
             disabled={offset === 0}
-            onClick={() => dispatch({ type: 'offset', value: Math.max(0, offset - PAGE_SIZE) })}
+            onClick={() => dispatch({ type: 'offset', value: Math.max(0, offset - limit) })}
           >
             <ChevronLeft className="h-4 w-4" />
             Previous
@@ -493,7 +602,7 @@ export function AdminAuditPage() {
             variant="outline"
             size="sm"
             disabled={to >= total}
-            onClick={() => dispatch({ type: 'offset', value: offset + PAGE_SIZE })}
+            onClick={() => dispatch({ type: 'offset', value: offset + limit })}
           >
             Next
             <ChevronRight className="h-4 w-4" />

@@ -805,6 +805,30 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Size ceiling for the audit trail. 0 = no row cap.
+    audit_max_rows: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Maximum number of audit events to keep on this server. "
+            "0 keeps every row. When set, the oldest rows beyond the cap "
+            "are deleted at most once a day, together with retention "
+            "pruning."
+        ),
+    )
+
+    # Volume guard for failed/blocked logins (#379). A brute-force run would
+    # otherwise fill the audit trail with one row per attempt.
+    audit_auth_failure_max_per_minute: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "How many failed or blocked logins one username may record in the "
+            "audit trail per minute. Attempts beyond it are still logged and "
+            "counted in health, but not stored as rows. 0 disables the limit."
+        ),
+    )
+
     # Admin approval for new user registrations
     require_approval: bool = Field(
         default=True,

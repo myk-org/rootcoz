@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminAuditPage } from '@/pages/AdminAuditPage'
 
@@ -8,6 +9,12 @@ vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
   return { ...actual, api: { get: (...args: unknown[]) => apiGet(...args) } }
 })
+
+// Radix Select opens its listbox through pointer capture, which jsdom lacks.
+HTMLElement.prototype.hasPointerCapture = () => false
+HTMLElement.prototype.setPointerCapture = () => {}
+HTMLElement.prototype.releasePointerCapture = () => {}
+HTMLElement.prototype.scrollIntoView = () => {}
 
 const ACTIONS = [
   { action: 'settings.update', label: 'Settings updated', count: 2, last_seen: '2024-01-02 10:00:00' },
@@ -67,24 +74,58 @@ class MockEventSource {
   }
 }
 
-/** Serve one page of events for whatever offset the page asks for. */
-function mockAuditApi(total: number, build: (offset: number) => unknown[] = () => [event()]) {
+/** Serve one page of events for whatever limit/offset the page asks for. */
+function mockAuditApi(
+  total: number,
+  build: (offset: number, limit: number) => unknown[] = () => [event()],
+) {
   apiGet.mockImplementation((path: string) => {
     if (path.startsWith('/api/admin/audit/actions')) {
       return Promise.resolve({ actions: ACTIONS })
     }
-    const offset = Number(new URL(path, 'http://x').searchParams.get('offset') ?? 0)
-    const events = offset < total ? build(offset) : []
-    return Promise.resolve({ events, total, limit: 50, offset })
+    const params = new URL(path, 'http://x').searchParams
+    const offset = Number(params.get('offset') ?? 0)
+    const limit = Number(params.get('limit') ?? 50)
+    const events = offset < total ? build(offset, limit) : []
+    return Promise.resolve({ events, total, limit, offset })
   })
 }
 
-function renderPage() {
+/** One event per row, so the range text reflects the requested page size. */
+function pageOfEvents(total: number) {
+  return (offset: number, limit: number) =>
+    Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) =>
+      event({ id: offset + i + 1 }),
+    )
+}
+
+function renderPage(initialEntry = '/admin/audit') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <AdminAuditPage />
+      <LocationProbe />
     </MemoryRouter>,
   )
+}
+
+/** The page owns the query string, so the URL assertions read it from the router. */
+function LocationProbe() {
+  const location = useLocation()
+  return <span data-testid="location">{`${location.pathname}${location.search}`}</span>
+}
+
+function liveSwitch() {
+  return screen.getByRole('switch', { name: /Live tail/ })
+}
+
+function liveDot() {
+  return screen.getByTestId('live-dot')
+}
+
+/** Tooltip text for the current live phase (Radix renders it on hover). */
+async function liveTooltip(): Promise<string> {
+  await userEvent.hover(screen.getByTestId('live-status'))
+  return (await screen.findByRole('tooltip')).textContent ?? ''
 }
 
 /** Type in the actor box and wait for the debounced request it produces. */
@@ -97,7 +138,7 @@ async function setActor(value: string, offset = 0) {
 }
 
 function enableLive() {
-  const liveSwitch = screen.getByRole('switch', { name: 'Live tail' })
+  const liveSwitch = screen.getByRole('switch', { name: /Live tail/ })
   fireEvent.click(liveSwitch)
   return { liveSwitch, source: MockEventSource.instances[MockEventSource.instances.length - 1] }
 }
@@ -201,6 +242,50 @@ describe('AdminAuditPage', () => {
     expect(await screen.findByText('Showing 1–1 of 120')).toBeInTheDocument()
   })
 
+  it('sends the default page size of 50 and shows it in the rows-per-page control', async () => {
+    mockAuditApi(1)
+    renderPage()
+
+    await screen.findByText('alice')
+    expect(apiGet).toHaveBeenCalledWith('/api/admin/audit?limit=50&offset=0')
+    expect(screen.getByRole('combobox', { name: 'Rows per page' })).toHaveTextContent('50')
+  })
+
+  it('changes the page size to 100, resets the offset and persists ?limit=100', async () => {
+    mockAuditApi(120, pageOfEvents(120))
+    renderPage('/admin/audit?q=alice')
+
+    expect(await screen.findByText('Showing 1–50 of 120')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Next'))
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=50'),
+    )
+
+    const user = userEvent.setup()
+    await user.click(screen.getByRole('combobox', { name: 'Rows per page' }))
+    await user.click(screen.getByRole('option', { name: '100' }))
+
+    // Offset back to the first page, refetched with the new page size.
+    await waitFor(() => expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=100&offset=0'))
+    expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?q=alice&limit=100')
+    expect(await screen.findByText('Showing 1–100 of 120')).toBeInTheDocument()
+  })
+
+  it('honours ?limit=250 on mount and ignores an invalid ?limit=9999', async () => {
+    mockAuditApi(120, pageOfEvents(120))
+    const { unmount } = renderPage('/admin/audit?limit=250')
+
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/admin/audit?limit=250&offset=0'))
+    expect(screen.getByRole('combobox', { name: 'Rows per page' })).toHaveTextContent('250')
+    unmount()
+
+    apiGet.mockClear()
+    renderPage('/admin/audit?limit=9999')
+
+    await waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/admin/audit?limit=50&offset=0'))
+    expect(screen.getByRole('combobox', { name: 'Rows per page' })).toHaveTextContent('50')
+  })
+
   it('subscribes the live tail, prepends, and closes on toggle-off and unmount', async () => {
     mockAuditApi(1)
     const { unmount } = renderPage()
@@ -294,5 +379,120 @@ describe('AdminAuditPage', () => {
     expect(screen.queryByText('Role changed')).not.toBeInTheDocument()
     expect(screen.getAllByRole('row')).toHaveLength(2)
     expect(screen.getByText('Showing 51–51 of 121')).toBeInTheDocument()
+  })
+
+  it('restores the tail from ?live=1 and starts out connecting', async () => {
+    mockAuditApi(1)
+    renderPage('/admin/audit?live=1')
+
+    expect(liveSwitch()).toHaveAttribute('aria-checked', 'true')
+    expect(MockEventSource.instances).toHaveLength(1)
+    expect(MockEventSource.instances[0].url).toBe('/api/admin/audit/stream')
+    expect(liveDot()).toHaveClass('bg-signal-amber')
+    expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Connecting'))
+    expect(await liveTooltip()).toContain('Connecting to the live audit stream')
+  })
+
+  it('turns green when the stream opens', async () => {
+    mockAuditApi(1)
+    renderPage()
+    const { source } = enableLive()
+
+    act(() => {
+      source.onopen?.()
+    })
+
+    expect(liveDot()).toHaveClass('animate-pulse', 'bg-signal-green')
+    expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Receiving live audit events'))
+    expect(await liveTooltip()).toContain('Receiving live audit events')
+  })
+
+  it('switches the tail off on error and leaves the failure visible without retrying', async () => {
+    mockAuditApi(1)
+    renderPage('/admin/audit?q=alice&live=1')
+    const source = MockEventSource.instances[0]
+
+    act(() => {
+      source.onerror?.()
+    })
+
+    expect(source.closed).toBe(true)
+    // Switch off, ?live=1 gone, other params kept — the admin re-enables it.
+    expect(liveSwitch()).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?q=alice')
+    expect(liveDot()).toHaveClass('bg-signal-red')
+    expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Live stream failed'))
+    expect(await liveTooltip()).toContain('switch Live on to try again')
+    // Dot + label + tooltip are the only signal: nothing inline beside the switch.
+    expect(screen.getByTestId('live-status').textContent).toBe('')
+    // No automatic reconnect.
+    expect(MockEventSource.instances).toHaveLength(1)
+  })
+
+  it('creates exactly one new stream when the admin enables it after a failure', async () => {
+    mockAuditApi(1)
+    renderPage('/admin/audit?live=1')
+
+    act(() => {
+      MockEventSource.instances[0].onerror?.()
+    })
+    expect(MockEventSource.instances).toHaveLength(1)
+
+    fireEvent.click(liveSwitch())
+
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(MockEventSource.instances[1].url).toBe('/api/admin/audit/stream')
+    expect(liveSwitch()).toHaveAttribute('aria-checked', 'true')
+    expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Connecting'))
+    expect(liveDot()).toHaveClass('bg-signal-amber')
+    expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?live=1')
+  })
+
+  it('writes live=1 on and removes it off while preserving other params', async () => {
+    mockAuditApi(1)
+    renderPage('/admin/audit?q=alice')
+
+    fireEvent.click(liveSwitch())
+    expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?q=alice&live=1')
+
+    fireEvent.click(liveSwitch())
+    expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?q=alice')
+    expect(screen.getByTestId('location')).not.toHaveTextContent('live=1')
+  })
+
+  it('does not offer expansion for a row with no details', async () => {
+    mockAuditApi(1, () => [event({ details: {} })])
+    renderPage()
+
+    const row = (await screen.findByText('No details recorded')).closest('tr')
+    expect(row).toBeTruthy()
+    expect(row!).not.toHaveAttribute('aria-expanded')
+    expect(row!).not.toHaveClass('cursor-pointer')
+  })
+
+  it('renders label, dot and switch tightly together and greys the dot when off', async () => {
+    mockAuditApi(1)
+    renderPage()
+    const { source } = enableLive()
+
+    // No text label: dot + tooltip carry the state, so nothing can shift.
+    expect(screen.queryByTestId('live-label')).toBeNull()
+    expect(liveDot().nextElementSibling).toHaveAttribute('role', 'switch')
+
+    act(() => {
+      source.onopen?.()
+    })
+    expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Receiving live audit events'))
+
+    act(() => {
+      source.onerror?.()
+    })
+    expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Live stream failed'))
+
+    fireEvent.click(liveSwitch())
+    fireEvent.click(liveSwitch())
+    expect(liveSwitch()).toHaveAttribute('aria-label', expect.stringContaining('Live tail is off'))
+    expect(liveDot()).toHaveClass('bg-border-default')
+    expect(await liveTooltip()).toContain('Live tail is off')
   })
 })
