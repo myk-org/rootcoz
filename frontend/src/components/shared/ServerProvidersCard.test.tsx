@@ -49,7 +49,7 @@ const put = vi.mocked(api.put)
 const del = vi.mocked(api.delete)
 
 type Model = { id: string; name?: string; included: boolean; free: boolean }
-type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; can_refresh_models?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: Model[] }
+type Provider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; can_refresh_models?: boolean; has_deployment_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: Model[] }
 
 function providersState(): Provider[] {
   return [
@@ -79,7 +79,7 @@ function registryEntry(provider: string): Provider {
 
 /** Keyless provider running on the deployment's credential — a row with Store API key. */
 function deploymentEntry(provider: string, supports_key = true, can_refresh_models?: boolean, models: Model[] = []): Provider {
-  return { ...catalogEntry(provider, supports_key, can_refresh_models), key_scoped_source: 'deployment', models }
+  return { ...catalogEntry(provider, supports_key, can_refresh_models), has_deployment_credential: true, key_scoped_source: 'deployment', models }
 }
 
 /** Every catalog provider, all accepting session keys — the default addable state. */
@@ -279,7 +279,7 @@ describe('ServerProvidersCard provider list', () => {
   it('hints the deployment-credential listing source without implying a stored key', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
-      { provider: 'EnMaaS', has_key: false, verified: false, supports_key: false, key_scoped_source: 'deployment', models: [] },
+      { provider: 'EnMaaS', has_key: false, verified: false, supports_key: false, has_deployment_credential: true, key_scoped_source: 'deployment', models: [] },
     ]))
     render(<ServerProvidersCard />)
 
@@ -332,7 +332,7 @@ describe('ServerProvidersCard provider list', () => {
       free: false,
     }))
     get.mockResolvedValue(listResult([
-      { provider: 'EnMaaS', has_key: false, verified: false, supports_key: false, key_scoped_source: 'deployment', models },
+      { provider: 'EnMaaS', has_key: false, verified: false, supports_key: false, has_deployment_credential: true, key_scoped_source: 'deployment', models },
     ]))
     render(<ServerProvidersCard />)
 
@@ -590,18 +590,44 @@ describe('ServerProvidersCard provider list', () => {
     expect(screen.queryByText('Models (0 of 0)')).not.toBeInTheDocument()
   })
 
-  it('renders no Store API key on a row without a deployment credential', async () => {
-    // Models make it a row, but nothing exists to promote into the store.
+  it('keeps a keyless catalog provider with models addable instead of making it a row (#380)', async () => {
+    const user = userEvent.setup()
+    // Catalog models are not a credential: with no stored key and no
+    // deployment credential the provider must stay addable.
     get.mockResolvedValue(listResult([{
       ...catalogEntry('openai', true, true),
       models: [{ id: 'gpt-4o', name: 'GPT-4o', included: true, free: false }],
     }]))
     render(<ServerProvidersCard />)
 
-    const list = await screen.findByRole('list', { name: 'Configured server providers' })
-    expect(within(list).getByText('openai')).toBeInTheDocument()
+    expect(await screen.findByText('No server providers configured.')).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Configured server providers' })).not.toBeInTheDocument()
     expect(screen.queryByText('Deployment credentials')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Store .* API key/ })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'openai' })).toBeInTheDocument()
+  })
+
+  it('offers Store API key for a deployment credential without a captured listing (#380)', async () => {
+    const user = userEvent.setup()
+    // key_scoped_source describes the listing only — it is null here, yet the
+    // credential is resolvable, so the row can still promote it.
+    get.mockResolvedValue(listResult([
+      { ...catalogEntry('openai', true), has_deployment_credential: true, key_scoped_source: null },
+      registryEntry('anthropic'),
+    ]))
+    render(<ServerProvidersCard />)
+
+    const list = await screen.findByRole('list', { name: 'Configured server providers' })
+    expect(within(list).getByText('openai')).toBeInTheDocument()
+    expect(screen.getByText('Deployment credentials')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Store openai API key' })).toBeInTheDocument()
+    expect(screen.queryByText('Listing from deployment credential')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('combobox', { name: 'Provider' }))
+    expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
   })
 
   it('shows the empty state when no provider is in play', async () => {
@@ -628,7 +654,7 @@ describe('ServerProvidersCard Find a provider de-duplication', () => {
     expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
   })
 
-  it('does not offer a catalog provider that is a row because of its models', async () => {
+  it('still offers a catalog provider whose only models are unbacked by a credential (#380)', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
       { ...catalogEntry('openai', true, true), models: [{ id: 'gpt-4o', name: 'GPT-4o', included: true, free: false }] },
@@ -636,10 +662,10 @@ describe('ServerProvidersCard Find a provider de-duplication', () => {
     ]))
     render(<ServerProvidersCard />)
 
-    await screen.findByText('openai')
+    await screen.findByText('No server providers configured.')
     await user.click(screen.getByRole('combobox', { name: 'Provider' }))
     expect(await screen.findByRole('option', { name: 'anthropic' })).toBeInTheDocument()
-    expect(screen.queryByRole('option', { name: 'openai' })).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'openai' })).toBeInTheDocument()
   })
 
   it('offers only the providers that have no row', async () => {
@@ -660,10 +686,12 @@ describe('ServerProvidersCard Find a provider de-duplication', () => {
     for (const unconfigured of ['google', 'openrouter', 'amazon-bedrock', 'ant-ling']) {
       expect(screen.getByRole('option', { name: unconfigured })).toBeInTheDocument()
     }
-    for (const row of ['gemini', 'openai', 'cerebras']) {
+    // Credentialed rows are not offered; a models-only provider still is.
+    for (const row of ['gemini', 'openai']) {
       expect(screen.queryByRole('option', { name: row })).not.toBeInTheDocument()
     }
-    expect(screen.getAllByRole('option')).toHaveLength(4)
+    expect(screen.getByRole('option', { name: 'cerebras' })).toBeInTheDocument()
+    expect(screen.getAllByRole('option')).toHaveLength(5)
   })
 })
 
@@ -764,7 +792,7 @@ describe('ServerProvidersCard deployment-credential controls', () => {
   it('stores the deployment credential of a provider outside the live catalog (#378)', async () => {
     const user = userEvent.setup()
     get.mockResolvedValue(listResult([
-      { provider: 'vertex-claude', has_key: false, verified: false, supports_key: true, can_refresh_models: true, key_scoped_source: 'deployment', models: [] },
+      { provider: 'vertex-claude', has_key: false, verified: false, supports_key: true, can_refresh_models: true, has_deployment_credential: true, key_scoped_source: 'deployment', models: [] },
     ]))
     render(<ServerProvidersCard />)
 

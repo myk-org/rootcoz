@@ -1623,6 +1623,21 @@ ServerProviderCanRefreshModels = Annotated[
 ]
 
 
+# Whether the deployment env resolves a credential for a provider (#378): a
+# models.json ``"$VAR"`` reference or an ambient ``<PROVIDER_ID>_API_KEY``.
+# Independent of any captured key-scoped listing, so the UI can offer "store
+# this deployment key" before a listing exists.
+ServerProviderHasDeploymentCredential = Annotated[
+    bool,
+    Field(
+        description=(
+            "True when the deployment env resolves a credential for this "
+            "provider and no key is stored. Boolean only, never key material."
+        ),
+    ),
+]
+
+
 class ServerProviderModelEntry(BaseModel):
     """One model in a per-provider server model selection (#347)."""
 

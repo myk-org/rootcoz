@@ -433,8 +433,6 @@ function sameProviderSet(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every(p => b.includes(p))
 }
 
-// Picker-specific copy: the stored env value means nothing next to checkboxes,
-// so the row states the consequence of unchecking instead.
 // ---------------------------------------------------------------------------
 // Source badge
 // ---------------------------------------------------------------------------
@@ -857,11 +855,13 @@ export function ServerSettingsPage() {
   }
 
   // ---- Active server providers editor ----
-  async function handleSaveServerProviders(checked: string[], options: string[]) {
+  async function handleSaveServerProviders(checked: string[], options: string[], undiscovered: string[]) {
     // '' is the "all active" contract: every provider checked saves it, and so
     // does checking none (there is no "none" state — empty means all).
-    const ids = options.filter(o => checked.includes(o))
-    const value = ids.length === options.length ? '' : ids.join(',')
+    // Stored IDs discovery did not report ride along unchanged: they have no
+    // checkbox, so dropping them would silently narrow the restriction.
+    const ids = [...options.filter(o => checked.includes(o)), ...undiscovered]
+    const value = sameProviderSet(ids, options) ? '' : ids.join(',')
     const error = await saveSettingValue('active_server_providers', value)
     if (error) return
     setServerProvidersDraft(null)
@@ -1231,10 +1231,13 @@ export function ServerSettingsPage() {
                 // ---- ACTIVE_SERVER_PROVIDERS: always-visible provider picker ----
                 if (setting.key === 'active_server_providers') {
                   const options = setting.options ?? []
+                  const stored = parseActiveServerProviders(setting.value, options)
+                  // Stored IDs with no discovered option have no checkbox, so a
+                  // save must carry them through instead of dropping them.
+                  const undiscovered = stored.filter(p => !options.includes(p))
                   // Saved selection limited to discovered options: a stale stored
                   // ID keeps its place in the DB but has no checkbox to toggle.
-                  const saved = parseActiveServerProviders(setting.value, options)
-                    .filter(p => options.includes(p))
+                  const saved = stored.filter(p => options.includes(p))
                   const checked = serverProvidersDraft ?? saved
                   const dirty = serverProvidersDraft !== null && !sameProviderSet(checked, saved)
                   const toggle = (provider: string) =>
@@ -1295,7 +1298,7 @@ export function ServerSettingsPage() {
                           <div className="flex items-center gap-2 pt-1">
                             {dirty && (
                               <>
-                                <Button size="sm" onClick={() => handleSaveServerProviders(checked, options)} disabled={state.saving} className="h-7 text-xs">
+                                <Button size="sm" onClick={() => handleSaveServerProviders(checked, options, undiscovered)} disabled={state.saving} className="h-7 text-xs">
                                   {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
                                 </Button>
                                 <Button size="sm" variant="outline" onClick={() => setServerProvidersDraft(null)} disabled={state.saving} className="h-7 text-xs">Cancel</Button>

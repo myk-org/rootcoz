@@ -514,6 +514,49 @@ def test_persist_rejects_invalid_log_level(client, monkeypatch):
     assert ok.status_code == 200
 
 
+def test_persist_applies_ambient_provider_validation(client, monkeypatch):
+    """An env AMBIENT_AUTH_PROVIDERS gets the PUT/import rules (#378)."""
+
+    async def _known():
+        return {"google-vertex-claude": "google-vertex-claude"}
+
+    monkeypatch.setattr(main, "_live_provider_spellings", _known)
+    monkeypatch.setenv("AMBIENT_AUTH_PROVIDERS", "google-vertex-claud")
+    response = client.post(
+        "/api/admin/settings/ambient_auth_providers/persist",
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 400
+    assert (
+        "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS" in response.json()["detail"]
+    )
+    # Nothing was promoted, so the env typo is not a DB override.
+    item = next(
+        s
+        for s in client.get("/api/admin/settings", headers=_admin_headers()).json()
+        if s["key"] == "ambient_auth_providers"
+    )
+    assert item["source"] == "env"
+
+    # A valid value is promoted in the registered spelling, not the env's.
+    monkeypatch.setenv("AMBIENT_AUTH_PROVIDERS", "Google-Vertex-Claude")
+    ok = client.post(
+        "/api/admin/settings/ambient_auth_providers/persist",
+        headers=_admin_headers(),
+    )
+    assert ok.status_code == 200, ok.json()
+    assert get_settings().ambient_auth_providers == "google-vertex-claude"
+    item = next(
+        s
+        for s in client.get("/api/admin/settings", headers=_admin_headers()).json()
+        if s["key"] == "ambient_auth_providers"
+    )
+    assert (item["value"], item["source"]) == (
+        "google-vertex-claude",
+        "db",
+    )
+
+
 # --- Persist resolves env values from dotenv too (#347 review) ---
 
 

@@ -73,6 +73,7 @@ from rootcoz.ai_client import (
     list_models,
     model_listing_status,
     normalize_provider,
+    parse_ambient_auth_provider_ids,
     probe_cursor_auth,
     registered_provider_ids,
     resolve_catalog_pair,
@@ -196,6 +197,7 @@ from rootcoz.models import (
     ReAnalyzeRequest,
     ReportPortalPushResult,
     ServerProviderCanRefreshModels,
+    ServerProviderHasDeploymentCredential,
     ServerProviderKeyInput,
     ServerProviderKeyScopedSource,
     SetCanUseServerProvidersRequest,
@@ -13152,6 +13154,13 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
             deployment_credentials, key_capable
         )
         capturable = {normalize_provider(name) for name in capturable_credentials}
+    # Providers the deployment env resolves a credential for, capture aside
+    # (#378): this is what ``store-deployment-key`` reads, so it must answer
+    # from the resolution alone — a provider is storable before (and without)
+    # any key-scoped listing. An unreadable manifest resolves nothing.
+    deployment_credential_ids = frozenset(
+        normalize_provider(name) for name in deployment_credentials or ()
+    )
     # Case-insensitive join (#347): storage matches providers ignoring case,
     # so a key stored as "Google" must key the catalog's "google" entry —
     # an exact-name lookup would split it into keyed + unkeyed rows.
@@ -13283,6 +13292,13 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         can_refresh_models: ServerProviderCanRefreshModels = record is not None or (
             capturable is not None and provider_lower in capturable
         )
+        # Whether the deployment env resolves this provider's credential
+        # (#378). A stored key is the provider's credential — nothing is left
+        # for the deployment env to contribute (``store-deployment-key``
+        # answers 409 for it), so it reports False.
+        has_deployment_credential: ServerProviderHasDeploymentCredential = (
+            record is None and normalize_provider(provider) in deployment_credential_ids
+        )
         providers.append(
             {
                 "provider": provider,
@@ -13306,6 +13322,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 else None,
                 "key_scoped_source": key_scoped_source,
                 "can_refresh_models": can_refresh_models,
+                "has_deployment_credential": has_deployment_credential,
                 "models": models,
             }
         )
@@ -13925,46 +13942,57 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
-# Known-provider listing in an AMBIENT_AUTH_PROVIDERS rejection is capped: the
-# sidecar registers ~30 providers and the whole list in a 400 body is unreadable.
-_KNOWN_PROVIDER_LIST_LIMIT = 12
+async def _live_provider_spellings() -> dict[str, str]:
+    """Lowercased provider ID → the spelling the deployment registers.
 
-
-def _ambient_auth_provider_ids(value: str) -> list[str]:
-    """Parse the AMBIENT_AUTH_PROVIDERS CSV the way the consumer reads it.
-
-    Split on comma, strip, drop empties, de-duplicate case-insensitively; the
-    caller's spelling of the first occurrence wins so a save round-trips.
+    Union of the current model catalog and the sidecar's key-capable
+    providers. An empty result means both sources are unavailable — a cold
+    catalog plus no discovery answer — and must never be read as "no provider
+    exists". The first spelling seen wins for a provider known to both.
     """
-    seen: set[str] = set()
-    ids: list[str] = []
-    for part in value.split(","):
-        provider = part.strip()
-        if provider and provider.lower() not in seen:
-            seen.add(provider.lower())
-            ids.append(provider)
-    return ids
-
-
-async def _live_provider_ids() -> set[str]:
-    """Lowercased provider IDs the deployment currently knows about.
-
-    Union of the current model catalog and the sidecar's key-capable providers.
-    An empty result means both sources are unavailable — a cold catalog plus no
-    discovery answer — and must never be read as "no provider exists".
-    """
-    catalog = _cached_catalog_provider_ids()
-    discovered = await supported_key_providers()
-    return {provider.lower() for provider in (*catalog, *discovered)}
+    spellings = {
+        provider.lower(): provider for provider in _cached_catalog_provider_ids()
+    }
+    for provider in await supported_key_providers():
+        spellings.setdefault(provider.lower(), provider)
+    return spellings
 
 
 def _known_providers_hint(known: set[str]) -> str:
-    """Readable, capped ``known: a, b, ...`` listing for a rejection message."""
-    names = sorted(known)
-    hint = ", ".join(names[:_KNOWN_PROVIDER_LIST_LIMIT])
-    if len(names) > _KNOWN_PROVIDER_LIST_LIMIT:
-        hint += f", ... (+{len(names) - _KNOWN_PROVIDER_LIST_LIMIT} more)"
-    return hint
+    """Readable ``known: a, b, ...`` listing for a rejection message."""
+    return ", ".join(sorted(known))
+
+
+async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str | None]:
+    """Canonical AMBIENT_AUTH_PROVIDERS IDs, plus a rejection when unknown.
+
+    Shared by every write path (PUT, settings import, persist-from-env): the
+    returned IDs are stored, and an accepted ID is replaced with the spelling
+    the deployment registers so the DB holds the sidecar's id — a caller typing
+    ``Google-Vertex-Claude`` must not persist a spelling the consumer's
+    exclusion cannot match. An empty known set means a cold catalog *and* no
+    key-capable answer from discovery — far more likely a transient sidecar
+    gap than a real "no providers exist" — so the value is accepted unchanged
+    rather than failing a save.
+    """
+    ids = parse_ambient_auth_provider_ids(value)
+    spellings = await _live_provider_spellings()
+    if not spellings:
+        return ids, None
+    # Currently stored ambient IDs stay valid: ``supported_key_providers()``
+    # excludes them from its own answer, so an unchanged re-save must not fail.
+    known = set(spellings) | {
+        provider.lower()
+        for provider in parse_ambient_auth_provider_ids(
+            get_settings().ambient_auth_providers or ""
+        )
+    }
+    if unknown := [provider for provider in ids if provider.lower() not in known]:
+        return ids, (
+            "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS: "
+            f"{', '.join(unknown)} (known: {_known_providers_hint(known)})"
+        )
+    return [spellings.get(provider.lower(), provider) for provider in ids], None
 
 
 async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
@@ -14107,36 +14135,17 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     # AMBIENT_AUTH_PROVIDERS is consumed as raw provider IDs by
     # supported_key_providers(): a typo is stored silently and never excludes
     # anything (the provider it was meant to exclude keeps offering key UI),
-    # while a real ID typed there silently disables a provider's key UI. Check
-    # every ID against the providers that actually exist. The stored value is
-    # always the canonical parse — padding and duplicates never persist.
-    if "ambient_auth_providers" in settings_updates:
-        raw = settings_updates["ambient_auth_providers"]
-        ids = _ambient_auth_provider_ids("" if raw is None else str(raw))
-        known = await _live_provider_ids()
-        # An empty known set means a cold catalog *and* no key-capable answer
-        # from discovery — far more likely a transient sidecar gap than a real
-        # "no providers exist". Accept the value unchanged: a discovery blip
-        # must never turn into a save failure. With any known provider the
-        # check runs catalog-only, as the ambient IDs already stored stay valid
-        # (``supported_key_providers()`` excludes them from its own answer, so
-        # an unchanged re-save must not fail).
-        if known:
-            known.update(
-                provider.lower()
-                for provider in _ambient_auth_provider_ids(
-                    get_settings().ambient_auth_providers or ""
-                )
-            )
-            if unknown := [p for p in ids if p.lower() not in known]:
-                errors.append(
-                    "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS: "
-                    f"{', '.join(unknown)} (known: {_known_providers_hint(known)})"
-                )
-        if raw is not None:
-            # Canonical form is stored even when the check is skipped — padding
-            # and duplicates never reach the setting's consumer.
-            settings_updates["ambient_auth_providers"] = ", ".join(ids)
+    # while a real ID typed there silently disables a provider's key UI.
+    # :func:`_normalize_ambient_auth_providers` checks every ID against the
+    # providers that actually exist and returns the canonical form to store —
+    # padding, duplicates and a non-registered spelling never persist.
+    if settings_updates.get("ambient_auth_providers") is not None:
+        ids, ambient_error = await _normalize_ambient_auth_providers(
+            str(settings_updates["ambient_auth_providers"])
+        )
+        if ambient_error:
+            errors.append(ambient_error)
+        settings_updates["ambient_auth_providers"] = ", ".join(ids)
     return errors
 
 
@@ -14614,6 +14623,18 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}'"
         ) from exc
+    # AMBIENT_AUTH_PROVIDERS needs the shared provider-ID validation and
+    # canonicalisation too (#378): the per-field model check accepts any
+    # string, so an env typo the PUT/import paths reject would otherwise be
+    # persisted as a DB override, and a non-registered spelling would survive.
+    if key == "ambient_auth_providers":
+        ids, ambient_error = await _normalize_ambient_auth_providers(env_value)
+        if ambient_error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid env value for '{key}': {ambient_error}",
+            )
+        env_value = ", ".join(ids)
 
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)

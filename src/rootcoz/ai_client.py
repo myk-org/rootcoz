@@ -83,6 +83,43 @@ def _provider_registry_entries(payload: object) -> list[Mapping[str, Any]] | Non
     return entries
 
 
+def parse_ambient_auth_provider_ids(value: str) -> list[str]:
+    """Parse an AMBIENT_AUTH_PROVIDERS CSV the way its consumers read it.
+
+    Split on comma, strip, drop empties, de-duplicate case-insensitively; the
+    first occurrence's spelling wins so a stored value round-trips. Shared by
+    the settings write paths (which canonicalise and store the result) and the
+    exclusion set below.
+    """
+    seen: set[str] = set()
+    ids: list[str] = []
+    for part in value.split(","):
+        provider = part.strip()
+        if provider and provider.lower() not in seen:
+            seen.add(provider.lower())
+            ids.append(provider)
+    return ids
+
+
+def ambient_auth_provider_exclusions() -> set[str]:
+    """Normalized provider IDs excluded from the per-user key flow.
+
+    ``AMBIENT_AUTH_PROVIDERS`` is admin/env-typed, so its spelling is not
+    guaranteed to match the sidecar's registry: compare through
+    :func:`normalize_provider` on both sides, or an ID saved as
+    ``Google-Vertex-Claude`` would never exclude ``google-vertex-claude`` and
+    the provider would keep offering keys that do nothing.
+    """
+    from rootcoz.config import get_settings
+
+    return {
+        normalize_provider(provider)
+        for provider in parse_ambient_auth_provider_ids(
+            get_settings().ambient_auth_providers or ""
+        )
+    }
+
+
 async def _discover_session_key_providers() -> list[str] | None:
     """Sidecar key-capable providers minus the ambient set; ``None`` on failure.
 
@@ -98,20 +135,14 @@ async def _discover_session_key_providers() -> list[str] | None:
     entries = _provider_registry_entries(providers)
     if entries is None:
         return None
-    from rootcoz.config import get_settings
-
-    ambient = {
-        provider.strip()
-        for provider in get_settings().ambient_auth_providers.split(",")
-        if provider.strip()
-    }
+    ambient = ambient_auth_provider_exclusions()
     return sorted(
         {
             entry["provider"]
             for entry in entries
             if entry.get("supportsSessionApiKey") is True
+            and normalize_provider(entry["provider"]) not in ambient
         }
-        - ambient
     )
 
 

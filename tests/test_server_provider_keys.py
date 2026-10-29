@@ -2880,6 +2880,38 @@ async def test_can_refresh_models_true_for_deployment_credential(
     assert provider["can_refresh_models"] is True
 
 
+async def test_list_reports_deployment_credential_without_a_captured_listing(
+    client, monkeypatch
+):
+    """``has_deployment_credential`` answers the credential, not the listing."""
+    _register_providers(monkeypatch, "google", "openai", "mistral")
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "google", "id": "gemini-2.5-pro"},
+            {"provider": "openai", "id": "gpt-5.6-luna"},
+            {"provider": "mistral", "id": "mistral-large"},
+        ],
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", AMBIENT_KEY)
+    await storage.set_server_ai_credential("mistral", SECRET, "admin")
+    _mock_supported(monkeypatch, ["google", "openai", "mistral"])
+    # No listing support: this load captures no rows at all.
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    providers = _providers(client)
+
+    # A resolvable env credential, reported with no captured listing at all.
+    assert providers["google"]["has_deployment_credential"] is True
+    assert providers["google"]["key_scoped"] is False
+    assert providers["google"]["key_scoped_source"] is None
+    # Neither a stored key nor an env credential: nothing to promote.
+    assert providers["openai"]["has_deployment_credential"] is False
+    # A stored key is the provider's credential — the deployment adds none.
+    assert providers["mistral"]["has_key"] is True
+    assert providers["mistral"]["has_deployment_credential"] is False
+
+
 async def test_can_refresh_models_false_for_ambient_provider(client, monkeypatch):
     """No stored key and no capturable credential: nothing to refresh (#376)."""
     _fake_catalog(monkeypatch, [{"provider": "google", "id": "gemini-2.5-pro"}])

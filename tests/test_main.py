@@ -9695,7 +9695,7 @@ class TestAdminSettingsEndpoints:
     def test_ambient_auth_providers_saved_canonical_deduped(
         self, test_client, monkeypatch
     ) -> None:
-        """Valid IDs save stripped and de-duplicated, keeping the caller's spelling."""
+        """Valid IDs save stripped, de-duplicated and in the registered spelling."""
         _no_key_providers(monkeypatch)
         response = test_client.put(
             "/api/admin/settings",
@@ -9705,7 +9705,9 @@ class TestAdminSettingsEndpoints:
         )
         assert response.status_code == 200, response.json()
         item = _settings_item(test_client, "ambient_auth_providers")
-        assert (item["value"], item["source"]) == ("Claude, gemini", "db")
+        # The catalog spells them lowercase: the stored value must too, so the
+        # consumer's exclusion matches the sidecar's registry id (#378).
+        assert (item["value"], item["source"]) == ("claude, gemini", "db")
 
     def test_ambient_auth_providers_unknown_id_rejected(
         self, test_client, monkeypatch
@@ -9725,6 +9727,28 @@ class TestAdminSettingsEndpoints:
         assert "known: claude, gemini" in detail
         # The rejected value never reached the store
         assert _settings_item(test_client, "ambient_auth_providers") == before
+
+    def test_ambient_auth_providers_rejection_lists_every_known_provider(
+        self, test_client, monkeypatch
+    ) -> None:
+        """The 400 names the whole known set, never a truncated sample (#378)."""
+        _no_key_providers(monkeypatch)
+        from rootcoz import ai_client
+
+        catalog = [
+            {"provider": f"provider-{index}", "id": f"provider-{index}/model"}
+            for index in range(15)
+        ]
+        ai_client.update_model_catalog(catalog)
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "nope"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        for entry in catalog:
+            assert entry["provider"] in detail
+        assert "more)" not in detail and "(+" not in detail
 
     def test_ambient_auth_providers_empty_allowed(
         self, test_client, monkeypatch
@@ -9779,9 +9803,10 @@ class TestAdminSettingsEndpoints:
             json={"settings": {"ambient_auth_providers": "Google-Vertex-Claude"}},
         )
         assert response.status_code == 200, response.json()
+        # Stored as the sidecar registers it, not as the admin typed it (#378)
         assert (
             _settings_item(test_client, "ambient_auth_providers")["value"]
-            == "Google-Vertex-Claude"
+            == "google-vertex-claude"
         )
 
     def test_put_settings_server_only_rejected(self, test_client) -> None:

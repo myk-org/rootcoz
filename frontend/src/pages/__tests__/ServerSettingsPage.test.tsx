@@ -810,6 +810,25 @@ describe('ServerSettingsPage active server providers', () => {
     )
   })
 
+  it('keeps stored ids that discovery omits when saving another toggle (#380)', async () => {
+    // vertex-claude is stored but no longer discovered: it has no checkbox, so
+    // the save must carry it through instead of silently dropping it.
+    get.mockResolvedValue(
+      restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
+    )
+
+    await openAiTab()
+    expect(screen.queryByRole('checkbox', { name: 'vertex-claude' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: 'gemini,openai,vertex-claude' },
+      }),
+    )
+  })
+
   it('Save persists an empty value when everything ends up checked (all active)', async () => {
     get.mockResolvedValue(restricted('gemini') as never)
 

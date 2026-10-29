@@ -13,7 +13,7 @@ import { ModelCombobox, type ModelOption } from './ModelCombobox'
 import { ConfirmDialog } from './ConfirmDialog'
 
 export type ServerProviderModel = { id: string; name?: string; included: boolean; free: boolean }
-export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; /** Stored key or deployment-credential refresh eligibility; absent on older servers. */ can_refresh_models?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: ServerProviderModel[] }
+export type ServerProvider = { provider: string; has_key: boolean; verified: boolean; supports_key: boolean; /** Stored key or deployment-credential refresh eligibility; absent on older servers. */ can_refresh_models?: boolean; /** A deployment credential (manifest $VAR / ambient <PROVIDER>_API_KEY) is resolvable, listing or not; absent on older servers. */ has_deployment_credential?: boolean; key_scoped?: boolean; key_scoped_status?: string | null; key_scoped_source?: 'deployment' | 'stored' | null; models: ServerProviderModel[] }
 
 /** GET /api/admin/server-providers — one entry per catalog + stored provider. */
 type ServerProviderListResult = { providers: ServerProvider[] }
@@ -23,11 +23,11 @@ type VerifyKeyResult = { ok: boolean; outcome?: string; message?: string }
 
 type KeyDialogMode = 'store' | 'edit'
 
-/** A row only exists for a provider actually in play: a stored key, a
- * deployment-credential listing, or a model selection. Registry-only entries
- * are listed so Find a provider can offer them, but must not render as rows. */
+/** A row only exists for a provider actually credentialed — a stored key or a
+ * resolvable deployment credential. Catalog models alone are not a credential:
+ * such a provider must stay in Find a provider so its key can be added. */
 function isProviderRow(item: ServerProvider): boolean {
-  return item.has_key || item.key_scoped_source === 'deployment' || (item.models?.length ?? 0) > 0
+  return item.has_key === true || item.has_deployment_credential === true
 }
 
 /** POST refresh-models — re-run of key-scoped discovery with the stored key. */
@@ -87,7 +87,7 @@ export function ServerProvidersCard() {
   }
 
   // GET lists every catalog + registry provider; rows are filtered to the ones
-  // in play. Keyless entries that run on deployment credentials (env keys,
+  // credentialed. Keyless entries that run on deployment credentials (env keys,
   // gcloud/Vertex mount) keep model + free management without key controls.
   const listed = providers ?? []
   const rows = listed.filter(isProviderRow)
@@ -311,9 +311,11 @@ export function ServerProvidersCard() {
                         </>
                       ) : (
                         <>
-                          {item.key_scoped_source === 'deployment' && <Badge variant="outline">Deployment credentials</Badge>}
+                          {/* Credential-derived, not listing-derived: the key can be
+                              promoted even when no listing was captured. */}
+                          {item.has_deployment_credential && <Badge variant="outline">Deployment credentials</Badge>}
                           {canRefresh && refreshButton}
-                          {item.supports_key && item.key_scoped_source === 'deployment' && (
+                          {item.supports_key && item.has_deployment_credential && (
                             <HintButton variant="outline" size="sm" disabled={busy !== null} onClick={() => openKeyDialog(item.provider, 'store')} aria-label={`Store ${item.provider} API key`} hint="Promotes the deployment credential into RootCoz's encrypted store — pick a model to verify it; nothing is typed.">Store API key</HintButton>
                           )}
                         </>
