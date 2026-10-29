@@ -1248,12 +1248,17 @@
 <tr>
 <td>GET</td>
 <td><code>/api/admin/server-providers</code></td>
-<td>Per provider: key presence, verification state, <code>key_scoped</code> flag, <code>key_scoped_status</code> (last capture outcome: <code>supported</code>/<code>unsupported</code>/<code>unavailable</code>, null when no capture ran), and its models with <code>included</code> + <code>free</code> flags — never the keys. For a key-scoped provider the model list is exactly what the stored key can access</td>
+<td>Per provider: key presence, verification state, <code>key_scoped</code> flag, <code>has_deployment_credential</code> (a deployment credential is resolvable for it, independently of any captured listing), <code>key_scoped_source</code>, <code>key_scoped_status</code> (last capture outcome: <code>supported</code>/<code>unsupported</code>/<code>unavailable</code>, null when no capture ran), and its models with <code>included</code> + <code>free</code> flags — never the keys. One entry per catalog provider, plus stored providers that left the catalog and every provider the sidecar registers as accepting session API keys (such a registry-only provider reports <code>models: []</code>, <code>supports_key: true</code>, <code>can_refresh_models: false</code>, and no selection rows) — a provider the sidecar reports as not key-capable is never added. For a key-scoped provider the model list is exactly what the stored key can access</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/api/admin/server-providers</code></td>
 <td>Add a server provider key: <code>provider</code>, <code>api_key</code>, <code>verification_model</code> — verified with a real sidecar turn before storing, then the key-scoped model listing is captured; <code>409</code> when a key is already stored</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/server-providers/{provider}/store-deployment-key</code></td>
+<td>Promote the deployment credential RootCoz already resolves for the provider into the encrypted store: body <code>{ "verification_model" }</code> only, nothing pasted; verified with a real sidecar turn first, then the same store/capture/seed path as add (<code>ok</code>, <code>outcome</code>, <code>model_count</code>); <code>404</code> when no deployment credential resolves, <code>409</code> when a key is already stored</td>
 </tr>
 <tr>
 <td>POST</td>

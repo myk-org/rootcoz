@@ -234,6 +234,18 @@ def _settings_item(test_client, key: str) -> dict[str, Any]:
     return next(s for s in response.json() if s["key"] == key)
 
 
+def _no_key_providers(monkeypatch) -> None:
+    """Pin sidecar key-provider discovery to an empty answer.
+
+    ``ai_client.get_sidecar_client`` is a module-level bound name the autouse
+    sidecar fixture does not patch, so a dev machine with a live sidecar would
+    otherwise feed real provider IDs into AMBIENT_AUTH_PROVIDERS validation.
+    """
+    monkeypatch.setattr(
+        "rootcoz.main.supported_key_providers", AsyncMock(return_value=[])
+    )
+
+
 @pytest.fixture
 def test_client(mock_settings, temp_db_path: Path):
     """Create a test client with mocked dependencies.
@@ -9679,6 +9691,123 @@ class TestAdminSettingsEndpoints:
         )
         assert response.status_code == 400
         assert "Unknown settings" in response.json()["detail"]
+
+    def test_ambient_auth_providers_saved_canonical_deduped(
+        self, test_client, monkeypatch
+    ) -> None:
+        """Valid IDs save stripped, de-duplicated and in the registered spelling."""
+        _no_key_providers(monkeypatch)
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {"ambient_auth_providers": " Claude ,  gemini,CLAUDE ,, "}
+            },
+        )
+        assert response.status_code == 200, response.json()
+        item = _settings_item(test_client, "ambient_auth_providers")
+        # The catalog spells them lowercase: the stored value must too, so the
+        # consumer's exclusion matches the sidecar's registry id (#378).
+        assert (item["value"], item["source"]) == ("claude, gemini", "db")
+
+    def test_ambient_auth_providers_unknown_id_rejected(
+        self, test_client, monkeypatch
+    ) -> None:
+        """A typo is a 400 that names it — and nothing is saved (#378)."""
+        _no_key_providers(monkeypatch)
+        before = _settings_item(test_client, "ambient_auth_providers")
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "google-vertex-claud"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS" in detail
+        assert "google-vertex-claud" in detail
+        # The known set is listed so the admin can pick a real ID
+        assert "known: claude, gemini" in detail
+        # The rejected value never reached the store
+        assert _settings_item(test_client, "ambient_auth_providers") == before
+
+    def test_ambient_auth_providers_rejection_lists_every_known_provider(
+        self, test_client, monkeypatch
+    ) -> None:
+        """The 400 names the whole known set, never a truncated sample (#378)."""
+        _no_key_providers(monkeypatch)
+        from rootcoz import ai_client
+
+        catalog = [
+            {"provider": f"provider-{index}", "id": f"provider-{index}/model"}
+            for index in range(15)
+        ]
+        ai_client.update_model_catalog(catalog)
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "nope"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        for entry in catalog:
+            assert entry["provider"] in detail
+        assert "more)" not in detail and "(+" not in detail
+
+    def test_ambient_auth_providers_empty_allowed(
+        self, test_client, monkeypatch
+    ) -> None:
+        """An empty value is valid: nothing is excluded from the key flow."""
+        _no_key_providers(monkeypatch)
+        response = test_client.put(
+            "/api/admin/settings", json={"settings": {"ambient_auth_providers": ""}}
+        )
+        assert response.status_code == 200, response.json()
+        assert _settings_item(test_client, "ambient_auth_providers")["value"] == ""
+
+    def test_ambient_auth_providers_accepted_when_discovery_unavailable(
+        self, test_client, monkeypatch
+    ) -> None:
+        """A cold catalog plus no discovery answer must not reject a save."""
+        from rootcoz import ai_client
+
+        monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
+        monkeypatch.setattr(
+            "rootcoz.main.supported_key_providers", AsyncMock(return_value=[])
+        )
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "Some New Provider"}},
+        )
+        assert response.status_code == 200, response.json()
+        # Accepted unchanged — a transient sidecar gap is never a save failure
+        assert (
+            _settings_item(test_client, "ambient_auth_providers")["value"]
+            == "Some New Provider"
+        )
+
+    def test_ambient_auth_providers_accepts_registered_ambient_provider(
+        self, test_client, monkeypatch
+    ) -> None:
+        """A key-incapable-but-registered provider ID is accepted (#378)."""
+        monkeypatch.setattr(
+            "rootcoz.main.supported_key_providers",
+            AsyncMock(return_value=["google-vertex-claude"]),
+        )
+        # Start from an empty list so only discovery can make this ID known
+        assert (
+            test_client.put(
+                "/api/admin/settings",
+                json={"settings": {"ambient_auth_providers": ""}},
+            ).status_code
+            == 200
+        )
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "Google-Vertex-Claude"}},
+        )
+        assert response.status_code == 200, response.json()
+        # Stored as the sidecar registers it, not as the admin typed it (#378)
+        assert (
+            _settings_item(test_client, "ambient_auth_providers")["value"]
+            == "google-vertex-claude"
+        )
 
     def test_put_settings_server_only_rejected(self, test_client) -> None:
         """PUT rejects bootstrap-only settings (db_path/debug — env-only forever, #347)."""

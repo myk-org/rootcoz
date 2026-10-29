@@ -1168,6 +1168,11 @@
 <td>Re-run key-scoped discovery with the stored key — picks up permission drift without re-entering the key.</td>
 </tr>
 <tr>
+<td><code>server-providers store-deployment-key</code></td>
+<td><code>--provider</code>, <code>--model</code></td>
+<td>Promote the deployment credential the server already resolves for the provider (manifest env reference or ambient <code>&lt;PROVIDER_ID&gt;_API_KEY</code>) into the encrypted store, verified with a real sidecar turn first — no key is passed.</td>
+</tr>
+<tr>
 <td><code>server-providers models</code></td>
 <td><code>--provider</code>, <code>--models</code>, <code>--free</code></td>
 <td>Set the provider's exposed models; comma-separated ids passed verbatim (real ids may end in <code>:free</code>). <code>--free</code> lists the free subset (free implies included; entries not in <code>--models</code> are auto-included). Models not listed are deselected.</td>

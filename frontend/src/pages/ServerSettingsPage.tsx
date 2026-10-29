@@ -160,6 +160,10 @@ function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
 // known set, kept alongside the backend's server-only metadata marker.
 const SERVER_ONLY_SETTING_KEYS = new Set(['admin_key', 'db_path', 'debug'])
 
+// Backend-owned settings with no UI: ambient-auth providers are an operator
+// detail, never a checkbox an admin toggles here.
+const HIDDEN_SETTING_KEYS = new Set(['ambient_auth_providers'])
+
 // Valid Jira auth method ids ('' / anything else = unset: Jira disabled).
 function parseJiraMethod(value?: string): JiraMethod | null {
   return value === 'oauth' || value === 'basic' || value === 'pat' || value === 'atst' ? value : null
@@ -426,6 +430,28 @@ function parseActiveServerProviders(raw: string, options: string[]): string[] {
   return [...new Set(raw.split(',').map(s => canonicalProvider(s.trim(), options)).filter(Boolean))]
 }
 
+function sameProviderSet(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every(p => b.includes(p))
+}
+
+// Serializes the picker selection back to a setting value.
+// The "all active" decision must be made on the visible selection BEFORE the
+// undiscovered stored IDs are appended: otherwise unchecking every visible
+// provider while a stored ID is undiscovered yields a one-provider allowlist
+// instead of the empty "all" value, silently disabling the rest (#380).
+function serializeActiveServerProviders(
+  checked: string[],
+  options: string[],
+  undiscovered: string[],
+): string {
+  const visibleChecked = options.filter(o => checked.includes(o))
+  // None selected and all selected both mean "all active" (there is no "none").
+  if (visibleChecked.length === 0 || sameProviderSet(visibleChecked, options)) return ''
+  // A real subset: carry undiscovered stored IDs through unchanged — they have
+  // no checkbox, so dropping them would silently narrow the restriction.
+  return [...new Set([...visibleChecked, ...undiscovered])].join(',')
+}
+
 // ---------------------------------------------------------------------------
 // Source badge
 // ---------------------------------------------------------------------------
@@ -510,9 +536,10 @@ export function ServerSettingsPage() {
   const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
   const [reposEditing, setReposEditing] = useState(false)
 
-  // Active server providers editor state
-  const [serverProvidersEditing, setServerProvidersEditing] = useState(false)
-  const [serverProvidersChecked, setServerProvidersChecked] = useState<string[]>([])
+  // Active server providers draft (null = untouched, render the stored value).
+  // Keeping the draft null until a toggle means a refetch (SSE, save, reset)
+  // never overwrites a selection the admin has not saved yet.
+  const [serverProvidersDraft, setServerProvidersDraft] = useState<string[] | null>(null)
 
   // Active settings tab (persisted across reloads)
   const [activeTab, setActiveTab] = useState<string>(() => {
@@ -647,19 +674,12 @@ export function ServerSettingsPage() {
     dispatch({ type: 'RESET_START', key })
     try {
       await api.delete(`/api/admin/settings/${encodeURIComponent(key)}`)
-      const fresh = await fetchSettings(true)
+      await fetchSettings(true)
       dispatch({ type: 'CLEAR_REVEALED', keys: [key] })
-      // A reset while the provider editor is open must not leave the pre-reset
-      // checkbox selection saveable over the fresh value (#339/#340). A
-      // superseded refetch returns null — repopulating from it would restore
-      // older selections, so skip it; the editor still closes (#346).
-      if (key === 'active_server_providers') {
-        if (fresh) {
-          const setting = fresh.find(s => s.key === key)
-          setServerProvidersChecked(parseActiveServerProviders(setting?.value ?? '', setting?.options ?? []))
-        }
-        setServerProvidersEditing(false)
-      }
+      // A reset while a provider draft is unsaved must not leave it saveable
+      // over the fresh value (#339/#340). Dropping the draft renders whatever
+      // the refetch returned — never the pre-reset selection (#346).
+      if (key === 'active_server_providers') setServerProvidersDraft(null)
     } catch {
       // silently fail – data will refetch anyway
     } finally {
@@ -854,18 +874,11 @@ export function ServerSettingsPage() {
   }
 
   // ---- Active server providers editor ----
-  const serverProviderOptions = state.settings.find(s => s.key === 'active_server_providers')?.options ?? []
-
-  async function handleSaveServerProviders() {
-    // '' means all providers active: save it when nothing is checked (footgun warned
-    // inline) or when every available option is checked (restore default semantics).
-    const isAll = serverProviderOptions.length > 0 &&
-      serverProvidersChecked.length === serverProviderOptions.length &&
-      serverProviderOptions.every(o => serverProvidersChecked.includes(o))
-    const value = serverProvidersChecked.length === 0 || isAll ? '' : serverProvidersChecked.join(',')
+  async function handleSaveServerProviders(checked: string[], options: string[], undiscovered: string[]) {
+    const value = serializeActiveServerProviders(checked, options, undiscovered)
     const error = await saveSettingValue('active_server_providers', value)
     if (error) return
-    setServerProvidersEditing(false)
+    setServerProvidersDraft(null)
   }
 
   // ---- Toggle reveal (fetch real value from server) ----
@@ -920,6 +933,7 @@ export function ServerSettingsPage() {
   const allGroups: CategoryGroup[] = useMemo(() => {
     const categoryMap = new Map<string, ServerSetting[]>()
     for (const s of state.settings) {
+      if (HIDDEN_SETTING_KEYS.has(s.key)) continue
       const cat = s.category || 'General'
       if (!categoryMap.has(cat)) categoryMap.set(cat, [])
       categoryMap.get(cat)!.push(s)
@@ -1228,10 +1242,24 @@ export function ServerSettingsPage() {
                   )
                 }
 
-                // ---- ACTIVE_SERVER_PROVIDERS: provider allowlist editor ----
+                // ---- ACTIVE_SERVER_PROVIDERS: always-visible provider picker ----
                 if (setting.key === 'active_server_providers') {
                   const options = setting.options ?? []
-                  const savedActive = parseActiveServerProviders(setting.value, options)
+                  const stored = parseActiveServerProviders(setting.value, options)
+                  // Stored IDs with no discovered option have no checkbox, so a
+                  // save must carry them through instead of dropping them.
+                  const undiscovered = stored.filter(p => !options.includes(p))
+                  // Saved selection limited to discovered options: a stale stored
+                  // ID keeps its place in the DB but has no checkbox to toggle.
+                  const saved = stored.filter(p => options.includes(p))
+                  const checked = serverProvidersDraft ?? saved
+                  const dirty = serverProvidersDraft !== null && !sameProviderSet(checked, saved)
+                  const toggle = (provider: string) =>
+                    setServerProvidersDraft(
+                      checked.includes(provider)
+                        ? checked.filter(p => p !== provider)
+                        : [...checked, provider],
+                    )
                   return (
                     <div key={setting.key} className="py-3 space-y-2">
                       <div className="flex items-center gap-2">
@@ -1240,106 +1268,65 @@ export function ServerSettingsPage() {
                         {saveToDbNode(setting)}
                         <EnvVarWarning setting={setting} />
                       </div>
-                      {serverProvidersEditing ? (
-                        <div className="space-y-3">
-                          {options.length === 0 ? (
-                            <p className="text-xs text-text-tertiary italic">No server providers available</p>
-                          ) : (
-                            <div className="space-y-1">
-                              {options.map((provider) => (
-                                <label key={provider} className="flex items-center gap-2 text-xs">
-                                  <input
-                                    type="checkbox"
-                                    checked={serverProvidersChecked.includes(provider)}
-                                    onChange={() =>
-                                      setServerProvidersChecked(prev =>
-                                        prev.includes(provider)
-                                          ? prev.filter(p => p !== provider)
-                                          : [...prev, provider],
-                                      )
-                                    }
-                                    className="h-3.5 w-3.5 accent-signal-blue"
-                                    aria-label={provider}
-                                  />
-                                  <span className={`font-mono ${serverProvidersChecked.includes(provider) ? 'text-text-primary' : 'text-text-tertiary line-through'}`}>
-                                    {provider}
-                                  </span>
-                                </label>
-                              ))}
-                            </div>
-                          )}
-                          {options.length > 0 && serverProvidersChecked.length === 0 && (
+                      {options.length === 0 ? (
+                        setting.value.trim() ? (
+                          <div className="space-y-1.5">
+                            <span className="text-xs text-text-secondary">
+                              Restricted to: <span className="font-mono">{setting.value}</span>
+                            </span>
+                            <p className="flex items-center gap-1.5 text-xs text-signal-amber">
+                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                              Provider discovery is currently unavailable — the stored restriction above stays in effect.
+                            </p>
+                            {setting.source === 'db' && (
+                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                              </Button>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-text-tertiary italic">No server providers available</span>
+                        )
+                      ) : (
+                        <div className="space-y-2">
+                          <div role="group" aria-label="Active server providers" className="space-y-1">
+                            {options.map((provider) => (
+                              <label key={provider} className="flex items-center gap-2 text-xs">
+                                <Checkbox
+                                  checked={checked.includes(provider)}
+                                  onCheckedChange={() => toggle(provider)}
+                                  aria-label={provider}
+                                />
+                                <span className={`font-mono ${checked.includes(provider) ? 'text-text-primary' : 'text-text-tertiary line-through'}`}>
+                                  {provider}
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                          {checked.length === 0 && (
                             <p className="flex items-center gap-1.5 text-xs text-signal-amber">
                               <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
                               No providers selected — saving this activates ALL server providers (an empty value means all).
                             </p>
                           )}
                           <div className="flex items-center gap-2 pt-1">
-                            <Button size="sm" onClick={handleSaveServerProviders} disabled={state.saving} className="h-7 text-xs">
-                              {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => setServerProvidersEditing(false)} className="h-7 text-xs">Cancel</Button>
-                            {options.length > 0 && (
-                              <Button size="sm" variant="ghost" onClick={() => setServerProvidersChecked([...options])} className="h-7 text-xs text-text-tertiary">
-                                Reset to all
-                              </Button>
+                            {dirty && (
+                              <>
+                                <Button size="sm" onClick={() => handleSaveServerProviders(checked, options, undiscovered)} disabled={state.saving} className="h-7 text-xs">
+                                  {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => setServerProvidersDraft(null)} disabled={state.saving} className="h-7 text-xs">Cancel</Button>
+                              </>
                             )}
                             {setting.source === 'db' && (
-                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
                                 <RotateCcw className="mr-1 h-3 w-3" /> Reset
                               </Button>
                             )}
                           </div>
                         </div>
-                      ) : (
-                        <div>
-                          {options.length === 0 ? (
-                            setting.value.trim() ? (
-                              <div className="space-y-1.5">
-                                <span className="text-xs text-text-secondary">
-                                  Restricted to: <span className="font-mono">{setting.value}</span>
-                                </span>
-                                <p className="flex items-center gap-1.5 text-xs text-signal-amber">
-                                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                                  Provider discovery is currently unavailable — the stored restriction above stays in effect.
-                                </p>
-                                {setting.source === 'db' && (
-                                  <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                    <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                                  </Button>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-xs text-text-tertiary italic">No server providers available</span>
-                            )
-                          ) : !setting.value.trim() ? (
-                            <span className="text-xs text-text-secondary">
-                              All server providers are active <span className="text-text-quaternary">(empty value = all)</span>
-                            </span>
-                          ) : (
-                            <div className="flex flex-wrap gap-1.5">
-                              {options.map((provider) => {
-                                const active = savedActive.includes(provider)
-                                return (
-                                  <span
-                                    key={provider}
-                                    className={`inline-flex items-center rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default ${active ? 'text-text-primary' : 'text-text-tertiary line-through'}`}
-                                  >
-                                    {provider}
-                                  </span>
-                                )
-                              })}
-                            </div>
-                          )}
-                          {options.length > 0 && (
-                            <button type="button" onClick={() => { setServerProvidersChecked(savedActive); setServerProvidersEditing(true) }} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
-                              Configure providers
-                            </button>
-                          )}
-                        </div>
                       )}
                       <p className="text-xs text-text-tertiary">{setting.description}</p>
-                      <p className="text-xs text-text-quaternary">Unchecked providers are hidden from users (no server-credential models). Users&rsquo; own API keys are unaffected.</p>
                       {setting.source === 'db' && setting.updated_by && (
                         <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
                       )}

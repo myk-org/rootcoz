@@ -2,7 +2,6 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '@/lib/api'
-import { useSSE } from '@/lib/useSSE'
 import { ServerSettingsPage } from '../ServerSettingsPage'
 
 vi.mock('@/lib/api', () => ({
@@ -748,22 +747,60 @@ describe('ServerSettingsPage active server providers', () => {
     await screen.findByText('ACTIVE_SERVER_PROVIDERS')
   }
 
-  it('shows the all-active default state with a checkbox list of options', async () => {
+  function restricted(value: string, extra: Partial<TestSetting> = {}): TestSetting[] {
+    const settings = baseSettings()
+    Object.assign(settings.find((s) => s.key === 'active_server_providers')!, { value, ...extra })
+    return settings
+  }
+
+  function providerBoxes(): HTMLElement[] {
+    return ['gemini', 'openai', 'vertex-claude'].map(
+      (p) => screen.getByRole('checkbox', { name: p }) as HTMLElement,
+    )
+  }
+
+  it('renders the provider checkboxes immediately, all checked for an empty value', async () => {
     await openAiTab()
 
-    expect(screen.getByText('All server providers are active')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
-
-    for (const provider of ['gemini', 'openai', 'vertex-claude']) {
-      const box = screen.getByRole('checkbox', { name: provider })
-      expect(box).toBeChecked()
-    }
-    expect(screen.getByText(/Unchecked providers are hidden from users/)).toBeInTheDocument()
+    for (const box of providerBoxes()) expect(box).toBeChecked()
+    expect(screen.queryByRole('button', { name: 'Configure providers' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
-  it('saves the comma-joined list of checked providers when one is unchecked', async () => {
+  it('never renders the backend-only ambient auth setting', async () => {
+    get.mockResolvedValue([
+      ...baseSettings(),
+      mk('ambient_auth_providers', 'AI', 'vertex-claude'),
+    ] as never)
+
     await openAiTab()
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    expect(screen.queryByText('AMBIENT_AUTH_PROVIDERS')).not.toBeInTheDocument()
+    expect(screen.queryByText(/ambient_auth_providers/i)).not.toBeInTheDocument()
+  })
+
+  it('renders the stored restriction as the checked subset', async () => {
+    get.mockResolvedValue(restricted('gemini,vertex-claude') as never)
+
+    await openAiTab()
+    const [gemini, openai, claude] = providerBoxes()
+    expect(gemini).toBeChecked()
+    expect(openai).not.toBeChecked()
+    expect(claude).toBeChecked()
+  })
+
+  it('toggling changes only the draft — no save fires before Save', async () => {
+    await openAiTab()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('Save persists the checked ids when some providers are unchecked', async () => {
+    await openAiTab()
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -775,18 +812,16 @@ describe('ServerSettingsPage active server providers', () => {
     )
   })
 
-  it('saves an empty value (all active) when everything is checked', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'active_server_providers')!.value = 'gemini'
-    get.mockResolvedValue(settings as never)
+  it('checking every visible provider saves all-active even when discovery omits a stored id (#380)', async () => {
+    // vertex-claude is stored but no longer discovered: it has no checkbox, and
+    // all visible providers checked means "all active" (empty value).
+    get.mockResolvedValue(
+      restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
+    )
 
     await openAiTab()
-    // Non-empty value renders chips: active solid, inactive struck through
-    expect(screen.getByText('openai')).toHaveClass('line-through')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    expect(screen.queryByRole('checkbox', { name: 'vertex-claude' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
-    fireEvent.click(screen.getByRole('checkbox', { name: 'vertex-claude' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() =>
@@ -796,9 +831,66 @@ describe('ServerSettingsPage active server providers', () => {
     )
   })
 
-  it('warns when zero providers are checked and saves empty (= all) on confirm', async () => {
+  it('Save persists an empty value when everything ends up checked (all active)', async () => {
+    get.mockResolvedValue(restricted('gemini') as never)
+
     await openAiTab()
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'vertex-claude' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: '' },
+      }),
+    )
+    // The draft is consumed by the save: no Save left for the same selection
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument())
+  })
+
+  it('unchecking every visible provider saves the empty value even with an undiscovered stored id (#380)', async () => {
+    // Saved value must stay "all active": appending the undiscovered id first
+    // would turn it into a one-provider allowlist disabling the visible ones.
+    get.mockResolvedValue(
+      restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
+    )
+
+    await openAiTab()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'gemini' }))
+
+    expect(
+      screen.getByText(/No providers selected — saving this activates ALL server providers/),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: '' },
+      }),
+    )
+  })
+
+  it('saves the visible subset plus undiscovered stored ids (#380)', async () => {
+    // A real subset is the only case where undiscovered stored ids ride along:
+    // dropping them would silently narrow the restriction.
+    get.mockResolvedValue(
+      restricted('gemini,vertex-claude', { options: ['gemini', 'openai'] }) as never,
+    )
+
+    await openAiTab()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    fireEvent.click(screen.getByRole('checkbox', { name: 'gemini' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: 'openai,vertex-claude' },
+      }),
+    )
+  })
+
+  it('unchecking everything saves the empty value (empty = all, never "none")', async () => {
+    await openAiTab()
 
     for (const provider of ['gemini', 'openai', 'vertex-claude']) {
       fireEvent.click(screen.getByRole('checkbox', { name: provider }))
@@ -815,39 +907,54 @@ describe('ServerSettingsPage active server providers', () => {
     )
   })
 
-  it('resets to all via the reset flow (restores the default empty value)', async () => {
-    const settings = baseSettings()
-    const providers = settings.find((s) => s.key === 'active_server_providers')!
-    providers.value = 'gemini'
-    providers.source = 'db'
-    providers.updated_by = 'admin'
-    get.mockResolvedValue(settings as never)
+  it('Cancel restores the stored value and fires no save', async () => {
+    get.mockResolvedValue(restricted('gemini') as never)
 
     await openAiTab()
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
-
-    // In-editor "Reset to all" re-checks everything
-    fireEvent.click(screen.getByRole('checkbox', { name: 'gemini' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Reset to all' }))
-    expect(screen.getByRole('checkbox', { name: 'gemini' })).toBeChecked()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
     expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
 
-    // Setting reset (delete) restores the stored default
-    const del = vi.mocked(api.delete)
-    del.mockResolvedValue({} as never)
-    fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
-    await waitFor(() =>
-      expect(del).toHaveBeenCalledWith('/api/admin/settings/active_server_providers'),
-    )
-    // Silent refetch after reset
-    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.getByRole('checkbox', { name: 'gemini' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
   })
 
-  it('closes the provider editor and resyncs selection after a setting reset, so Save cannot restore the old restriction', async () => {
-    const settings = baseSettings()
-    const providers = settings.find((s) => s.key === 'active_server_providers')!
-    providers.value = 'gemini'
-    providers.source = 'db'
+  it('hides Save and Cancel once the draft matches the stored value again', async () => {
+    get.mockResolvedValue(restricted('gemini') as never)
+
+    await openAiTab()
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
+
+    // Toggling back to the stored selection clears the dirty state
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
+  it('matches saved provider IDs case-insensitively and saves canonical spelling', async () => {
+    get.mockResolvedValue(restricted('Gemini,OpenAI') as never)
+
+    await openAiTab()
+    expect(screen.getByRole('checkbox', { name: 'gemini' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'vertex-claude' })).not.toBeChecked()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { active_server_providers: 'gemini' },
+      }),
+    )
+  })
+
+  it('drops the unsaved draft when the stored value is reset, so Save cannot restore it', async () => {
+    const settings = restricted('gemini', { source: 'db' })
     let reset = false
     get.mockImplementation(async () => (reset ? baseSettings() : settings))
     const del = vi.mocked(api.delete)
@@ -857,53 +964,50 @@ describe('ServerSettingsPage active server providers', () => {
     })
 
     await openAiTab()
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
-    expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'openai' }))
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
-    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
-
-    // Editor closed after the reset: no Save button to click with stale state
     await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument(),
+      expect(del).toHaveBeenCalledWith('/api/admin/settings/active_server_providers'),
     )
-    expect(screen.getByRole('button', { name: 'Configure providers' })).toBeInTheDocument()
+    // Draft dropped: the row renders the refetched (unrestricted) value, not the
+    // pre-reset selection, and there is no stale Save left to click
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument())
+    for (const box of providerBoxes()) expect(box).toBeChecked()
+  })
 
-    // Re-opening starts from the refetched (reset) value, not the pre-reset selection
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
-    expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    await waitFor(() =>
-      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
-        settings: { active_server_providers: '' },
-      }),
-    )
+  it('shows updated_by and the history toggle for a db-sourced value', async () => {
+    get.mockResolvedValue(restricted('gemini', { source: 'db', updated_by: 'admin' }) as never)
+
+    await openAiTab()
+    expect(screen.getByText('Modified by admin')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show history' })).toBeInTheDocument()
   })
 
   it('shows a hint when no server providers are available', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'active_server_providers')!.options = []
-    get.mockResolvedValue(settings as never)
+    get.mockResolvedValue(restricted('', { options: [] }) as never)
 
     await openAiTab()
     expect(screen.getByText('No server providers available')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Configure providers' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
   })
 
-  it('shows a reset affordance when a restriction is stored but discovery is unavailable', async () => {
-    const settings = baseSettings()
-    const providers = settings.find((s) => s.key === 'active_server_providers')!
-    providers.options = []
-    providers.value = 'gemini'
-    providers.source = 'db'
-    providers.updated_by = 'admin'
-    get.mockResolvedValue(settings as never)
+  it('renders the description served by the settings API with the picker', async () => {
+    await openAiTab()
+    // No hardcoded copy in the page: the backend description is the single source.
+    expect(screen.getByText('Description for active_server_providers')).toBeInTheDocument()
+  })
+
+  it('keeps the stored value read-only with a reset when discovery is unavailable', async () => {
+    get.mockResolvedValue(
+      restricted('gemini', { options: [], source: 'db', updated_by: 'admin' }) as never,
+    )
 
     await openAiTab()
     expect(screen.getByText('Restricted to:')).toBeInTheDocument()
-    expect(
-      screen.getByText(/Provider discovery is currently unavailable/),
-    ).toBeInTheDocument()
+    expect(screen.getByText(/Provider discovery is currently unavailable/)).toBeInTheDocument()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
 
     const del = vi.mocked(api.delete)
     del.mockResolvedValue({} as never)
@@ -913,77 +1017,6 @@ describe('ServerSettingsPage active server providers', () => {
     )
     // Silent refetch after reset
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
-  })
-
-  it('matches saved provider IDs case-insensitively and saves canonical spelling', async () => {
-    const settings = baseSettings()
-    settings.find((s) => s.key === 'active_server_providers')!.value = 'Gemini,OpenAI'
-    get.mockResolvedValue(settings as never)
-
-    await openAiTab()
-    // Mixed-case saved IDs are active (no struck-through chip anywhere)
-    for (const el of screen.getAllByText('gemini')) expect(el).not.toHaveClass('line-through')
-    for (const el of screen.getAllByText('openai')) expect(el).not.toHaveClass('line-through')
-    expect(screen.getByText('vertex-claude')).toHaveClass('line-through')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
-    expect(screen.getByRole('checkbox', { name: 'gemini' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'openai' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'vertex-claude' })).not.toBeChecked()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
-    await waitFor(() =>
-      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
-        settings: { active_server_providers: 'gemini,openai' },
-      }),
-    )
-  })
-
-  it('does not repopulate provider checkboxes from a superseded reset refetch', async () => {
-    const settings = baseSettings()
-    const providers = settings.find((s) => s.key === 'active_server_providers')!
-    providers.value = 'gemini'
-    providers.source = 'db'
-    get.mockResolvedValueOnce(settings as never) // initial load: restricted to gemini
-    const del = vi.mocked(api.delete)
-    del.mockResolvedValue({} as never)
-
-    await openAiTab()
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
-    expect(screen.getByRole('checkbox', { name: 'openai' })).not.toBeChecked()
-
-    // The reset's silent refetch stays pending; when it resolves it carries an
-    // OLDER restriction than either the pre-reset or the post-reset state.
-    let resolveStale!: (value: TestSetting[]) => void
-    get.mockImplementationOnce(() => new Promise<TestSetting[]>((r) => { resolveStale = r }))
-    fireEvent.click(screen.getByRole('button', { name: 'Reset' }))
-    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
-
-    // A newer fetch (settings-changed SSE) supersedes it and resolves with the
-    // post-reset state: no restriction, all providers active.
-    get.mockResolvedValueOnce(baseSettings() as never)
-    const events = vi.mocked(useSSE).mock.calls.find(([stream]) => stream === 'settings')![1] as Record<string, () => void>
-    events['settings-changed']()
-    await waitFor(() => expect(get).toHaveBeenCalledTimes(3))
-
-    // The stale response arrives LAST — handleReset must not repopulate the
-    // provider checkboxes from it; the editor still closes (#346).
-    const stale = baseSettings()
-    stale.find((s) => s.key === 'active_server_providers')!.value = 'openai'
-    resolveStale(stale)
-
-    // Reset finished: editor closed, row shows the fresh (post-reset) state
-    await waitFor(() =>
-      expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument(),
-    )
-    expect(screen.getByText('All server providers are active')).toBeInTheDocument()
-
-    // Reopening seeds from the rendered fresh value — never the stale
-    // 'openai'-only restriction the superseded response carried.
-    fireEvent.click(screen.getByRole('button', { name: 'Configure providers' }))
-    for (const provider of ['gemini', 'openai', 'vertex-claude']) {
-      expect(screen.getByRole('checkbox', { name: provider })).toBeChecked()
-    }
   })
 })
 

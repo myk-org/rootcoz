@@ -7275,6 +7275,79 @@ class TestAdminServerProvidersCommands:
             "gemini-2.5-pro",  # pragma: allowlist secret
         )
 
+    def test_server_providers_store_deployment_key(self, mock_client):
+        """No key flag: the server promotes the deployment credential (#378)."""
+        mock_client.admin_store_deployment_server_provider_key.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+            "model_count": 4,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "store-deployment-key",
+                "--provider",
+                "mygateway",
+                "--model",
+                "mygateway/gpt-4o",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert (
+            "Stored the deployment credential for mygateway"
+            " (4 key-scoped model(s))" in result.output
+        )
+        mock_client.admin_store_deployment_server_provider_key.assert_called_once_with(
+            "mygateway", "mygateway/gpt-4o"
+        )
+
+    def test_server_providers_store_deployment_key_without_count(self, mock_client):
+        """A server that captured no listing reports no count (#378)."""
+        mock_client.admin_store_deployment_server_provider_key.return_value = {
+            "outcome": "accepted",
+            "ok": True,
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "store-deployment-key",
+                "--provider",
+                "mygateway",
+                "--model",
+                "mygateway/gpt-4o",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Stored the deployment credential for mygateway" in result.output
+        assert "model(s)" not in result.output
+
+    def test_server_providers_store_deployment_key_rejected_exits_nonzero(
+        self, mock_client
+    ):
+        mock_client.admin_store_deployment_server_provider_key.return_value = {
+            "outcome": "rejected",
+            "ok": False,
+            "message": "Check the key and selected model; existing credential unchanged.",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "server-providers",
+                "store-deployment-key",
+                "--provider",
+                "mygateway",
+                "--model",
+                "mygateway/gpt-4o",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Key NOT stored (rejected)" in result.output
+
     def test_server_providers_refresh_models(self, mock_client):
         mock_client.admin_refresh_server_provider_models.return_value = {
             "ok": True,

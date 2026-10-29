@@ -684,12 +684,13 @@ class Settings(BaseSettings):
     active_server_providers: str = Field(
         default="",
         description=(
-            "Comma-separated server provider IDs exposed to users on server "
-            "credentials (model catalog, admin-declared free pairs, and "
-            "ambient-auth models). Empty = all providers. A deactivated "
-            "provider's models lose their server credential source — free "
-            "pairs on it stop working with server credentials too — but stay "
-            "usable with a user's own API key."
+            "Providers whose models run on the server's own credentials. "
+            "Empty means every provider is active. Uncheck a provider to stop "
+            "offering its models on server credentials — users who add their "
+            "own API key can still use those models. Providers that "
+            "authenticate through the deployment (ambient auth) have no "
+            "user-key fallback, so unchecking one hides it from users "
+            "entirely."
         ),
     )
 

@@ -60,6 +60,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from rootcoz import storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
+    _cached_catalog_provider_ids,
     _get_model_catalog,
     _setup_usage_recorder,
     ai_username,
@@ -72,6 +73,7 @@ from rootcoz.ai_client import (
     list_models,
     model_listing_status,
     normalize_provider,
+    parse_ambient_auth_provider_ids,
     probe_cursor_auth,
     registered_provider_ids,
     resolve_catalog_pair,
@@ -200,6 +202,7 @@ from rootcoz.models import (
     ReAnalyzeRequest,
     ReportPortalPushResult,
     ServerProviderCanRefreshModels,
+    ServerProviderHasDeploymentCredential,
     ServerProviderKeyInput,
     ServerProviderKeyScopedSource,
     SetCanUseServerProvidersRequest,
@@ -208,6 +211,7 @@ from rootcoz.models import (
     SetReviewedRequest,
     SetServerProviderModelsRequest,
     SetTrackedInRequest,
+    StoreDeploymentProviderKeyRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
     UpdateFilterPresetRequest,
@@ -403,6 +407,10 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
+        # Operator detail, not a per-analysis default: it drives
+        # supported_key_providers() (which providers may ever touch a user
+        # API key) and is edited via env/CLI, never in Server Settings.
+        "ambient_auth_providers",
     }
 )
 
@@ -12838,6 +12846,21 @@ async def _stored_provider_ids() -> set[str]:
     }
 
 
+async def _has_stored_server_key(provider: str) -> bool:
+    """Whether this provider already has a stored key (admin write endpoints).
+
+    Case-insensitive exact spelling — the same match the storage layer uses
+    (``lower(provider) = lower(?)``). Distinct from
+    :func:`_stored_provider_ids`, which normalizes legacy aliases for the
+    capture scope; an admin write must not answer "409 already stored" for a
+    differently-named alias.
+    """
+    return any(
+        row["provider"].lower() == provider.lower()
+        for row in await storage.list_server_ai_providers()
+    )
+
+
 async def _capture_deployment_provider_listing(
     provider: str, key: str
 ) -> tuple[list[dict[str, Any]], str]:
@@ -13168,14 +13191,97 @@ async def capture_deployment_provider_listings(
     return captured
 
 
+# Each candidate costs a real sidecar turn, so verification is bounded; this is
+# an attempt bound, not data truncation.
+# shortcut: verification tries at most 5 discovered models; raise this if a
+# provider ever front-loads more than 5 unusable models.
+_MAX_VERIFICATION_CANDIDATES = 5
+
+
+async def _resolve_verification_model(
+    provider: str, key: str, requested: str | None
+) -> tuple[list[str], HTTPException | None]:
+    """Model ids to verify a key with — ``(models, error)``, one always set.
+
+    Shared by add, rotate and store-deployment-key (#378). A caller-supplied
+    model always wins and never triggers discovery. Without one, the key's own
+    scoped listing supplies the candidates, which is the only way a key-capable
+    provider with no catalog model template can be verified at all — a
+    hand-typed id would be rejected by the sidecar. Every usable entry is
+    returned, usable first, so one unusable id cannot block a key that a later
+    listed model verifies (#378). Manifest-only entries are skipped: they are
+    not key-verified. An unsupported/empty listing is an error telling the
+    admin to type a model id; a rejected credential is an error telling them to
+    fix the key, since discovery fails the same way as verification would. The
+    key never reaches the logs.
+    """
+    model = (requested or "").strip()
+    if model:
+        return [model], None
+    from rootcoz.ai_client import (
+        _listing_entry_usable,
+        auth_failure_status,
+        models_for_api_key,
+    )
+
+    try:
+        discovery = await models_for_api_key(provider, key)
+        entries = [
+            entry for entry in discovery["models"] if entry.get("source") != "manifest"
+        ]
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        if auth_status := auth_failure_status(exc):
+            logger.info(
+                "Key-scoped model discovery rejected the credential for"
+                " provider=%s (HTTP %s)",
+                provider,
+                auth_status,
+            )
+            return [], HTTPException(
+                status_code=400,
+                detail=(
+                    "The credential was rejected by the provider"
+                    f" (HTTP {auth_status}); check the key before retrying"
+                ),
+            )
+        logger.debug(
+            "Key-scoped model discovery unavailable for provider=%s;"
+            " verification needs an explicit model id",
+            provider,
+        )
+        entries = []
+    ordered = sorted(entries, key=lambda entry: not _listing_entry_usable(entry))
+    models = list(dict.fromkeys(entry["id"] for entry in ordered))
+    if not models:
+        return [], HTTPException(
+            status_code=400,
+            detail=(
+                f"Provider '{provider}' exposes no models for this credential;"
+                " enter a model id to verify against"
+            ),
+        )
+    logger.debug(
+        "Verifying server provider key for %s against discovered model ids %s",
+        provider,
+        models[:_MAX_VERIFICATION_CANDIDATES],
+    )
+    return models, None
+
+
 async def _verify_and_store_server_provider_key(
     provider: str,
     body: ServerProviderKeyInput,
     request: Request,
     *,
     replacing: bool,
+    include_model_count: bool = False,
 ) -> JSONResponse:
-    """Shared add/rotate path: verify the key with a real turn, then store."""
+    """Shared add/rotate/store path: verify the key with a real turn, then store.
+
+    ``include_model_count`` adds the captured key-scoped model count to the
+    success payload (#378) — reported only when the capture actually produced
+    a listing, so a caller never presents a zero as "this key reaches nothing".
+    """
     # Resolve to the sidecar's exact-case id up front (#347): verification,
     # the duplicate check, and storage all see the canonical spelling, so
     # a lowercase add behaves identically to the catalog's ``EnMaaS`` and
@@ -13191,10 +13297,21 @@ async def _verify_and_store_server_provider_key(
         raise HTTPException(status_code=400, detail=error)
     from rootcoz.ai_client import verify_ai_key
 
-    model = body.verification_model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Select a model to verify the key")
-    outcome = await verify_ai_key(provider, model, key)
+    # Never empty: capability and key are validated above, and discovery only
+    # runs for a key-capable provider (#378).
+    models, model_error = await _resolve_verification_model(
+        provider, key, body.verification_model
+    )
+    if model_error is not None:
+        raise model_error
+    # Try the discovered candidates in order: a listed id pi-config cannot open
+    # a session for must not block a key a later listed model verifies (#378).
+    # The last outcome is the answer once every attempt failed.
+    outcome = "inconclusive"
+    for model in models[:_MAX_VERIFICATION_CANDIDATES]:
+        outcome = await verify_ai_key(provider, model, key)
+        if outcome == "accepted":
+            break
     if outcome != "accepted":
         # Mirror the user flow: report the outcome, never store an untested key.
         message = {
@@ -13215,9 +13332,7 @@ async def _verify_and_store_server_provider_key(
     # sidecar round-trip above can take seconds, and a concurrent add during
     # it must not be silently overwritten by this one, nor a concurrent
     # removal resurrected without its model selections.
-    exists = provider.lower() in {
-        row["provider"].lower() for row in await storage.list_server_ai_providers()
-    }
+    exists = await _has_stored_server_key(provider)
     if exists and not replacing:
         raise HTTPException(
             status_code=409,
@@ -13261,7 +13376,17 @@ async def _verify_and_store_server_provider_key(
         else "",
     )
     return JSONResponse(
-        content=strip_sensitive_from_response({"outcome": "accepted", "ok": True}),
+        content=strip_sensitive_from_response(
+            {
+                "outcome": "accepted",
+                "ok": True,
+                **(
+                    {"model_count": len(key_models)}
+                    if include_model_count and capture_status == "supported"
+                    else {}
+                ),
+            }
+        ),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -13270,11 +13395,13 @@ async def _verify_and_store_server_provider_key(
 async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     """List server provider key state and per-model selection (admin only).
 
-    Never returns keys. One entry per catalog provider (plus stored
-    providers that left the catalog), each with key presence, verification
-    state, a ``managed`` flag, and its models with ``included`` + ``free``
-    flags — unmanaged providers (no stored key, no selection rows) report
-    their whole catalog as included, matching what the server pool
+    Never returns keys. One entry per catalog provider, plus stored
+    providers that left the catalog and every provider the sidecar registers
+    as key-capable (#378 — a provider with no catalog model would otherwise
+    be invisible and could never be offered a key), each with key presence,
+    verification state, a ``managed`` flag, and its models with ``included`` +
+    ``free`` flags — unmanaged providers (no stored key, no selection rows)
+    report their whole catalog as included, matching what the server pool
     actually exposes for them.
     """
     _require_admin(request)
@@ -13309,6 +13436,13 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
             deployment_credentials, key_capable
         )
         capturable = {normalize_provider(name) for name in capturable_credentials}
+    # Providers the deployment env resolves a credential for, capture aside
+    # (#378): this is what ``store-deployment-key`` reads, so it must answer
+    # from the resolution alone — a provider is storable before (and without)
+    # any key-scoped listing. An unreadable manifest resolves nothing.
+    deployment_credential_ids = frozenset(
+        normalize_provider(name) for name in deployment_credentials or ()
+    )
     # Case-insensitive join (#347): storage matches providers ignoring case,
     # so a key stored as "Google" must key the catalog's "google" entry —
     # an exact-name lookup would split it into keyed + unkeyed rows.
@@ -13385,6 +13519,15 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     listed_ids = {p.lower(): p for p in models_by_provider}
     for stored_id in stored:
         listed_ids.setdefault(stored_id.lower(), stored_id)
+    # Registry-only providers (#378): the sidecar registers ~30 key-capable
+    # providers, but only one with a model in the catalog reaches the UI's
+    # "Find a provider" picker — an admin could never store a key for the
+    # rest. Union the capability answer already fetched above (one lookup per
+    # request, never a second call); the sidecar's exact spelling wins, and
+    # the case-insensitive join keeps a catalog/stored entry's casing. A
+    # ``supportsSessionApiKey: false`` provider is not in this list at all.
+    for key_provider in key_providers:
+        listed_ids.setdefault(key_provider.lower(), key_provider)
     for provider in sorted(listed_ids.values()):
         provider_lower = provider.lower()
         # Managed = stored selection rows or a stored key — the same rule
@@ -13431,6 +13574,13 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
         can_refresh_models: ServerProviderCanRefreshModels = record is not None or (
             capturable is not None and provider_lower in capturable
         )
+        # Whether the deployment env resolves this provider's credential
+        # (#378). A stored key is the provider's credential — nothing is left
+        # for the deployment env to contribute (``store-deployment-key``
+        # answers 409 for it), so it reports False.
+        has_deployment_credential: ServerProviderHasDeploymentCredential = (
+            record is None and normalize_provider(provider) in deployment_credential_ids
+        )
         providers.append(
             {
                 "provider": provider,
@@ -13454,6 +13604,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
                 else None,
                 "key_scoped_source": key_scoped_source,
                 "can_refresh_models": can_refresh_models,
+                "has_deployment_credential": has_deployment_credential,
                 "models": models,
             }
         )
@@ -13470,15 +13621,82 @@ async def add_server_provider(
     """Add a server provider key (admin only) — verified before storing."""
     _require_admin(request)
     provider = body.provider.strip()
-    if provider.lower() in {
-        row["provider"].lower() for row in await storage.list_server_ai_providers()
-    }:
+    if await _has_stored_server_key(provider):
         raise HTTPException(
             status_code=409,
             detail=f"Provider '{provider}' already has a stored key; use rotate-key",
         )
     return await _verify_and_store_server_provider_key(
         provider, body, request, replacing=False
+    )
+
+
+@app.post(
+    "/api/admin/server-providers/{provider:path}/store-deployment-key",
+    operation_id="storeDeploymentProviderKey",
+)
+async def store_deployment_provider_key(
+    provider: str, request: Request, body: StoreDeploymentProviderKeyRequest
+) -> JSONResponse:
+    """Promote a deployment credential into the stored key store (admin only, #378).
+
+    A provider keyed from the deployment env (``models.json`` ``"$VAR"`` or an
+    ambient ``<PROVIDER_ID>_API_KEY``) already resolves a working credential,
+    so the admin never re-enters it: this reads the same in-memory resolution
+    and hands it to the shared add path, which verifies with a real turn,
+    encrypts, bumps the credential generation, captures the key-scoped listing,
+    seeds the selection, and writes the ``[AUDIT]`` line naming the admin and
+    the provider. Nothing here reads, returns or logs key material, a prefix of
+    it, or the resolved value of the variable behind it.
+
+    Only the states that make the action impossible are HTTP errors: a key
+    already stored (``409`` — rotate instead) and no deployment credential
+    resolved (``404``; an unreadable manifest resolves nothing either, which is
+    never a ``500``). A rejected or inconclusive verification follows the
+    add/rotate convention — ``200`` with ``ok: false`` and nothing stored.
+    ``verification_model`` is optional: omitted, the credential's own first
+    discovered model verifies it, and a ``400`` asks for one when discovery
+    exposes none (#378).
+    """
+    _require_admin(request)
+    # Stored first: that answer needs no credential, so it must not hide
+    # behind a "no deployment credential" 404.
+    if await _has_stored_server_key(provider):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+        )
+    from rootcoz.ai_client import deployment_provider_credentials
+
+    credentials = deployment_provider_credentials()
+    # ``None`` is an unreadable manifest (the resolver logged why): it resolves
+    # nothing right now, so it answers like "no credential", never a 500.
+    match = next(
+        (
+            (name, key)
+            for name, key in (credentials or {}).items()
+            if normalize_provider(name) == normalize_provider(provider)
+        ),
+        None,
+    )
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Provider '{provider}' has no deployment credential to store",
+        )
+    name, key = match
+    # The resolved credential is handed over as the submitted key, so the add
+    # path does every part of the store exactly once, for both entry points.
+    return await _verify_and_store_server_provider_key(
+        name,
+        ServerProviderKeyInput(
+            provider=name,
+            api_key=SecretStr(key),
+            verification_model=body.verification_model,
+        ),
+        request,
+        replacing=False,
+        include_model_count=True,
     )
 
 
@@ -13491,9 +13709,7 @@ async def rotate_server_provider_key(
 ) -> JSONResponse:
     """Replace a server provider key (admin only) — re-verified before storing."""
     _require_admin(request)
-    if provider.lower() not in {
-        row["provider"].lower() for row in await storage.list_server_ai_providers()
-    }:
+    if not await _has_stored_server_key(provider):
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' has no stored key"
         )
@@ -14011,7 +14227,60 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
 
 
-def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
+async def _live_provider_spellings() -> dict[str, str]:
+    """Lowercased provider ID → the spelling the deployment registers.
+
+    Union of the current model catalog and the sidecar's key-capable
+    providers. An empty result means both sources are unavailable — a cold
+    catalog plus no discovery answer — and must never be read as "no provider
+    exists". The first spelling seen wins for a provider known to both.
+    """
+    spellings = {
+        provider.lower(): provider for provider in _cached_catalog_provider_ids()
+    }
+    for provider in await supported_key_providers():
+        spellings.setdefault(provider.lower(), provider)
+    return spellings
+
+
+def _known_providers_hint(known: set[str]) -> str:
+    """Readable ``known: a, b, ...`` listing for a rejection message."""
+    return ", ".join(sorted(known))
+
+
+async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str | None]:
+    """Canonical AMBIENT_AUTH_PROVIDERS IDs, plus a rejection when unknown.
+
+    Shared by every write path (PUT, settings import, persist-from-env): the
+    returned IDs are stored, and an accepted ID is replaced with the spelling
+    the deployment registers so the DB holds the sidecar's id — a caller typing
+    ``Google-Vertex-Claude`` must not persist a spelling the consumer's
+    exclusion cannot match. An empty known set means a cold catalog *and* no
+    key-capable answer from discovery — far more likely a transient sidecar
+    gap than a real "no providers exist" — so the value is accepted unchanged
+    rather than failing a save.
+    """
+    ids = parse_ambient_auth_provider_ids(value)
+    spellings = await _live_provider_spellings()
+    if not spellings:
+        return ids, None
+    # Currently stored ambient IDs stay valid: ``supported_key_providers()``
+    # excludes them from its own answer, so an unchanged re-save must not fail.
+    known = set(spellings) | {
+        provider.lower()
+        for provider in parse_ambient_auth_provider_ids(
+            get_settings().ambient_auth_providers or ""
+        )
+    }
+    if unknown := [provider for provider in ids if provider.lower() not in known]:
+        return ids, (
+            "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS: "
+            f"{', '.join(unknown)} (known: {_known_providers_hint(known)})"
+        )
+    return [spellings.get(provider.lower(), provider) for provider in ids], None
+
+
+async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
     """Validate admin settings updates; return per-entry error messages.
 
     Shared by the PUT update and the settings import endpoints so every
@@ -14147,6 +14416,21 @@ def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
+
+    # AMBIENT_AUTH_PROVIDERS is consumed as raw provider IDs by
+    # supported_key_providers(): a typo is stored silently and never excludes
+    # anything (the provider it was meant to exclude keeps offering key UI),
+    # while a real ID typed there silently disables a provider's key UI.
+    # :func:`_normalize_ambient_auth_providers` checks every ID against the
+    # providers that actually exist and returns the canonical form to store —
+    # padding, duplicates and a non-registered spelling never persist.
+    if settings_updates.get("ambient_auth_providers") is not None:
+        ids, ambient_error = await _normalize_ambient_auth_providers(
+            str(settings_updates["ambient_auth_providers"])
+        )
+        if ambient_error:
+            errors.append(ambient_error)
+        settings_updates["ambient_auth_providers"] = ", ".join(ids)
     return errors
 
 
@@ -14160,7 +14444,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
     if not settings_updates:
         raise HTTPException(status_code=400, detail="No settings provided")
 
-    errors = _validate_settings_updates(settings_updates)
+    errors = await _validate_settings_updates(settings_updates)
     if errors:
         raise HTTPException(
             status_code=400, detail=f"Invalid settings: {'; '.join(errors)}"
@@ -14398,7 +14682,7 @@ async def import_server_settings(request: Request) -> JSONResponse:
     # rules the per-setting PUT enforces, plus the empty-override gates
     # the shared save path applies (checked here so a rejection is a 422
     # before any DB write, keeping the import atomic).
-    errors = _validate_settings_updates(updates)
+    errors = await _validate_settings_updates(updates)
     for key, value in updates.items():
         if key in _DERIVED_SETTINGS:
             # Same rule the persist endpoint enforces: a derived value is
@@ -14624,6 +14908,18 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}'"
         ) from exc
+    # AMBIENT_AUTH_PROVIDERS needs the shared provider-ID validation and
+    # canonicalisation too (#378): the per-field model check accepts any
+    # string, so an env typo the PUT/import paths reject would otherwise be
+    # persisted as a DB override, and a non-registered spelling would survive.
+    if key == "ambient_auth_providers":
+        ids, ambient_error = await _normalize_ambient_auth_providers(env_value)
+        if ambient_error:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid env value for '{key}': {ambient_error}",
+            )
+        env_value = ", ".join(ids)
 
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)

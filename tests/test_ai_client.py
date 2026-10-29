@@ -45,6 +45,61 @@ def test_normalize_provider(raw: str, canonical: str) -> None:
     assert normalize_provider(raw) == canonical
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        # The sidecar's explicit status suffix is the only textual status.
+        ("Sidecar API key model discovery failed (HTTP 401)", 401),
+        ("Sidecar API key model discovery failed (HTTP 403)", 403),
+        # A bare word or number is not evidence: unrelated failures keep None.
+        ("model rejected by provider", None),
+        ("provider request 401 timed out", None),
+        ("upstream returned 4013 for this model", None),
+        # Unambiguous auth phrases, with no status attached.
+        ("invalid api key", 401),
+        ("API key is invalid", 401),
+        ("Incorrect API key provided", 401),
+        ("Unauthorized", 401),
+        ("Forbidden", 403),
+        ("authentication failed", 401),
+    ],
+)
+def test_auth_failure_status_reads_structured_evidence_only(
+    message: str, expected: int | None
+) -> None:
+    assert ai_client.auth_failure_status(RuntimeError(message)) == expected
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_failure_status_reads_an_http_status_error(status: int) -> None:
+    request = httpx.Request("GET", "http://sidecar.test/providers")
+    error = httpx.HTTPStatusError(
+        "boom", request=request, response=httpx.Response(status, request=request)
+    )
+
+    assert ai_client.auth_failure_status(error) == status
+
+
+def test_auth_failure_status_ignores_a_non_auth_status_error() -> None:
+    request = httpx.Request("GET", "http://sidecar.test/providers")
+    error = httpx.HTTPStatusError(
+        "boom", request=request, response=httpx.Response(500, request=request)
+    )
+
+    assert ai_client.auth_failure_status(error) is None
+
+
+def test_auth_failure_status_walks_the_exception_chain() -> None:
+    request = httpx.Request("GET", "http://sidecar.test/providers")
+    rejection = httpx.HTTPStatusError(
+        "boom", request=request, response=httpx.Response(401, request=request)
+    )
+    wrapped = RuntimeError("model discovery failed")
+    wrapped.__cause__ = rejection
+
+    assert ai_client.auth_failure_status(wrapped) == 401
+
+
 @pytest.mark.asyncio
 async def test_provider_discovery_transport_failure_denies_key_capability(
     monkeypatch: pytest.MonkeyPatch,

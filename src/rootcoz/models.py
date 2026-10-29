@@ -1593,7 +1593,22 @@ class ServerProviderKeyInput(BaseModel):
 
     provider: Annotated[str, Strict(), StringConstraints(min_length=1)]
     api_key: SecretStr
-    verification_model: Annotated[str, Strict(), StringConstraints(min_length=1)]
+    # Omitted or empty: the model is discovered from the key's own listing
+    # (#378) — a provider with no catalog model template can still be keyed.
+    verification_model: Annotated[str, Strict()] | None = None
+
+
+class StoreDeploymentProviderKeyRequest(BaseModel):
+    """Admin store-deployment-key body (#378).
+
+    Carries no key: the credential is the one the deployment already resolves
+    (manifest ``"$VAR"`` or an ambient ``<PROVIDER_ID>_API_KEY``), promoted
+    into the encrypted store server-side. The verification model is the
+    caller's choice when supplied; omitted, it comes from the credential's own
+    key-scoped listing (#378).
+    """
+
+    verification_model: Annotated[str, Strict()] | None = None
 
 
 # Which credential a provider's key-scoped model listing was captured with
@@ -1612,6 +1627,21 @@ ServerProviderCanRefreshModels = Annotated[
             "True when refresh-models can act for this provider: a stored "
             "server key, or a deployment credential eligible for key-scoped "
             "capture. Boolean only, never key material."
+        ),
+    ),
+]
+
+
+# Whether the deployment env resolves a credential for a provider (#378): a
+# models.json ``"$VAR"`` reference or an ambient ``<PROVIDER_ID>_API_KEY``.
+# Independent of any captured key-scoped listing, so the UI can offer "store
+# this deployment key" before a listing exists.
+ServerProviderHasDeploymentCredential = Annotated[
+    bool,
+    Field(
+        description=(
+            "True when the deployment env resolves a credential for this "
+            "provider and no key is stored. Boolean only, never key material."
         ),
     ),
 ]

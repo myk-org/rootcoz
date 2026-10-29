@@ -1778,6 +1778,21 @@ class TestAmbientAuthProviderExclusion:
         ]
 
     @pytest.mark.asyncio
+    async def test_ambient_provider_exclusion_is_case_insensitive(self, monkeypatch):
+        """A differently-cased stored ID still excludes the registered provider."""
+        client = AsyncMock()
+        client.get_providers.return_value = [
+            {"provider": "google-vertex-claude", "supportsSessionApiKey": True},
+            {"provider": "supported", "supportsSessionApiKey": True},
+        ]
+        monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+
+        # Rows saved before the write paths canonicalised carry any spelling.
+        _override_ambient_providers(monkeypatch, "Google-Vertex-Claude")
+
+        assert await ai_client.supported_key_providers() == ["supported"]
+
+    @pytest.mark.asyncio
     async def test_ambient_provider_credential_save_rejected(
         self, tmp_path, monkeypatch
     ):
