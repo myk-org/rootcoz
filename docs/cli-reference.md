@@ -268,6 +268,7 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `server-providers add` | `--provider`, `--api-key`, `--verification-model` | Add a server provider key (verified with a real sidecar turn before storing; the key-scoped model listing is captured). |
 | `server-providers rotate-key` | `--provider`, `--api-key`, `--verification-model` | Replace a key (re-verified first; the key-scoped listing is re-captured). |
 | `server-providers refresh-models` | `--provider` | Re-run key-scoped discovery with the stored key — picks up permission drift without re-entering the key. |
+| `server-providers store-deployment-key` | `--provider`, `--model` | Promote the deployment credential the server already resolves for the provider (manifest env reference or ambient `<PROVIDER_ID>_API_KEY`) into the encrypted store, verified with a real sidecar turn first — no key is passed. |
 | `server-providers models` | `--provider`, `--models`, `--free` | Set the provider's exposed models; comma-separated ids passed verbatim (real ids may end in `:free`). `--free` lists the free subset (free implies included; entries not in `--models` are auto-included). Models not listed are deselected. |
 | `server-providers remove` | `--provider` | Remove the key, selection, and free pairs. |
 

@@ -344,6 +344,7 @@ def test_endpoints_require_admin(client):
         ("put", "/api/admin/server-providers/google/models"),
         ("delete", "/api/admin/server-providers/google"),
         ("post", "/api/admin/server-providers/google/rotate-key"),
+        ("post", "/api/admin/server-providers/google/store-deployment-key"),
     ):
         response = getattr(client, method)(
             path, headers={"Authorization": f"Bearer {key}"}
@@ -1733,6 +1734,66 @@ async def test_list_joins_stored_key_case_insensitively(client, monkeypatch):
     assert SECRET not in response.text
 
 
+async def test_list_includes_registry_only_provider(client, monkeypatch):
+    """A registered key-capable provider with no catalog model is listed (#378).
+
+    Observed live: the sidecar registered ~30 key-capable providers but the
+    catalog held one, so the UI's provider picker could not offer the rest and
+    an admin could never store a key for them.
+    """
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google", "openai", "deepseek"])
+    response = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert response.status_code == 200
+    providers = {p["provider"]: p for p in response.json()["providers"]}
+    assert sorted(providers) == ["deepseek", "google", "openai"]
+    entry = providers["deepseek"]
+    assert entry["models"] == []
+    assert entry["supports_key"] is True
+    assert entry["has_key"] is False
+    assert entry["verified"] is False
+    assert entry["managed"] is False
+    assert entry["key_scoped"] is False
+    assert entry["key_scoped_source"] is None
+    assert entry["can_refresh_models"] is False
+
+
+async def test_list_excludes_registered_provider_without_key_support(
+    client, monkeypatch
+):
+    """``supportsSessionApiKey: false`` never reaches the listing (#378)."""
+    _fake_catalog(monkeypatch, CATALOG)
+    # github-copilot is registered by the sidecar but not key-capable, so the
+    # capability answer the endpoint unions is already the gated set.
+    _mock_supported(monkeypatch, ["google", "openai"])
+    response = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert response.status_code == 200
+    assert sorted(p["provider"] for p in response.json()["providers"]) == [
+        "google",
+        "openai",
+    ]
+
+
+async def test_list_single_entry_for_catalog_and_registered_provider(
+    client, monkeypatch
+):
+    """A provider in both the catalog and the registry keeps one keyed entry."""
+    _fake_catalog(monkeypatch, CATALOG)
+    _mock_supported(monkeypatch, ["google", "openai"])
+    await storage.set_server_ai_credential("google", SECRET, "admin")
+    response = client.get("/api/admin/server-providers", headers=_admin_headers())
+    assert response.status_code == 200
+    providers = response.json()["providers"]
+    assert [p["provider"] for p in providers] == ["google", "openai"]
+    entry = providers[0]
+    assert entry["has_key"] is True
+    assert entry["supports_key"] is True
+    assert [m["id"] for m in entry["models"]] == [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ]
+
+
 async def test_endpoint_key_checks_are_case_insensitive(client, monkeypatch):
     _fake_catalog(monkeypatch, CATALOG)
     _mock_supported(monkeypatch, ["google"])
@@ -2819,6 +2880,38 @@ async def test_can_refresh_models_true_for_deployment_credential(
     assert provider["can_refresh_models"] is True
 
 
+async def test_list_reports_deployment_credential_without_a_captured_listing(
+    client, monkeypatch
+):
+    """``has_deployment_credential`` answers the credential, not the listing."""
+    _register_providers(monkeypatch, "google", "openai", "mistral")
+    _fake_catalog(
+        monkeypatch,
+        [
+            {"provider": "google", "id": "gemini-2.5-pro"},
+            {"provider": "openai", "id": "gpt-5.6-luna"},
+            {"provider": "mistral", "id": "mistral-large"},
+        ],
+    )
+    monkeypatch.setenv("GEMINI_API_KEY", AMBIENT_KEY)
+    await storage.set_server_ai_credential("mistral", SECRET, "admin")
+    _mock_supported(monkeypatch, ["google", "openai", "mistral"])
+    # No listing support: this load captures no rows at all.
+    _mock_key_discovery(monkeypatch, [], listing_supported=False)
+
+    providers = _providers(client)
+
+    # A resolvable env credential, reported with no captured listing at all.
+    assert providers["google"]["has_deployment_credential"] is True
+    assert providers["google"]["key_scoped"] is False
+    assert providers["google"]["key_scoped_source"] is None
+    # Neither a stored key nor an env credential: nothing to promote.
+    assert providers["openai"]["has_deployment_credential"] is False
+    # A stored key is the provider's credential — the deployment adds none.
+    assert providers["mistral"]["has_key"] is True
+    assert providers["mistral"]["has_deployment_credential"] is False
+
+
 async def test_can_refresh_models_false_for_ambient_provider(client, monkeypatch):
     """No stored key and no capturable credential: nothing to refresh (#376)."""
     _fake_catalog(monkeypatch, [{"provider": "google", "id": "gemini-2.5-pro"}])
@@ -3427,3 +3520,375 @@ async def test_capability_lookup_failure_keeps_captured_rows(
     assert [
         row["model"] for row in await storage.list_server_provider_key_models()
     ] == ["mygateway/gpt-4o"]
+
+
+# --- Store the deployment credential as a server key (#378) ---
+
+
+def _store_deployment_key(client, provider, model="gpt-5.6-luna"):
+    """POST store-deployment-key; ``model=None`` omits the field entirely."""
+    return client.post(
+        f"/api/admin/server-providers/{provider}/store-deployment-key",
+        headers=_admin_headers(),
+        json={} if model is None else {"verification_model": model},
+    )
+
+
+async def test_store_deployment_key_promotes_the_resolved_credential(
+    client, monkeypatch, tmp_path, caplog
+):
+    """The deployment credential becomes the stored key, key never re-sent."""
+    _register_providers(monkeypatch, "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    _fake_catalog(monkeypatch, [{"provider": "openai", "id": "gpt-5.6-luna"}])
+    _mock_supported(monkeypatch, ["openai"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gpt-5.6-luna"}, {"id": "gpt-5.6-nova"}])
+
+    with _captured_logs(caplog, "rootcoz.main", level=logging.INFO) as logs:
+        response = _store_deployment_key(client, "openai")
+
+    assert response.status_code == 200
+    assert response.json() == {"outcome": "accepted", "ok": True, "model_count": 2}
+    # Verification ran with the deployment credential, not with anything posted.
+    assert verified == [("openai", "gpt-5.6-luna", AMBIENT_KEY)]
+    stored = await storage.list_server_ai_providers()
+    assert [row["provider"] for row in stored] == ["openai"]
+    # A first store assigns the first generation — the key-scoped capture's guard.
+    assert stored[0]["generation"] == 1
+    assert stored[0]["key_capture_status"] == "supported"
+    assert await storage.get_server_ai_credential("openai") == AMBIENT_KEY
+    # Same machinery as add: the selection is seeded from the key-scoped listing.
+    assert sorted(
+        row["model"] for row in await storage.list_server_provider_models()
+    ) == ["gpt-5.6-luna", "gpt-5.6-nova"]
+    # Encrypted at rest, and no key material in the response or the logs.
+    for path in tmp_path.glob("server-providers.db*"):
+        assert AMBIENT_KEY.encode() not in path.read_bytes()
+    assert AMBIENT_KEY not in response.text
+    assert AMBIENT_KEY not in logs.text
+    assert "[AUDIT] Admin 'admin' stored server provider key for 'openai'" in logs.text
+
+
+def test_store_deployment_key_without_a_credential_is_404(client, monkeypatch):
+    """No resolvable credential (unset variable, no manifest entry) is a 404."""
+    _mock_supported(monkeypatch, ["openai"])
+    response = _store_deployment_key(client, "openai")
+    assert response.status_code == 404
+    assert "no deployment credential to store" in response.json()["detail"]
+
+
+def test_store_deployment_key_unreadable_manifest_is_404(client, monkeypatch, tmp_path):
+    """An unreadable manifest resolves nothing — a 404, never a 500 (#376)."""
+    agent_dir = _point_agent_dir(
+        monkeypatch, tmp_path, {"mygateway": _deployment_provider()}
+    )
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    (agent_dir / "models.json").unlink()
+    _mock_supported(monkeypatch, ["mygateway"])
+    response = _store_deployment_key(client, "mygateway")
+    assert response.status_code == 404
+    assert "no deployment credential to store" in response.json()["detail"]
+
+
+async def test_store_deployment_key_conflicts_with_an_existing_key(
+    client, monkeypatch, tmp_path
+):
+    """A stored key answers 409 (rotate instead) and is left untouched."""
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _mock_supported(monkeypatch, ["mygateway"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    await storage.set_server_ai_credential("mygateway", SECRET, "admin")
+    generation = await storage.get_server_credential_generation("mygateway")
+
+    response = _store_deployment_key(client, "mygateway", "mygateway/gpt-4o")
+
+    assert response.status_code == 409
+    assert "already has a stored key; use rotate-key" in response.json()["detail"]
+    # The stored credential and its generation are exactly what they were, and
+    # no verification round-trip was spent on the rejected request.
+    assert await storage.get_server_ai_credential("mygateway") == SECRET
+    assert await storage.get_server_credential_generation("mygateway") == generation
+    assert verified == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
+async def test_store_deployment_key_reports_rejected_verification(
+    client, monkeypatch, tmp_path
+):
+    """A rejected check keeps the add/rotate convention: 200, ok:false, no write."""
+    _point_agent_dir(monkeypatch, tmp_path, {"mygateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _mock_supported(monkeypatch, ["mygateway"])
+    _mock_verify(monkeypatch, "rejected")
+
+    response = _store_deployment_key(client, "mygateway", "mygateway/gpt-4o")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["outcome"] == "rejected"
+    assert response.json()["message"]
+    assert "model_count" not in response.json()
+    assert await storage.list_server_ai_providers() == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
+async def test_store_deployment_key_matches_provider_case_insensitively(
+    client, monkeypatch, tmp_path
+):
+    """A lowercase request resolves the mixed-case manifest provider's key."""
+    _point_agent_dir(monkeypatch, tmp_path, {"MyGateway": _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(monkeypatch, [{"provider": "MyGateway", "id": "MyGateway/gpt-4o"}])
+    _mock_supported(monkeypatch, ["MyGateway"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "MyGateway/gpt-4o"}])
+
+    response = _store_deployment_key(client, "mygateway", "MyGateway/gpt-4o")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    # Verification and storage both see the sidecar's exact-case id.
+    assert verified == [("MyGateway", "MyGateway/gpt-4o", DEPLOYMENT_KEY)]
+    assert [row["provider"] for row in await storage.list_server_ai_providers()] == [
+        "MyGateway"
+    ]
+
+
+# --- Verification model discovery (#378 r2) ---
+
+
+def _zero_model_provider(monkeypatch, tmp_path, provider="mygateway"):
+    """A key-capable provider with a deployment credential and no catalog model."""
+    _point_agent_dir(monkeypatch, tmp_path, {provider: _deployment_provider()})
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+    _fake_catalog(monkeypatch, [])
+    _mock_supported(monkeypatch, [provider])
+
+
+@pytest.mark.parametrize("posted_model", [None, ""])
+async def test_store_deployment_key_discovers_the_verification_model(
+    client, monkeypatch, tmp_path, caplog, posted_model
+):
+    """No model supplied: the credential's own first listing model verifies.
+
+    A zero-model provider has no catalog template to type in, and the sidecar
+    rejects an invented id, so discovery is the only path that can store it.
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gw-first"}, {"id": "gw-second"}])
+
+    with _captured_logs(caplog, "rootcoz.main", level=logging.DEBUG) as logs:
+        response = _store_deployment_key(client, "mygateway", posted_model)
+
+    assert response.status_code == 200
+    assert response.json() == {"outcome": "accepted", "ok": True, "model_count": 2}
+    assert verified == [("mygateway", "gw-first", DEPLOYMENT_KEY)]
+    assert await storage.get_server_ai_credential("mygateway") == DEPLOYMENT_KEY
+    # The chosen id is a DEBUG detail; the key is never logged at any level.
+    assert "gw-first" in logs.text
+    assert DEPLOYMENT_KEY not in logs.text
+    assert DEPLOYMENT_KEY not in response.text
+
+
+@pytest.mark.parametrize("models,listing", [([], True), ([], False)])
+async def test_store_deployment_key_without_a_discoverable_model_is_400(
+    client, monkeypatch, tmp_path, models, listing
+):
+    """Unsupported or empty discovery is a 400 naming the manual model, no write."""
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, models, listing_supported=listing)
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 400
+    assert "enter a model id to verify against" in response.json()["detail"]
+    assert verified == []
+    assert await storage.list_server_ai_providers() == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
+async def test_explicit_verification_model_never_discovers(
+    client, monkeypatch, tmp_path
+):
+    """A caller-supplied model always wins — no discovery before verification.
+
+    The key is rejected so the post-verification capture (which legitimately
+    re-runs discovery once a key is stored) never runs: an empty call list
+    proves the model itself was never discovered.
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "rejected")
+    calls = _mock_key_discovery(monkeypatch, [{"id": "gw-first"}])
+
+    response = _store_deployment_key(client, "mygateway", "gw-typed")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert verified == [("mygateway", "gw-typed", DEPLOYMENT_KEY)]
+    assert calls == []
+    assert await storage.list_server_ai_providers() == []
+
+
+async def test_add_and_rotate_discover_the_verification_model(client, monkeypatch):
+    """Plain add and rotate discover the model too — same shared rule."""
+    _fake_catalog(monkeypatch, [])
+    _mock_supported(monkeypatch, ["mygateway"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gw-first"}, {"id": "gw-second"}])
+
+    added = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={"provider": "mygateway", "api_key": SECRET},
+    )
+    assert added.status_code == 200
+    assert added.json()["ok"] is True
+    assert await storage.get_server_ai_credential("mygateway") == SECRET
+
+    rotated_key = "rotated-key-456"  # pragma: allowlist secret  # gitleaks:allow
+    rotated = client.post(
+        "/api/admin/server-providers/mygateway/rotate-key",
+        headers=_admin_headers(),
+        json={"provider": "mygateway", "api_key": rotated_key},
+    )
+    assert rotated.status_code == 200
+    assert rotated.json()["ok"] is True
+    assert await storage.get_server_ai_credential("mygateway") == rotated_key
+    assert verified == [
+        ("mygateway", "gw-first", SECRET),
+        ("mygateway", "gw-first", rotated_key),
+    ]
+    assert SECRET not in added.text and rotated_key not in rotated.text
+
+
+def test_add_without_a_model_on_an_unsupported_provider_never_discovers(
+    client, monkeypatch
+):
+    """The capability gate answers first — no discovery for an unsupported id."""
+    _mock_supported(monkeypatch, ["openai"])
+    calls = _mock_key_discovery(monkeypatch, [{"id": "gw-first"}])
+
+    response = client.post(
+        "/api/admin/server-providers",
+        headers=_admin_headers(),
+        json={"provider": "mygateway", "api_key": SECRET},
+    )
+
+    assert response.status_code == 400
+    assert "does not support session API keys" in response.json()["detail"]
+    assert calls == []
+
+
+async def test_unrelated_discovery_failure_keeps_the_model_guidance(
+    client, monkeypatch, tmp_path
+):
+    """A discovery failure that is not a credential rejection blames no key.
+
+    "model rejected by provider" is about the model, not the key: telling the
+    admin to check the key sends them after the wrong cause (#378).
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, RuntimeError("model rejected by provider"))
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "check the key" not in detail
+    assert "rejected by the provider" not in detail
+    assert "enter a model id to verify against" in detail
+    assert verified == []
+    assert await storage.list_server_ai_providers() == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
+async def test_rejected_credential_is_not_reported_as_a_missing_model(
+    client, monkeypatch, tmp_path
+):
+    """Discovery answering 401 means a bad key, not a provider with no models.
+
+    The sidecar client flattens the HTTP status into a ``RuntimeError``, so the
+    message must name the credential, never suggest typing a model id (#378).
+    """
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(
+        monkeypatch,
+        RuntimeError("Sidecar API key model discovery failed (HTTP 401)"),
+    )
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "rejected by the provider (HTTP 401)" in detail
+    assert "check the key" in detail
+    assert "enter a model id" not in detail
+    assert verified == []
+    assert await storage.list_server_ai_providers() == []
+    assert DEPLOYMENT_KEY not in response.text
+
+
+@pytest.mark.parametrize(
+    "bad_entry,expected_attempts",
+    [
+        # A usable id pi-config cannot open a session for: tried, then the next.
+        ({"id": "gw-bad"}, ["gw-bad", "gw-good"]),
+        # A declared-but-broken capability limit: deprioritized, never blocking.
+        (
+            {"id": "gw-bad", "capabilities": {"inputTokenLimit": 10}},
+            ["gw-good"],
+        ),
+    ],
+)
+async def test_verification_falls_back_to_the_next_listed_model(
+    client, monkeypatch, tmp_path, bad_entry, expected_attempts
+):
+    """An unusable first listing id must not block a key a later id verifies."""
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = []
+
+    async def fake(provider, model, key):
+        verified.append((provider, model, key))
+        return "accepted" if model == "gw-good" else "inconclusive"
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", fake)
+    _mock_key_discovery(monkeypatch, [bad_entry, {"id": "gw-good"}])
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    # Tried in order, stopping at the first success.
+    assert [model for _, model, _ in verified] == expected_attempts
+    assert await storage.get_server_ai_credential("mygateway") == DEPLOYMENT_KEY
+
+
+async def test_every_candidate_failing_reports_the_last_outcome(
+    client, monkeypatch, tmp_path
+):
+    """All attempts fail: the last one answers, and attempts stay bounded."""
+    _zero_model_provider(monkeypatch, tmp_path)
+    verified = []
+    outcomes = ["rejected"] + ["inconclusive"] * 5
+
+    async def fake(provider, model, key):
+        verified.append(model)
+        return outcomes[len(verified) - 1]
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", fake)
+    _mock_key_discovery(monkeypatch, [{"id": f"gw-{index}"} for index in range(6)])
+
+    response = _store_deployment_key(client, "mygateway", None)
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is False
+    assert response.json()["outcome"] == "inconclusive"
+    # Bounded to _MAX_VERIFICATION_CANDIDATES attempts, in listing order.
+    assert verified == ["gw-0", "gw-1", "gw-2", "gw-3", "gw-4"]
+    assert await storage.list_server_ai_providers() == []
