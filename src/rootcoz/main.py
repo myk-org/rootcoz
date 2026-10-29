@@ -12593,6 +12593,21 @@ async def _capture_key_scoped_models(
     return (listing_models, "supported") if stored else ([], "superseded")
 
 
+async def _stored_provider_ids() -> set[str]:
+    """Normalized ids of the providers that have a stored server key (#376).
+
+    The single storage query behind "does this provider have a stored key":
+    ``_deployment_capture_scope`` uses the whole set to pick what a capture
+    pass may touch, and the deployment write path re-reads it just before
+    writing — the scope set is only a snapshot, and a key stored during a
+    sidecar round-trip owns the rows from then on.
+    """
+    return {
+        normalize_provider(row["provider"])
+        for row in await storage.list_server_ai_providers()
+    }
+
+
 async def _capture_deployment_provider_listing(
     provider: str, key: str
 ) -> tuple[list[dict[str, Any]], str]:
@@ -12600,11 +12615,13 @@ async def _capture_deployment_provider_listing(
 
     Returns ``(models, status)``: ``"supported"`` (rows stored),
     ``"unsupported"`` (the sidecar serves no key-scoped listing for this
-    provider) or ``"unavailable"`` (discovery or the write failed). Rows are
-    written without a generation binding — a deployment credential has no
-    stored row to bind to. Every failure leaves the existing rows untouched:
-    a deployment credential never clears a listing, so a sidecar hiccup can
-    never downgrade the admin view to the static manifest.
+    provider), ``"unavailable"`` (discovery or the write failed) or
+    ``"superseded"`` (a server key was stored for the provider while the
+    discovery ran, so the write was skipped — the stored key owns the rows).
+    Rows are written without a generation binding — a deployment credential
+    has no stored row to bind to. Every failure leaves the existing rows
+    untouched: a deployment credential never clears a listing, so a sidecar
+    hiccup can never downgrade the admin view to the static manifest.
     """
     try:
         from rootcoz.ai_client import models_for_api_key
@@ -12623,6 +12640,17 @@ async def _capture_deployment_provider_listing(
         )
         return [], "unsupported"
     try:
+        # Re-checked at write time, never trusted from the pass-start scope:
+        # the discovery above is a sidecar round-trip, and a key stored in that
+        # window (another tab, startup task, forced refresh) must not have its
+        # listing overwritten by the deployment credential (#376).
+        if normalize_provider(provider) in await _stored_provider_ids():
+            logger.warning(
+                "Deployment key-scoped capture superseded for provider=%s (a"
+                " stored key appeared during discovery); discarding",
+                provider,
+            )
+            return [], "superseded"
         models, stored = await _store_supported_key_listing(
             provider, discovery["models"], expected_generation=None
         )
@@ -12646,20 +12674,45 @@ async def _capture_deployment_provider_listing(
 
 
 async def _capture_deployment_listing_for(
-    provider: str,
+    provider: str, key_capable: frozenset[str] | None = None
 ) -> tuple[list[dict[str, Any]], str]:
     """Capture the listing of one provider keyed by the deployment env (#372).
 
     ``(models, status)`` with status ``"missing"`` when the provider has no
-    resolved deployment credential (no manifest entry, no flag, or its
-    variable is unset) — the caller decides whether that is a 404.
+    resolved deployment credential (no manifest entry or flag, its variable
+    unset, no ambient ``<PROVIDER_ID>_API_KEY``) — the caller decides whether
+    that is a 404 — and ``"unknown"`` when the manifest could not be read:
+    nothing can be resolved right now, so the caller must report a transient
+    failure, never "no stored key". A provider the sidecar does not report as
+    key-capable answers ``"unsupported"`` without a sidecar call (#376).
+    ``key_capable`` reuses an already-fetched capability answer.
     """
     from rootcoz.ai_client import deployment_provider_credentials
 
-    for name, key in (deployment_provider_credentials() or {}).items():
-        if name.lower() == provider.lower():
-            return await _capture_deployment_provider_listing(name, key)
-    return [], "missing"
+    credentials = deployment_provider_credentials()
+    if credentials is None:
+        return [], "unknown"
+    match = next(
+        (
+            (name, key)
+            for name, key in credentials.items()
+            if name.lower() == provider.lower()
+        ),
+        None,
+    )
+    if match is None:
+        return [], "missing"
+    name, key = match
+    if key_capable is None:
+        key_capable = _key_capable_ids(await supported_key_providers())
+    if not _key_scoped_listing_supported(name, key_capable):
+        logger.debug(
+            "Refusing key-scoped deployment refresh for provider=%s (sidecar"
+            " reports no session API key support)",
+            name,
+        )
+        return [], "unsupported"
+    return await _capture_deployment_provider_listing(name, key)
 
 
 # Deployment-credential capture (#372) costs one sidecar round-trip per
@@ -12678,33 +12731,66 @@ def _deployment_credentials_digest(credentials: dict[str, str]) -> str:
     return hashlib.sha256(json.dumps(sorted(credentials.items())).encode()).hexdigest()
 
 
+def _key_capable_ids(providers: list[str]) -> frozenset[str]:
+    """Normalized capability set of the sidecar's ``supported_key_providers()``.
+
+    Derived once per capture pass / endpoint request, never per provider
+    (#376). Every gate compares through :func:`normalize_provider`, like the
+    rest of the provider handling, so a mixed-case catalog id still matches.
+    """
+    return frozenset(normalize_provider(provider) for provider in providers)
+
+
+def _key_scoped_listing_supported(provider: str, key_capable: frozenset[str]) -> bool:
+    """Whether ``/models/for-api-key`` may be called for this provider (#376).
+
+    The single capability rule shared by the capture scope, the refreshability
+    flag and the per-provider refresh path: the sidecar answers every other
+    provider with a 400 ("Provider does not support session API keys"), so no
+    capture path may issue the request.
+    """
+    return normalize_provider(provider) in key_capable
+
+
 async def _deployment_capture_scope(
-    credentials: dict[str, str],
+    credentials: dict[str, str], key_capable: frozenset[str]
 ) -> tuple[dict[str, str], set[str]]:
-    """Split resolved deployment credentials into capturable / stored-key (#376).
+    """Split resolved deployment credentials into capturable / leave-alone (#376).
 
     A provider with a stored key owns its rows and its own generation-bound
     capture path: capturing it with the deployment key would overwrite the
     stored key's listing, which the API then reports as ``stored`` while
-    sessions use the stored key. Returns ``(capturable, stored)``, ``stored``
-    being the normalized stored-provider set the stale sweep leaves alone.
+    sessions use the stored key. A provider the sidecar does not report as
+    key-capable is skipped too: ``/models/for-api-key`` only answers it with a
+    400, so its static manifest listing stands and no request is made.
+
+    Returns ``(capturable, keep)``. ``keep`` is the normalized set of providers
+    whose captured rows a pass must leave alone — stored-key providers plus the
+    credential-backed providers this pass will not capture. A capability
+    answer alone never sweeps: ``supported_key_providers()`` fails closed, so a
+    sidecar blip must not clear rows a live credential still backs. Logs
+    provider names only, at DEBUG, once per skipped provider per pass.
     """
-    stored = {
-        normalize_provider(row["provider"])
-        for row in await storage.list_server_ai_providers()
-    }
-    return (
-        {
-            name: key
-            for name, key in credentials.items()
-            if normalize_provider(name) not in stored
-        },
-        stored,
-    )
+    stored = await _stored_provider_ids()
+    capturable: dict[str, str] = {}
+    keep = set(stored)
+    for name, key in credentials.items():
+        if normalize_provider(name) in stored:
+            continue
+        if not _key_scoped_listing_supported(name, key_capable):
+            keep.add(normalize_provider(name))
+            logger.debug(
+                "Skipping key-scoped deployment listing for provider=%s (sidecar"
+                " reports no session API key support)",
+                name,
+            )
+            continue
+        capturable[name] = key
+    return capturable, keep
 
 
 async def _clear_stale_deployment_listings(
-    credentials: dict[str, str], stored: set[str]
+    credentials: dict[str, str], keep: set[str]
 ) -> list[str]:
     """Clear captured key-scoped rows whose deployment credential is gone (#372).
 
@@ -12719,31 +12805,57 @@ async def _clear_stale_deployment_listings(
     Without a stored key the remaining rows can only be deployment-captured or
     orphaned — ``key_scoped_source`` cannot tell those apart for rows written
     before this change — and clearing is the correct outcome either way: no
-    credential exists to back the listing. ``stored`` comes from
+    credential exists to back the listing. ``keep`` comes from
     ``_deployment_capture_scope`` (the same skip rule the capture uses). Logs
-    provider names only. Best-effort: a storage failure logs a warning and
-    keeps every row — this runs inside page loads, model refreshes and the
-    startup task, none of which may fail because of a sweep (#376).
+    provider names only. Best-effort: a storage failure logs a warning naming
+    the provider that was being processed and keeps its rows plus those of the
+    providers not yet swept (rows cleared before the failure stay cleared) —
+    this runs inside page loads, model refreshes and the startup task, none of
+    which may fail because of a sweep (#376).
     """
     deployment = {normalize_provider(name) for name in credentials}
     try:
         # One spelling per provider: the row write is case-insensitive, so a
         # drifted duplicate spelling must not be cleared (and logged) twice.
-        by_lower: dict[str, str] = {}
-        for row in await storage.list_server_provider_key_models():
-            by_lower.setdefault(row["provider"].lower(), row["provider"])
-        cleared: list[str] = []
-        for provider_lower, provider in sorted(by_lower.items()):
-            normalized = normalize_provider(provider)
-            if normalized in deployment or normalized in stored:
-                continue
-            if await storage.set_server_provider_key_models(provider, [], status=None):
-                cleared.append(provider)
-    except sqlite3.Error, OSError:
+        rows = await storage.list_server_provider_key_models()
+    except (sqlite3.Error, OSError) as exc:
         logger.warning(
-            "Unable to clear stale deployment key-scoped listings; keeping them"
+            "Unable to read key-scoped listings for the deployment sweep (%s);"
+            " keeping every captured row",
+            exc,
+            exc_info=True,
         )
         return []
+    by_lower: dict[str, str] = {}
+    for row in rows:
+        by_lower.setdefault(row["provider"].lower(), row["provider"])
+    cleared: list[str] = []
+    providers = sorted(by_lower.values())
+    for index, provider in enumerate(providers):
+        normalized = normalize_provider(provider)
+        if normalized in deployment or normalized in keep:
+            continue
+        try:
+            stored_cleared = await storage.set_server_provider_key_models(
+                provider, [], status=None
+            )
+        except (sqlite3.Error, OSError) as exc:
+            # A failed read and a failed per-provider write are different
+            # faults, and a failure mid-sweep says nothing about the rows
+            # already cleared — say all three (#376).
+            logger.warning(
+                "Unable to clear the stale deployment key-scoped listing for"
+                " provider=%s (%s); keeping its rows and those of the providers"
+                " not yet swept (%s). Already cleared before the failure: %s",
+                provider,
+                exc,
+                providers[index + 1 :],
+                cleared,
+                exc_info=True,
+            )
+            return cleared
+        if stored_cleared:
+            cleared.append(provider)
     if cleared:
         logger.info(
             "Cleared captured deployment key-scoped listings for providers that"
@@ -12754,16 +12866,20 @@ async def _clear_stale_deployment_listings(
 
 
 async def capture_deployment_provider_listings(
-    *, force: bool = False, credentials: dict[str, str] | None = None
+    *,
+    force: bool = False,
+    credentials: dict[str, str] | None = None,
+    key_capable: frozenset[str] | None = None,
 ) -> dict[str, int]:
     """Capture key-scoped listings for deployment-env provider credentials (#372).
 
     A custom provider whose key comes from the deployment env (``models.json``
-    ``apiKey: "$VAR"``, ``trustKeyScopedListing: true``) has no stored
-    credential, so the add/rotate capture (#350) never runs and the server
-    provider listing falls back to the provider's static manifest. The sidecar
-    serves a live key-scoped listing for exactly that credential — capture it
-    so the offered set matches what the gateway serves.
+    ``apiKey: "$VAR"``, ``trustKeyScopedListing: true``) — or a registered
+    provider keyed from the ambient environment (``OPENAI_API_KEY``, #376) —
+    has no stored credential, so the add/rotate capture (#350) never runs and
+    the server provider listing falls back to the provider's static manifest.
+    The sidecar serves a live key-scoped listing for exactly that credential —
+    capture it so the offered set matches what the gateway serves.
 
     Best-effort per provider: a failure logs a warning and leaves its existing
     rows untouched, never propagating. Runs at most once per
@@ -12775,9 +12891,14 @@ async def capture_deployment_provider_listings(
     means the manifest read failed (or is unresolved), which keeps every
     captured row and sweeps nothing. Each pass also clears captured rows whose
     deployment credential disappeared (``_clear_stale_deployment_listings``)
-    — including a pass that resolves no credential at all. Returns
+    — including a pass that resolves no credential at all. Only providers the
+    sidecar reports as key-capable are captured (#376): an unsupported provider
+    is never sent to ``/models/for-api-key``, which would answer it with a 400.
+    ``key_capable`` reuses an already-fetched capability answer, so one request
+    performs one ``supported_key_providers()`` lookup. Returns
     ``{provider: captured model count}`` for the providers captured by this
-    call.
+    call; a provider that gains a stored key during the pass is skipped rather
+    than overwritten (#376).
     """
     global _deployment_listing_state
     if credentials is None:
@@ -12789,8 +12910,10 @@ async def capture_deployment_provider_listings(
         # rows a live credential still backs, so a sweep here would clear
         # them all. The resolver already logged the warning.
         return {}
+    if key_capable is None:
+        key_capable = _key_capable_ids(await supported_key_providers())
     try:
-        capturable, stored = await _deployment_capture_scope(credentials)
+        capturable, keep = await _deployment_capture_scope(credentials, key_capable)
     except sqlite3.Error, OSError:
         logger.warning(
             "Unable to read stored server providers; skipping deployment"
@@ -12807,7 +12930,7 @@ async def capture_deployment_provider_listings(
     ):
         return {}
     _deployment_listing_state = (now, digest)
-    await _clear_stale_deployment_listings(capturable, stored)
+    await _clear_stale_deployment_listings(capturable, keep)
     captured: dict[str, int] = {}
     for provider, key in capturable.items():
         models, status = await _capture_deployment_provider_listing(provider, key)
@@ -12926,25 +13049,37 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     actually exposes for them.
     """
     _require_admin(request)
+    # Catalog first: ambient deployment credentials (#376) resolve against the
+    # last-known catalog, so a cold cache would report a provider keyed from
+    # the environment as not refreshable on this page load.
+    catalog = await _get_model_catalog()
     # Deployment-env credentials (#372) have no stored key whose add/rotate
     # would capture their key-scoped listing. Capture it here (TTL-cached) so
     # the offered set is the live listing, not the provider's static manifest.
     # One resolved map feeds both the capture and the source field below.
     from rootcoz.ai_client import deployment_provider_credentials
 
+    # One capability answer per page load (#376): it gates the deployment
+    # capture below and feeds the ``supports_key`` flag further down.
+    key_providers = await supported_key_providers()
+    key_capable = _key_capable_ids(key_providers)
     deployment_credentials = deployment_provider_credentials()
     # Providers this load holds a deployment credential for — the same
     # ``capturable`` scope the capture writes with, so a stored key is not
     # counted here (it owns its rows) and the refresh flag below cannot drift
-    # from what a capture would actually do. ``None`` = manifest unreadable.
+    # from what a capture would actually do. A provider the sidecar reports as
+    # not key-capable drops out here too, so it is neither listed as key-scoped
+    # nor offered a refresh it cannot serve (#376). ``None`` = manifest
+    # unreadable.
     capturable: set[str] | None = None
     if deployment_credentials is not None:
-        await capture_deployment_provider_listings(credentials=deployment_credentials)
-        capturable_credentials, _stored = await _deployment_capture_scope(
-            deployment_credentials
+        await capture_deployment_provider_listings(
+            credentials=deployment_credentials, key_capable=key_capable
+        )
+        capturable_credentials, _keep = await _deployment_capture_scope(
+            deployment_credentials, key_capable
         )
         capturable = {normalize_provider(name) for name in capturable_credentials}
-    catalog = await _get_model_catalog()
     # Case-insensitive join (#347): storage matches providers ignoring case,
     # so a key stored as "Google" must key the catalog's "google" entry —
     # an exact-name lookup would split it into keyed + unkeyed rows.
@@ -12958,7 +13093,7 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
     free_by_provider: dict[str, set[str]] = {}
     for row in await storage.list_free_ai_models():
         free_by_provider.setdefault(row["provider"].lower(), set()).add(row["model"])
-    supported = {p.lower() for p in await supported_key_providers()}
+    supported = {p.lower() for p in key_providers}
     # Key-scoped listings captured at add/rotate (#350): for a keyed
     # provider these replace the static catalog as the offered model set —
     # a restricted key must not offer models it cannot use. Providers with
@@ -13060,12 +13195,12 @@ async def list_server_providers_endpoint(request: Request) -> JSONResponse:
             key_scoped_source = "deployment"
         # Whether the refresh-models endpoint can act for this provider (#376):
         # it reads a stored key or re-captures with a capturable deployment
-        # credential. With the manifest unreadable (``capturable`` None) only
-        # an already captured listing keeps it refreshable. Boolean only.
+        # credential the sidecar reports as key-capable. With the manifest
+        # unreadable (``capturable`` None) no deployment credential can be
+        # resolved — the retained listing has nothing to refresh with — so only
+        # a stored key keeps it offered. Boolean only.
         can_refresh_models: ServerProviderCanRefreshModels = record is not None or (
-            provider_lower in key_scoped
-            if capturable is None
-            else provider_lower in capturable
+            capturable is not None and provider_lower in capturable
         )
         providers.append(
             {
@@ -13158,8 +13293,11 @@ async def refresh_server_provider_models(
     ``unavailable`` and keeps the last captured listing.
 
     A provider with no stored key is refreshed with its deployment-env
-    credential instead (#372) — an env-referenced ``models.json`` key is
-    never stored, but it is what the sidecar lists models for.
+    credential instead (#372) — an env-referenced ``models.json`` key or the
+    provider's ambient ``<PROVIDER_ID>_API_KEY`` (#376) is never stored, but it
+    is what the sidecar lists models for. When that manifest is unreadable no
+    credential can be resolved, so the answer is a retryable 503, never the
+    "no stored key" 404 (#376).
     """
     _require_admin(request)
     canonical = await _canonical_key_provider_id(provider)
@@ -13179,9 +13317,25 @@ async def refresh_server_provider_models(
         # provider is keyed by the manifest's env reference and flagged for
         # key-scoped listing — a capture with that key is what refresh means.
         models, status = await _capture_deployment_listing_for(provider)
+        if status == "unknown":
+            # The manifest could not be read, so no credential could be
+            # resolved — a transient dependency failure, not a missing key.
+            raise HTTPException(
+                status_code=503,
+                detail="Deployment model manifest is unreadable; retry in a moment",
+            )
         if status == "missing":
             raise HTTPException(
                 status_code=404, detail=f"Provider '{provider}' has no stored key"
+            )
+        if status == "unsupported":
+            # The sidecar does not serve a key-scoped listing for this provider
+            # (#376): nothing was requested, so do not report a capture.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Provider '{provider}' does not support key-scoped model listing"
+                ),
             )
         logger.info(
             "[AUDIT] Admin '%s' refreshed deployment key-scoped models for '%s'"

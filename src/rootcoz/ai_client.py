@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -783,61 +784,138 @@ def _env_reference_var(reference: object) -> str | None:
     return name if name.isidentifier() else None
 
 
-def deployment_provider_credentials() -> dict[str, str] | None:
-    """Deployment-env keys of providers flagged ``trustKeyScopedListing`` (#372).
+# Providers whose ambient API key variable breaks the ``<ID>_API_KEY``
+# convention. Each entry is tried in order, before the convention-derived name.
+# shortcut: only the google/gemini aliases are mapped — upstream also accepts
+# HF_TOKEN, AI_GATEWAY_API_KEY, CLOUDFLARE_API_KEY, ...; add an entry here when
+# one of those providers needs ambient resolution.
+_AMBIENT_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "google": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+}
 
-    A custom provider whose ``models.json`` ``apiKey`` is an environment
-    reference (``"$VAR"`` / ``"${VAR}"``) authenticates from the deployment
-    env, so it has no stored server key and the add/rotate capture (#350)
-    never runs for it — its live key-scoped listing has to be captured with
-    the env-resolved key instead.
 
-    Only flagged providers are returned: the flag is what makes the listing
-    trustworthy for a custom host, and the sidecar honors it solely from the
-    admin-controlled manifest. Unset/empty variables and literal keys are
-    skipped. Key material is never logged — provider names only, at DEBUG so
-    a page-load read does not log the same names on every request.
+def ambient_api_key_var(provider: str) -> str:
+    """Environment variable holding a provider's ambient API key.
 
-    ``None`` means the manifest exists but could not be read or parsed right
-    now (rewritten under us, mount blip) — "unknown", never "nothing is
-    eligible": a caller must keep whatever it captured before (#376). An
-    empty dict is a successful read that resolved no credential.
+    The convention is ``<PROVIDER_ID>_API_KEY`` with every non-alphanumeric
+    character folded to ``_``: ``openai`` -> ``OPENAI_API_KEY``,
+    ``my-gateway`` -> ``MY_GATEWAY_API_KEY``. Providers whose key variable
+    breaks the convention are handled by :data:`_AMBIENT_KEY_ALIASES`.
     """
-    try:
-        agent_dir = _sidecar_agent_dir()
-        if agent_dir is None:
-            return {}
-        manifest = json.loads((agent_dir / "models.json").read_text())
-    except FileNotFoundError:
-        # No manifest: no custom providers, nothing to resolve.
-        return {}
-    except OSError, ValueError:
-        # A failure must never look like "no eligible providers" (#376): the
-        # caller would sweep every captured deployment listing away.
-        logger.warning(
-            "Deployment provider manifest unreadable; keeping captured"
-            " key-scoped listings"
-        )
-        return None
-    providers = manifest.get("providers") if isinstance(manifest, dict) else None
-    if not isinstance(providers, dict):
-        return {}
+    name = re.sub(r"[^A-Za-z0-9]+", "_", provider).strip("_").upper()
+    return f"{name}_API_KEY"
+
+
+def _ambient_api_key_vars(provider: str) -> tuple[str, ...]:
+    """Candidate variables for a provider, aliases first, convention last."""
+    aliases = _AMBIENT_KEY_ALIASES.get(normalize_provider(provider), ())
+    return tuple(dict.fromkeys((*aliases, ambient_api_key_var(provider))))
+
+
+def _cached_catalog_provider_ids() -> list[str]:
+    """Provider IDs in the last-known sidecar catalog, sorted (empty if none).
+
+    Ambient credential resolution is synchronous (grant guards and page loads
+    call it directly), so it resolves against ``_model_catalog_cache``, which
+    the async catalog paths keep current — the same snapshot
+    :func:`_catalog_public_provider_names` uses.
+    """
+    return sorted(
+        {
+            provider
+            for entry in _model_catalog_cache or ()
+            if isinstance(provider := entry.get("provider"), str) and provider
+        }
+    )
+
+
+def deployment_provider_credentials() -> dict[str, str] | None:
+    """Deployment-env keys of the providers the server can list models with.
+
+    Two sources, both of which leave the provider with no stored server key,
+    so the add/rotate capture (#350) never runs for it — its live key-scoped
+    listing has to be captured with the env-resolved key instead (#372):
+
+    1. A custom provider whose ``models.json`` ``apiKey`` is an environment
+       reference (``"$VAR"`` / ``"${VAR}"``), flagged
+       ``trustKeyScopedListing``. Only flagged providers count: the flag is
+       what makes the listing trustworthy for a custom host, and the sidecar
+       honors it solely from the admin-controlled manifest.
+    2. A sidecar-registered provider (the last-known catalog) authenticated
+       from the ambient environment: the variable named by
+       :func:`ambient_api_key_var` — ``openai`` with ``OPENAI_API_KEY`` set.
+       A provider the manifest declares is skipped here: the manifest's
+       ``apiKey`` (literal or reference) is the key the sidecar uses. Cursor's
+       ``acpx-``/``cli-`` agents are skipped too: they authenticate through the
+       CLI, not through ``CURSOR_API_KEY``.
+
+    Unset/empty variables and literal keys are skipped. Key material is never
+    logged — provider names only, at DEBUG so a page-load read does not log
+    the same names on every request.
+
+    ``None`` means "unknown": the raw answer a caller must not act on. It is
+    returned when a configured agent dir did not yield a readable manifest
+    right now — the file is missing (atomic replace, mount blip), unreadable,
+    or unparseable. Unknown is never "nothing is eligible": a caller must
+    keep whatever it captured before (#376), so ambient resolution is skipped
+    too rather than reporting an empty-capture pass. An empty dict is a
+    successful read that resolved no credential.
+    """
     resolved: dict[str, str] = {}
-    for provider, config in providers.items():
-        if not isinstance(provider, str) or not isinstance(config, dict):
-            continue
-        if config.get("trustKeyScopedListing") is not True:
-            continue
-        var = _env_reference_var(config.get("apiKey"))
-        key = os.environ.get(var, "").strip() if var else ""
-        if not key:
-            logger.debug(
-                "Deployment credential unavailable for provider=%s (%s unset)",
-                provider,
-                var or "no env reference",
+    declared: set[str] = set()
+    agent_dir = _sidecar_agent_dir()
+    if agent_dir is not None:
+        try:
+            manifest = json.loads((agent_dir / "models.json").read_text())
+        except (OSError, ValueError) as exc:
+            # A configured agent dir without a readable manifest is unknown,
+            # not "no eligible providers" (#376): the caller would sweep every
+            # captured deployment listing away over a transient blip.
+            logger.warning(
+                "Deployment provider manifest unreadable (%s); keeping captured"
+                " key-scoped listings",
+                exc,
+                exc_info=True,
             )
+            return None
+        providers = manifest.get("providers") if isinstance(manifest, dict) else None
+        for provider, config in (
+            providers.items() if isinstance(providers, dict) else ()
+        ):
+            if not isinstance(provider, str) or not isinstance(config, dict):
+                continue
+            declared.add(provider.lower())
+            if config.get("trustKeyScopedListing") is not True:
+                continue
+            var = _env_reference_var(config.get("apiKey"))
+            key = os.environ.get(var, "").strip() if var else ""
+            if not key:
+                logger.debug(
+                    "Deployment credential unavailable for provider=%s (%s unset)",
+                    provider,
+                    var or "no env reference",
+                )
+                continue
+            resolved[provider] = key
+    ambient: list[str] = []
+    for provider in _cached_catalog_provider_ids():
+        # Cursor's agents authenticate through acpx / the CLI login, so
+        # CURSOR_API_KEY is not an ambient listing credential — out of scope.
+        if provider.lower() in declared or is_cursor_provider(
+            normalize_provider(provider)
+        ):
             continue
-        resolved[provider] = key
+        for var in _ambient_api_key_vars(provider):
+            key = os.environ.get(var, "").strip()
+            if key:
+                resolved[provider] = key
+                ambient.append(provider)
+                break
+    if ambient:
+        logger.debug(
+            "Ambient deployment credentials resolved for providers: %s", sorted(ambient)
+        )
     logger.debug("Deployment credentials resolved for providers: %s", sorted(resolved))
     return resolved
 
@@ -1920,6 +1998,7 @@ __all__ = [
     "CHAT_BUILTIN_TOOLS",
     "AIResult",
     "_setup_usage_recorder",
+    "ambient_api_key_var",
     "call_ai",
     "call_ai_once",
     "clear_cursor_auth_cache",
