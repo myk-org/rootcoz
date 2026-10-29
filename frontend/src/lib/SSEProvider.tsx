@@ -610,8 +610,18 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
   let backoffTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectDelay = 1000
 
+  /** At most one reconnect is pending: whichever timer is armed, both are cleared. */
+  function cancelPendingReconnect() {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    if (backoffTimer) clearTimeout(backoffTimer)
+    debounceTimer = null
+    backoffTimer = null
+  }
+
   function connectEventSource() {
     if (destroyed || guard.expired) return
+    // A new attempt supersedes any timer still waiting to open one.
+    cancelPendingReconnect()
 
     // Cleanup old
     for (const { name, handler } of activeListeners) {
@@ -669,8 +679,9 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
       void guard.failed(1).then((expired) => {
         if (expired || destroyed || eventSource) return
         // Back off like the leader path does: a down server must not be probed
-        // on every 150ms tick by every open tab.
-        if (backoffTimer) clearTimeout(backoffTimer)
+        // on every 150ms tick by every open tab. A pending debounce would open
+        // the stream this backoff was meant to delay, so it is dropped.
+        cancelPendingReconnect()
         backoffTimer = setTimeout(() => {
           backoffTimer = null
           if (!destroyed) connectEventSource()
@@ -682,7 +693,9 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
 
   function scheduleReconnect() {
     if (destroyed || guard.expired) return
-    if (debounceTimer) clearTimeout(debounceTimer)
+    // The debounce replaces a pending backoff too — the subscription change is
+    // the newer reason to reconnect. The delay itself is only reset by an open.
+    cancelPendingReconnect()
     debounceTimer = setTimeout(() => {
       debounceTimer = null
       connectEventSource()
@@ -700,8 +713,7 @@ function createFallbackManager(onExpired: () => void): SSEManager & { destroy():
     },
     destroy() {
       destroyed = true
-      if (debounceTimer) clearTimeout(debounceTimer)
-      if (backoffTimer) clearTimeout(backoffTimer)
+      cancelPendingReconnect()
       for (const { name, handler } of activeListeners) {
         eventSource?.removeEventListener(name, handler)
       }

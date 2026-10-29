@@ -46,6 +46,12 @@ function Subscriber() {
   return <div>page content</div>
 }
 
+/** A subscription whose topic can change, like a page navigating to another job. */
+function TopicSubscriber({ topic }: { topic: string }) {
+  useSSE(topic, { 'active-count': () => {} })
+  return <div>page content</div>
+}
+
 const fetchMock = vi.fn()
 
 /** The guard asks /api/auth/me whether the session survived; the answer decides. */
@@ -134,6 +140,8 @@ describe('SSEProvider session expiry', () => {
     })
     expect(MockEventSource.instances).toHaveLength(1)
     expect(screen.getAllByText(EXPIRED_TEXT)).toHaveLength(1)
+    // Nothing is left armed — a dead session never retries.
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('treats a 200 probe as transient and reconnects', async () => {
@@ -208,6 +216,64 @@ describe('SSEProvider session expiry', () => {
     })
     await fail(source)
     await expectReconnectAfter(1_000)
+  })
+
+  it('reconnects once when a subscription changes during a scheduled backoff', async () => {
+    const { rerender } = render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    expect(MockEventSource.instances).toHaveLength(1)
+
+    probe('network')
+    await fail(MockEventSource.instances[0])
+
+    // A topic change during the backoff: the debounce is the one reconnect left.
+    rerender(
+      <SSEProvider>
+        <TopicSubscriber topic="results:abc123" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    const reconnected = MockEventSource.instances[1]
+    expect(reconnected.closed).toBe(false)
+    expect(reconnected.url).toContain('results%3Aabc123')
+
+    // The stale backoff would fire by now and swap the stream a second time.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(reconnected.closed).toBe(false)
+  })
+
+  it('clears a pending backoff when the provider unmounts', async () => {
+    const { unmount } = render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    probe('network')
+    await fail(MockEventSource.instances[0])
+
+    unmount()
+
+    // No timer is left behind, so nothing reconnects for an unmounted tab.
+    expect(vi.getTimerCount()).toBe(0)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(1)
   })
 
   it('ignores a 401 probe from the manager a logout destroyed', async () => {

@@ -1673,6 +1673,80 @@ def _chain_rows(db_path: Path) -> list[tuple[int, str | None, str | None]]:
         ).fetchall()
 
 
+# The v1 hash field list, frozen here as the literal the pre-v2 code covered.
+# Restating it (instead of importing ``storage._AUDIT_HASH_FIELDS``) is what
+# makes these tests prove old hashes still verify: an edit to the storage list
+# fails here rather than silently un-verifying every stored row.
+_V1_HASH_FIELDS = (
+    "id",
+    "created_at",
+    "actor",
+    "actor_role",
+    "is_admin",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "details",
+    "request_ip",
+)
+_V1_INSERT_COLUMNS = (
+    "created_at",
+    "actor",
+    "actor_role",
+    "is_admin",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "details",
+    "request_ip",
+    "throttle_rescue",
+    "prev_hash",
+)
+
+
+def _insert_pre_v2_row(
+    db_path: Path, *, prev_hash: str = storage._AUDIT_GENESIS_HASH, **fields: Any
+) -> dict[str, Any]:
+    """Write a row exactly as the pre-v2 code wrote it: version 1, v1 hash."""
+    row: dict[str, Any] = {
+        "created_at": storage.audit_timestamp(),
+        "actor": "alice",
+        "actor_role": None,
+        "is_admin": 0,
+        "action": "auth.login",
+        "target_type": None,
+        "target_id": None,
+        "outcome": "success",
+        "details": "{}",
+        "request_ip": None,
+        "throttle_rescue": 0,
+        "prev_hash": prev_hash,
+        "hash_version": 1,
+    }
+    row.update(fields)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            f"INSERT INTO audit_events ({', '.join(_V1_INSERT_COLUMNS)})"
+            f" VALUES ({', '.join('?' * len(_V1_INSERT_COLUMNS))})",
+            tuple(row[name] for name in _V1_INSERT_COLUMNS),
+        )
+        row["id"] = cursor.lastrowid
+        payload = json.dumps(
+            {name: row[name] for name in _V1_HASH_FIELDS},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        row["entry_hash"] = hashlib.sha256((payload + prev_hash).encode()).hexdigest()
+        conn.execute(
+            "UPDATE audit_events SET hash_version = 1, entry_hash = ? WHERE id = ?",
+            (row["entry_hash"], row["id"]),
+        )
+    return row
+
+
 async def test_chain_links_each_row_to_its_predecessor(audit_db: Path) -> None:
     for index in range(3):
         await storage.insert_audit_event(action=f"action.{index}", actor="alice")
@@ -1706,6 +1780,48 @@ async def test_verify_chain_flags_a_tampered_row(audit_db: Path) -> None:
     assert result["ok"] is False
     assert result["first_broken_id"] == middle["id"]
     assert result["checked"] == 3
+
+
+async def test_a_new_row_is_v2_and_covers_throttle_rescue(audit_db: Path) -> None:
+    """The rescue budget is hashed from v2 on, so editing it breaks the chain."""
+    event = await storage.insert_audit_event(
+        action="auth.login_failed", actor="mallory"
+    )
+    assert event["hash_version"] == 2
+
+    payloads = [
+        json.loads(exported["hash_payload"])
+        async for batch in storage.iter_audit_events()
+        for exported in batch
+    ]
+    assert payloads[-1]["throttle_rescue"] == 0
+    assert (await storage.verify_audit_chain())["ok"] is True
+
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET throttle_rescue = 1 WHERE id = ?",
+            (event["id"],),
+        )
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == event["id"]
+
+
+async def test_a_pre_v2_row_still_verifies_against_the_v1_field_list(
+    audit_db: Path,
+) -> None:
+    """A v1 row keeps its stored hash: the version bump rewrites nothing."""
+    old = _insert_pre_v2_row(audit_db)
+    new = await storage.insert_audit_event(action="auth.login", actor="alice")
+    assert new is not None
+    assert new["hash_version"] == 2
+    # The new row links to the v1 hash it found at the tail, unrewritten.
+    assert new["prev_hash"] == old["entry_hash"]
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is True
+    assert (result["checked"], result["legacy"]) == (2, 0)
+    assert _chain_rows(audit_db)[0][2] == old["entry_hash"]
 
 
 async def test_verify_chain_flags_a_deleted_row(audit_db: Path) -> None:
@@ -2199,6 +2315,7 @@ def test_audit_export_hash_payload_is_the_stored_row(
         "outcome": "success",
         "details": '{"note":"naïve"}',  # the stored text, not the object
         "request_ip": "203.0.113.9",
+        "throttle_rescue": 0,  # v2 hashes the rescue flag
     }
     assert event["is_admin"] is True
     assert json.loads(event["hash_payload"])["details"] == event["details_raw"]
@@ -2265,12 +2382,36 @@ def test_audit_export_json_carries_verifiable_details_text(
 
     event = _export(app_client, format="json").json()[0]
     assert json.loads(event["details_raw"]) == event["details"]
-    restored = {name: event[name] for name in storage._AUDIT_HASH_FIELDS}
+    restored = {name: event[name] for name in storage._audit_hash_fields(event)}
     restored["is_admin"] = int(bool(event["is_admin"]))
     restored["details"] = event["details_raw"]
+    # The version travels with the row; without it the payload is read as v1.
+    restored["hash_version"] = event["hash_version"]
     assert (
         storage._audit_entry_hash(restored, event["prev_hash"]) == stored["entry_hash"]
     )
+
+
+def test_audit_export_verifies_a_mixed_v1_v2_trail(
+    app_client, temp_db_path: Path
+) -> None:
+    """Each exported row reproduces its own hash, whatever version wrote it."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    old = _insert_pre_v2_row(temp_db_path, action="auth.login_failed")
+    _insert_audit(action="action.new", actor="bob")
+
+    events = _export(app_client, format="json").json()
+    assert [event["id"] for event in events] == [old["id"], old["id"] + 1]
+    assert [event["hash_version"] for event in events] == [1, 2]
+    for event in events:
+        assert _export_hash(event) == event["entry_hash"]
+        # ``hash_version`` is what tells an offline verifier which field list
+        # the payload was built from.
+        assert ("throttle_rescue" in json.loads(event["hash_payload"])) is (
+            event["hash_version"] == 2
+        )
+    assert app_client.get("/api/admin/audit/verify").json()["ok"] is True
 
 
 def test_audit_export_streams_past_the_batch_size(
@@ -2323,12 +2464,14 @@ def test_audit_export_csv_has_the_documented_columns(
         "outcome",
         "request_ip",
         "details",
+        "hash_version",
         "prev_hash",
         "entry_hash",
         "hash_payload",
     ]
     assert len(rows) == 1
     row = rows[0]
+    assert row["hash_version"] == "2"
     assert row["actor"] == "alice"
     assert row["actor_role"] == "operator"
     assert row["is_admin"] == "0"
@@ -2438,6 +2581,7 @@ def test_audit_export_unescapes_to_the_hashed_row(
 
     rows = list(csv.DictReader(io.StringIO(_export(app_client, format="csv").text)))
     row = next(candidate for candidate in rows if candidate["id"] == str(stored["id"]))
+    payload = json.loads(row["hash_payload"])
     restored = {
         "id": int(row["id"]),
         "created_at": row["created_at"],
@@ -2450,6 +2594,9 @@ def test_audit_export_unescapes_to_the_hashed_row(
         "outcome": _csv_unescape(row["outcome"]),
         "details": _csv_unescape(row["details"]),
         "request_ip": _csv_unescape(row["request_ip"]),
+        # Not a CSV column: the payload is where a CSV-only verifier reads it.
+        "throttle_rescue": payload["throttle_rescue"],
+        "hash_version": int(row["hash_version"]),
     }
     assert restored["actor"] == "-x"
     assert restored["target_id"] == "'quoted"
@@ -3138,10 +3285,10 @@ async def test_rescue_cap_holds_when_the_attacker_creates_the_accounts(
     assert monitoring._audit_suppressed_auth_events == 15
 
 
-async def test_rescued_row_is_flagged_outside_the_api_and_the_hash(
+async def test_a_rescued_row_exposes_the_flag_and_hashes_it(
     audit_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The flag marks the rescue without changing the chain or the payload."""
+    """The flag marks the rescue and is part of the v2 payload from now on."""
     _reset_suppression(monkeypatch)
     monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
     _add_existing_user(audit_db, "admin")
@@ -3159,8 +3306,14 @@ async def test_rescued_row_is_flagged_outside_the_api_and_the_hash(
         if event["actor"] == "admin"
     )
     assert flags[event["id"]] == 1
-    assert "throttle_rescue" not in event
-    assert "throttle_rescue" not in main._audit_public_event(dict(event))
+    assert event["throttle_rescue"] == 1
+    exported = [
+        row
+        async for batch in storage.iter_audit_events()
+        for row in batch
+        if row["id"] == event["id"]
+    ]
+    assert json.loads(exported[0]["hash_payload"])["throttle_rescue"] == 1
     assert (await storage.verify_audit_chain()) == {
         "checked": 51,
         "legacy": 0,

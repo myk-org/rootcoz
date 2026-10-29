@@ -12823,7 +12823,9 @@ def _audit_iso_bound(
 
 # CSV column order for the audit export — the documented header. The hash
 # columns make the export independently verifiable, row by row;
-# ``hash_payload`` is the exact text ``entry_hash`` covers.
+# ``hash_payload`` is the exact text ``entry_hash`` covers and ``hash_version``
+# says which field list that payload was built from (v1 = the original list,
+# v2 adds ``throttle_rescue``).
 _AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
     "id",
     "created_at",
@@ -12836,6 +12838,7 @@ _AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
     "outcome",
     "request_ip",
     "details",
+    "hash_version",
     "prev_hash",
     "entry_hash",
     "hash_payload",
@@ -13017,10 +13020,12 @@ async def verify_audit_chain_endpoint(
 ) -> dict[str, Any]:
     """Recompute the audit hash chain and report the first tampered event.
 
-    ``legacy`` counts rows written before the chain existed (NULL hashes): they
+    "``legacy`` counts rows written before the chain existed (NULL hashes): they
     are reported separately, never counted as broken and never given a
     fabricated hash. ``truncated``/``truncated_before_id`` mark the boundary
-    left by retention pruning, which is not a break.
+    left by retention pruning, which is not a break. Each row is verified with
+    its own ``hash_version`` (v1 = the original field list; v2 adds
+    ``throttle_rescue``), so a trail mixing both versions verifies cleanly.
     """
     _require_admin(request)
     result = await storage.verify_audit_chain(limit=limit)
@@ -13048,11 +13053,13 @@ async def export_audit_events_endpoint(
     full matched set is streamed, so no page size limits the export and memory
     stays bounded. CSV columns are ``id, created_at, actor, actor_role,
     is_admin, action, target_type, target_id, outcome, request_ip, details,
-    prev_hash, entry_hash, hash_payload`` — the hash columns let a retained
-    export be verified on its own: ``hash_payload`` is the exact canonical text
-    ``entry_hash`` covers, so ``sha256(hash_payload + prev_hash)`` matches with
-    no field re-mapping. Each JSON event carries the same ``hash_payload`` plus
-    ``details_raw``, the stored ``details`` text inside it.
+    hash_version, prev_hash, entry_hash, hash_payload`` — the hash columns let a
+    retained export be verified on its own: ``hash_payload`` is the exact
+    canonical text ``entry_hash`` covers, so ``sha256(hash_payload + prev_hash)``
+    matches with no field re-mapping, and ``hash_version`` names the field list
+    that payload was built from (v1 = the original list, v2 adds
+    ``throttle_rescue``). Each JSON event carries the same ``hash_version`` and
+    ``hash_payload`` plus ``details_raw``, the stored ``details`` text inside it.
     """
     _require_admin(request)
     logger.info(

@@ -653,9 +653,10 @@ async def _migrate_audit_integrity(db: aiosqlite.Connection) -> None:
     """Give ``audit_events`` its chain columns and one canonical UTC timestamp.
 
     Columns are added idempotently. ``throttle_rescue`` marks the rows the
-    login volume guard rescued past a spent budget; it is deliberately outside
-    ``_AUDIT_HASH_FIELDS`` so the chain hashes stay as they were. The value
-    rewrite runs once per database
+    login volume guard rescued past a spent budget; it is hashed from
+    ``hash_version`` 2 on, so v1 rows (which never covered it) keep verifying
+    against the original field list. Existing rows therefore become version 1
+    through the column default. The value rewrite runs once per database
     (claimed via ``_migrations_applied``) and only for rows still in the naive
     form; a row already ending with ``Z`` is left alone, so the statement is
     safe to repeat even without the claim.
@@ -664,6 +665,9 @@ async def _migrate_audit_integrity(db: aiosqlite.Connection) -> None:
     await _migrate_add_column(db, "audit_events", "entry_hash", "TEXT")
     await _migrate_add_column(
         db, "audit_events", "throttle_rescue", "INTEGER NOT NULL DEFAULT 0"
+    )
+    await _migrate_add_column(
+        db, "audit_events", "hash_version", "INTEGER NOT NULL DEFAULT 1"
     )
     if not await _claim_migration(db, _AUDIT_UTC_REWRITE_KEY):
         return
@@ -1576,8 +1580,9 @@ async def init_db() -> None:
         # ``prev_hash``/``entry_hash`` chain the rows for tamper evidence and
         # stay NULL on rows written before the chain existed.
         # ``throttle_rescue`` flags a row the login volume guard rescued past a
-        # spent budget; it is not part of the hash, so it is not in
-        # ``_AUDIT_COLUMNS`` either — the API never exposes it.
+        # spent budget; it is hashed under ``hash_version`` 2 (see
+        # ``_AUDIT_HASH_FIELDS_V2``). ``hash_version`` says which field list
+        # covers a row, so a v1 row keeps verifying as written.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS audit_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1593,7 +1598,8 @@ async def init_db() -> None:
                 request_ip TEXT,
                 throttle_rescue INTEGER NOT NULL DEFAULT 0,
                 prev_hash TEXT,
-                entry_hash TEXT
+                entry_hash TEXT,
+                hash_version INTEGER NOT NULL DEFAULT 1
             )
         """)
         await _migrate_audit_integrity(db)
@@ -9895,6 +9901,11 @@ _AUDIT_GENESIS_HASH = "0" * 64
 # The row fields covered by ``entry_hash`` — everything but the hash columns
 # themselves. ``details`` is hashed as the stored text, not as a re-serialized
 # object, so verification checks the bytes the database actually holds.
+#
+# v1 = the original field list. v2 adds ``throttle_rescue``, appended last so
+# the v2 payload is the v1 payload plus one trailing key and no existing key
+# ever moves; the fields are also emitted with ``sort_keys``, so the canonical
+# bytes stay stable whatever the tuple order.
 _AUDIT_HASH_FIELDS = (
     "id",
     "created_at",
@@ -9908,12 +9919,31 @@ _AUDIT_HASH_FIELDS = (
     "details",
     "request_ip",
 )
+_AUDIT_HASH_FIELDS_V2 = (*_AUDIT_HASH_FIELDS, "throttle_rescue")
+
+# The version new rows are written with.
+_AUDIT_HASH_VERSION = 2
 
 # One column list for every reader (insert/list/verify/export) so they agree.
+# ``throttle_rescue`` is read here because a v2 hash covers it.
 _AUDIT_COLUMNS = (
     "id, created_at, actor, actor_role, is_admin, action, target_type,"
-    " target_id, outcome, details, request_ip, prev_hash, entry_hash"
+    " target_id, outcome, details, request_ip, throttle_rescue, prev_hash,"
+    " entry_hash, hash_version"
 )
+
+
+def _audit_hash_fields(row: dict[str, Any]) -> tuple[str, ...]:
+    """The field list this row's ``entry_hash`` was computed over.
+
+    Selected by ``hash_version``: 2 covers ``throttle_rescue``, anything else
+    — including a missing or NULL key in an exported/legacy dict — is v1.
+    """
+    return (
+        _AUDIT_HASH_FIELDS_V2
+        if row.get("hash_version") == _AUDIT_HASH_VERSION
+        else _AUDIT_HASH_FIELDS
+    )
 
 
 def _audit_hash_payload(row: dict[str, Any]) -> str:
@@ -9922,10 +9952,12 @@ def _audit_hash_payload(row: dict[str, Any]) -> str:
     Verifying is then plain ``sha256(hash_payload + prev_hash)`` on the stored
     bytes: no field re-mapping and no type coercion. An export that re-rendered
     the values would break it — ``is_admin`` is stored ``1``/``0`` and rendered
-    ``true``/``false`` — so the payload travels with the row instead.
+    ``true``/``false`` — so the payload travels with the row instead. The field
+    list follows the row's ``hash_version`` (v1 = the original list; v2 adds
+    ``throttle_rescue``), so old and new rows each reproduce their own hash.
     """
     return json.dumps(
-        {name: row[name] for name in _AUDIT_HASH_FIELDS},
+        {name: row[name] for name in _audit_hash_fields(row)},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -9967,9 +9999,10 @@ def _audit_export_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     stored row, never from the decoded event: re-rendering a value (``is_admin``
     as ``true`` instead of ``1``) would make an exported row unverifiable.
     """
+    raw = dict(row)
     event = _audit_event_row(row)
-    event["details_raw"] = row["details"]
-    event["hash_payload"] = _audit_hash_payload(row)
+    event["details_raw"] = raw["details"]
+    event["hash_payload"] = _audit_hash_payload(raw)
     return event
 
 
@@ -10062,8 +10095,9 @@ async def insert_audit_event(
     ``BEGIN IMMEDIATE`` transaction, which serializes the tail read against
     concurrent inserts: two writers can never link to the same predecessor.
     ``created_at`` is set here (not by a column default) so it is always the
-    canonical UTC form the hash covers. The returned row is what the DB holds,
-    so callers can broadcast it.
+    canonical UTC form the hash covers. The row is written as
+    ``hash_version`` 2, so ``throttle_rescue`` is part of its hash. The returned
+    row is what the DB holds, so callers can broadcast it.
 
     With ``throttle``, the budget check runs inside that same transaction and
     the insert is skipped (``None`` returned) once it is exhausted: parallel
@@ -10095,8 +10129,8 @@ async def insert_audit_event(
         cursor = await db.execute(
             "INSERT INTO audit_events (created_at, actor, actor_role, is_admin,"
             " action, target_type, target_id, outcome, details, request_ip,"
-            " throttle_rescue, prev_hash)"
-            f" VALUES ({', '.join('?' * 12)}) RETURNING {_AUDIT_COLUMNS}",
+            " throttle_rescue, prev_hash, hash_version)"
+            f" VALUES ({', '.join('?' * 13)}) RETURNING {_AUDIT_COLUMNS}",
             (
                 audit_timestamp(),
                 actor_value,
@@ -10110,6 +10144,7 @@ async def insert_audit_event(
                 request_ip,
                 rescue,
                 prev_hash,
+                _AUDIT_HASH_VERSION,
             ),
         )
         row = await cursor.fetchone()
@@ -10294,6 +10329,10 @@ async def verify_audit_chain(limit: int | None = None) -> dict[str, Any]:
     whose hash was cleared after the chain started is a break, not a jump back
     to the pre-chain era — otherwise clearing the newest row's hash would hide
     a tampered payload from this check.
+
+    Each row is recomputed with its own ``hash_version`` (v1 = the original
+    field list; v2 adds ``throttle_rescue``), so a trail written across the
+    version bump verifies cleanly and a v1 row's hash is never rewritten.
     """
     sql = f"SELECT {_AUDIT_COLUMNS} FROM audit_events ORDER BY id DESC"
     params: tuple[Any, ...] = ()
