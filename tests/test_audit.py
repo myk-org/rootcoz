@@ -4749,18 +4749,21 @@ async def test_audit_write_retries_a_contended_lock(
     """A burst of writers can outlast ``busy_timeout``.
 
     The row must still be written: a lost audit row is a compliance hole, not a
-    missing log line. Only the lock is retried.
+    missing log line. Only the lock is retried, and the retry lives inside the
+    insert itself so no forwarding layer can drop an argument.
     """
-    real = storage._insert_audit_event_once
+    real_connect = storage._connect_db
     calls = {"count": 0}
 
-    async def flaky(**kwargs):  # type: ignore[no-untyped-def]
+    @contextlib.asynccontextmanager
+    async def flaky_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
         calls["count"] += 1
         if calls["count"] < 3:
             raise sqlite3.OperationalError("database is locked")
-        return await real(**kwargs)
+        async with real_connect(*args, **kwargs) as db:
+            yield db
 
-    monkeypatch.setattr(storage, "_insert_audit_event_once", flaky)
+    monkeypatch.setattr(storage, "_connect_db", flaky_connect)
     monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
 
     row = await storage.insert_audit_event(action="auth.login", actor="alice")
@@ -4775,11 +4778,13 @@ async def test_audit_write_does_not_retry_a_real_storage_error(
     """A genuine storage fault must surface, never be masked as contention."""
     calls = {"count": 0}
 
-    async def broken(**kwargs):  # type: ignore[no-untyped-def]
+    @contextlib.asynccontextmanager
+    async def broken_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
         calls["count"] += 1
         raise sqlite3.OperationalError("no such table: audit_events")
+        yield  # pragma: no cover - unreachable, keeps this a generator
 
-    monkeypatch.setattr(storage, "_insert_audit_event_once", broken)
+    monkeypatch.setattr(storage, "_connect_db", broken_connect)
     monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
 
     with pytest.raises(sqlite3.OperationalError):

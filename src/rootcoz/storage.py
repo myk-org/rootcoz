@@ -10085,7 +10085,7 @@ async def _audit_throttle_decision(
     return "rescue" if (await cursor.fetchone())[0] < throttle.limit else "drop"
 
 
-async def _insert_audit_event_once(
+async def insert_audit_event(
     *,
     action: str,
     actor: str,
@@ -10118,97 +10118,67 @@ async def _insert_audit_event_once(
     ``throttle_rescue = 1``.
     """
     actor_value = actor or "anonymous"
-    async with _connect_db() as db:
-        # Take the write lock before reading the tail: two concurrent inserts
-        # can then never link to the same predecessor.
-        await db.execute("BEGIN IMMEDIATE")
-        rescue = 0
-        if throttle is not None:
-            decision = await _audit_throttle_decision(db, actor_value, throttle)
-            if decision == "drop":
-                # Nothing written: closing the connection rolls the empty
-                # transaction back and releases the write lock.
-                return None
-            rescue = int(decision == "rescue")
-        cursor = await db.execute(
-            "SELECT entry_hash FROM audit_events"
-            " WHERE entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1"
-        )
-        tail = await cursor.fetchone()
-        prev_hash = tail[0] if tail else _AUDIT_GENESIS_HASH
-        cursor = await db.execute(
-            "INSERT INTO audit_events (created_at, actor, actor_role, is_admin,"
-            " action, target_type, target_id, outcome, details, request_ip,"
-            " throttle_rescue, prev_hash, hash_version)"
-            f" VALUES ({', '.join('?' * 13)}) RETURNING {_AUDIT_COLUMNS}",
-            (
-                audit_timestamp(),
-                actor_value,
-                actor_role,
-                int(bool(is_admin)),
-                action,
-                target_type,
-                target_id,
-                outcome,
-                _audit_details_json(details),
-                request_ip,
-                rescue,
-                prev_hash,
-                _AUDIT_HASH_VERSION,
-            ),
-        )
-        row = await cursor.fetchone()
-        assert row is not None  # INSERT ... RETURNING always yields the row
-        stored = dict(row)
-        entry_hash = _audit_entry_hash(stored, prev_hash)
-        await db.execute(
-            "UPDATE audit_events SET entry_hash = ? WHERE id = ?",
-            (entry_hash, stored["id"]),
-        )
-        await db.commit()
-    stored["entry_hash"] = entry_hash
-    return _audit_event_row(stored)
 
+    async def _attempt() -> dict[str, Any] | None:
+        async with _connect_db() as db:
+            # Take the write lock before reading the tail: two concurrent inserts
+            # can then never link to the same predecessor.
+            await db.execute("BEGIN IMMEDIATE")
+            rescue = 0
+            if throttle is not None:
+                decision = await _audit_throttle_decision(db, actor_value, throttle)
+                if decision == "drop":
+                    # Nothing written: closing the connection rolls the empty
+                    # transaction back and releases the write lock.
+                    return None
+                rescue = int(decision == "rescue")
+            cursor = await db.execute(
+                "SELECT entry_hash FROM audit_events"
+                " WHERE entry_hash IS NOT NULL ORDER BY id DESC LIMIT 1"
+            )
+            tail = await cursor.fetchone()
+            prev_hash = tail[0] if tail else _AUDIT_GENESIS_HASH
+            cursor = await db.execute(
+                "INSERT INTO audit_events (created_at, actor, actor_role, is_admin,"
+                " action, target_type, target_id, outcome, details, request_ip,"
+                " throttle_rescue, prev_hash, hash_version)"
+                f" VALUES ({', '.join('?' * 13)}) RETURNING {_AUDIT_COLUMNS}",
+                (
+                    audit_timestamp(),
+                    actor_value,
+                    actor_role,
+                    int(bool(is_admin)),
+                    action,
+                    target_type,
+                    target_id,
+                    outcome,
+                    _audit_details_json(details),
+                    request_ip,
+                    rescue,
+                    prev_hash,
+                    _AUDIT_HASH_VERSION,
+                ),
+            )
+            row = await cursor.fetchone()
+            assert row is not None  # INSERT ... RETURNING always yields the row
+            stored = dict(row)
+            entry_hash = _audit_entry_hash(stored, prev_hash)
+            await db.execute(
+                "UPDATE audit_events SET entry_hash = ? WHERE id = ?",
+                (entry_hash, stored["id"]),
+            )
+            await db.commit()
+        stored["entry_hash"] = entry_hash
+        return _audit_event_row(stored)
 
-async def insert_audit_event(
-    action: str,
-    actor: str,
-    *,
-    actor_role: str | None = None,
-    is_admin: bool = False,
-    target_type: str | None = None,
-    target_id: str | None = None,
-    outcome: str = "success",
-    details: dict[str, Any] | None = None,
-    request_ip: str | None = None,
-    throttle: AuditThrottle | None = None,
-) -> dict[str, Any] | None:
-    """Insert one audit event, retrying a contended write lock.
-
-    ``BEGIN IMMEDIATE`` serialises the chain tail read against concurrent
-    inserts, but a burst of logins can outlast ``busy_timeout`` and raise
-    ``database is locked``. An audit row that is lost that way is a compliance
-    hole rather than a missing log line, so the write is retried with a short
-    exponential backoff before the failure is reported to :func:`record_audit`
-    (which still never raises to the action being audited).
-
-    Only lock/busy errors are retried; every other storage error propagates
-    immediately so a real fault is never masked as contention.
-    """
+    # ``BEGIN IMMEDIATE`` contends under a burst of concurrent logins and a
+    # busy_timeout alone can still time out: retry the lock instead of losing
+    # the row (a dropped audit row is a compliance hole, not a lost log line).
+    # The retry lives here, in the one function that owns the arguments, so a
+    # forwarding layer can never drop one.
     for attempt in range(_AUDIT_LOCK_ATTEMPTS):
         try:
-            return await _insert_audit_event_once(
-                action=action,
-                actor=actor,
-                actor_role=actor_role,
-                is_admin=is_admin,
-                target_type=target_type,
-                target_id=target_id,
-                outcome=outcome,
-                details=details,
-                request_ip=request_ip,
-                throttle=throttle,
-            )
+            return await _attempt()
         except sqlite3.OperationalError as exc:
             message = str(exc).lower()
             contended = "locked" in message or "busy" in message
