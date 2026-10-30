@@ -30,6 +30,9 @@ PROW_ARTIFACTS_MAX_OBJECTS = 5_000
 # Valid values for the explicit ``jira_auth_mode`` setting.
 JIRA_AUTH_MODES = ("oauth", "basic", "pat", "atst")
 
+# Roles a new registration may default to (``admin`` is granted, never default).
+DEFAULT_USER_ROLES = ("viewer", "reviewer", "operator")
+
 
 def _split_outside_brackets(raw: str) -> list[str]:
     """Split string on commas that are not inside square brackets."""
@@ -343,7 +346,6 @@ class Settings(BaseSettings):
     max_concurrent_ai_calls: int = Field(default=3, gt=0)
 
     # Default AI provider (server-level default, can be overridden per-request)
-    force_server_credentials: bool = False
     ai_provider: str = ""
     # Default AI model (server-level default, can be overridden per-request)
     ai_model: str = ""
@@ -413,13 +415,20 @@ class Settings(BaseSettings):
     poll_interval_minutes: int = Field(default=2, gt=0)
     max_wait_minutes: int = Field(default=0, ge=0)
 
-    # Allow list — comma-separated usernames allowed to submit/modify data.
-    # Empty means open access (all users allowed). Admin users always bypass.
+    # Write allow-list — a layer ON TOP of roles, not a replacement for them:
+    # with a non-empty value every authenticated non-admin who is not listed
+    # gets 403 on the write routes even when their role would allow the
+    # action, and empty removes only this extra restriction (each user's role
+    # still decides what they may do). Admins always bypass. Server-only
+    # (env-var-only, see _SERVER_ONLY_SETTINGS in main.py).
     allowed_users: str = Field(
         default="",
         description=(
-            "Comma-separated list of usernames allowed to create/modify data. "
-            "Empty = open access (no restriction). Admin users always bypass."
+            "Write allow-list for deployments where a wide population can "
+            "authenticate (self-registration, or a trusted proxy/SSO): when "
+            "set, only these usernames may create or modify data. Empty = no "
+            "username restriction — each user's role decides what they may do. "
+            "It never grants a permission, and admins always bypass it."
         ),
     )
 
@@ -511,16 +520,19 @@ class Settings(BaseSettings):
         if mode and mode not in JIRA_AUTH_MODES:
             raise ValueError(
                 f"jira_auth_mode must be one of {', '.join(JIRA_AUTH_MODES)} "
-                f"(got {value!r})"
+                f"(case-insensitive, got {value!r})"
             )
         return mode or None
 
     @field_validator("default_user_role")
     @classmethod
     def _validate_default_role(cls, v: str) -> str:
-        allowed = ("viewer", "reviewer", "operator")
-        if v not in allowed:
-            raise ValueError(f"DEFAULT_USER_ROLE must be one of: {', '.join(allowed)}")
+        if v not in DEFAULT_USER_ROLES:
+            # Case-sensitive: the values are RBAC identifiers, not free text.
+            raise ValueError(
+                f"DEFAULT_USER_ROLE must be one of: "
+                f"{', '.join(DEFAULT_USER_ROLES)} (case-sensitive)"
+            )
         return v
 
     @field_validator("prow_url", mode="before")
@@ -792,6 +804,73 @@ class Settings(BaseSettings):
             except ValueError:
                 return 720
         return 720
+
+    # Explicit lockout switch (#379 E2E-I09) — the admin asked for a toggle
+    # plus a number, not a magic threshold of 0. Lockout is active only when
+    # this is true AND the threshold below is > 0.
+    login_lockout_enabled: bool = Field(
+        default=True,
+        description=(
+            "Lock an account after too many consecutive failed logins. "
+            "Off means no counting and no lock, whatever the threshold."
+        ),
+    )
+
+    # Consecutive failed logins before the account is locked (#379 §I.1).
+    # There is no automatic expiry: "it unlocked itself after 15 minutes" is
+    # exactly what an attacker waits for, so a lock needs an admin unlock.
+    # A lock blocks new logins only — see _account_block_reason.
+    login_lockout_threshold: int = Field(
+        default=5,
+        ge=0,
+        description=(
+            "Lock an account after this many consecutive failed logins. "
+            "0 also disables lockout. A locked account can only be "
+            "unlocked by an admin — there is no automatic expiry. A lock "
+            "blocks new logins; existing sessions and API keys keep working."
+        ),
+    )
+
+    # How long the audit trail is kept. 0 = keep every event forever.
+    audit_retention_days: int = Field(
+        default=90,
+        ge=0,
+        le=36500,
+        description=(
+            "How many days of audit events to keep on this server. "
+            "0 keeps them forever. Older events are deleted at most once "
+            "a day."
+        ),
+    )
+
+    # Size ceiling for the audit trail. 0 = no row cap.
+    audit_max_rows: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Maximum number of audit events to keep on this server. "
+            "0 keeps every row. When set, the oldest rows beyond the cap "
+            "are deleted at most once a day, together with retention "
+            "pruning."
+        ),
+    )
+
+    # Volume guard for failed/blocked logins (#379). A brute-force run would
+    # otherwise fill the audit trail with one row per attempt.
+    audit_auth_failure_max_per_minute: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "How many failed or blocked logins may be recorded in the audit "
+            "trail per minute — per username N, N×10 server-wide, plus at most "
+            "N rescued rows per window for attempts against existing accounts. "
+            "Cycling names does not reset the budget, no flood of junk "
+            "usernames can starve the target's rows, and the total per window "
+            "never exceeds N×11 rows however many accounts exist. Attempts "
+            "beyond the limit are still logged and counted in health, but not "
+            "stored as rows. 0 disables the limit."
+        ),
+    )
 
     # Admin approval for new user registrations
     require_approval: bool = Field(

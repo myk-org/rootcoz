@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { Moon, Sun } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { TEXT_BUTTON_CLASS } from '@/lib/controlStyles'
 
 export const THEME_STORAGE_KEY = 'rootcoz-theme'
 
@@ -27,15 +29,27 @@ export function ThemeToggle() {
   }
 
   return (
-    <button
-      type="button"
-      onClick={toggle}
-      data-testid="theme-toggle"
-      aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-      className="flex h-8 items-center gap-1.5 rounded-full border border-border-default bg-surface-elevated px-3 text-xs font-medium text-text-secondary transition-colors duration-150 hover:bg-surface-hover hover:text-text-primary"
-    >
-      {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-      {theme === 'dark' ? 'Light' : 'Dark'}
-    </button>
+    // Header text button, same look as Guide/Feedback: no box of its own.
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onClick={toggle}
+            data-testid="theme-toggle"
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+            className={TEXT_BUTTON_CLASS}
+          >
+            {theme === 'dark' ? (
+              <Sun className="h-4 w-4 shrink-0" />
+            ) : (
+              <Moon className="h-4 w-4 shrink-0" />
+            )}
+            {theme === 'dark' ? 'Light' : 'Dark'}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Switch to {theme === 'dark' ? 'light' : 'dark'} theme</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }

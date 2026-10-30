@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NewAnalysisPage } from '@/pages/NewAnalysisPage'
-import { PeerConfigList } from '@/components/shared/PeerConfigList'
 import { ReAnalyzeDialog } from '@/pages/report/ReAnalyzeDialog'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import type { AnalysisResult, AiModelsResponse } from '@/types'
@@ -34,7 +33,7 @@ const defaults = {
   ai_provider: 'openai', ai_model: 'gpt', ai_call_timeout: 10, tests_repo_url: '', additional_repos: [],
   peer_ai_configs: [], peer_analysis_max_rounds: 3, jira_enabled: false, jira_url: '', jira_project_key: '',
   get_job_artifacts: false, jenkins_artifacts_max_size_mb: 50, wait_for_completion: false,
-  poll_interval_minutes: 2, max_wait_minutes: 0, force_server_credentials: false,
+  poll_interval_minutes: 2, max_wait_minutes: 0,
 }
 
 // Radix Select needs pointer capture, which jsdom does not implement.
@@ -51,14 +50,13 @@ function setup() {
 afterEach(() => { grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset() })
 
 describe('analysis credential-scoped pickers', () => {
-  it('shows only catalog-backed sources, and submits explicit server override on new analysis', async () => {
+  it('offers catalog-backed server and own-key sources, and submits the chosen pair', async () => {
     setup()
     const user = userEvent.setup()
     render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
     await screen.findByRole('button', { name: 'AI Configuration' })
     // The AI section is collapsed on new analysis.
     await user.click(screen.getByRole('button', { name: 'AI Configuration' }))
-    await screen.findByRole('switch', { name: 'Use server credentials' })
     const provider = screen.getByRole('combobox', { name: 'AI Provider' })
     await user.click(provider)
     expect(await screen.findByRole('option', { name: 'Claude · Server' })).toBeInTheDocument()
@@ -66,16 +64,6 @@ describe('analysis credential-scoped pickers', () => {
     expect(screen.getByRole('option', { name: 'Gemini · User + Server' })).toBeInTheDocument()
     expect(screen.getByRole('option', { name: 'Anthropic · User + Server' })).toBeInTheDocument()
     expect(screen.queryByRole('option', { name: /empty/i })).not.toBeInTheDocument()
-    await user.keyboard('{Escape}')
-    await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
-    await user.click(provider)
-    expect(screen.queryByRole('option', { name: /Openai/ })).not.toBeInTheDocument()
-    expect(await screen.findByRole('option', { name: 'Gemini · Server' })).toBeInTheDocument()
-    await user.click(screen.getByRole('option', { name: 'Gemini · Server' }))
-    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
-    expect(screen.queryByRole('option', { name: /user-extra/i })).not.toBeInTheDocument()
-    expect(screen.getByRole('option', { name: /shared.*Server/i })).toBeInTheDocument()
-    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
     await user.click(screen.getByRole('option', { name: 'Claude · Server' }))
     await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
     expect(screen.getByRole('option', { name: /sonnet.*Server/i })).toBeInTheDocument()
@@ -83,23 +71,9 @@ describe('analysis credential-scoped pickers', () => {
     await user.click(screen.getByRole('button', { name: 'Paste XML' }))
     await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
     await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true })))
-  })
-
-  it('keeps a mixed-source model on forced server even when user listing is unverified', async () => {
-    setup()
-    const user = userEvent.setup()
-    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
-    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
-    await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
-    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
-    await user.click(await screen.findByRole('option', { name: 'Anthropic · Server' }))
-    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
-    await user.click(screen.getByRole('option', { name: /mixed.*Server/i }))
-    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
-    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
-    await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'anthropic', ai_model: 'mixed', force_server_credentials: true })))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'claude', ai_model: 'sonnet' })))
+    // No credential-source override rides along: the grant alone decides.
+    expect(Object.keys(post.mock.calls[0][1]).some((key) => key.includes('credential'))).toBe(false)
   })
 
   it('requires a model after selecting a provider on new analysis', async () => {
@@ -134,19 +108,13 @@ describe('analysis credential-scoped pickers', () => {
     await user.click(screen.getByRole('button', { name: 'Paste XML' }))
     await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
     await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'openrouter', ai_model: 'custom-model', force_server_credentials: false })))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'openrouter', ai_model: 'custom-model' })))
     await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
     await user.click(screen.getByRole('option', { name: 'Mistral · User' }))
     expect(screen.getByRole('combobox', { name: 'AI Model' })).not.toHaveAttribute('readonly')
-    await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
-    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
-    expect(screen.queryByRole('option', { name: /Mistral|Openrouter/ })).not.toBeInTheDocument()
-    await user.keyboard('{Escape}')
-    expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled()
   })
 
-  it('does not present unverified IDs as available even if a listing-capable provider includes them', async () => {
-    setup()
+  it('does not present unverified IDs as available even if a listing-capable provider includes them', async () => {    setup()
     catalog.providers.openai.push({ id: 'not-confirmed', name: 'Not confirmed', provider: 'openai', credential_sources: ['user'], verified: false })
     const user = userEvent.setup()
     const result = { request_params: { ai_provider: 'openai', ai_model: 'not-confirmed', peer_ai_configs: [] } } as unknown as AnalysisResult
@@ -157,22 +125,7 @@ describe('analysis credential-scoped pickers', () => {
     catalog.providers.openai.pop()
   })
 
-  it('restricts peer provider and model to the selected credential source', async () => {
-    setup()
-    const user = userEvent.setup()
-    render(<MemoryRouter><PeerConfigList peerConfigs={[{ id: 'peer', ai_provider: 'openrouter', ai_model: 'suggested' }]} setPeerConfigs={() => {}} maxRounds={1} setMaxRounds={() => {}} forceServer /></MemoryRouter>)
-    const provider = await screen.findByRole('combobox', { name: 'Peer 1 provider' })
-    expect(provider).toHaveTextContent('openrouter (unavailable)')
-    // The model input stays a real combobox: raw value, never decorated, so the
-    // user can edit it. Unavailability is conveyed by the disabled list option.
-    const model = screen.getByRole('combobox', { name: 'Peer 1 model' })
-    expect(model).toHaveValue('suggested')
-    expect(model).not.toHaveAttribute('readonly')
-    await user.click(provider)
-    expect(screen.queryByRole('option', { name: /Openrouter|Openai/ })).not.toBeInTheDocument()
-  })
-
-  it('keeps stored unavailable choices visible but unselectable and sends false on reanalysis', async () => {
+  it('keeps stored unavailable choices visible but unselectable and submits the chosen pair on reanalysis', async () => {
     setup()
     const user = userEvent.setup()
     const result = { request_params: { ai_provider: 'missing', ai_model: 'old', peer_ai_configs: [] } } as unknown as AnalysisResult
@@ -190,7 +143,7 @@ describe('analysis credential-scoped pickers', () => {
     const model = within(document.body).getByRole('option', { name: /gpt.*User/i })
     await user.click(model)
     await user.click(screen.getByRole('button', { name: 'Re-Analyze' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/re-analyze/job', expect.objectContaining({ ai_provider: 'openai', ai_model: 'gpt', force_server_credentials: false })))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/re-analyze/job', expect.objectContaining({ ai_provider: 'openai', ai_model: 'gpt' })))
   })
 
   it('requires peer selections on new analysis too', async () => {
@@ -239,7 +192,7 @@ describe('analysis credential-scoped pickers', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Re-Analyze' })).not.toBeDisabled())
     expect(screen.getByRole('combobox', { name: 'Peer 1 model' })).toHaveValue('manual-peer')
     await user.click(screen.getByRole('button', { name: 'Re-Analyze' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/re-analyze/job', expect.objectContaining({ ai_provider: 'openrouter', ai_model: 'suggested', force_server_credentials: false, peer_ai_configs: [{ ai_provider: 'mistral', ai_model: 'manual-peer' }] })))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/re-analyze/job', expect.objectContaining({ ai_provider: 'openrouter', ai_model: 'suggested', peer_ai_configs: [{ ai_provider: 'mistral', ai_model: 'manual-peer' }] })))
   })
 
   it('mutes only unavailable server sources, keeps own-key models usable, and blocks stale server reanalysis and peers', async () => {
@@ -248,7 +201,6 @@ describe('analysis credential-scoped pickers', () => {
     const user = userEvent.setup()
     render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
     await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
-    expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
     const providerTrigger = screen.getByRole('combobox', { name: 'AI Provider' })
     for (let i = 0; i < 10 && document.activeElement !== providerTrigger; i++) await user.tab()
     expect(providerTrigger).toHaveFocus()
@@ -295,7 +247,7 @@ describe('analysis credential-scoped pickers', () => {
     await user.click(screen.getByRole('button', { name: 'Paste XML' }))
     await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
     await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'gemini', ai_model: 'shared', force_server_credentials: false })))
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'gemini', ai_model: 'shared' })))
     await user.click(screen.getByRole('button', { name: 'Peer Analysis' }))
     await user.click(screen.getByRole('switch', { name: 'Enable peer review' }))
     const peerTrigger = screen.getByRole('combobox', { name: 'Peer 1 provider' })
@@ -304,22 +256,20 @@ describe('analysis credential-scoped pickers', () => {
     expect(screen.getAllByRole('option', { name: /Claude · Server$/ })[0]).toHaveAttribute('data-disabled')
     const peerMixed = screen.getByRole('option', { name: /Gemini · User \+ Server$/ })
     expect(within(peerMixed).getByText('Server')).toHaveClass('text-text-tertiary')
-    const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true, peer_ai_configs: [] } } as unknown as AnalysisResult
+    const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', peer_ai_configs: [] } } as unknown as AnalysisResult
     render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
     expect(await screen.findByRole('button', { name: 'Re-Analyze' })).toBeDisabled()
   })
 
-  it('uses own-key choices for a saved server-forced job after access is revoked', async () => {
+  it('uses own-key choices for a saved server job after access is revoked', async () => {
     setup()
     grant = false
     const user = userEvent.setup()
-    const result = { request_params: { ai_provider: 'gemini', ai_model: 'shared', force_server_credentials: true, peer_ai_configs: [{ ai_provider: 'openai', ai_model: 'gpt' }] } } as unknown as AnalysisResult
+    const result = { request_params: { ai_provider: 'gemini', ai_model: 'shared', peer_ai_configs: [{ ai_provider: 'openai', ai_model: 'gpt' }] } } as unknown as AnalysisResult
     render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
     const submit = await screen.findByRole('button', { name: 'Re-Analyze' })
     await waitFor(() => expect(submit).toBeEnabled())
-    expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
-    expect(screen.getByRole('switch', { name: 'Use server credentials' })).toHaveAttribute('aria-checked', 'false')
-    expect(screen.getByText(/original analysis used server credentials.*no longer have access/i)).toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Use server credentials' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
     expect(screen.getByRole('option', { name: /user-extra.*User/i })).not.toHaveAttribute('aria-disabled', 'true')
     await user.click(screen.getByRole('option', { name: /user-extra.*User/i }))
@@ -330,13 +280,12 @@ describe('analysis credential-scoped pickers', () => {
     expect(screen.getByRole('combobox', { name: 'Peer 1 provider', hidden: true })).toBeInTheDocument()
   })
 
-  it('blocks a saved server-forced job with no own key after access is revoked', async () => {
+  it('blocks a saved server job with no own key after access is revoked', async () => {
     grant = false
     get.mockImplementation(async (path: string) => path === '/api/ai-models' ? { providers: { claude: catalog.providers.claude }, provider_status: {} } : defaults)
-    const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true, peer_ai_configs: [] } } as unknown as AnalysisResult
+    const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', peer_ai_configs: [] } } as unknown as AnalysisResult
     render(<MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter>)
     expect(await screen.findByRole('button', { name: 'Re-Analyze' })).toBeDisabled()
-    expect(screen.getByText(/original analysis used server credentials.*no longer have access/i)).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent(/Add your own key or ask an admin/)
     expect(post).not.toHaveBeenCalled()
   })
@@ -368,58 +317,6 @@ describe('analysis credential-scoped pickers', () => {
     await user.click(screen.getByRole('button', { name: 'Peer Analysis' }))
     await user.click(screen.getByRole('switch', { name: 'Enable peer review' }))
     expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled()
-  })
-
-  it('honors the server key default for picker, peers, and submission', async () => {
-    get.mockImplementation(async (path: string) => path === '/api/ai-models?force_server_credentials=true'
-      ? { providers: { claude: catalog.providers.claude }, provider_status: {} }
-      : path === '/api/ai-models' ? { providers: {}, provider_status: {} }
-      : { ...defaults, ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true })
-    post.mockResolvedValue({ job_id: 'next' })
-    const user = userEvent.setup()
-    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
-    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Use server credentials' })).toHaveAttribute('aria-checked', 'true'))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled())
-    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
-    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeEnabled())
-    await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true })))
-    expect(get).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=true')
-  })
-
-  it('allows an explicit user-key override of a true server default', async () => {
-    setup()
-    get.mockImplementation(async (path: string) => path.startsWith('/api/ai-models') ? catalog : { ...defaults, ai_provider: 'gemini', ai_model: 'shared', force_server_credentials: true })
-    const user = userEvent.setup()
-    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
-    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Use server credentials' })).toHaveAttribute('aria-checked', 'true'))
-    await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
-    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
-    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeEnabled())
-    await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ force_server_credentials: false })))
-  })
-
-  it('recovers server options when the user-key catalog fails', async () => {
-    get.mockImplementation(async (path: string) => path === '/api/ai-models'
-      ? Promise.reject(new Error('bad user key'))
-      : path === '/api/ai-models?force_server_credentials=true'
-        ? { providers: { claude: catalog.providers.claude }, provider_status: {} }
-        : { ...defaults, ai_provider: 'claude', ai_model: 'sonnet' })
-    post.mockResolvedValue({ job_id: 'next' })
-    const user = userEvent.setup()
-    render(<MemoryRouter><NewAnalysisPage /></MemoryRouter>)
-    await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
-    await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
-    await user.click(screen.getByRole('button', { name: 'Paste XML' }))
-    await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeEnabled())
-    await user.click(screen.getByRole('button', { name: 'Submit Analysis' }))
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/analyze', expect.objectContaining({ force_server_credentials: true })))
   })
 
   it('requires a valid selection when server defaults and catalog are empty', async () => {

@@ -12,7 +12,7 @@ from rootcoz.models import ChatInitRequest, ChatMessageRequest
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("admin", [False, True])
-async def test_start_requires_pair_and_force_and_send_requires_start(
+async def test_start_requires_pair_and_send_requires_start(
     admin, monkeypatch, tmp_path
 ):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
@@ -26,11 +26,7 @@ async def test_start_requires_pair_and_force_and_send_requires_start(
             {
                 "status": "completed",
                 "result": {},
-                "request_params": {
-                    "ai_provider": "openai",
-                    "ai_model": "old",
-                    "force_server_credentials": True,
-                },
+                "request_params": {"ai_provider": "openai", "ai_model": "old"},
             },
         )
     request = SimpleNamespace(
@@ -80,7 +76,7 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
                 "status": "completed",
                 "ai_provider": "other",
                 "ai_model": "old",
-                "request_params": {"force_server_credentials": True},
+                "request_params": {},
             },
         )
     from rootcoz.config import Settings
@@ -88,12 +84,7 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
     monkeypatch.setattr(
         main,
         "get_settings",
-        lambda: Settings(
-            ai_provider="other",
-            ai_model="old",
-            force_server_credentials=True,
-            ai_call_timeout=30,
-        ),
+        lambda: Settings(ai_provider="other", ai_model="old", ai_call_timeout=30),
     )
     monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
     monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
@@ -115,7 +106,7 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
 
     async def create(**kwargs):
         assert (kwargs["ai_provider"], kwargs["ai_model"]) == ("openai", "chosen")
-        assert ai_client.force_server_credentials.get() is False
+        assert ai_client.chat_session_source.get() == "user"
         await storage.save_ai_session_source("sid", "alice", "openai", "user")
         return "sid"
 
@@ -125,11 +116,7 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
     request = SimpleNamespace(
         state=SimpleNamespace(username="alice", is_admin=True, role="admin")
     )
-    body = {
-        "ai_provider": "openai",
-        "ai_model": "chosen",
-        "force_server_credentials": False,
-    }
+    body = {"ai_provider": "openai", "ai_model": "chosen"}
     result = await (
         main.init_admin_chat(request, ChatInitRequest(**body))
         if admin
@@ -145,11 +132,8 @@ async def test_start_and_send_use_selected_source_not_job_or_settings(
         )
     )
     assert sent["assistant_message_id"]
-    assert tasks.tasks[0].kwargs.get("force_server") is False
-    for override in (
-        {"ai_provider": "openai", "ai_model": "different"},
-        {"force_server_credentials": True},
-    ):
+    assert tasks.tasks[0].kwargs.get("credential_source") == "user"
+    for override in ({"ai_provider": "openai", "ai_model": "different"},):
         with pytest.raises(HTTPException) as exc:
             if admin:
                 await main.send_admin_chat_message(
@@ -220,7 +204,7 @@ async def test_send_after_user_key_removed_requires_new_start(
             await main.send_chat_message(
                 job_id, ChatMessageRequest(message="hi"), request, BackgroundTasks()
             )
-    assert exc.value.status_code == 422
+    assert exc.value.status_code == 409
     assert "Start" in str(exc.value.detail)
     assert await storage.count_chat_messages(job_id, username="alice") == 1
 
@@ -244,7 +228,7 @@ async def test_server_grant_revoked_cannot_resume(monkeypatch, tmp_path):
 
     token = ai_client.ai_username.set("alice")
     try:
-        assert (await main._current_chat_choice("job", "alice"))[1] is True
+        assert (await main._current_chat_choice("job", "alice"))[1] == "server"
         await storage.set_user_can_use_server_providers("alice", False)
         with pytest.raises(ValueError, match="grant"):
             await require_server_provider_grant()
@@ -275,56 +259,30 @@ async def test_revoked_key_cannot_resume_or_fall_back_to_server(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("admin", [False, True])
-@pytest.mark.asyncio
-async def test_start_server_only_model_requires_explicit_server_choice(
-    monkeypatch, tmp_path, admin
-):
+async def test_chat_selection_uses_server_source_when_granted(monkeypatch, tmp_path):
+    """A pair no user key reaches comes from the server pool for a granted caller."""
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "choice.db")
     await storage.init_db()
     await storage.create_admin_user("alice")
-    if not admin:
-        await storage.save_result(
-            "job", "", "completed", {"status": "completed", "result": {}}
-        )
     monkeypatch.setattr(
         ai_client,
         "_get_model_catalog",
         AsyncMock(return_value=[{"provider": "openai", "id": "m"}]),
     )
-    request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+    provider, model = await main._validate_chat_selection(
+        ChatInitRequest(ai_provider="openai", ai_model="m"), "alice"
     )
-    body = ChatInitRequest(
-        ai_provider="openai", ai_model="m", force_server_credentials=False
-    )
-    with pytest.raises(HTTPException) as exc:
-        if admin:
-            await main.init_admin_chat(request, body)
-        else:
-            await main.init_chat("job", request, body)
-    assert exc.value.status_code == 422
-    assert "server" in str(exc.value.detail).lower()
-    assert (
-        await storage.count_chat_messages(
-            main.ADMIN_CHAT_JOB_ID if admin else "job", username="alice"
-        )
-        == 0
-    )
+    assert (provider, model) == ("openai", "m")
+    assert ai_client._selected_credential_source.get() == "server"
 
 
 @pytest.mark.asyncio
-async def test_start_rejects_server_without_grant_even_when_job_forced(
-    monkeypatch, tmp_path
-):
+async def test_start_rejects_server_without_grant(monkeypatch, tmp_path):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
     await storage.init_db()
     await storage.create_admin_user("alice")
     await storage.save_result(
-        "job",
-        "",
-        "completed",
-        {"status": "completed", "request_params": {"force_server_credentials": True}},
+        "job", "", "completed", {"status": "completed", "request_params": {}}
     )
     monkeypatch.setattr(
         ai_client,
@@ -339,9 +297,7 @@ async def test_start_rejects_server_without_grant_even_when_job_forced(
         await main.init_chat(
             "job",
             request,
-            ChatInitRequest(
-                ai_provider="openai", ai_model="m", force_server_credentials=True
-            ),
+            ChatInitRequest(ai_provider="openai", ai_model="m"),
         )
     assert exc.value.status_code == 422
     assert await storage.count_chat_messages("job", username="bob") == 0
@@ -393,9 +349,7 @@ async def test_new_session_replaces_stale_welcome_but_keeps_replies(
     request = SimpleNamespace(
         state=SimpleNamespace(username="alice", is_admin=True, role="admin")
     )
-    body = ChatInitRequest(
-        ai_provider="openai", ai_model="chosen", force_server_credentials=False
-    )
+    body = ChatInitRequest(ai_provider="openai", ai_model="chosen")
     await main.init_chat(job_id, request, body)
 
     # A real exchange that must survive the next session.

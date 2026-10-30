@@ -486,10 +486,6 @@
 <td>AI timeout in minutes.</td>
 </tr>
 <tr>
-<td><code>--force-server-credentials</code> / <code>--no-force-server-credentials</code></td>
-<td>Use server-managed AI credentials instead of your own key.</td>
-</tr>
-<tr>
 <td><code>--raw-prompt</code></td>
 <td>Extra instructions appended to the AI prompt.</td>
 </tr>
@@ -1048,9 +1044,29 @@
 <td>Download one transcript JSONL. Admin only.</td>
 </tr>
 <tr>
-<td><code>users list</code></td>
+<td><code>audit list</code></td>
+<td><code>--actor</code>, <code>--action</code> (repeatable), <code>--target-type</code>, <code>--target-id</code>, <code>--outcome</code>, <code>--q</code>, <code>--since</code>, <code>--until</code>, <code>--limit</code> (50, max 500), <code>--offset</code></td>
+<td>Recorded audit events, newest first. Prints time, actor, action, target, and outcome, then the match count. <code>--actor</code> is case-insensitive and exact; <code>--q</code> searches event details; <code>--since</code>/<code>--until</code> take ISO 8601 timestamps (a date-only value means a UTC day, a timestamp without an offset is read as UTC). Admin only.</td>
+</tr>
+<tr>
+<td><code>audit actions</code></td>
 <td>—</td>
-<td>All users, roles, and grants.</td>
+<td>Every recorded action id with its event count, last-seen timestamp, and display label. Admin only.</td>
+</tr>
+<tr>
+<td><code>audit verify</code></td>
+<td><code>--limit</code> (verify only the newest N events)</td>
+<td>Recompute the tamper-evidence hash chain. Prints <code>Audit chain OK: N event(s) verified</code>, or the first broken event id and exits <code>1</code>. Rows written before the chain existed are reported as skipped, not broken, and a chain whose head was removed by retention pruning is reported as truncated (still exit <code>0</code> — a pruned boundary is not a break). <code>--json</code> prints the full result and still exits <code>1</code> on a broken chain. Admin only.</td>
+</tr>
+<tr>
+<td><code>audit export</code></td>
+<td><code>--format</code> (<code>json</code>, <code>csv</code>), <code>--output</code>/<code>-o</code> (file, or <code>-</code> for stdout), plus the <code>audit list</code> filters</td>
+<td>Stream the whole matching set to a file or stdout — uncapped, unlike <code>audit list</code>. This is how evidence is retained before retention pruning deletes it, which is why both hash columns travel with it. CSV columns: <code>id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, hash_version, prev_hash, entry_hash, hash_payload</code>; <code>sha256(hash_payload + prev_hash) == entry_hash</code> verifies a row offline, and a text cell starting with <code>'</code>, <code>=</code>, <code>+</code>, <code>-</code>, <code>@</code>, a tab or a CR carries one leading <code>'</code> escape (remove exactly one to recover the stored value). A row with no <code>hash_payload</code> is not verifiable — never treat it as verified. Admin only.</td>
+</tr>
+<tr>
+<td><code>users list</code></td>
+<td><code>--limit</code> (1–500), <code>--offset</code>, <code>--query</code> (case-insensitive username substring)</td>
+<td>Users, roles, grants and account state. The table always ends with <code>Showing 1–25 of 137 user(s)</code>, so a page never looks like the whole list; without <code>--limit</code> every user is returned.</td>
 </tr>
 <tr>
 <td><code>users create USERNAME</code></td>
@@ -1066,6 +1082,21 @@
 <td><code>users rotate-key USERNAME</code></td>
 <td>—</td>
 <td>Issue a new key for a user.</td>
+</tr>
+<tr>
+<td><code>users unlock USERNAME</code></td>
+<td>—</td>
+<td>Clear a lockout (and its consecutive-failure counter). Records <code>admin.user_unlock</code>.</td>
+</tr>
+<tr>
+<td><code>users disable USERNAME</code></td>
+<td>—</td>
+<td>Disable an account without deleting it. Records <code>admin.user_disabled</code>.</td>
+</tr>
+<tr>
+<td><code>users enable USERNAME</code></td>
+<td>—</td>
+<td>Re-enable a previously disabled account. Records <code>admin.user_enabled</code>.</td>
 </tr>
 <tr>
 <td><code>users change-role USERNAME ROLE</code></td>
@@ -1189,6 +1220,8 @@
 <ul>
 <li><code>rootcoz results show JOB_ID --fields "result.summary,result.failures.test_name,result.failures.classification"</code> returns only what a report needs, which keeps large results cheap to poll.</li>
 <li><code>rootcoz results full JOB_ID --json</code> returns the complete picture in one call — failures with review state and effective classifications joined server-side, a precomputed summary, a paginated <code>tests</code> page, comments, and tracked-in links. Its <code>--status</code>/<code>--child-job</code>/<code>--child-build</code>/<code>--offset</code>/<code>--limit</code> flags page the <code>tests</code> section.</li>
+<li><code>rootcoz admin audit list --since 2026-04-01T00:00:00Z --action admin.job_delete --action user.job_delete --json</code> reads back who deleted what this month, in one call.</li>
+<li><code>rootcoz admin audit export --format csv --output audit-q2.csv --since 2026-04-01 --until 2026-06-30</code> snapshots a quarter of evidence before retention prunes it, and <code>rootcoz admin audit verify</code> proves the stored chain has not been edited.</li>
 <li><code>rootcoz admin token-usage --group-by model --format csv &gt; usage.csv</code> is the only command with a first-class CSV mode; everything else uses <code>--json</code>.</li>
 <li><code>rootcoz --server staging</code> switches servers without editing any file, and <code>rootcoz config servers</code> shows which name maps to which URL.</li>
 <li><code>rootcoz analyze --source file -f results.xml</code> works with no Jenkins or Prow access at all.</li>

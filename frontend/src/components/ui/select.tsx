@@ -2,6 +2,7 @@ import * as React from "react"
 import * as SelectPrimitive from "@radix-ui/react-select"
 import { Check, ChevronDown } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { CONTROL_CLASS } from "@/lib/controlStyles"
 
 const Select = SelectPrimitive.Root
 const SelectGroup = SelectPrimitive.Group
@@ -14,7 +15,8 @@ const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-9 w-full items-center justify-between rounded-full border border-border-default bg-surface-elevated px-4 py-2 text-sm text-text-primary ring-offset-surface-card placeholder:text-text-tertiary transition-colors hover:bg-surface-hover focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      CONTROL_CLASS,
+      "flex w-full items-center justify-between px-4 py-2 text-sm text-text-primary ring-offset-surface-card placeholder:text-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
       className,
     )}
     {...props}

@@ -66,14 +66,14 @@ function foldCatalogKeys<T>(record: Record<string, T>): FoldedRecord<T> {
   return { folded, originalIds }
 }
 
-function loadProviderCatalog(cacheKey: string, forceServer: boolean): Promise<CatalogState> {
+function loadProviderCatalog(cacheKey: string): Promise<CatalogState> {
   const cached = catalogCache.get(cacheKey)
   if (cached) return Promise.resolve(cached)
   const inflight = catalogInflight.get(cacheKey)
   if (inflight) return inflight
   const generation = catalogGeneration
   const req = api
-    .get<AiModelsResponse>(`/api/ai-models?force_server_credentials=${forceServer}`)
+    .get<AiModelsResponse>('/api/ai-models')
     .then((res) => {
       const { folded: providers, originalIds } = foldCatalogKeys(res.providers ?? {})
       const providerStatus = foldCatalogKeys(res.provider_status ?? {}).folded
@@ -124,8 +124,14 @@ export function useEnabledProviders(): string[] {
   return enabled
 }
 
-/** Models catalog + provider_status (e.g. cursor auth). */
-export function useProviderCatalog(forceServer = false): {
+/**
+ * Models catalog + provider_status (e.g. cursor auth).
+ *
+ * The catalog already carries a `credential_sources` list per model and the
+ * per-user server grant, so one request serves every consumer: a granted user
+ * sees server and own-key models, everyone else own-key (and free) models.
+ */
+export function useProviderCatalog(): {
   providerKeys: string[]
   providers: AiModelsResponse['providers']
   /** @deprecated Use providerKeys. */
@@ -135,7 +141,7 @@ export function useProviderCatalog(forceServer = false): {
   originalIds: Record<string, string>
 } {
   const { username, isAdmin, authenticated } = useAuth()
-  const cacheKey = `${catalogKeyFor(username, isAdmin, authenticated)}:${forceServer ? 'server' : 'default'}`
+  const cacheKey = catalogKeyFor(username, isAdmin, authenticated)
   const [reloadToken, setReloadToken] = useState(0)
   const [state, setState] = useState<{ key: string; catalog: CatalogState }>(() => ({
     key: cacheKey, catalog: catalogCache.get(cacheKey) ?? EMPTY_CATALOG,
@@ -152,7 +158,7 @@ export function useProviderCatalog(forceServer = false): {
   useEffect(() => {
     let ignore = false
     const generation = catalogGeneration
-    loadProviderCatalog(cacheKey, forceServer)
+    loadProviderCatalog(cacheKey)
       .then((next) => {
         if (!ignore && generation === catalogGeneration) setState({ key: cacheKey, catalog: next })
       })
@@ -162,7 +168,7 @@ export function useProviderCatalog(forceServer = false): {
     return () => {
       ignore = true
     }
-  }, [cacheKey, forceServer, reloadToken])
+  }, [cacheKey, reloadToken])
 
   return state.key === cacheKey ? state.catalog : catalogCache.get(cacheKey) ?? EMPTY_CATALOG
 }
@@ -191,11 +197,9 @@ export function useProviderOptions(
 
 /**
  * Cursor auth banner copy when provider_status.cursor.ok === false.
- * Pass the caller's credential mode so the banner matches the catalog the
- * caller actually selects models from.
  */
-export function useCursorAuthStatus(forceServer = false): ProviderStatus | null {
-  const { providerStatus } = useProviderCatalog(forceServer)
+export function useCursorAuthStatus(): ProviderStatus | null {
+  const { providerStatus } = useProviderCatalog()
   const st = providerStatus.cursor
   if (!st || st.ok) return null
   return st

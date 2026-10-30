@@ -18,6 +18,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import { CONTROL_CLASS } from '@/lib/controlStyles'
 import {
   Building2,
   Check,
@@ -256,10 +257,10 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
             aria-label="Saved filter presets"
             data-testid="filter-presets-trigger"
             className={cn(
-              'flex h-9 items-center gap-2 rounded-full border px-4 py-2 text-sm transition-colors focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50',
-              activePreset
-                ? 'border-signal-blue/40 bg-signal-blue/10 text-text-primary'
-                : 'border-border-default bg-surface-elevated text-text-primary hover:bg-surface-hover',
+              // A filter control beside the page's other controls: shared shape.
+              CONTROL_CLASS,
+              'flex items-center gap-2 px-4 py-2 text-sm text-text-primary transition-colors focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50',
+              activePreset && 'border-signal-blue/40 bg-signal-blue/10',
             )}
           >
             {modified && (
@@ -358,7 +359,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
           variant="secondary"
           size="sm"
           data-testid="filter-preset-update"
-          className="h-7 rounded-full px-3 text-xs"
+          className="h-7 px-3 text-xs"
           disabled={busy}
           onClick={updateActive}
           title={`Overwrite "${activePreset.name}" with the current filters`}
@@ -384,7 +385,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
           aria-label="Unload preset (keeps current filters)"
           title="Unload preset (keeps current filters)"
           data-testid="filter-preset-unload"
-          className="rounded-full p-1 text-text-tertiary hover:bg-surface-hover hover:text-text-primary"
+          className="rounded-md p-1 text-text-tertiary hover:bg-surface-hover hover:text-text-primary"
           onClick={() => setActiveId(null)}
         >
           <X className="h-3.5 w-3.5" />

@@ -34,6 +34,20 @@ export interface AdminUser {
   /** Stored DB flag for reports access (orthogonal to role; admins ignore this). */
   can_view_reports: boolean
   can_use_server_providers: boolean
+  /** Locked after too many consecutive failed logins; only an admin unlock clears it. */
+  locked: boolean
+  locked_at: string | null
+  /** Admin-disabled: cannot log in until re-enabled; data stays intact. */
+  disabled: boolean
+  failed_login_count: number
+}
+
+/** GET /api/admin/users — one window of accounts plus the count of the whole match. */
+export interface AdminUsersResponse {
+  users: AdminUser[]
+  total: number
+  limit: number
+  offset: number
 }
 
 export interface CreateUserRequest {
@@ -199,7 +213,6 @@ export interface AnalysisResult {
   cloning_repos?: string[]
   progress_phase?: string
   request_params?: {
-    force_server_credentials?: boolean
     ai_provider: string
     ai_model: string
     peer_ai_configs?: AiConfig[]
@@ -585,7 +598,6 @@ export interface FeedbackCreateResponse {
 /** Non-sensitive server settings returned by GET /api/default-server-settings. */
 export interface DefaultServerSettings {
   // AI configuration
-  force_server_credentials: boolean
   ai_provider: string
   ai_model: string
   ai_call_timeout: number

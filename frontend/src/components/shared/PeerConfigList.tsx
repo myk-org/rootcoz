@@ -13,9 +13,12 @@ export type PeerConfigWithId = AiConfig & { id: string }
 interface PeerConfigListProps {
   peerConfigs: PeerConfigWithId[]
   setPeerConfigs: React.Dispatch<React.SetStateAction<PeerConfigWithId[]>>
-  maxRounds: number
-  setMaxRounds: React.Dispatch<React.SetStateAction<number>>
+  /** Rounds editor, for callers that run peers with the request (analysis). */
+  maxRounds?: number
+  setMaxRounds?: React.Dispatch<React.SetStateAction<number>>
   forceServer?: boolean
+  /** Row-specific add label (Server Settings names the field it adds). */
+  addLabel?: string
 }
 
 export function PeerConfigList({
@@ -24,9 +27,14 @@ export function PeerConfigList({
   maxRounds,
   setMaxRounds,
   forceServer = false,
+  addLabel = 'Add Peer',
 }: PeerConfigListProps) {
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
-  const { providers, providerStatus } = useProviderCatalog(forceServer)
+  const { providers, providerStatus } = useProviderCatalog()
+  // Omitted where rounds are a server setting with its own row (E2E-F33).
+  const rounds = maxRounds !== undefined && setMaxRounds !== undefined
+    ? { value: maxRounds, set: setMaxRounds }
+    : null
 
   const updatePeer = (id: string, patch: Partial<PeerConfigWithId>) => {
     setPeerConfigs((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)))
@@ -92,19 +100,21 @@ export function PeerConfigList({
         }
       >
         <Plus className="h-3.5 w-3.5" />
-        Add Peer
+        {addLabel}
       </button>
-      <div className="space-y-1.5">
-        <FieldLabel>Max Rounds</FieldLabel>
-        <Input
-          type="number"
-          min={1}
-          max={10}
-          value={maxRounds}
-          onChange={(e) => setMaxRounds(toIntInRange(e.target.value, 1, 10, 1))}
-          className="w-24"
-        />
-      </div>
+      {rounds && (
+        <div className="space-y-1.5">
+          <FieldLabel>Max Rounds</FieldLabel>
+          <Input
+            type="number"
+            min={1}
+            max={10}
+            value={rounds.value}
+            onChange={(e) => rounds.set(toIntInRange(e.target.value, 1, 10, 1))}
+            className="w-24"
+          />
+        </div>
+      )}
     </>
   )
 }

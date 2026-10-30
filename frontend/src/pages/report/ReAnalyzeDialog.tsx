@@ -49,7 +49,6 @@ function initFormState(p: AnalysisResult['request_params'], result: AnalysisResu
     // to the server-side resolution chain on submit).
     aiProvider: normalizeProvider(p?.ai_provider || result.ai_provider || ''),
     aiModel: p?.ai_model || result.ai_model || '',
-    forceServerCredentials: p?.force_server_credentials === true,
     aiCallTimeout: p?.ai_call_timeout != null ? (p.ai_call_timeout as number) : undefined,
     rawPrompt: (p?.raw_prompt as string) || '',
     enablePeers: !!(p?.peer_ai_configs?.length) || resolvedPeers.length > 0,
@@ -94,7 +93,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const init = initFormState(params, result)
   const [aiProvider, setAiProvider] = useState(init.aiProvider)
   const [aiModel, setAiModel] = useState(init.aiModel)
-  const [forceServerCredentials, setForceServerCredentials] = useState(init.forceServerCredentials)
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(init.aiCallTimeout)
   const [rawPrompt, setRawPrompt] = useState(init.rawPrompt)
 
@@ -114,8 +112,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   const [maxArtifactsSize, setMaxArtifactsSize] = useState<number | undefined>(init.maxArtifactsSize)
   const [hadStoredAiPair, setHadStoredAiPair] = useState(init.hadStoredAiPair)
 
-  const effectiveForceServer = forceServerCredentials && canUseServerProviders
-  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
+  const { providers, providerStatus } = useProviderCatalog()
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -126,7 +123,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     const s = initFormState(result.request_params, result)
     setAiProvider(s.aiProvider)
     setAiModel(s.aiModel)
-    setForceServerCredentials(s.forceServerCredentials)
     setAiCallTimeout(s.aiCallTimeout)
     setRawPrompt(s.rawPrompt)
     setEnablePeers(s.enablePeers)
@@ -154,7 +150,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
   // configs, so they must not block validation either. Zero active peers while
   // peer review is enabled still blocks, as on the submit form.
   const activePeers = peerConfigs.filter((c) => c.ai_provider.trim())
-  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, activePeers, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders, deferPrimary)
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, activePeers, enablePeers, false, canUseServerProviders, canUseFreeProviders, deferPrimary)
 
   const handleSubmit = useCallback(async () => {
     if (aiUnavailable) {
@@ -175,7 +171,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
           : hadStoredAiPair
             ? { ai_provider: '', ai_model: '' }
             : {}),
-        force_server_credentials: effectiveForceServer,
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
         ...(enableJira !== undefined && { enable_jira: enableJira }),
         ...(jiraUrl && { jira_url: jiraUrl }),
@@ -215,7 +210,6 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
     aiProvider,
     aiModel,
     hadStoredAiPair,
-    effectiveForceServer,
     aiUnavailable,
     aiCallTimeout,
     rawPrompt,
@@ -295,7 +289,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} />
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={false} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -310,18 +304,14 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={false} />
             </div>
             {deferPrimary && (
               <p className="text-[11px] text-text-tertiary">
                 Left empty, the provider and model are resolved by the server from the repository settings or the admin's server settings.
               </p>
             )}
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-text-secondary">Use server credentials</span>
-              <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
-            </div>
-            {!canUseServerProviders && <CredentialAccessNotice className="mt-2" message={params?.force_server_credentials ? 'The original analysis used server credentials, but you no longer have access. Select a model available with your own AI key or ask an admin for access.' : undefined} />}
+            {!canUseServerProviders && <CredentialAccessNotice className="mt-2" />}
             <div className="space-y-1.5">
               <FieldLabel>Raw Prompt</FieldLabel>
               <textarea
@@ -356,7 +346,7 @@ export function ReAnalyzeDialog({ open, onOpenChange, result, jobId, failureUuid
                 setPeerConfigs={setPeerConfigs}
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
-                forceServer={effectiveForceServer}
+                forceServer={false}
               />
             )}
           </Section>

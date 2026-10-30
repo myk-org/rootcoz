@@ -157,14 +157,12 @@ async def test_call_ai_passes_exact_catalog_pair_to_sidecar(
     monkeypatch.setattr(ai_client, "_call_ai", call)
     monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
     token = ai_client.ai_username.set("admin")
-    force_token = ai_client.force_server_credentials.set(True)
     try:
         assert (
             await call_ai_under_test("prompt", ai_provider=provider, ai_model=model)
             is result
         )
     finally:
-        ai_client.force_server_credentials.reset(force_token)
         ai_client.ai_username.reset(token)
     assert result.credential_source == "server"
     call.assert_awaited_once_with("prompt", ai_provider=provider, ai_model=model)

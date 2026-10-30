@@ -1,0 +1,7127 @@
+"""Tests for the structured audit trail (#379).
+
+Two layers: the storage helpers, and ``main.record_audit`` — the single
+emission point that writes the row, emits the ``[AUDIT]`` log line and keeps
+secrets out of both.
+"""
+
+from __future__ import annotations
+
+import ast
+import asyncio
+import contextlib
+import csv
+import hashlib
+import io
+import json
+import logging
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from rootcoz import ai_client, main, monitoring, storage
+from rootcoz.encryption import encrypt_sensitive_fields
+from tests.conftest import admin_login, make_app_client
+
+MAIN_PATH = Path(__file__).resolve().parents[1] / "src" / "rootcoz" / "main.py"
+
+_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret  # gitleaks:allow
+_ADMIN_HEADERS = {"Authorization": f"Bearer {_ADMIN_KEY}"}
+_SECRET = "sk-live-0a1b2c3d0a1b2c3d"  # pragma: allowlist secret  # gitleaks:allow
+
+
+@pytest.fixture
+def audit_db(tmp_path, monkeypatch) -> Path:
+    """Isolated, schema-initialized DB for the audit tests."""
+    db_path = tmp_path / "results.db"
+    monkeypatch.setattr(storage, "DB_PATH", db_path)
+    asyncio.run(storage.init_db())
+    return db_path
+
+
+def _events(**filters: Any) -> list[dict[str, Any]]:
+    """Synchronous read of the recorded events (endpoint tests are sync)."""
+    return asyncio.run(storage.list_audit_events(**filters))["events"]
+
+
+def _fake_request(
+    *,
+    role: str = "admin",
+    is_admin: bool = False,
+    headers: dict[str, str] | None = None,
+    client_host: str | None = "10.0.0.7",
+) -> Any:
+    """Minimal stand-in for a Starlette Request on the audit code paths."""
+    return SimpleNamespace(
+        state=SimpleNamespace(role=role, is_admin=is_admin),
+        headers=headers or {},
+        client=SimpleNamespace(host=client_host) if client_host else None,
+    )
+
+
+# --- storage round-trip ----------------------------------------------------
+
+
+async def test_insert_and_list_round_trip(audit_db: Path) -> None:
+    await storage.insert_audit_event(
+        action="user.job_delete",
+        actor="alice",
+        actor_role="operator",
+        target_type="job",
+        target_id="job-1",
+        details={"reason": "cleanup"},
+    )
+    await storage.insert_audit_event(
+        action="auth.login",
+        actor="bob",
+        is_admin=True,
+        actor_role="admin",
+        outcome="success",
+        request_ip="203.0.113.9",
+    )
+
+    result = await storage.list_audit_events()
+    assert result["total"] == 2
+    events = result["events"]
+    # Newest first.
+    assert [e["action"] for e in events] == ["auth.login", "user.job_delete"]
+    login = events[0]
+    assert login["actor"] == "bob"
+    assert login["is_admin"] is True
+    assert login["request_ip"] == "203.0.113.9"
+    assert login["details"] == {}
+    assert events[1]["details"] == {"reason": "cleanup"}
+    assert events[1]["target_type"] == "job"
+    assert events[1]["target_id"] == "job-1"
+
+
+async def test_details_stored_compact_and_non_ascii_unescaped(audit_db: Path) -> None:
+    """The stored text is exactly what the browser's JSON.stringify produces."""
+    await storage.insert_audit_event(
+        action="admin.setting_persist",
+        actor="alice",
+        details={"key": "value", "note": "naïve"},
+    )
+
+    with sqlite3.connect(audit_db) as conn:
+        (raw,) = conn.execute(
+            "SELECT details FROM audit_events WHERE action = 'admin.setting_persist'"
+        ).fetchone()
+    assert raw == '{"key":"value","note":"naïve"}'
+
+
+async def test_details_search_covers_compact_and_legacy_rows(audit_db: Path) -> None:
+    await storage.insert_audit_event(
+        action="action.compact", actor="alice", details={"key": "value"}
+    )
+    # Pre-compact rows kept json.dumps' spaced defaults.
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "INSERT INTO audit_events (actor, action, details) VALUES ('alice', ?, ?)",
+            ("action.legacy", json.dumps({"key": "value"})),
+        )
+
+    compact = await storage.list_audit_events(q='"key":"value"')
+    assert sorted(event["action"] for event in compact["events"]) == [
+        "action.compact",
+        "action.legacy",
+    ]
+
+    # A spaced fragment matches the legacy row (and only it).
+    spaced = await storage.list_audit_events(q='"key": "')
+    assert [event["action"] for event in spaced["events"]] == ["action.legacy"]
+
+
+@pytest.mark.parametrize(
+    ("filters", "expected_action"),
+    [
+        ({"actor": "alice"}, "user.job_delete"),
+        ({"action": "admin.setting_persist"}, "admin.setting_persist"),
+        ({"target_type": "setting"}, "admin.setting_persist"),
+        ({"target_id": "job-1"}, "user.job_delete"),
+        ({"outcome": "denied"}, "auth.login_blocked"),
+    ],
+)
+async def test_list_filters(
+    audit_db: Path, filters: dict[str, str], expected_action: str
+) -> None:
+    await storage.insert_audit_event(
+        action="user.job_delete", actor="alice", target_type="job", target_id="job-1"
+    )
+    await storage.insert_audit_event(
+        action="admin.setting_persist",
+        actor="admin",
+        target_type="setting",
+        target_id="ai_model",
+    )
+    await storage.insert_audit_event(
+        action="auth.login_blocked",
+        actor="mallory",
+        outcome="denied",
+    )
+
+    result = await storage.list_audit_events(**filters)
+    assert result["total"] == 1
+    assert result["events"][0]["action"] == expected_action
+
+
+async def test_list_pagination_and_total(audit_db: Path) -> None:
+    for index in range(5):
+        await storage.insert_audit_event(
+            action=f"action.{index}", actor="alice", target_id=str(index)
+        )
+
+    page = await storage.list_audit_events(limit=2, offset=1)
+    assert page["total"] == 5
+    assert [e["action"] for e in page["events"]] == ["action.3", "action.2"]
+
+
+async def test_list_date_range_filter(audit_db: Path) -> None:
+    old = await storage.insert_audit_event(action="action.old", actor="alice")
+    await storage.insert_audit_event(action="action.new", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
+            (old["id"],),
+        )
+
+    recent = await storage.list_audit_events(date_from="2021-01-01T00:00:00")
+    assert [e["action"] for e in recent["events"]] == ["action.new"]
+    assert recent["total"] == 1
+
+
+async def test_distinct_audit_actions(audit_db: Path) -> None:
+    for _ in range(3):
+        await storage.insert_audit_event(action="auth.login", actor="alice")
+    await storage.insert_audit_event(action="job.delete", actor="bob")
+
+    actions = await storage.distinct_audit_actions()
+    assert [(entry["action"], entry["count"]) for entry in actions] == [
+        ("auth.login", 3),
+        ("job.delete", 1),
+    ]
+    assert all(entry["last_seen"] for entry in actions)
+
+
+async def test_prune_audit_events_by_cutoff(audit_db: Path) -> None:
+    old = await storage.insert_audit_event(action="action.old", actor="alice")
+    await storage.insert_audit_event(action="action.new", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
+            (old["id"],),
+        )
+
+    deleted = await storage.prune_audit_events("2021-01-01 00:00:00")
+    assert deleted == 1
+    remaining = await storage.list_audit_events()
+    assert [e["action"] for e in remaining["events"]] == ["action.new"]
+
+
+# --- record_audit ----------------------------------------------------------
+
+
+def _capture_main_logs(caplog: pytest.LogCaptureFixture) -> Any:
+    """Attach caplog to the main module logger (simple_logger sets propagate=False)."""
+    main_logger = main.logger
+    main_logger.setLevel(logging.INFO)
+    main_logger.addHandler(caplog.handler)
+    return main_logger
+
+
+async def test_record_audit_writes_row_and_log_line(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+
+    try:
+        await main.record_audit(
+            action="admin.user_create",
+            actor="admin",
+            message="Admin 'admin' created reviewer user 'carol'",
+            target_type="user",
+            target_id="carol",
+            details={"role": "reviewer"},
+            request=_fake_request(),
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    assert "[AUDIT] Admin 'admin' created reviewer user 'carol'" in caplog.text
+
+    result = await storage.list_audit_events(action="admin.user_create")
+    assert result["total"] == 1
+    event = result["events"][0]
+    assert event["actor"] == "admin"
+    assert event["target_id"] == "carol"
+    assert event["details"] == {"role": "reviewer"}
+    assert event["outcome"] == "success"
+
+
+async def test_record_audit_stores_compact_details(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    _capture_main_logs(caplog)
+
+    await main.record_audit(
+        action="admin.setting_persist",
+        actor="admin",
+        message="Admin 'admin' stored a setting",
+        details={"key": "value", "note": "naïve"},
+    )
+
+    with sqlite3.connect(audit_db) as conn:
+        (raw,) = conn.execute(
+            "SELECT details FROM audit_events WHERE action = 'admin.setting_persist'"
+        ).fetchone()
+    assert raw == '{"key":"value","note":"naïve"}'
+
+
+async def test_record_audit_swallows_db_failure(
+    audit_db: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The failure counter is process-wide; reset it so health tests stay hermetic.
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+
+    try:
+        with patch.object(
+            storage,
+            "insert_audit_event",
+            AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
+        ):
+            # Must not raise — an audit problem cannot fail the caller's action.
+            await main.record_audit(
+                action="auth.login",
+                actor="alice",
+                message="Login success: user='alice' is_admin=False",
+                request=_fake_request(),
+            )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    assert "Failed to persist audit event 'auth.login'" in caplog.text
+    assert "[AUDIT] Login success: user='alice' is_admin=False" in caplog.text
+
+
+async def test_record_audit_never_stores_swallowed_secret(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+
+    try:
+        await main.record_audit(
+            action="provider.key.store",
+            actor="admin",
+            message="Admin 'admin' stored server provider key for 'claude'",
+            target_type="provider",
+            target_id="claude",
+            details={
+                "provider": "claude",
+                "api_key": _SECRET,
+                "nested": {"token": _SECRET},
+            },
+            request=_fake_request(),
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    event = (await storage.list_audit_events(action="provider.key.store"))["events"][0]
+    assert _SECRET not in json.dumps(event)
+    assert _SECRET not in caplog.text
+    assert event["details"] == {"provider": "claude", "nested": {}}
+
+
+def test_redact_details_drops_sensitive_names() -> None:
+    redacted = main._redact_details(
+        {
+            "provider": "claude",
+            "api_key": _SECRET,
+            "jenkins_password": _SECRET,
+            "github_token": _SECRET,
+            "keys": ["ai_model"],
+            "redacted_keys": ["jenkins_password"],
+            "nested": {"secret": _SECRET, "test_name": "t"},
+        }
+    )
+    assert redacted == {
+        "provider": "claude",
+        "keys": ["ai_model"],
+        "redacted_keys": ["jenkins_password"],
+        "nested": {"test_name": "t"},
+    }
+
+
+def test_audit_setting_details_flags_sensitive_keys() -> None:
+    assert main._audit_setting_details("ai_model") == {
+        "key": "ai_model",
+        "changed": True,
+    }
+    assert main._audit_setting_details("jenkins_password") == {
+        "key": "jenkins_password",
+        "changed": True,
+        "redacted": True,
+    }
+
+
+# --- request IP ------------------------------------------------------------
+
+
+def test_request_ip_without_trusted_proxy_is_not_recorded() -> None:
+    request = _fake_request(headers={"x-forwarded-for": "203.0.113.9"})
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=False)
+    ):
+        assert main._audit_request_ip(request) is None
+
+
+def test_request_ip_uses_forwarded_header_behind_trusted_proxy() -> None:
+    request = _fake_request(headers={"x-forwarded-for": "203.0.113.9, 10.0.0.1"})
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
+    ):
+        assert main._audit_request_ip(request) == "203.0.113.9"
+
+
+def test_request_ip_falls_back_to_client_host() -> None:
+    request = _fake_request(client_host="10.0.0.7")
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
+    ):
+        assert main._audit_request_ip(request) == "10.0.0.7"
+
+
+async def test_record_audit_stores_request_ip_only_behind_trusted_proxy(
+    audit_db: Path,
+) -> None:
+    request = _fake_request(headers={"x-forwarded-for": "203.0.113.9"})
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
+    ):
+        await main.record_audit(
+            action="auth.login", actor="alice", message="m", request=request
+        )
+    with patch.object(
+        main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=False)
+    ):
+        await main.record_audit(
+            action="auth.login", actor="bob", message="m", request=request
+        )
+
+    events = (await storage.list_audit_events(action="auth.login"))["events"]
+    by_actor = {event["actor"]: event for event in events}
+    assert by_actor["alice"]["request_ip"] == "203.0.113.9"
+    assert by_actor["bob"]["request_ip"] is None
+
+
+# --- retention pruning -----------------------------------------------------
+
+
+async def test_prune_periodically_deletes_old_keeps_recent(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = await storage.insert_audit_event(action="action.old", actor="alice")
+    await storage.insert_audit_event(action="action.new", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
+            (old["id"],),
+        )
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=90, audit_max_rows=0),
+    )
+
+    assert await main.prune_audit_events_periodically() == 1
+    remaining = await storage.list_audit_events()
+    assert [e["action"] for e in remaining["events"]] == ["action.new"]
+
+
+async def test_prune_failure_does_not_consume_the_daily_slot(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed prune must leave the timestamp unset so the next call retries."""
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=90, audit_max_rows=0),
+    )
+    with patch.object(
+        storage,
+        "prune_audit_events",
+        AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
+    ):
+        assert await main.prune_audit_events_periodically() == 0
+    assert main._last_audit_prune_at == 0.0
+
+    old = await storage.insert_audit_event(action="action.old", actor="alice")
+    await storage.insert_audit_event(action="action.new", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
+            (old["id"],),
+        )
+
+    # No 24h wait: the retry happens on the very next call.
+    assert await main.prune_audit_events_periodically() == 1
+    assert main._last_audit_prune_at > 0
+
+
+async def test_prune_periodically_runs_at_most_daily(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await storage.insert_audit_event(action="action.keep", actor="alice")
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=90, audit_max_rows=0),
+    )
+
+    first = await main.prune_audit_events_periodically()
+    second = await main.prune_audit_events_periodically()
+    assert first == 0
+    assert second == 0
+    assert main._last_audit_prune_at > 0
+
+
+async def test_prune_disabled_when_retention_is_zero(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await storage.insert_audit_event(action="action.keep", actor="alice")
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=0, audit_max_rows=0),
+    )
+
+    assert await main.prune_audit_events_periodically() == 0
+    assert main._last_audit_prune_at == 0
+    assert (await storage.list_audit_events())["total"] == 1
+
+
+# --- migrated and new call sites -------------------------------------------
+# --- migrated and new call sites -------------------------------------------
+
+
+@pytest.fixture
+def temp_db_path(tmp_path: Path) -> Path:
+    return tmp_path / "app.db"
+
+
+def test_startup_prune_respects_saved_retention(tmp_path: Path, monkeypatch) -> None:
+    """A saved ``audit_retention_days=0`` (keep forever) survives a restart."""
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(storage, "DB_PATH", db_path)
+    asyncio.run(storage.init_db())
+    asyncio.run(storage.set_server_setting("audit_retention_days", "0"))
+    old = asyncio.run(storage.insert_audit_event(action="action.old", actor="alice"))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
+            (old["id"],),
+        )
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+
+    gen = make_app_client(db_path)
+    next(gen)  # app startup runs the lifespan (and the startup prune)
+    try:
+        events = asyncio.run(storage.list_audit_events())["events"]
+        assert [event["action"] for event in events] == ["action.old"]
+    finally:
+        with contextlib.suppress(StopIteration):
+            next(gen)
+
+
+async def test_log_stream_is_audited(audit_db: Path) -> None:
+    request = SimpleNamespace(
+        state=SimpleNamespace(role="admin", is_admin=True, username="admin"),
+        headers={},
+        client=None,
+    )
+
+    response = await main.stream_logs(request, lines=5, level="error")
+    await response.body_iterator.aclose()
+
+    events = (await storage.list_audit_events(action="logs.stream"))["events"]
+    assert len(events) == 1
+    assert events[0]["target_type"] == "logs"
+    assert events[0]["actor"] == "admin"
+    assert events[0]["details"] == {"lines": 5, "level": "ERROR"}
+
+
+@pytest.fixture
+def app_client(temp_db_path: Path):
+    """App client whose env/DB patches stay active for the whole test body."""
+    yield from make_app_client(temp_db_path)
+
+
+def test_login_success_is_audited(app_client) -> None:
+    admin_login(app_client)
+
+    events = _events(action="auth.login")
+    assert len(events) == 1
+    event = events[0]
+    assert event["actor"] == "admin"
+    assert event["is_admin"] is True
+    assert event["outcome"] == "success"
+    assert event["target_type"] == "user"
+    assert event["details"] == {"method": "api_key"}
+
+
+def test_login_records_a_session_authenticated_caller(app_client) -> None:
+    """A re-login by a caller who already holds a session says so."""
+    admin_login(app_client)
+    # The client keeps the cookies, so the second login carries a live session.
+    again = app_client.post(
+        "/api/auth/login",
+        json={
+            "username": "admin",
+            "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+        },
+    )
+    assert again.status_code == 200, again.text
+
+    methods = [event["details"]["method"] for event in _events(action="auth.login")]
+    assert methods == ["session", "api_key"]
+
+
+def test_login_records_a_proxy_authenticated_caller(temp_db_path: Path) -> None:
+    """An identity the trusted proxy vouched for is recorded as such."""
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        response = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+            headers={"X-Forwarded-User": "sso-user"},
+        )
+        assert response.status_code == 200, response.text
+        assert _events(action="auth.login")[0]["details"] == {"method": "proxy"}
+
+
+def test_login_failure_is_audited(app_client) -> None:
+    response = app_client.post(
+        "/api/auth/login",
+        json={
+            "username": "nobody",
+            "api_key": "wrong-key-0123456789",  # pragma: allowlist secret  # gitleaks:allow
+        },
+    )
+    assert response.status_code == 401
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 1
+    assert events[0]["actor"] == "nobody"
+    assert events[0]["outcome"] == "failure"
+    # The key belongs to no account at all.
+    assert events[0]["details"] == {"reason": "unknown_user"}
+
+
+def test_login_failure_reasons_are_distinguishable(app_client) -> None:
+    """One row per refused attempt, each naming why it was refused (#379)."""
+    unknown = app_client.post(
+        "/api/auth/login",
+        json={
+            "username": "ghost",
+            "api_key": "nobody-owns-this",  # pragma: allowlist secret
+        },
+    )
+    assert unknown.status_code == 401
+
+    registered = app_client.post("/api/auth/register", json={"username": "real"})
+    assert registered.status_code == 200, registered.text
+    other = app_client.post("/api/auth/register", json={"username": "other"})
+    assert other.status_code == 200, other.text
+    other_key = other.json()["api_key"]
+    # A key that is real but belongs to a different account.
+    bad_key = app_client.post(
+        "/api/auth/login", json={"username": "real", "api_key": other_key}
+    )
+    assert bad_key.status_code == 401
+
+    overlong_name = "a" * (main._LOGIN_MAX_USERNAME_LENGTH + 5)
+    overlong = app_client.post(
+        "/api/auth/login",
+        json={
+            "username": overlong_name,
+            "api_key": "some-key-here",  # pragma: allowlist secret
+        },
+    )
+    assert overlong.status_code == 401
+
+    reasons = [
+        event["details"]["reason"] for event in _events(action="auth.login_failed")
+    ]
+    assert reasons == ["overlong", "bad_key", "unknown_user"]
+
+
+def test_login_failure_reason_follows_the_account_not_the_key(app_client) -> None:
+    """A wrong key for a name that exists is ``bad_key``, never ``unknown_user``.
+
+    Live defect on #381: the bootstrap ``admin`` has no ``users`` row, so its
+    wrong-key attempt was recorded as an unknown user — the key was unknown,
+    the account was not.
+    """
+    known = app_client.post("/api/auth/register", json={"username": "known-a"})
+    assert known.status_code == 200, known.text
+
+    for username in ("admin", "known-a"):
+        refused = app_client.post(
+            "/api/auth/login",
+            json={"username": username, "api_key": "wrong"},  # pragma: allowlist secret
+        )
+        assert refused.status_code == 401, refused.text
+
+    ghost = app_client.post(
+        "/api/auth/login",
+        json={
+            "username": "no-such-account",
+            "api_key": "wrong",  # pragma: allowlist secret
+        },
+    )
+    assert ghost.status_code == 401, ghost.text
+
+    reasons = {
+        event["actor"]: event["details"]["reason"]
+        for event in _events(action="auth.login_failed")
+    }
+    assert reasons == {
+        "admin": "bad_key",
+        "known-a": "bad_key",
+        "no-such-account": "unknown_user",
+    }
+
+
+def test_a_blocked_login_names_its_reason(temp_db_path: Path) -> None:
+    """A pending account that authenticates is refused with reason=blocked."""
+    for client in make_app_client(temp_db_path, {"REQUIRE_APPROVAL": "true"}):
+        registered = client.post("/api/auth/register", json={"username": "pending-b"})
+        assert registered.status_code == 200, registered.text
+        key = registered.json()["api_key"]
+        asyncio.run(storage.set_user_status("pending-b", "pending"))
+
+        blocked = client.post(
+            "/api/auth/login", json={"username": "pending-b", "api_key": key}
+        )
+        assert blocked.status_code == 403, blocked.text
+
+        events = _events(action="auth.login_blocked")
+        assert len(events) == 1
+        assert events[0]["outcome"] == "denied"
+        assert events[0]["details"] == {"status": "pending", "reason": "blocked"}
+        assert _events(action="auth.login") == []
+
+
+def test_login_failure_for_unknown_username_keeps_it_verbatim(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The trail exists to name the username under attack, not to hide it."""
+    bad = {"username": "attacker-1", "api_key": "wrong"}  # pragma: allowlist secret
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    try:
+        response = app_client.post("/api/auth/login", json=bad)
+    finally:
+        main_logger.removeHandler(caplog.handler)
+    assert response.status_code == 401
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 1
+    assert events[0]["actor"] == "attacker-1"
+    assert events[0]["target_id"] == "attacker-1"
+    assert "Failed login attempt for username 'attacker-1'" in caplog.text
+
+
+def test_login_failure_for_a_real_account_keeps_its_exact_name(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    registered = app_client.post("/api/auth/register", json={"username": "real.user"})
+    assert registered.status_code == 200, registered.text
+
+    bad = {"username": "real.user", "api_key": "wrong"}  # pragma: allowlist secret
+    main_logger = _capture_main_logs(caplog)
+    try:
+        response = app_client.post("/api/auth/login", json=bad)
+    finally:
+        main_logger.removeHandler(caplog.handler)
+    assert response.status_code == 401
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 1
+    assert events[0]["actor"] == "real.user"
+    assert events[0]["target_id"] == "real.user"
+    assert "Failed login attempt for username 'real.user'" in caplog.text
+
+
+def test_login_username_that_is_a_hex_token_is_stored_verbatim(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A token typed as a username is the evidence, not a secret to hide."""
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    token = (
+        "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    try:
+        response = app_client.post(
+            "/api/auth/login",
+            json={"username": token, "api_key": "wrong"},  # pragma: allowlist secret
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+    assert response.status_code == 401
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 1
+    assert events[0]["actor"] == token
+    assert events[0]["target_id"] == token
+    assert f"Failed login attempt for username '{token}'" in caplog.text
+
+
+def test_login_username_over_the_length_limit_is_recorded_truncated(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An over-long name is refused like a bad credential, but stays visible."""
+    wrong_key = {"username": "nobody", "api_key": "wrong"}  # pragma: allowlist secret
+    baseline = app_client.post("/api/auth/login", json=wrong_key)
+
+    username = "a" * (main._LOGIN_MAX_USERNAME_LENGTH - 1) + "tail-beyond-the-limit"
+    assert len(username) > main._LOGIN_MAX_USERNAME_LENGTH
+    expected = f"{username[: main._LOGIN_MAX_USERNAME_LENGTH]}…"
+
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    try:
+        response = app_client.post(
+            "/api/auth/login",
+            json={"username": username, "api_key": "wrong"},  # pragma: allowlist secret
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    assert response.status_code == 401
+    assert response.json() == baseline.json()
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 2
+    over_long = next(event for event in events if event["actor"] == expected)
+    assert over_long["target_id"] == expected
+    assert f"Failed login attempt for username '{expected}'" in caplog.text
+    assert "tail-beyond-the-limit" not in json.dumps(events) + caplog.text
+    assert "[redacted]" not in json.dumps(over_long)
+
+
+def test_logout_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.post("/api/auth/logout")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="auth.logout")
+    assert len(events) == 1
+    event = events[0]
+    assert event["actor"] == "admin"
+    assert event["target_type"] == "user"
+    assert event["target_id"] == "admin"
+    assert event["outcome"] == "success"
+    # The session cookie is cleared, but its value is never a detail.
+    assert event["details"] == {"session_cleared": True}
+
+
+def test_settings_update_audits_keys_without_values(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/admin/settings",
+        json={"settings": {"ai_model": "test-model", "jenkins_password": _SECRET}},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="settings.update")
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert details["changed_keys"] == ["ai_model", "jenkins_password"]
+    assert details["redacted_keys"] == ["jenkins_password"]
+    # The pre-existing key list stays for consumers of the original shape.
+    assert details["keys"] == ["ai_model", "jenkins_password"]
+    assert _SECRET not in json.dumps(events[0])
+    assert events[0]["target_type"] == "setting"
+
+
+def test_settings_import_audits_changed_keys(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.post(
+        "/api/admin/settings/import",
+        json={"version": 1, "settings": {"ai_call_timeout": "25"}},
+    )
+    assert response.status_code == 200, response.text
+
+    details = _events(action="settings.import")[0]["details"]
+    assert details == {
+        "changed_keys": ["ai_call_timeout"],
+        "redacted_keys": [],
+        "keys": ["ai_call_timeout"],
+    }
+
+
+def test_settings_reset_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/admin/settings", json={"settings": {"ai_model": "test-model"}}
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.delete("/api/admin/settings/ai_model")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="settings.reset")
+    assert len(events) == 1
+    assert events[0]["target_id"] == "ai_model"
+    assert events[0]["details"] == {"key": "ai_model", "changed": True}
+
+
+def test_provider_key_store_audits_provider_not_key(app_client) -> None:
+    admin_login(app_client)
+    with (
+        patch.object(
+            main, "_canonical_key_provider_id", AsyncMock(return_value="claude")
+        ),
+        patch("rootcoz.ai_client.verify_ai_key", AsyncMock(return_value="accepted")),
+        patch.object(
+            main,
+            "_capture_key_scoped_models",
+            AsyncMock(return_value=([], "unsupported")),
+        ),
+        patch.object(main, "_seed_server_provider_selection", AsyncMock()),
+    ):
+        response = app_client.post(
+            "/api/admin/server-providers",
+            json={
+                "provider": "claude",
+                "api_key": _SECRET,
+                "verification_model": "test-model",
+            },
+        )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="provider.key.store")
+    assert len(events) == 1
+    assert events[0]["target_type"] == "provider"
+    assert events[0]["target_id"] == "claude"
+    assert events[0]["details"] == {"provider": "claude", "outcome": "accepted"}
+    assert _SECRET not in json.dumps(events[0])
+
+
+def test_deployment_key_promotion_has_its_own_action(app_client) -> None:
+    """A promoted deployment credential is not a manually entered key (#379)."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main, "_canonical_key_provider_id", AsyncMock(return_value="claude")
+        ),
+        patch("rootcoz.ai_client.verify_ai_key", AsyncMock(return_value="accepted")),
+        patch(
+            "rootcoz.ai_client.deployment_provider_credentials",
+            lambda: {"claude": _SECRET},
+        ),
+        patch.object(
+            main,
+            "_capture_key_scoped_models",
+            AsyncMock(return_value=([], "unsupported")),
+        ),
+        patch.object(main, "_seed_server_provider_selection", AsyncMock()),
+    ):
+        response = app_client.post(
+            "/api/admin/server-providers/claude/store-deployment-key",
+            json={"verification_model": "test-model"},
+        )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="provider.key.promote")
+    assert len(events) == 1
+    event = events[0]
+    assert event["target_type"] == "provider"
+    assert event["target_id"] == "claude"
+    assert event["outcome"] == "success"
+    assert event["details"] == {"provider": "claude", "outcome": "accepted"}
+    assert _SECRET not in json.dumps(event)
+    # The manual-entry action is not written for a promotion.
+    assert _events(action="provider.key.store") == []
+
+
+def test_a_rejected_promotion_is_audited(app_client) -> None:
+    """A promotion that never stores anything still leaves exactly one row."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main, "_canonical_key_provider_id", AsyncMock(return_value="claude")
+        ),
+        patch("rootcoz.ai_client.verify_ai_key", AsyncMock(return_value="rejected")),
+        patch(
+            "rootcoz.ai_client.deployment_provider_credentials",
+            lambda: {"claude": _SECRET},
+        ),
+    ):
+        response = app_client.post(
+            "/api/admin/server-providers/claude/store-deployment-key",
+            json={"verification_model": "test-model"},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is False
+
+    events = _events(action="provider.key.promote")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["target_id"] == "claude"
+    assert events[0]["details"] == {
+        "provider": "claude",
+        "reason": "verification_rejected",
+    }
+    assert _SECRET not in json.dumps(events[0])
+
+
+def test_a_refused_promotion_is_audited_once(app_client) -> None:
+    """No deployment credential to promote: a 404 and one failure row."""
+    admin_login(app_client)
+    with patch("rootcoz.ai_client.deployment_provider_credentials", dict):
+        response = app_client.post(
+            "/api/admin/server-providers/claude/store-deployment-key", json={}
+        )
+    assert response.status_code == 404, response.text
+
+    events = _events(action="provider.key.promote")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"] == {"provider": "claude", "reason": "not_found"}
+
+
+def test_analysis_rerun_is_audited_with_previous_classification(
+    app_client,
+) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-rerun",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "analysis_state": "submitted",
+                "failures": [
+                    {"test_name": "t1", "analysis": {"classification": "CODE"}},
+                    {"test_name": "t2", "analysis": {"classification": "CODE"}},
+                    {"test_name": "t3", "analysis": {"classification": "INFRA"}},
+                ],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                    }
+                ),
+            },
+        )
+    )
+    with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+        response = app_client.post(
+            "/results/job-rerun/analyze",
+            json={"ai_provider": "claude", "ai_model": "test-model"},
+        )
+    assert response.status_code == 202, response.text
+
+    events = _events(action="analysis.rerun")
+    assert len(events) == 1
+    event = events[0]
+    assert event["target_type"] == "job"
+    assert event["target_id"] == "job-rerun"
+    assert event["outcome"] == "success"
+    assert event["actor"] == "admin"
+    assert event["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "trigger": "manual",
+        "previous_classification": "CODE",
+    }
+
+
+def test_analysis_rerun_without_a_classification_omits_the_detail(
+    app_client,
+) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-fresh",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "analysis_state": "submitted",
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                    }
+                ),
+            },
+        )
+    )
+    with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+        response = app_client.post(
+            "/results/job-fresh/analyze",
+            json={"ai_provider": "claude", "ai_model": "test-model"},
+        )
+    assert response.status_code == 202, response.text
+    assert _events(action="analysis.rerun")[0]["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "trigger": "manual",
+    }
+
+
+def test_analysis_rerun_failure_is_audited(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-boom",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "analysis_state": "submitted",
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "raw",
+                        "failures": [{"test_name": "t", "error_message": "e"}],
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                    }
+                ),
+            },
+        )
+    )
+    with (
+        patch(
+            "rootcoz.main._enqueue_ci_source_analysis",
+            AsyncMock(side_effect=RuntimeError("queue down")),
+        ),
+        # The client re-raises: the audit row is written before the error escapes.
+        pytest.raises(RuntimeError),
+    ):
+        app_client.post(
+            "/results/job-boom/analyze",
+            json={"ai_provider": "claude", "ai_model": "test-model"},
+        )
+    assert _events(action="analysis.rerun")[0]["outcome"] == "failure"
+
+
+def _registered_user_session(app_client, username: str) -> dict[str, Any]:
+    """Register a user and return the kwargs that call the API as them."""
+    registered = app_client.post("/api/auth/register", json={"username": username})
+    assert registered.status_code == 200, registered.text
+    return {
+        "headers": {"Authorization": ""},
+        "cookies": {"rootcoz_session": registered.cookies.get("rootcoz_session")},
+    }
+
+
+def test_tracker_token_set_and_delete_audit_the_field_only(app_client) -> None:
+    session = _registered_user_session(app_client, "carol")
+
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    response = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token, "github_token": "gh-token-0123456789"},
+        **session,
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": ""},
+        **session,
+    )
+    assert response.status_code == 200, response.text
+
+    sets = _events(action="user.tracker_token_set")
+    # One row per field that changed: the field is the whole point, and
+    # "the jira token" alone cannot tell the email from the secret (#379).
+    assert {event["details"]["field"] for event in sets} == {
+        "github_token",
+        "jira_token",
+    }
+    assert all(event["target_type"] == "user" for event in sets)
+    assert all(event["target_id"] == "carol" for event in sets)
+    deletes = _events(action="user.tracker_token_delete")
+    assert len(deletes) == 1
+    assert deletes[0]["details"] == {"field": "jira_token"}
+    stored = json.dumps(sets + deletes)
+    assert token not in stored
+    assert "gh-token-0123456789" not in stored
+
+
+def test_tracker_token_audit_records_only_actual_changes(app_client) -> None:
+    """The profile form resubmits every field; only real changes are audited."""
+    session = _registered_user_session(app_client, "dave")
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+
+    first = app_client.put("/api/user/tokens", json={"jira_token": token}, **session)
+    assert first.status_code == 200, first.text
+    assert len(_events(action="user.tracker_token_set")) == 1
+
+    # Unchanged values, and empty fields that were never set, record nothing.
+    resubmit = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token, "github_token": "", "jira_sa_token": ""},
+        **session,
+    )
+    assert resubmit.status_code == 200, resubmit.text
+    assert len(_events(action="user.tracker_token_set")) == 1
+    assert _events(action="user.tracker_token_delete") == []
+
+    # Clearing a stored value is exactly one delete row, never a set row.
+    cleared = app_client.put("/api/user/tokens", json={"jira_token": ""}, **session)
+    assert cleared.status_code == 200, cleared.text
+    deletes = _events(action="user.tracker_token_delete")
+    assert len(deletes) == 1
+    assert deletes[0]["details"] == {"field": "jira_token"}
+    assert len(_events(action="user.tracker_token_set")) == 1
+
+    # Clearing an already empty field is not a change either.
+    again = app_client.put("/api/user/tokens", json={"jira_token": ""}, **session)
+    assert again.status_code == 200, again.text
+    assert len(_events(action="user.tracker_token_delete")) == 1
+
+
+def test_tracker_token_validation_failure_is_audited_once(app_client) -> None:
+    """A rejected save is one row, whatever the field count, and never a value."""
+    session = _registered_user_session(app_client, "gina")
+    bad_secret = "not-a-service-token"  # pragma: allowlist secret
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    response = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token, "jira_sa_token": bad_secret},
+        **session,
+    )
+    assert response.status_code == 400, response.text
+
+    events = _events(action="user.tracker_token_set")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["outcome"], event["target_type"]) == ("failure", "user")
+    assert event["target_id"] == "gina"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "fields": ["jira_token", "jira_sa_token"],
+    }
+    assert bad_secret not in json.dumps(event)
+
+    saved = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token},
+        **session,
+    )
+    assert saved.status_code == 200, saved.text
+    events = _events(action="user.tracker_token_set")
+    assert [event["outcome"] for event in events] == ["success", "failure"]
+
+
+def test_tracker_token_storage_failure_is_audited(app_client) -> None:
+    session = _registered_user_session(app_client, "helen")
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    with (
+        patch.object(
+            storage, "save_user_tokens", AsyncMock(side_effect=OSError("disk full"))
+        ),
+        pytest.raises(OSError),
+    ):
+        app_client.put(
+            "/api/user/tokens",
+            json={"jira_token": token},
+            **session,
+        )
+
+    event = _events(action="user.tracker_token_set")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "storage_error", "fields": ["jira_token"]}
+
+    saved = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token},
+        **session,
+    )
+    assert saved.status_code == 200, saved.text
+    assert len(_events(action="user.tracker_token_set")) == 2
+
+
+def test_comment_delete_is_audited_without_the_body(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-comments",
+            "",
+            "completed",
+            {
+                "job_name": "my-job",
+                "failures": [{"test_name": "test_a", "analysis": {}}],
+            },
+        )
+    )
+    created = app_client.post(
+        "/results/job-comments/comments",
+        json={"test_name": "test_a", "comment": "body text that must not be audited"},
+    )
+    assert created.status_code == 201, created.text
+    comment_id = created.json()["id"]
+
+    deleted = app_client.delete(f"/results/job-comments/comments/{comment_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    events = _events(action="comment.delete")
+    assert len(events) == 1
+    event = events[0]
+    assert event["target_type"] == "comment"
+    assert event["target_id"] == str(comment_id)
+    assert event["details"] == {"job_id": "job-comments", "test_name": "test_a"}
+    assert "body text" not in json.dumps(event)
+
+
+def test_comment_delete_keeps_a_uuid_job_id_in_the_details(app_client) -> None:
+    """A uuid4 job id is an id, not a credential: it stays verbatim."""
+    job_id = "123e4567-e89b-12d3-a456-426614174000"
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {"job_name": "my-job", "failures": [{"test_name": "test_a"}]},
+        )
+    )
+    created = app_client.post(
+        f"/results/{job_id}/comments",
+        json={"test_name": "test_a", "comment": "a note"},
+    )
+    assert created.status_code == 201, created.text
+    comment_id = created.json()["id"]
+
+    deleted = app_client.delete(f"/results/{job_id}/comments/{comment_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    event = _events(action="comment.delete")[0]
+    assert event["details"] == {"job_id": job_id, "test_name": "test_a"}
+    assert event["target_id"] == str(comment_id)
+
+
+def test_job_delete_is_audited(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.save_result(
+            "job-1",
+            status="completed",
+            result={"job_name": "my-job", "submitted_by": "admin"},
+        )
+    )
+    response = app_client.delete("/results/job-1")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="admin.job_delete")
+    assert len(events) == 1
+    assert events[0]["target_type"] == "job"
+    assert events[0]["target_id"] == "job-1"
+
+
+def test_export_push_is_audited(app_client) -> None:
+    exporter = AsyncMock()
+    exporter.push = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True, message="Pushed 2 items", details={"pushed": 2}
+        )
+    )
+    exporter.__enter__ = lambda self: exporter
+    exporter.__exit__ = lambda self, *exc: False
+
+    admin_login(app_client)
+    with (
+        patch.object(
+            main,
+            "get_result",
+            AsyncMock(return_value={"result": {"failures": [{"test_name": "t"}]}}),
+        ),
+        patch.object(main, "_build_export_context", AsyncMock(return_value=None)),
+        patch.object(main, "_create_exporter", return_value=exporter),
+    ):
+        response = app_client.post("/results/job-1/push/reportportal")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="export.push")
+    assert len(events) == 1
+    assert events[0]["details"] == {
+        "plugin": "reportportal",
+        "pushed": 2,
+        "outcome": "success",
+    }
+    assert events[0]["outcome"] == "success"
+    assert events[0]["target_id"] == "job-1"
+
+
+def test_export_push_to_an_unknown_job_is_audited(app_client) -> None:
+    """A push that never reaches the exporter still leaves one failure row."""
+    admin_login(app_client)
+    job_id = "123e4567-e89b-12d3-a456-426614174000"
+    with patch.object(main, "get_result", AsyncMock(return_value=None)):
+        response = app_client.post(f"/results/{job_id}/push/reportportal")
+    assert response.status_code == 404, response.text
+
+    events = _events(action="export.push")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["target_id"] == job_id
+    assert events[0]["details"] == {
+        "reason": "not_found",
+        "plugin": "reportportal",
+    }
+
+
+def test_export_push_with_the_exporter_disabled_is_audited(app_client) -> None:
+    admin_login(app_client)
+    job_id = "123e4567-e89b-12d3-a456-426614174000"
+    response = app_client.post(f"/results/{job_id}/push-reportportal")
+    assert response.status_code == 400, response.text
+
+    events = _events(action="export.push")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"]["plugin"] == "reportportal"
+    assert events[0]["details"]["reason"] == "invalid_request"
+
+
+# --- one row per action for the state changes an admin investigates (#379) ---
+
+_ANALYZE_BODY: dict[str, Any] = {
+    "type": "raw",
+    "failures": [
+        {"test_name": "test_a", "error_message": "assert False", "stack_trace": "l1"}
+    ],
+    "ai_provider": "claude",
+    "ai_model": "test-model",
+}
+
+
+def _store_job(job_id: str = "job-1", **overrides: Any) -> dict[str, Any]:
+    """Store one completed job with a single failure, for the row tests."""
+    result: dict[str, Any] = {
+        "job_name": "my-job",
+        "failures": [{"test_name": "test_a", "analysis": {}}],
+        **overrides,
+    }
+    asyncio.run(storage.save_result(job_id, "", "completed", result))
+    return result
+
+
+async def _boom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    """An enqueue that refuses the request instead of queueing a job."""
+    raise main.HTTPException(status_code=422, detail="Unsupported analysis type")
+
+
+def test_analysis_submit_is_audited(app_client) -> None:
+    admin_login(app_client)
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "test-model")),
+        ),
+        patch.object(main, "_validate_peer_configs", AsyncMock(return_value=None)),
+        patch.object(
+            main,
+            "_enqueue_ci_source_analysis",
+            AsyncMock(return_value={"job_id": "job-new"}),
+        ),
+    ):
+        response = app_client.post("/analyze", json=_ANALYZE_BODY)
+    assert response.status_code == 202, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert (event["target_type"], event["target_id"]) == ("job", "job-new")
+    assert event["details"] == {
+        "job_name": "raw-analysis",
+        "provider": "claude",
+        "model": "test-model",
+        "ingest_only": False,
+    }
+
+
+def test_analysis_submit_refusal_is_audited(app_client) -> None:
+    """An enqueue that never produced a job still leaves one failure row."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "test-model")),
+        ),
+        patch.object(main, "_validate_peer_configs", AsyncMock(return_value=None)),
+        patch.object(main, "_enqueue_ci_source_analysis", _boom),
+    ):
+        response = app_client.post("/analyze", json=_ANALYZE_BODY)
+    assert response.status_code == 422, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "failure"
+    assert event["target_id"] is None
+    assert event["details"] == {
+        "job_name": "raw-analysis",
+        "provider": "claude",
+        "model": "test-model",
+        "ingest_only": False,
+        "reason": "invalid_payload",
+    }
+
+
+def test_ingest_only_submit_is_audited(app_client) -> None:
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_enqueue_ci_source_analysis",
+        AsyncMock(return_value={"job_id": "job-submitted"}),
+    ):
+        response = app_client.post(
+            "/submit",
+            json={
+                "type": "raw",
+                "failures": [{"test_name": "test_a", "error_message": "x"}],
+            },
+        )
+    assert response.status_code == 202, response.text
+
+    event = _events(action="analysis.submit")[0]
+    assert event["details"]["ingest_only"] is True
+    assert event["target_id"] == "job-submitted"
+
+
+def test_analysis_submit_records_the_submitted_job_name(app_client) -> None:
+    """The row names the job the caller asked for, not the source fallback.
+
+    Live defect on #381: ``POST /submit`` with ``job_name`` recorded the
+    source's generic name, so the row pointed at nothing the caller sent.
+    """
+    admin_login(app_client)
+    submitted = "details-probe-1755999999"
+    with patch.object(
+        main,
+        "_enqueue_ci_source_analysis",
+        AsyncMock(return_value={"job_id": "job-named"}),
+    ):
+        response = app_client.post(
+            "/submit",
+            json={
+                "type": "raw",
+                "job_name": submitted,
+                "failures": [{"test_name": "test_a", "error_message": "x"}],
+            },
+        )
+    assert response.status_code == 202, response.text
+
+    details = _events(action="analysis.submit")[0]["details"]
+    assert details["job_name"] == submitted
+    assert details["ingest_only"] is True
+    # The dashboard name is still there, under its own key.
+    assert details["display_name"] == "raw-analysis"
+
+
+def test_analysis_submit_ai_config_failure_is_audited(app_client) -> None:
+    """An exit before the enqueue still leaves one row for the attempt."""
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_resolve_ai_config_allow_defer",
+        AsyncMock(
+            side_effect=main.HTTPException(
+                status_code=400, detail="AI provider is not configured"
+            )
+        ),
+    ):
+        response = app_client.post("/analyze", json=_ANALYZE_BODY)
+    assert response.status_code == 400, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "failure"
+    assert event["target_id"] is None
+    # Nothing was resolved, so no empty string is shipped as a value.
+    assert event["details"] == {"ingest_only": False, "reason": "invalid_request"}
+
+
+def test_analysis_submit_operator_denial_is_audited(app_client) -> None:
+    """The role gate now sits inside the audited scope."""
+    session = _registered_user_session(app_client, "viewer-audit")
+    response = app_client.post("/analyze", json=_ANALYZE_BODY, **session)
+    assert response.status_code == 403, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "denied"
+    assert event["details"]["reason"] == "forbidden"
+
+
+def test_analysis_submit_records_the_resolved_model(app_client) -> None:
+    """The row names the model that ran, not the empty request fields."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "server-default-model")),
+        ),
+        patch.object(main, "_validate_peer_configs", AsyncMock(return_value=None)),
+        patch.object(
+            main,
+            "_enqueue_ci_source_analysis",
+            AsyncMock(return_value={"job_id": "job-defaulted"}),
+        ),
+    ):
+        response = app_client.post(
+            "/analyze",
+            json={
+                "type": "raw",
+                "failures": [{"test_name": "test_a", "error_message": "x"}],
+            },
+        )
+    assert response.status_code == 202, response.text
+
+    event = _events(action="analysis.submit")[0]
+    assert event["details"] == {
+        "job_name": "raw-analysis",
+        "provider": "claude",
+        "model": "server-default-model",
+        "ingest_only": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_submit_is_not_logged_as_a_success(audit_db: Path) -> None:
+    """A cancelled enqueue produced no job, so it is a failure, not a success."""
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+
+    async def _prepare() -> tuple[str, str, str, str, Any]:
+        async def _enqueue() -> dict[str, Any]:
+            raise asyncio.CancelledError
+
+        return "claude", "test-model", "raw-analysis", "raw-analysis", _enqueue
+
+    with pytest.raises(asyncio.CancelledError):
+        await main._enqueue_audited_analysis(
+            request=request, ingest_only=False, prepare=_prepare
+        )
+
+    events = (await storage.list_audit_events(action="analysis.submit"))["events"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "ingest_only": False,
+        "job_name": "raw-analysis",
+        "provider": "claude",
+        "model": "test-model",
+        "reason": "cancelled",
+    }
+    assert event["target_id"] is None
+
+
+def test_failure_re_analyze_is_audited(app_client) -> None:
+    admin_login(app_client)
+    failure_uuid = "123e4567-e89b-12d3-a456-426614174000"
+    _store_job(
+        "job-failure",
+        failures=[
+            {"test_name": "test_a", "id": failure_uuid, "analysis": {}},
+        ],
+        request_params=encrypt_sensitive_fields(
+            {"ai_provider": "claude", "ai_model": "test-model", "submitted_by": "admin"}
+        ),
+    )
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "test-model")),
+        ),
+        patch.object(
+            main, "_reanalyze_failure_background", AsyncMock(return_value=None)
+        ),
+        patch.object(main, "notify_job_status_changed"),
+    ):
+        response = app_client.post(f"/api/failures/{failure_uuid}/re-analyze")
+    assert response.status_code == 202, response.text
+
+    events = _events(action="analysis.rerun")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-failure"
+    assert event["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "trigger": "failure",
+        "failure_uuid": failure_uuid,
+        "test_name": "test_a",
+    }
+
+
+def test_failure_re_analyze_of_an_unknown_failure_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.post("/api/failures/no-such-uuid/re-analyze")
+    assert response.status_code == 404, response.text
+
+    events = _events(action="analysis.rerun")
+    assert len(events) == 1
+    event = events[0]
+    # Same target as the success row (the parent job, unknown here), with the
+    # failure uuid in the details so a job filter still surfaces both.
+    assert (event["outcome"], event["target_type"]) == ("failure", "job")
+    assert event["target_id"] is None
+    assert event["details"] == {
+        "reason": "not_found",
+        "trigger": "failure",
+        "failure_uuid": "no-such-uuid",
+    }
+
+
+def test_failure_re_analyze_refusal_names_the_parent_job(app_client) -> None:
+    """A refused rerun on a known job filters the same way as the success row."""
+    admin_login(app_client)
+    failure_uuid = "123e4567-e89b-12d3-a456-426614174001"
+    # No request_params: the guard refuses before the rerun can be queued.
+    _store_job(
+        "job-refused",
+        failures=[{"test_name": "test_a", "id": failure_uuid, "analysis": {}}],
+    )
+
+    response = app_client.post(f"/api/failures/{failure_uuid}/re-analyze")
+    assert response.status_code == 400, response.text
+
+    event = _events(action="analysis.rerun")[0]
+    assert (event["outcome"], event["target_type"]) == ("failure", "job")
+    assert event["target_id"] == "job-refused"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "trigger": "failure",
+        "failure_uuid": failure_uuid,
+    }
+
+
+def test_comment_add_is_audited_without_the_body(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-comment")
+
+    response = app_client.post(
+        "/results/job-comment/comments",
+        json={"test_name": "test_a", "comment": "body text that must not be audited"},
+    )
+    assert response.status_code == 201, response.text
+
+    events = _events(action="comment.add")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-comment"
+    assert event["details"] == {
+        "test_name": "test_a",
+        "comment_id": response.json()["id"],
+    }
+    assert "body text" not in json.dumps(event)
+
+
+def test_comment_add_for_an_unknown_test_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-comment")
+
+    response = app_client.post(
+        "/results/job-comment/comments",
+        json={"test_name": "not_a_test", "comment": "a note"},
+    )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="comment.add")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "invalid_request", "test_name": "not_a_test"}
+
+
+def test_comment_add_denied_by_the_allow_list_is_audited(app_client) -> None:
+    """An authorization refusal before the body check still leaves one row."""
+    session = _registered_user_session(app_client, "denied-user")
+    _store_job("job-denied")
+
+    with patch.object(
+        main,
+        "_check_allow_list",
+        side_effect=main.HTTPException(status_code=403, detail="Not allowed"),
+    ):
+        response = app_client.post(
+            "/results/job-denied/comments",
+            json={"test_name": "test_a", "comment": "a note"},
+            **session,
+        )
+    assert response.status_code == 403, response.text
+
+    events = _events(action="comment.add")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "denied"
+    assert event["details"] == {"reason": "forbidden", "test_name": "test_a"}
+
+
+def test_comment_enrich_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-enrich")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich",
+            test_name="test_a",
+            comment="see https://github.com/o/r/pull/1",
+            username="admin",
+        )
+    )
+    with (
+        patch.object(
+            main,
+            "detect_github_prs",
+            return_value=[{"owner": "o", "repo": "r", "number": 1}],
+        ),
+        patch.object(main, "detect_github_issues", return_value=[]),
+        patch.object(
+            main, "fetch_github_pr_status", AsyncMock(return_value={"state": "open"})
+        ),
+    ):
+        response = app_client.post("/results/job-enrich/enrich-comments")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="comment.enrich")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-enrich"
+    assert event["details"] == {"count": 1, "job_id": "job-enrich"}
+
+
+def test_comment_enrich_failure_is_audited(app_client) -> None:
+    """An enrichment that raises still leaves one failure row."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            storage,
+            "get_comments_for_job",
+            AsyncMock(side_effect=RuntimeError("db down")),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        app_client.post("/results/job-enrich/enrich-comments")
+
+    event = _events(action="comment.enrich")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "internal_error", "job_id": "job-enrich"}
+    assert event["target_id"] == "job-enrich"
+
+    response = app_client.post("/results/job-enrich/enrich-comments")
+    assert response.status_code == 200, response.text
+    assert [event["outcome"] for event in _events(action="comment.enrich")] == [
+        "success",
+        "failure",
+    ]
+
+
+def test_pattern_override_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-pattern")
+
+    response = app_client.put(
+        "/results/job-pattern/override-pattern",
+        json={"test_name": "test_a", "pattern": "FLAKY"},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="pattern.override")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-pattern"
+    assert event["details"] == {"test_name": "test_a", "to": "FLAKY"}
+
+
+def test_pattern_override_for_an_unknown_test_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-pattern")
+
+    response = app_client.put(
+        "/results/job-pattern/override-pattern",
+        json={"test_name": "not_a_test", "pattern": "FLAKY"},
+    )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="pattern.override")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "test_name": "not_a_test",
+        "pattern": "FLAKY",
+    }
+
+
+def test_classification_override_records_from_and_to(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-classify")
+
+    first = app_client.post(
+        "/history/classify",
+        json={
+            "test_name": "test_a",
+            "classification": "FLAKY",
+            "job_id": "job-classify",
+        },
+    )
+    assert first.status_code == 201, first.text
+    second = app_client.post(
+        "/history/classify",
+        json={
+            "test_name": "test_a",
+            "classification": "REGRESSION",
+            "job_id": "job-classify",
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    events = _events(action="classification.override")
+    assert [event["details"] for event in events] == [
+        {"test_name": "test_a", "from": "FLAKY", "to": "REGRESSION"},
+        {"test_name": "test_a", "from": "", "to": "FLAKY"},
+    ]
+    assert all(event["target_id"] == "job-classify" for event in events)
+    assert all(event["outcome"] == "success" for event in events)
+
+
+def test_classification_override_refusal_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-classify")
+
+    response = app_client.post(
+        "/history/classify",
+        json={"test_name": " ", "classification": "FLAKY", "job_id": "job-classify"},
+    )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="classification.override")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "test_name": "",
+        "to": "FLAKY",
+    }
+
+
+def test_classification_override_from_uses_the_child_job_pattern(app_client) -> None:
+    """A child-job classification reads that child's previous pattern, not the parent's."""
+    admin_login(app_client)
+    _store_job("job-child")
+    asyncio.run(
+        storage.set_test_classification(
+            test_name="test_a",
+            classification="FLAKY",
+            job_id="job-child",
+            job_name="child-job",
+            child_build_number=7,
+            visible=1,
+        )
+    )
+
+    response = app_client.post(
+        "/history/classify",
+        json={
+            "test_name": "test_a",
+            "classification": "REGRESSION",
+            "job_id": "job-child",
+            "job_name": "child-job",
+            "child_build_number": 7,
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    event = _events(action="classification.override")[0]
+    assert event["details"] == {
+        "test_name": "test_a",
+        "from": "FLAKY",
+        "to": "REGRESSION",
+    }
+
+
+def test_tags_set_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-tags")
+
+    response = app_client.put(
+        "/results/job-tags/tags", json={"tags": ["Foo", "bar", "foo"]}
+    )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="job.tags_set")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-tags"
+    assert event["details"] == {
+        "added": ["foo", "bar"],
+        "removed": [],
+        "tags": ["foo", "bar"],
+    }
+
+
+def test_tags_set_on_an_unknown_job_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put("/results/no-job/tags", json={"tags": ["foo"]})
+    assert response.status_code == 404, response.text
+
+    event = _events(action="job.tags_set")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "not_found"}
+
+
+def test_tags_set_with_a_malformed_body_is_audited(app_client) -> None:
+    """Invalid JSON and a non-object body are attempts, not silent 400s."""
+    admin_login(app_client)
+    _store_job("job-tags")
+
+    malformed = app_client.put(
+        "/results/job-tags/tags",
+        content=b"{not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert malformed.status_code == 400, malformed.text
+    not_object = app_client.put("/results/job-tags/tags", json=["foo"])
+    assert not_object.status_code == 400, not_object.text
+
+    events = _events(action="job.tags_set")
+    assert [event["outcome"] for event in events] == ["failure", "failure"]
+    assert all(event["details"] == {"reason": "invalid_request"} for event in events)
+
+    saved = app_client.put("/results/job-tags/tags", json={"tags": ["foo"]})
+    assert saved.status_code == 200, saved.text
+    assert _events(action="job.tags_set")[0]["outcome"] == "success"
+    assert len(_events(action="job.tags_set")) == 3
+
+
+def test_bulk_metadata_set_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/jobs/metadata/bulk",
+        json={"items": [{"job_name": "j1"}, {"job_name": "j2"}]},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="job.metadata_set")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["details"] == {"bulk": True, "count": 2, "keys": []}
+
+
+def test_bulk_metadata_set_refusal_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/jobs/metadata/bulk", json={"items": [{"job_name": ""}]}
+    )
+    assert response.status_code == 422, response.text
+
+    event = _events(action="job.metadata_set")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_payload",
+        "bulk": True,
+        "count": 1,
+    }
+
+
+def test_job_metadata_set_storage_failure_is_audited(app_client) -> None:
+    """A failed write leaves one row and the client sees the same error."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            storage, "set_job_metadata", AsyncMock(side_effect=RuntimeError("db down"))
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        app_client.put("/api/jobs/my-job/metadata", json={"team": "core"})
+
+    events = _events(action="job.metadata_set")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"] == {"reason": "internal_error"}
+    assert (events[0]["target_type"], events[0]["target_id"]) == ("job", "my-job")
+
+    saved = app_client.put("/api/jobs/my-job/metadata", json={"team": "core"})
+    assert saved.status_code == 200, saved.text
+    assert [event["outcome"] for event in _events(action="job.metadata_set")] == [
+        "success",
+        "failure",
+    ]
+
+
+def test_job_metadata_delete_is_audited(app_client) -> None:
+    admin_login(app_client)
+    saved = app_client.put("/api/jobs/my-job/metadata", json={"team": "core"})
+    assert saved.status_code == 200, saved.text
+
+    response = app_client.delete("/api/jobs/my-job/metadata")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="job.metadata_delete")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert (event["target_type"], event["target_id"]) == ("job", "my-job")
+
+
+def test_job_metadata_delete_of_an_unknown_job_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.delete("/api/jobs/no-job/metadata")
+    assert response.status_code == 404, response.text
+
+    event = _events(action="job.metadata_delete")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "not_found"}
+
+
+def test_job_metadata_delete_records_what_was_cleared(app_client) -> None:
+    """The point of a delete row is what was lost, key by key."""
+    admin_login(app_client)
+    saved = app_client.put(
+        "/api/jobs/my-job/metadata",
+        json={"team": "core", "tier": "1", "labels": ["a"]},
+    )
+    assert saved.status_code == 200, saved.text
+
+    response = app_client.delete("/api/jobs/my-job/metadata")
+    assert response.status_code == 200, response.text
+
+    event = _events(action="job.metadata_delete")[0]
+    assert event["details"] == {
+        "cleared": {"team": "core", "tier": "1", "labels": ["a"]}
+    }
+    # ``version`` was never set, so it is not part of what was lost.
+    assert "version" not in event["details"]["cleared"]
+
+
+def test_job_metadata_delete_with_nothing_stored_says_so_deliberately(
+    app_client,
+) -> None:
+    """A row that cleared an empty record still says a delete happened."""
+    admin_login(app_client)
+    # An empty write creates the row this delete then removes.
+    created = app_client.put("/api/jobs/empty-job/metadata", json={})
+    assert created.status_code == 200, created.text
+
+    response = app_client.delete("/api/jobs/empty-job/metadata")
+    assert response.status_code == 200, response.text
+
+    event = _events(action="job.metadata_delete")[0]
+    assert event["details"] == {"cleared": {}}
+    assert event["outcome"] == "success"
+
+
+def test_job_metadata_set_records_the_fields_it_touched(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put("/api/jobs/my-job/metadata", json={"team": "core"})
+    assert response.status_code == 200, response.text
+
+    event = _events(action="job.metadata_set")[0]
+    assert event["details"] == {"keys": ["team"]}
+    assert event["outcome"] == "success"
+
+
+def test_tracked_in_set_and_delete_are_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-tracked")
+
+    created = app_client.put(
+        "/results/job-tracked/tracked-in",
+        json={"test_name": "test_a", "url": "https://github.com/o/r/issues/1"},
+    )
+    assert created.status_code == 200, created.text
+    link_id = created.json()["id"]
+
+    deleted = app_client.delete(f"/results/job-tracked/tracked-in/{link_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    sets = _events(action="tracked_in.set")
+    assert len(sets) == 1
+    assert sets[0]["target_id"] == "job-tracked"
+    assert sets[0]["details"] == {
+        "test_name": "test_a",
+        "type": "github",
+        "link_id": link_id,
+        "changed": "added",
+    }
+    # The URL is deliberately absent: a tracker link can carry userinfo.
+    assert "github.com" not in json.dumps(sets[0])
+
+    deletes = _events(action="tracked_in.delete")
+    assert len(deletes) == 1
+    assert deletes[0]["details"] == {
+        "link_id": link_id,
+        "type": "github",
+        "test_name": "test_a",
+        "changed": "cleared",
+    }
+
+
+def test_tracked_in_set_says_whether_the_link_was_added_or_updated(app_client) -> None:
+    """Re-posting the same url updates a link; a new url adds one."""
+    admin_login(app_client)
+    _store_job("job-tracked")
+
+    first = app_client.put(
+        "/results/job-tracked/tracked-in",
+        json={"test_name": "test_a", "url": "https://github.com/o/r/issues/1"},
+    )
+    assert first.status_code == 200, first.text
+    again = app_client.put(
+        "/results/job-tracked/tracked-in",
+        json={"test_name": "test_a", "url": "https://github.com/o/r/issues/1"},
+    )
+    assert again.status_code == 200, again.text
+    other = app_client.put(
+        "/results/job-tracked/tracked-in",
+        json={"test_name": "test_a", "url": "https://github.com/o/r/issues/2"},
+    )
+    assert other.status_code == 200, other.text
+
+    changes = [
+        event["details"]["changed"] for event in _events(action="tracked_in.set")
+    ]
+    assert changes == ["added", "updated", "added"]
+
+
+def test_pattern_override_records_from_and_to(app_client) -> None:
+    """A pattern change reads from → to, like the classification override."""
+    admin_login(app_client)
+    _store_job("job-pattern")
+
+    classified = app_client.post(
+        "/history/classify",
+        json={
+            "test_name": "test_a",
+            "classification": "FLAKY",
+            "job_id": "job-pattern",
+        },
+    )
+    assert classified.status_code == 201, classified.text
+    overridden = app_client.put(
+        "/results/job-pattern/override-pattern",
+        json={"test_name": "test_a", "pattern": "REGRESSION"},
+    )
+    assert overridden.status_code == 200, overridden.text
+
+    event = next(
+        event
+        for event in _events(action="pattern.override")
+        if event["outcome"] == "success"
+    )
+    assert event["details"] == {
+        "test_name": "test_a",
+        "from": "FLAKY",
+        "to": "REGRESSION",
+    }
+
+
+def test_ingest_only_submit_never_ships_an_empty_provider(app_client) -> None:
+    """An ingest-only job resolves no AI pair, so none is recorded."""
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_enqueue_ci_source_analysis",
+        AsyncMock(return_value={"job_id": "job-submitted"}),
+    ):
+        response = app_client.post(
+            "/submit",
+            json={
+                "type": "raw",
+                "name": "my-job",
+                "failures": [{"test_name": "test_a", "error_message": "x"}],
+            },
+        )
+    assert response.status_code == 202, response.text
+
+    event = _events(action="analysis.submit")[0]
+    assert event["details"] == {"ingest_only": True, "job_name": "my-job"}
+    assert "" not in event["details"].values()
+
+
+def test_tracked_in_delete_of_an_unknown_link_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.delete("/results/job-tracked/tracked-in/4242")
+    assert response.status_code == 404, response.text
+
+    event = _events(action="tracked_in.delete")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "not_found", "link_id": 4242}
+
+
+def test_feedback_create_is_audited_without_the_body(app_client) -> None:
+    admin_login(app_client)
+    created = SimpleNamespace(
+        issue_url="https://github.com/o/r/issues/7", issue_number=7, title="A title"
+    )
+    with (
+        patch.object(
+            storage,
+            "get_user_tokens",
+            AsyncMock(return_value={"github_token": "gh-token-0123456789"}),
+        ),
+        patch.object(
+            main, "create_feedback_from_preview", AsyncMock(return_value=created)
+        ),
+    ):
+        response = app_client.post(
+            "/api/feedback/create",
+            json={
+                "title": "A title",
+                "body": "body text that must not be audited",
+                "labels": ["feedback"],
+            },
+        )
+    assert response.status_code == 201, response.text
+
+    events = _events(action="feedback.create")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert (event["target_type"], event["target_id"]) == ("feedback", "7")
+    assert event["details"] == {
+        "kind": "github_issue",
+        "issue_number": 7,
+        "issue_url": "https://github.com/o/r/issues/7",
+    }
+    stored = json.dumps(event)
+    assert "body text" not in stored
+    assert "gh-token-0123456789" not in stored
+
+
+def test_feedback_create_without_a_token_is_audited(app_client) -> None:
+    admin_login(app_client)
+    with patch.object(storage, "get_user_tokens", AsyncMock(return_value={})):
+        response = app_client.post(
+            "/api/feedback/create", json={"title": "A title", "body": "A body"}
+        )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="feedback.create")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "kind": "github_issue",
+    }
+    assert "A body" not in json.dumps(event)
+
+
+def test_global_model_refresh_is_audited(app_client) -> None:
+    admin_login(app_client)
+    sidecar = SimpleNamespace(refresh_models=AsyncMock(return_value={"claude": []}))
+    with (
+        patch("pi_sidecar_client.get_sidecar_client", return_value=sidecar),
+        patch.object(main, "update_model_catalog"),
+        patch.object(main, "clear_cursor_auth_cache"),
+        patch.object(main, "registered_provider_ids", AsyncMock(return_value=set())),
+        patch.object(
+            main, "build_friendly_catalog", return_value={"claude": [], "openai": []}
+        ),
+        patch.object(
+            main,
+            "capture_deployment_provider_listings",
+            AsyncMock(return_value={}),
+        ),
+    ):
+        response = app_client.post("/api/admin/ai-models/refresh")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="provider.models_refresh")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["details"] == {"scope": "all", "provider_count": 2}
+
+
+def test_global_model_refresh_failure_is_audited(app_client) -> None:
+    admin_login(app_client)
+    sidecar = SimpleNamespace(
+        refresh_models=AsyncMock(side_effect=RuntimeError("sidecar down"))
+    )
+    with patch("pi_sidecar_client.get_sidecar_client", return_value=sidecar):
+        response = app_client.post("/api/admin/ai-models/refresh")
+    assert response.status_code == 502, response.text
+
+    event = _events(action="provider.models_refresh")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "upstream_failure", "scope": "all"}
+
+
+def test_settings_export_records_sensitivity_and_key_count(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(storage.set_server_setting("ai_provider", "value-not-in-the-row"))
+
+    plain = app_client.get("/api/admin/settings/export")
+    assert plain.status_code == 200, plain.text
+    sensitive = app_client.get(
+        "/api/admin/settings/export", params={"include_sensitive": "true"}
+    )
+    assert sensitive.status_code == 200, sensitive.text
+
+    events = _events(action="admin.settings_export")
+    assert [(e["outcome"], e["details"]) for e in events] == [
+        ("success", {"include_sensitive": True, "keys": 1}),
+        ("success", {"include_sensitive": False, "keys": 1}),
+    ]
+    assert all(e["target_type"] == "settings" for e in events)
+    assert "value-not-in-the-row" not in json.dumps(events)
+
+
+def test_audit_export_is_audited_with_its_filters(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    for index in range(2):
+        asyncio.run(storage.insert_audit_event(action="action.x", actor="alice"))
+
+    response = app_client.get(
+        "/api/admin/audit/export", params={"format": "csv", "action": "action.x"}
+    )
+    assert response.status_code == 200, response.text
+    # The export record is written once the rows are on their way, so it can
+    # never appear in its own snapshot.
+    assert len(response.text.strip().splitlines()) == 3  # header + two rows
+
+    events = _events(action="audit.export")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["details"] == {
+        "format": "csv",
+        "filters": {"action": ["action.x"]},
+        "count": 2,
+    }
+
+
+def test_the_new_rows_never_carry_a_secret_or_a_comment_body(app_client) -> None:
+    """The trail may name what changed; it must never carry what was written."""
+    admin_login(app_client)
+    _store_job("job-secrets")
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    api_key = "sk-live-0a1b2c3d0a1b2c3d"  # pragma: allowlist secret  # gitleaks:allow
+    comment = "comment body that must not be audited"
+
+    session = _registered_user_session(app_client, "erin")
+    saved = app_client.put("/api/user/tokens", json={"jira_token": token}, **session)
+    assert saved.status_code == 200, saved.text
+    posted = app_client.post(
+        "/results/job-secrets/comments",
+        json={"test_name": "test_a", "comment": comment},
+    )
+    assert posted.status_code == 201, posted.text
+    with (
+        patch.object(
+            main, "supported_key_providers", AsyncMock(return_value=["openai"])
+        ),
+        patch.object(ai_client, "verify_ai_key", AsyncMock(return_value="rejected")),
+    ):
+        app_client.put(
+            "/api/user/ai-credentials/openai",
+            json={"api_key": api_key, "model": "gpt-4o"},
+            **session,
+        )
+
+    stored = json.dumps(_events())
+    assert token not in stored
+    assert api_key not in stored
+    assert comment not in stored
+
+
+@pytest.mark.asyncio
+async def test_ai_credential_set_records_the_model_and_whether_it_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An add and a rotation must be distinguishable afterwards (#379)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ai.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    monkeypatch.setattr(main, "registered_provider_ids", AsyncMock(return_value=set()))
+    from rootcoz import ai_client
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+
+    for key in ("first-key-000000", "second-key-111111"):  # pragma: allowlist secret
+        await main.set_user_ai_credential(
+            "openai",
+            main.AiCredentialInput(api_key=key, model="gpt-4o"),
+            request,
+        )
+
+    events = (await storage.list_audit_events(action="user.ai_credential_set"))[
+        "events"
+    ]
+    assert [event["details"] for event in events] == [
+        {"provider": "openai", "model": "gpt-4o", "replaced": True},
+        {"provider": "openai", "model": "gpt-4o", "replaced": False},
+    ]
+    assert [event["outcome"] for event in events] == ["success", "success"]
+    stored = json.dumps(events)
+    assert "first-key-000000" not in stored
+    assert "second-key-111111" not in stored
+
+
+@pytest.mark.asyncio
+async def test_ai_credential_failures_are_each_audited_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every failure path of a key save leaves exactly one failure row."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ai-failures.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    from rootcoz import ai_client
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+    key = "valid-key-000000"  # pragma: allowlist secret
+
+    # Invalid input: no model to verify against.
+    with pytest.raises(main.HTTPException):
+        await main.set_user_ai_credential(
+            "openai", main.AiCredentialInput(api_key=key, model=" "), request
+        )
+
+    # Verification refused the key.
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="rejected"))
+    rejected = await main.set_user_ai_credential(
+        "openai", main.AiCredentialInput(api_key=key, model="gpt-4o"), request
+    )
+    assert rejected.status_code == 200
+
+    # The stored map cannot be read, so the write is refused with 409.
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(side_effect=storage.UnreadableAiCredentialsError("broken")),
+    )
+    with pytest.raises(main.HTTPException) as unreadable:
+        await main.set_user_ai_credential(
+            "openai", main.AiCredentialInput(api_key=key, model="gpt-4o"), request
+        )
+    assert unreadable.value.status_code == 409
+
+    # Persistence failed after a successful verification.
+    monkeypatch.setattr(storage, "get_user_ai_credentials", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        storage,
+        "update_user_ai_credential",
+        AsyncMock(side_effect=RuntimeError("db down")),
+    )
+    with pytest.raises(RuntimeError):
+        await main.set_user_ai_credential(
+            "openai", main.AiCredentialInput(api_key=key, model="gpt-4o"), request
+        )
+
+    events = (await storage.list_audit_events(action="user.ai_credential_set"))[
+        "events"
+    ]
+    assert [event["outcome"] for event in events] == ["failure"] * 4
+    assert [event["details"]["reason"] for event in events] == [
+        "internal_error",
+        "unreadable_credentials",
+        "rejected",
+        "invalid_request",
+    ]
+    assert all(event["details"]["provider"] == "openai" for event in events)
+    assert key not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_ai_credential_case_variant_is_not_a_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new spelling is a new credential, not a rotation of a case-distinct one."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ai-case.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["Foo", "foo"])
+    )
+    monkeypatch.setattr(
+        main, "registered_provider_ids", AsyncMock(return_value={"Foo", "foo"})
+    )
+    from rootcoz import ai_client
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+
+    for provider, key in (
+        ("Foo", "first-key-000000"),
+        ("foo", "second-key-111111"),
+    ):  # pragma: allowlist secret
+        await main.set_user_ai_credential(
+            provider,
+            main.AiCredentialInput(api_key=key, model="gpt-4o"),
+            request,
+        )
+
+    events = (await storage.list_audit_events(action="user.ai_credential_set"))[
+        "events"
+    ]
+    assert [event["details"]["replaced"] for event in events] == [False, False]
+    assert [event["details"]["provider"] for event in events] == ["foo", "Foo"]
+
+
+def test_transcript_download_names_the_session_and_its_job(
+    app_client, tmp_path: Path
+) -> None:
+    """Without the ids the row says someone downloaded *a* transcript."""
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"message"}\n')
+    session_id = "123e4567-e89b-12d3-a456-426614174000"
+    asyncio.run(
+        storage.record_token_usage(
+            job_id="job-transcript",
+            ai_provider="claude",
+            ai_model="test-model",
+            call_type="analysis",
+            session_id=session_id,
+        )
+    )
+
+    admin_login(app_client)
+    with patch.object(main, "transcript_path", return_value=transcript):
+        response = app_client.get(f"/api/admin/transcripts/{session_id}")
+    assert response.status_code == 200, response.text
+
+    with patch.object(main, "transcript_path", return_value=None):
+        missing = app_client.get("/api/admin/transcripts/not-a-uuid")
+    assert missing.status_code == 400
+
+    events = _events(action="transcript.download")
+    assert [e["outcome"] for e in events] == ["failure", "success"]
+    assert events[1]["target_id"] == session_id
+    assert events[1]["details"] == {
+        "session_id": session_id,
+        "job_id": "job-transcript",
+    }
+    # An id that names no session still records what was asked for, and no
+    # invented job id.
+    assert events[0]["target_id"] == "not-a-uuid"
+    assert events[0]["details"] == {"session_id": "not-a-uuid"}
+
+
+def test_issue_create_is_audited(app_client) -> None:
+    admin_login(app_client)
+    with (
+        patch.object(
+            main, "_load_effective_failure", AsyncMock(return_value=(None, {}, None))
+        ),
+        patch.object(
+            main, "_resolve_github_repo_url", return_value="https://github.com/o/r"
+        ),
+        patch.object(
+            main,
+            "create_github_issue",
+            AsyncMock(return_value={"url": "https://github.com/o/r/issues/1"}),
+        ),
+        patch.object(main, "_add_tracker_comment", AsyncMock(return_value=1)),
+    ):
+        response = app_client.post(
+            "/results/job-1/create-github-issue",
+            json={
+                "test_name": "test_a",
+                "title": "T",
+                "body": "B",
+                "github_token": "gh-token-0123456789",
+            },
+        )
+    assert response.status_code == 201, response.text
+
+    events = _events(action="issue.create")
+    assert len(events) == 1
+    assert events[0]["details"]["tracker"] == "github"
+    assert events[0]["target_id"] == "job-1"
+
+
+def test_admin_db_query_is_audited_without_raw_sql(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post(
+            "/api/admin/db/query", json={"sql": "SELECT 'secret-value' AS v"}
+        )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="admin.db_query")
+    assert len(events) == 1
+    details = events[0]["details"]
+    assert set(details) == {"sql_hash", "rows"}
+    assert details["rows"] == 1
+    assert len(details["sql_hash"]) == 64
+    assert "secret-value" not in json.dumps(events[0])
+
+
+def test_admin_db_schema_is_audited(app_client, temp_db_path: Path) -> None:
+    admin_login(app_client)
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.get("/api/admin/db/schema")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="admin.db_schema")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "success"
+    assert events[0]["details"] == {"tables": len(response.json()["tables"])}
+
+
+async def test_admin_db_schema_denial_is_audited(audit_db: Path) -> None:
+    with pytest.raises(Exception) as exc_info:
+        await main.admin_db_schema(_fake_request(is_admin=False))
+    assert getattr(exc_info.value, "status_code", None) == 403
+
+    events = (await storage.list_audit_events(action="admin.db_schema"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "denied"
+    assert events[0]["details"] == {"reason": "forbidden"}
+
+
+def test_admin_db_query_with_a_parameter_placeholder_is_audited(
+    app_client, temp_db_path: Path
+) -> None:
+    """``SELECT ?`` raises ProgrammingError: still a 400 and still a failure row."""
+    admin_login(app_client)
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post("/api/admin/db/query", json={"sql": "SELECT ?"})
+    assert response.status_code == 400, response.text
+
+    events = _events(action="admin.db_query")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert set(events[0]["details"]) == {"sql_hash"}
+
+
+def test_admin_db_query_masks_credential_columns(
+    app_client, temp_db_path: Path
+) -> None:
+    """A query selecting a token column returns it masked, never in plaintext."""
+    admin_login(app_client)
+    secret = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post(
+            "/api/admin/db/query",
+            json={"sql": f"SELECT '{secret}' AS github_token, 1 AS n"},
+        )
+    assert response.status_code == 200, response.text
+
+    payload = response.json()
+    assert payload["rows"] == [{"github_token": "***", "n": 1}]
+    assert payload["count"] == 1
+    assert secret not in response.text
+    # The audit row keeps the count, and never the rows themselves.
+    details = _events(action="admin.db_query")[0]["details"]
+    assert details["rows"] == 1
+    assert secret not in json.dumps(details)
+
+
+def test_admin_db_query_rejection_is_audited_as_denied(
+    app_client, temp_db_path: Path
+) -> None:
+    """A rejected query form leaves a denied row, never the statement."""
+    admin_login(app_client)
+    sql = "DELETE FROM users WHERE username = 'secret-value'"
+    with patch.object(main, "DB_PATH", temp_db_path):
+        response = app_client.post("/api/admin/db/query", json={"sql": sql})
+    assert response.status_code == 400, response.text
+
+    events = _events(action="admin.db_query")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "denied"
+    assert events[0]["details"] == {"reason": "invalid_request"}
+    assert "secret-value" not in json.dumps(events[0])
+
+
+async def test_admin_db_query_by_a_non_admin_is_audited_as_denied(
+    audit_db: Path,
+) -> None:
+    with pytest.raises(Exception) as exc_info:
+        await main.admin_db_query(_fake_request(is_admin=False))
+    assert getattr(exc_info.value, "status_code", None) == 403
+
+    events = (await storage.list_audit_events(action="admin.db_query"))["events"]
+    assert len(events) == 1
+    assert events[0]["outcome"] == "denied"
+    assert events[0]["details"] == {"reason": "forbidden"}
+
+
+# --- GET /api/admin/audit --------------------------------------------------
+
+
+def _insert_audit(**fields: Any) -> dict[str, Any]:
+    """Synchronous insert helper for the endpoint tests."""
+    return asyncio.run(storage.insert_audit_event(**fields))
+
+
+def _clear_audit(db_path: Path) -> None:
+    """Drop the events the login itself recorded, so a test starts from zero."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM audit_events")
+
+
+def _csv_unescape(value: str) -> str:
+    """The documented inverse of the export escaping: drop one apostrophe."""
+    return value.removeprefix("'")
+
+
+def _export_hash(event: dict[str, Any]) -> str:
+    """The server's recomputation: payload text plus prev_hash, nothing mapped."""
+    return hashlib.sha256(
+        (event["hash_payload"] + event["prev_hash"]).encode()
+    ).hexdigest()
+
+
+def test_audit_endpoint_exposes_event_fields(app_client) -> None:
+    admin_login(app_client)
+    _insert_audit(
+        action="admin.setting_persist",
+        actor="alice",
+        actor_role="admin",
+        is_admin=True,
+        target_type="setting",
+        target_id="ai_model",
+        details={"key": "ai_model"},
+        request_ip="203.0.113.9",
+    )
+
+    response = app_client.get(
+        "/api/admin/audit", params={"action": "admin.setting_persist"}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["total"], body["limit"], body["offset"]) == (1, 50, 0)
+    event = body["events"][0]
+    assert event["actor"] == "alice"
+    assert event["actor_role"] == "admin"
+    assert event["is_admin"] is True
+    assert event["action"] == "admin.setting_persist"
+    assert event["target_type"] == "setting"
+    assert event["target_id"] == "ai_model"
+    assert event["outcome"] == "success"
+    assert event["details"] == {"key": "ai_model"}
+    assert event["request_ip"] == "203.0.113.9"
+    assert event["created_at"]
+    assert event["target_label"] is None
+    assert event["target_job_id"] is None
+
+
+def test_audit_endpoint_exposes_resolved_target_label(app_client) -> None:
+    admin_login(app_client)
+    _save_job(JOB_ID, JOB_NAME)
+    _insert_audit(
+        action="job.delete",
+        actor="alice",
+        target_type="job",
+        target_id=JOB_ID,
+    )
+
+    response = app_client.get("/api/admin/audit", params={"action": "job.delete"})
+    assert response.status_code == 200, response.text
+    event = response.json()["events"][0]
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, JOB_NAME)
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"actor": "ALICE"}, ["user.job_delete"]),
+        (
+            {"action": ["user.job_delete", "auth.login"]},
+            ["auth.login", "user.job_delete"],
+        ),
+        (
+            {"action": "auth.login,admin.setting_persist"},
+            ["admin.setting_persist", "auth.login"],
+        ),
+        ({"outcome": "denied"}, ["auth.login_blocked"]),
+        ({"target_type": "job"}, ["user.job_delete"]),
+        ({"target_id": "job-7"}, ["user.job_delete"]),
+        ({"q": "cleanup"}, ["user.job_delete"]),
+    ],
+)
+def test_audit_endpoint_filters(
+    app_client, temp_db_path: Path, params: dict[str, Any], expected: list[str]
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    _insert_audit(
+        action="user.job_delete",
+        actor="alice",
+        target_type="job",
+        target_id="job-7",
+        details={"reason": "cleanup"},
+    )
+    _insert_audit(action="auth.login", actor="bob")
+    _insert_audit(
+        action="admin.setting_persist",
+        actor="admin",
+        target_type="setting",
+        target_id="ai_model",
+    )
+    _insert_audit(action="auth.login_blocked", actor="mallory", outcome="denied")
+
+    response = app_client.get("/api/admin/audit", params=params)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [event["action"] for event in body["events"]] == expected
+    assert body["total"] == len(expected)
+
+
+def test_audit_endpoint_date_range(app_client, temp_db_path: Path) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    old = _insert_audit(action="action.old", actor="alice")
+    _insert_audit(action="action.new", actor="alice")
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z' WHERE id = ?",
+            (old["id"],),
+        )
+
+    since = app_client.get(
+        "/api/admin/audit", params={"since": "2021-01-01T00:00:00Z"}
+    ).json()
+    assert [event["action"] for event in since["events"]] == ["action.new"]
+
+    until = app_client.get(
+        "/api/admin/audit", params={"until": "2020-12-31T23:59:59+00:00"}
+    ).json()
+    assert [event["action"] for event in until["events"]] == ["action.old"]
+
+    bad = app_client.get("/api/admin/audit", params={"since": "yesterday"})
+    assert bad.status_code == 400
+
+    # A date-only bound covers the whole day, both ends.
+    midday = _insert_audit(action="action.midday", actor="alice")
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2022-06-15T15:00:00.000000Z' WHERE id = ?",
+            (midday["id"],),
+        )
+    same_day = app_client.get(
+        "/api/admin/audit", params={"since": "2022-06-15", "until": "2022-06-15"}
+    ).json()
+    assert [event["action"] for event in same_day["events"]] == ["action.midday"]
+
+
+def test_audit_endpoint_strips_sensitive_detail_fields(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    # Written straight to storage to simulate a row that escaped write-time
+    # redaction (older version, manual edit).
+    _insert_audit(
+        action="admin.db_query",
+        actor="alice",
+        details={
+            "sql_hash": "abc",
+            "request_params": {"github_token": _SECRET, "job_name": "keep"},
+        },
+    )
+
+    response = app_client.get("/api/admin/audit")
+    assert response.status_code == 200, response.text
+    assert _SECRET not in response.text
+    assert response.json()["events"][0]["details"] == {
+        "sql_hash": "abc",
+        "request_params": {"job_name": "keep"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("term", "expected"),
+    [
+        ("100%", ["action.literal"]),
+        ("naïve", ["action.unicode", "action.legacy"]),
+        ("cleanup", ["action.literal"]),
+    ],
+)
+async def test_list_details_search_treats_input_literally(
+    audit_db: Path, term: str, expected: list[str]
+) -> None:
+    await storage.insert_audit_event(
+        action="action.literal", actor="alice", details={"reason": "cleanup 100% done"}
+    )
+    await storage.insert_audit_event(
+        action="action.unicode", actor="alice", details={"note": "naïve path"}
+    )
+    # Pre-#379 rows stored json.dumps' ASCII-escaped form.
+    await storage.insert_audit_event(
+        action="action.other", actor="alice", details={"reason": "nothing here"}
+    )
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "INSERT INTO audit_events (actor, action, details)"
+            " VALUES ('alice', 'action.legacy', ?)",
+            (json.dumps({"note": "naïve path"}),),
+        )
+
+    result = await storage.list_audit_events(q=term)
+    assert sorted(event["action"] for event in result["events"]) == sorted(expected)
+
+
+# --- read-time target labels (#379) ----------------------------------------
+
+#: A canonical job id — ``main.py`` mints a uuid4 — and the job's display name.
+JOB_ID = "123e4567-e89b-12d3-a456-426614174000"
+JOB_NAME = "my-job"
+
+
+def _save_job(job_id: str, job_name: str) -> None:
+    """Store a job whose ``result_json.job_name`` is the label under test."""
+    asyncio.run(_save_job_async(job_id, job_name))
+
+
+async def _save_job_async(job_id: str, job_name: str) -> None:
+    await storage.save_result(job_id, status="completed", result={"job_name": job_name})
+
+
+async def _export_all() -> list[dict[str, Any]]:
+    """Every exported event, in the export's own order."""
+    return [event async for batch in storage.iter_audit_events() for event in batch]
+
+
+def test_audit_list_labels_a_job_target(audit_db: Path) -> None:
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.delete",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_ID,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, JOB_NAME)
+
+
+def test_audit_list_resolves_a_job_target_recorded_by_name(audit_db: Path) -> None:
+    """``job.metadata_set``/``_delete`` record the job name, not its id."""
+    _save_job(JOB_ID, JOB_NAME)
+    for action in ("job.metadata_set", "job.metadata_delete"):
+        asyncio.run(
+            storage.insert_audit_event(
+                action=action,
+                actor="alice",
+                target_type="job",
+                target_id=JOB_NAME,
+            )
+        )
+
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert [(event["target_job_id"], event["target_label"]) for event in events] == [
+        (JOB_ID, JOB_NAME)
+    ] * 2
+
+
+def test_audit_list_by_name_target_of_a_deleted_job_keeps_the_name(
+    audit_db: Path,
+) -> None:
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(storage.delete_job(JOB_ID))
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_delete",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_NAME,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert (event["target_job_id"], event["target_label"]) == (None, JOB_NAME)
+
+
+def test_audit_list_target_label_is_null_for_a_deleted_job(audit_db: Path) -> None:
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(storage.delete_job(JOB_ID))
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.delete",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_ID,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, None)
+
+
+def test_audit_list_labels_a_comment_with_its_job(audit_db: Path) -> None:
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(
+        storage.insert_audit_event(
+            action="comment.delete",
+            actor="alice",
+            target_type="comment",
+            target_id="122",
+            details={"job_id": JOB_ID},
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, JOB_NAME)
+
+
+def test_audit_list_target_label_is_null_for_other_target_types(audit_db: Path) -> None:
+    for target_type, target_id in (("user", "alice"), ("setting", "ai_model")):
+        asyncio.run(
+            storage.insert_audit_event(
+                action="action.other",
+                actor="alice",
+                target_type=target_type,
+                target_id=target_id,
+                details={"job_id": "job-1"},
+            )
+        )
+
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert [event["target_label"] for event in events] == [None, None]
+    assert [event["target_job_id"] for event in events] == [None, None]
+
+
+def test_audit_target_label_never_enters_the_hash(audit_db: Path) -> None:
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_NAME,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert event["target_job_id"] == JOB_ID
+    assert asyncio.run(storage.verify_audit_chain())["ok"] is True
+
+    exported = asyncio.run(_export_all())[0]
+    assert "target_label" not in exported["hash_payload"]
+    assert "target_job_id" not in exported["hash_payload"]
+    # The id was resolved, never stored: it appears nowhere in the payload.
+    assert JOB_ID not in exported["hash_payload"]
+    assert "target_job_id" not in exported
+
+
+async def test_audit_list_resolves_one_page_in_one_query(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page mixing ids and names costs one bulk query, not one per row."""
+    job_ids = [f"{index:08x}-0000-4000-8000-000000000000" for index in range(20)]
+    by_id, by_name = job_ids[:10], job_ids[10:]
+    for job_id in by_id:
+        await _save_job_async(job_id, f"name-{job_id}")
+        await storage.insert_audit_event(
+            action="job.delete",
+            actor="alice",
+            target_type="job",
+            target_id=job_id,
+        )
+    for job_id in by_name:
+        await _save_job_async(job_id, f"name-{job_id}")
+        await storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id=f"name-{job_id}",
+        )
+
+    calls: list[list[str]] = []
+    original = storage._audit_target_jobs
+
+    async def _spy(db: Any, refs: list[str]) -> dict[str, tuple[str, str | None]]:
+        calls.append(list(refs))
+        return await original(db, refs)
+
+    monkeypatch.setattr(storage, "_audit_target_jobs", _spy)
+    events = (await storage.list_audit_events(limit=50))["events"]
+
+    assert len(events) == 20
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted(
+        [*by_id, *(f"name-{job_id}" for job_id in by_name)]
+    )
+    assert {(event["target_job_id"], event["target_label"]) for event in events} == {
+        (job_id, f"name-{job_id}") for job_id in job_ids
+    }
+
+
+# --- §I account lockout, disable and unlock -------------------------------
+
+_THRESHOLD = 3
+
+
+def _lockout_client(
+    temp_db_path: Path, threshold: int = _THRESHOLD, enabled: bool | None = None
+):
+    """App client with the lockout threshold pinned through the env default."""
+    env = {"LOGIN_LOCKOUT_THRESHOLD": str(threshold)}
+    if enabled is not None:
+        env["LOGIN_LOCKOUT_ENABLED"] = str(enabled).lower()
+    return make_app_client(temp_db_path, env)
+
+
+def _register(client, username: str) -> str:
+    """Register an active user and return its API key."""
+    response = client.post("/api/auth/register", json={"username": username})
+    assert response.status_code == 200, response.text
+    return response.json()["api_key"]
+
+
+def _login(client, username: str, api_key: str):
+    return client.post(
+        "/api/auth/login", json={"username": username, "api_key": api_key}
+    )
+
+
+def _user_state(username: str) -> dict[str, Any]:
+    """The account's lockout/disable state as the admin users list reports it."""
+    return next(
+        user
+        for user in asyncio.run(storage.list_users())
+        if user["username"] == username
+    )
+
+
+def test_an_account_locks_at_the_configured_threshold(temp_db_path: Path) -> None:
+    for client in _lockout_client(temp_db_path):
+        key = _register(client, "victim")
+        for _ in range(_THRESHOLD):
+            assert (
+                _login(
+                    client, "victim", "wrong"
+                ).status_code  # pragma: allowlist secret
+                == 401
+            )
+
+        state = _user_state("victim")
+        assert state["failed_login_count"] == _THRESHOLD
+        assert state["locked"] is True
+        assert state["locked_at"]
+
+        # The lock is the state, not the attempt count: the right key is refused.
+        assert _login(client, "victim", key).status_code == 401
+
+        locked = _events(action="auth.account_locked")
+        assert len(locked) == 1
+        assert locked[0]["actor"] == "victim"
+        assert locked[0]["target_id"] == "victim"
+        assert locked[0]["details"] == {
+            "threshold": _THRESHOLD,
+            "failed_attempts": _THRESHOLD,
+        }
+        # Further failures keep the lock and never rewrite the lock row.
+        assert (
+            _login(client, "victim", "nope").status_code  # pragma: allowlist secret
+            == 401
+        )
+        assert _user_state("victim")["failed_login_count"] == _THRESHOLD
+        assert len(_events(action="auth.account_locked")) == 1
+
+
+def test_threshold_zero_disables_lockout(temp_db_path: Path) -> None:
+    """``0`` means no lockout at all — no counting, no lock, no row."""
+    for client in _lockout_client(temp_db_path, threshold=0):
+        key = _register(client, "busy-user")
+        for _ in range(_THRESHOLD + 2):
+            assert (
+                _login(
+                    client, "busy-user", "wrong"
+                ).status_code  # pragma: allowlist secret
+                == 401
+            )
+
+        state = _user_state("busy-user")
+        assert state["failed_login_count"] == 0
+        assert state["locked"] is False
+        assert _events(action="auth.account_locked") == []
+        assert _login(client, "busy-user", key).status_code == 200
+
+
+def test_the_lockout_toggle_off_never_locks_whatever_the_threshold(
+    temp_db_path: Path,
+) -> None:
+    """The explicit switch (#379 E2E-I09/I10) is the off switch, not ``0``."""
+    for client in _lockout_client(temp_db_path, enabled=False):
+        key = _register(client, "toggled-off")
+        for _ in range(10):
+            assert (
+                _login(
+                    client, "toggled-off", "wrong"
+                ).status_code  # pragma: allowlist secret
+                == 401
+            )
+
+        state = _user_state("toggled-off")
+        assert state["failed_login_count"] == 0
+        assert state["locked"] is False
+        assert _events(action="auth.account_locked") == []
+        assert _login(client, "toggled-off", key).status_code == 200
+
+
+def test_the_toggle_on_with_a_zero_threshold_is_still_off(temp_db_path: Path) -> None:
+    """Both must be set for lockout: enabled AND a positive threshold."""
+    for client in _lockout_client(temp_db_path, threshold=0, enabled=True):
+        key = _register(client, "no-threshold")
+        for _ in range(_THRESHOLD + 2):
+            assert (
+                _login(
+                    client, "no-threshold", "wrong"
+                ).status_code  # pragma: allowlist secret
+                == 401
+            )
+
+        state = _user_state("no-threshold")
+        assert state["failed_login_count"] == 0
+        assert state["locked"] is False
+        assert _events(action="auth.account_locked") == []
+        assert _login(client, "no-threshold", key).status_code == 200
+
+
+def test_a_successful_login_resets_the_failure_counter(temp_db_path: Path) -> None:
+    for client in _lockout_client(temp_db_path):
+        key = _register(client, "remembering")
+        for _ in range(_THRESHOLD - 1):
+            assert (
+                _login(
+                    client, "remembering", "wrong"
+                ).status_code  # pragma: allowlist secret
+                == 401
+            )
+        assert _user_state("remembering")["failed_login_count"] == _THRESHOLD - 1
+
+        assert _login(client, "remembering", key).status_code == 200
+
+        state = _user_state("remembering")
+        assert state["failed_login_count"] == 0
+        assert state["locked"] is False
+        assert _events(action="auth.account_locked") == []
+
+
+def test_an_unknown_username_increments_nothing(temp_db_path: Path) -> None:
+    """A name that names no account has no counter to move and no row to lock."""
+    for client in _lockout_client(temp_db_path):
+        _register(client, "real-one")
+        for _ in range(_THRESHOLD + 1):
+            assert (
+                _login(client, "ghost", "wrong").status_code  # pragma: allowlist secret
+                == 401
+            )
+
+        assert [user["username"] for user in asyncio.run(storage.list_users())] == [
+            "real-one"
+        ]
+        assert _user_state("real-one")["failed_login_count"] == 0
+        assert _events(action="auth.account_locked") == []
+        assert {
+            event["details"]["reason"] for event in _events(action="auth.login_failed")
+        } == {"unknown_user"}
+
+
+def test_a_locked_or_disabled_account_answers_like_a_wrong_key(
+    temp_db_path: Path,
+) -> None:
+    """The three refusals are byte-identical — no oracle for the attacker."""
+    for client in _lockout_client(temp_db_path):
+        lockme_key = _register(client, "lockme")
+        key = _register(client, "disableme")
+
+        wrong = _login(client, "nobody-here", "wrong")  # pragma: allowlist secret
+        assert wrong.status_code == 401
+
+        for _ in range(_THRESHOLD):
+            _login(client, "lockme", "wrong")  # pragma: allowlist secret
+        locked = _login(client, "lockme", lockme_key)
+
+        admin_login(client)
+        disabled_put = client.put(
+            "/api/admin/users/disableme/disabled", json={"disabled": True}
+        )
+        assert disabled_put.status_code == 200, disabled_put.text
+        disabled = _login(client, "disableme", key)
+
+        assert locked.status_code == disabled.status_code == 401
+        assert locked.content == disabled.content == wrong.content
+        assert locked.headers["content-type"] == wrong.headers["content-type"]
+
+        blocked = {
+            event["actor"]: event["details"]["reason"]
+            for event in _events(action="auth.login_blocked")
+        }
+        assert blocked == {"lockme": "locked", "disableme": "disabled"}
+        assert all(
+            event["outcome"] == "denied"
+            for event in _events(action="auth.login_blocked")
+        )
+
+
+def test_admin_unlock_clears_the_lock_and_the_counter(temp_db_path: Path) -> None:
+    for client in _lockout_client(temp_db_path):
+        key = _register(client, "locked-out")
+        for _ in range(_THRESHOLD):
+            _login(client, "locked-out", "wrong")  # pragma: allowlist secret
+        was_locked_at = _user_state("locked-out")["locked_at"]
+
+        admin_login(client)
+        response = client.post("/api/admin/users/locked-out/unlock")
+        assert response.status_code == 200, response.text
+
+        state = _user_state("locked-out")
+        assert state["locked"] is False
+        assert state["locked_at"] is None
+        assert state["failed_login_count"] == 0
+        assert _login(client, "locked-out", key).status_code == 200
+
+        events = _events(action="admin.user_unlock")
+        assert len(events) == 1
+        assert events[0]["actor"] == "admin"
+        assert events[0]["target_type"] == "user"
+        assert events[0]["target_id"] == "locked-out"
+        assert events[0]["details"] == {
+            "was_locked_at": was_locked_at,
+            "failed_attempts": _THRESHOLD,
+        }
+
+
+def test_unlock_of_an_unknown_user_is_a_404(temp_db_path: Path) -> None:
+    for client in _lockout_client(temp_db_path):
+        admin_login(client)
+        assert client.post("/api/admin/users/ghost/unlock").status_code == 404
+        assert _events(action="admin.user_unlock") == []
+
+
+def test_disable_and_enable_flip_the_flag_and_audit(temp_db_path: Path) -> None:
+    for client in _lockout_client(temp_db_path):
+        _register(client, "switchable")
+        admin_login(client)
+
+        disabled = client.put(
+            "/api/admin/users/switchable/disabled", json={"disabled": True}
+        )
+        assert disabled.status_code == 200, disabled.text
+        state = _user_state("switchable")
+        assert state["disabled"] is True
+        # Disabling is not deleting: the account and its role stay.
+        assert state["role"] == "reviewer"
+
+        enabled = client.put(
+            "/api/admin/users/switchable/disabled", json={"disabled": False}
+        )
+        assert enabled.status_code == 200, enabled.text
+        assert _user_state("switchable")["disabled"] is False
+
+        off = _events(action="admin.user_disabled")
+        on = _events(action="admin.user_enabled")
+        assert len(off) == len(on) == 1
+        assert off[0]["target_id"] == "switchable"
+        # Registration itself left a session, so the disable drops one; enabling
+        # has nothing to invalidate.
+        assert off[0]["details"] == {
+            "role": "reviewer",
+            "disabled": False,
+            "sessions_invalidated": True,
+        }
+        assert on[0]["details"] == {
+            "role": "reviewer",
+            "disabled": True,
+            "sessions_invalidated": False,
+        }
+
+
+def test_disabling_drops_the_account_sessions(temp_db_path: Path) -> None:
+    """A disable takes effect now, not at the account's next login."""
+    for client in _lockout_client(temp_db_path):
+        key = _register(client, "session-user")
+        assert _login(client, "session-user", key).status_code == 200
+        user_token = client.cookies.get("rootcoz_session") or ""
+        assert asyncio.run(storage.get_session(user_token)) is not None
+
+        admin_login(client)
+        assert (
+            client.put(
+                "/api/admin/users/session-user/disabled", json={"disabled": True}
+            ).status_code
+            == 200
+        )
+
+        assert (
+            _events(action="admin.user_disabled")[0]["details"]["sessions_invalidated"]
+            is True
+        )
+        assert asyncio.run(storage.get_session(user_token)) is None
+
+
+def test_a_non_admin_cannot_disable_or_unlock(temp_db_path: Path) -> None:
+    for client in _lockout_client(temp_db_path):
+        _register(client, "target-user")
+        key = _register(client, "regular-user")
+        # Bearer keeps this request on the user's key: no admin session cookie.
+        headers = {"Authorization": f"Bearer {key}"}
+
+        refused_disable = client.put(
+            "/api/admin/users/target-user/disabled",
+            json={"disabled": True},
+            headers=headers,
+        )
+        refused_unlock = client.post(
+            "/api/admin/users/target-user/unlock", headers=headers
+        )
+
+        assert refused_disable.status_code == 403
+        assert refused_unlock.status_code == 403
+        assert _user_state("target-user")["disabled"] is False
+        assert _events(action="admin.user_disabled") == []
+        assert _events(action="admin.user_unlock") == []
+
+
+def test_users_list_exposes_lockout_and_disable_state(temp_db_path: Path) -> None:
+    for client in _lockout_client(temp_db_path):
+        _register(client, "listed-user")
+        _login(client, "listed-user", "wrong")  # pragma: allowlist secret
+        admin_login(client)
+
+        row = next(
+            user
+            for user in client.get("/api/admin/users").json()["users"]
+            if user["username"] == "listed-user"
+        )
+        assert row["locked"] is False
+        assert row["locked_at"] is None
+        assert row["disabled"] is False
+        assert row["failed_login_count"] == 1
+
+
+# --- disabled is refused everywhere, locked only at login (#379) -----------
+
+#: The middleware's answer to a bad credential — a refused account must match it,
+#: byte for byte, so the caller never learns which condition applied.
+_GENERIC_401 = {"detail": "Authentication required. Please log in with your API key."}
+
+
+def _set_account_state(
+    username: str, *, disabled: bool = False, locked: bool = False
+) -> None:
+    """Flip the flags directly.
+
+    A session outliving its account is exactly what the middleware must refuse,
+    and ``set_user_disabled`` deletes sessions, so the session path can only be
+    proven with the flag set underneath a live session.
+    """
+    with sqlite3.connect(storage.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE users SET disabled = ?, locked_at = ? WHERE username = ?",
+            (int(disabled), storage.audit_timestamp() if locked else None, username),
+        )
+
+
+def _auth_probe(client, path: str, username: str, key: str, session_token: str):
+    """One request on one authentication path, with no other credential in play."""
+    client.cookies.clear()
+    if path == "bearer":
+        return client.get("/api/auth/me", headers={"Authorization": f"Bearer {key}"})
+    if path == "session":
+        return client.get("/api/auth/me", cookies={"rootcoz_session": session_token})
+    return client.get("/api/auth/me", headers={"X-Forwarded-User": username})
+
+
+@pytest.mark.parametrize("path", ["bearer", "session", "proxy"])
+def test_a_locked_account_keeps_the_access_it_already_has(
+    temp_db_path: Path, path: str
+) -> None:
+    """The lock guards the login, not the account (#379).
+
+    Locking on a session or a key would let a stranger who knows a username
+    cut off that account with five wrong guesses, so only a new login is
+    refused and the existing credential keeps working until rotated.
+    """
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        username = f"locked-{path}"
+        key = _register(client, username)
+        token = asyncio.run(
+            storage.create_session(username, is_admin=False, role="reviewer")
+        )
+        _set_account_state(username, locked=True)
+
+        assert _login(client, username, key).status_code == 401
+        blocked = [
+            event
+            for event in _events(action="auth.login_blocked")
+            if event["actor"] == username
+        ]
+        assert len(blocked) == 1
+        assert blocked[0]["outcome"] == "denied"
+        assert blocked[0]["details"] == {"reason": "locked"}
+
+        response = _auth_probe(client, path, username, key, token)
+        assert response.status_code == 200, (path, response.text)
+        assert response.json()["username"] == username
+        # A working credential is not a refusal, so the trail keeps one row.
+        assert (
+            len(
+                [
+                    event
+                    for event in _events(action="auth.login_blocked")
+                    if event["actor"] == username
+                ]
+            )
+            == 1
+        )
+
+
+def test_a_disabled_account_is_refused_on_every_auth_path(
+    temp_db_path: Path,
+) -> None:
+    """A key, a session and a proxy identity are all only as good as their row."""
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        for path in ("bearer", "session", "proxy"):
+            username = f"disabled-{path}"
+            key = _register(client, username)
+            token = asyncio.run(
+                storage.create_session(username, is_admin=False, role="reviewer")
+            )
+            _set_account_state(username, disabled=True)
+
+            response = _auth_probe(client, path, username, key, token)
+            assert response.status_code == 401, (path, response.text)
+            assert response.json() == _GENERIC_401, path
+
+            blocked = [
+                event
+                for event in _events(action="auth.login_blocked")
+                if event["actor"] == username
+            ]
+            assert len(blocked) == 1, path
+            assert blocked[0]["outcome"] == "denied"
+            assert blocked[0]["target_id"] == username
+            assert blocked[0]["details"] == {"reason": "disabled"}
+
+
+_SSO_BLOCKED_USER = "sso-blocked"
+
+
+def test_a_blocked_sso_user_lands_on_the_login_page_instead_of_looping(
+    temp_db_path: Path,
+) -> None:
+    """ "/" refuses, "/login" must not send the same identity back (#379).
+
+    One pass of the loop writes one row: the refusal is recorded where it is
+    decided, never again on the redirect that follows it.
+    """
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        _register(client, _SSO_BLOCKED_USER)
+        _set_account_state(_SSO_BLOCKED_USER, disabled=True)
+        client.cookies.clear()
+        headers = {"accept": "text/html", "x-forwarded-user": _SSO_BLOCKED_USER}
+
+        refused = client.get("/", headers=headers, follow_redirects=False)
+        assert refused.status_code == 303
+        assert refused.headers["location"] == "/login"
+
+        page = client.get("/login", headers=headers, follow_redirects=False)
+        assert page.status_code != 303, page.headers.get("location")
+
+        rows = _events(action="auth.login_blocked", actor=_SSO_BLOCKED_USER)
+        assert len(rows) == 1
+        assert rows[0]["details"] == {"reason": "disabled"}
+
+        # A second attempt is a second row — one per attempt, not per hop.
+        assert (
+            client.get("/", headers=headers, follow_redirects=False).status_code == 303
+        )
+        assert (
+            client.get("/login", headers=headers, follow_redirects=False).status_code
+            != 303
+        )
+        assert len(_events(action="auth.login_blocked", actor=_SSO_BLOCKED_USER)) == 2
+
+
+def test_a_healthy_sso_user_still_shortcuts_to_the_dashboard(
+    temp_db_path: Path,
+) -> None:
+    """The blocked-account check must not touch an ordinary identity."""
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        _register(client, "sso-healthy")
+        client.cookies.clear()
+
+        response = client.get(
+            "/login",
+            headers={"x-forwarded-user": "sso-healthy"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/"
+        assert response.cookies.get("rootcoz_username") == "sso-healthy"
+        assert _events(action="auth.login_blocked") == []
+
+
+def test_the_bootstrap_admin_is_never_blocked(temp_db_path: Path) -> None:
+    """It has no ``users`` row, so there is no flag that could disable it."""
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        admin_login(client)
+        assert client.get("/api/auth/me").json()["is_admin"] is True
+        me = client.get("/api/auth/me", headers=_ADMIN_HEADERS)
+        assert me.status_code == 200
+        assert _events(action="auth.login_blocked") == []
+
+
+def test_a_polling_client_cannot_flood_the_trail(temp_db_path: Path) -> None:
+    """The existing volume guard caps the rows; the refusal keeps answering."""
+    for client in make_app_client(
+        temp_db_path, {"AUDIT_AUTH_FAILURE_MAX_PER_MINUTE": "2"}
+    ):
+        key = _register(client, "poller")
+        token = asyncio.run(
+            storage.create_session("poller", is_admin=False, role="reviewer")
+        )
+        _set_account_state("poller", disabled=True)
+
+        for _ in range(5):
+            response = _auth_probe(client, "bearer", "poller", key, token)
+            assert response.status_code == 401
+
+        assert len(_events(action="auth.login_blocked", actor="poller")) == 2
+
+
+def test_an_admin_cannot_disable_their_own_account(temp_db_path: Path) -> None:
+    """The refusal is a 400, the session survives and the denial is audited."""
+    for client in make_app_client(temp_db_path):
+        cookies = _db_admin_cookies(client, "db-admin")
+        _register(client, "switchable")
+
+        client.cookies.clear()
+        refused = client.put(
+            "/api/admin/users/db-admin/disabled",
+            json={"disabled": True},
+            cookies=cookies,
+        )
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["detail"] == "You cannot disable your own account"
+        assert _user_state("db-admin")["disabled"] is False
+        client.cookies.clear()
+        assert client.get("/api/auth/me", cookies=cookies).status_code == 200
+
+        # Disabling someone else, and re-enabling, are unaffected.
+        for disabled in (True, False):
+            response = client.put(
+                "/api/admin/users/switchable/disabled",
+                json={"disabled": disabled},
+                cookies=cookies,
+            )
+            assert response.status_code == 200, response.text
+            assert _user_state("switchable")["disabled"] is disabled
+
+        denied = [
+            event
+            for event in _events(action="admin.user_disabled")
+            if event["outcome"] == "denied"
+        ]
+        assert len(denied) == 1
+        assert denied[0]["actor"] == "db-admin"
+        assert denied[0]["target_id"] == "db-admin"
+        assert denied[0]["details"]["reason"] == "self"
+
+
+def test_the_last_enabled_admin_cannot_be_disabled(temp_db_path: Path) -> None:
+    """Zero enabled admins would end the admin surface until ``ADMIN_KEY``."""
+    for client in make_app_client(temp_db_path):
+        _db_admin_cookies(client, "only-admin")
+        client.cookies.clear()
+        admin_login(client)
+
+        refused = client.put(
+            "/api/admin/users/only-admin/disabled", json={"disabled": True}
+        )
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["detail"] == "Cannot disable the last enabled admin"
+        assert _user_state("only-admin")["disabled"] is False
+
+        # A second enabled admin makes the same disable allowed again.
+        _db_admin_cookies(client, "second-admin")
+        client.cookies.clear()
+        admin_login(client)
+        allowed = client.put(
+            "/api/admin/users/only-admin/disabled", json={"disabled": True}
+        )
+        assert allowed.status_code == 200, allowed.text
+        assert _user_state("only-admin")["disabled"] is True
+
+        denied = [
+            event
+            for event in _events(action="admin.user_disabled")
+            if event["outcome"] == "denied"
+        ]
+        assert len(denied) == 1
+        assert denied[0]["details"]["reason"] == "last_admin"
+
+
+def _db_admin_cookies(client, username: str) -> dict[str, str]:
+    """Create a DB-backed admin through the API and return its session cookies."""
+    client.cookies.clear()
+    created = client.post(
+        "/api/admin/users/create",
+        json={"username": username, "role": "admin"},
+        headers=_ADMIN_HEADERS,
+    )
+    assert created.status_code == 200, created.text
+    login = _login(client, username, created.json()["api_key"])
+    assert login.status_code == 200, login.text
+    return dict(login.cookies)
+
+
+# --- target_gone and widened q (#379) -------------------------------------
+
+#: Target types that have no presence to check — the notion does not apply.
+_NO_PRESENCE_TARGETS = (
+    "transcript",
+    "database",
+    "audit",
+    "logs",
+    "metadata",
+    "settings",
+    "failure",
+    "feedback",
+)
+
+
+def _only_event() -> dict[str, Any]:
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert len(events) == 1
+    return events[0]
+
+
+def test_target_gone_is_true_for_a_removed_job(audit_db: Path) -> None:
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_ID,
+        )
+    )
+    assert _only_event()["target_gone"] is False
+
+    asyncio.run(storage.delete_job(JOB_ID))
+    assert _only_event()["target_gone"] is True
+
+
+def test_target_gone_is_true_for_a_removed_user_and_setting(audit_db: Path) -> None:
+    asyncio.run(
+        storage.insert_audit_event(
+            action="admin.user_role_change",
+            actor="admin",
+            target_type="user",
+            target_id="gone-user",
+        )
+    )
+    asyncio.run(
+        storage.insert_audit_event(
+            action="settings.reset",
+            actor="admin",
+            target_type="setting",
+            target_id="jenkins_url",
+        )
+    )
+
+    def _gone() -> dict[str, bool | None]:
+        return {
+            event["action"]: event["target_gone"]
+            for event in asyncio.run(storage.list_audit_events())["events"]
+        }
+
+    assert _gone() == {"admin.user_role_change": True, "settings.reset": True}
+
+    asyncio.run(storage.create_admin_user("gone-user"))
+    asyncio.run(storage.set_server_setting("jenkins_url", "http://jenkins"))
+    # Presence is read at list time, never stored: a name or a key that comes
+    # back un-gones its history.
+    assert _gone() == {"admin.user_role_change": False, "settings.reset": False}
+
+
+def test_target_gone_follows_a_deleted_comment(audit_db: Path) -> None:
+    """The ``#comment-<id>`` link dies with the comment, and says who removed it."""
+    _save_job(JOB_ID, JOB_NAME)
+    comment_id = asyncio.run(
+        storage.add_comment(JOB_ID, "test-a", "hello", username="alice")
+    )
+    target = _insert_audit(
+        action="comment.add",
+        actor="alice",
+        target_type="comment",
+        target_id=str(comment_id),
+        details={"job_id": JOB_ID},
+    )
+
+    # While the comment exists the link is rendered: it must not be dropped.
+    event = _only(_events(), "comment.add")
+    assert event["target_gone"] is False
+    assert _deletion_fields(event) == _NO_DELETION
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, JOB_NAME)
+
+    asyncio.run(storage.delete_comment(comment_id, "", job_id=JOB_ID))
+    deletion = _insert_audit(
+        action="comment.delete",
+        actor="alice",
+        target_type="comment",
+        target_id=str(comment_id),
+        details={"job_id": JOB_ID},
+    )
+
+    event = _only(_events(), "comment.add")
+    assert event["target_gone"] is True
+    assert _deletion_fields(event) == (
+        "alice",
+        deletion["created_at"],
+        deletion["id"],
+    )
+    # The row that recorded the removal is its own evidence.
+    own = _only(_events(), "comment.delete")
+    assert own["target_gone"] is True
+    assert own["target_delete_event_id"] == deletion["id"]
+    assert target["id"] < deletion["id"]
+
+
+def test_target_gone_is_null_for_a_comment_with_no_recorded_job(
+    audit_db: Path,
+) -> None:
+    """Without a job there is no row to look the id up in — so no claim."""
+    asyncio.run(
+        storage.insert_audit_event(
+            action="comment.delete",
+            actor="alice",
+            target_type="comment",
+            target_id="122",
+        )
+    )
+    assert _only_event()["target_gone"] is None
+
+
+def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
+    """The audit page shows the name a human reads, however the target was named."""
+    asyncio.run(
+        storage.save_result(
+            JOB_ID,
+            status="completed",
+            result={
+                "display_name": "Human Name",
+                "job_name": "machine-name",
+                "origin_job_name": "origin-name",
+            },
+        )
+    )
+    refs = (JOB_ID, "Human Name", "machine-name", "origin-name")
+    for ref in refs:
+        asyncio.run(
+            storage.insert_audit_event(
+                action="job.metadata_set",
+                actor="alice",
+                target_type="job",
+                target_id=ref,
+            )
+        )
+
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert [(event["target_job_id"], event["target_label"]) for event in events] == [
+        (JOB_ID, "Human Name")
+    ] * len(refs)
+
+
+@pytest.mark.parametrize("target_type", _NO_PRESENCE_TARGETS)
+def test_target_gone_is_null_where_the_notion_does_not_apply(
+    audit_db: Path, target_type: str
+) -> None:
+    asyncio.run(
+        storage.insert_audit_event(
+            action="logs.stream",
+            actor="admin",
+            target_type=target_type,
+            target_id="whatever",
+        )
+    )
+    assert _only_event()["target_gone"] is None
+
+
+async def test_q_matches_actor_target_action_and_details(audit_db: Path) -> None:
+    """``q`` finds the row that shows the text, whichever column holds it."""
+    await storage.insert_audit_event(
+        action="user.job_delete",
+        actor="alice",
+        target_type="job",
+        target_id="job-1",
+        details={},
+    )
+    await storage.insert_audit_event(
+        action="settings.update",
+        actor="bob",
+        target_type="setting",
+        target_id="jenkins_url",
+        details={"changed_keys": ["jenkins_url"]},
+    )
+
+    async def _actions(term: str) -> list[str]:
+        result = await storage.list_audit_events(q=term)
+        return [event["action"] for event in result["events"]]
+
+    # actor, target_id, action, details — plus case-insensitivity.
+    assert await _actions("alice") == ["user.job_delete"]
+    assert await _actions("ALICE") == ["user.job_delete"]
+    assert await _actions("job-1") == ["user.job_delete"]
+    assert await _actions("job_delete") == ["user.job_delete"]
+    assert await _actions("jenkins") == ["settings.update"]
+    assert await _actions("nothing-matches-this") == []
+
+
+# --- read-time deletion cross-reference (#379) -----------------------------
+
+#: A second job id, used where the test needs a job that was never deleted.
+OTHER_JOB_ID = "223e4567-e89b-12d3-a456-426614174001"
+
+
+def _delete_job_and_audit(
+    job_id: str, *, action: str = "user.job_delete", actor: str = "bob"
+) -> dict[str, Any]:
+    """Delete a stored job, then record the deletion the way ``main.py`` does."""
+    asyncio.run(storage.delete_job(job_id))
+    return asyncio.run(
+        storage.insert_audit_event(
+            action=action, actor=actor, target_type="job", target_id=job_id
+        )
+    )
+
+
+def _deletion_fields(event: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return (
+        event["target_deleted_by"],
+        event["target_deleted_at"],
+        event["target_delete_event_id"],
+    )
+
+
+@pytest.mark.parametrize("action", ["user.job_delete", "admin.job_delete"])
+def test_audit_list_cross_references_the_delete_event(
+    audit_db: Path, action: str
+) -> None:
+    """A target whose job row is gone still says who deleted it, and when."""
+    _save_job(JOB_ID, JOB_NAME)
+    deletion = _delete_job_and_audit(JOB_ID, action=action, actor="bob")
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_delete",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_ID,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert _deletion_fields(event) == ("bob", deletion["created_at"], deletion["id"])
+    # An unresolved uuid is still the id — the job may come back.
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, None)
+
+
+def test_audit_list_cross_references_a_job_deleted_by_name(audit_db: Path) -> None:
+    """A name reference is matched by name and keeps its name as the label."""
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(storage.delete_job(JOB_ID))
+    deletion = asyncio.run(
+        storage.insert_audit_event(
+            action="user.job_delete",
+            actor="bob",
+            target_type="job",
+            target_id=JOB_NAME,
+        )
+    )
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_delete",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_NAME,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert _deletion_fields(event) == ("bob", deletion["created_at"], deletion["id"])
+    assert (event["target_job_id"], event["target_label"]) == (None, JOB_NAME)
+
+
+def test_audit_list_cross_references_a_bulk_delete(audit_db: Path) -> None:
+    """A bulk delete that lists its ids resolves every one of them."""
+    job_ids = [JOB_ID, OTHER_JOB_ID]
+    for job_id in job_ids:
+        _save_job(job_id, f"name-{job_id}")
+        asyncio.run(storage.delete_job(job_id))
+    bulk = asyncio.run(
+        storage.insert_audit_event(
+            action="admin.job_delete",
+            actor="root",
+            target_type="job",
+            details={"job_ids": job_ids, "count": len(job_ids)},
+        )
+    )
+    for job_id in job_ids:
+        asyncio.run(
+            storage.insert_audit_event(
+                action="job.metadata_delete",
+                actor="alice",
+                target_type="job",
+                target_id=job_id,
+            )
+        )
+
+    events = asyncio.run(storage.list_audit_events())["events"]
+    targeted = [event for event in events if event["target_id"] in job_ids]
+    assert [_deletion_fields(event) for event in targeted] == [
+        ("root", bulk["created_at"], bulk["id"])
+    ] * 2
+
+
+def test_audit_list_admits_an_unknown_deletion(audit_db: Path) -> None:
+    """Deleted before the trail existed: no evidence, so no claim."""
+    _save_job(JOB_ID, JOB_NAME)
+    asyncio.run(storage.delete_job(JOB_ID))
+    # Another job's deletion must not be borrowed as this one's evidence.
+    _save_job(OTHER_JOB_ID, "other-job")
+    _delete_job_and_audit(OTHER_JOB_ID)
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_delete",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_ID,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert _deletion_fields(event) == (None, None, None)
+
+
+def test_audit_list_skips_the_cross_reference_for_a_live_job(audit_db: Path) -> None:
+    """A job that still exists was not deleted, so it needs no evidence."""
+    _save_job(JOB_ID, JOB_NAME)
+    _save_job(OTHER_JOB_ID, "other-job")
+    _delete_job_and_audit(OTHER_JOB_ID)
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_ID,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, JOB_NAME)
+    assert _deletion_fields(event) == (None, None, None)
+
+
+async def test_audit_list_cross_references_one_page_in_one_query(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One bulk query per page, and only the references that need it."""
+    gone = [f"{index:08x}-1111-4000-8000-000000000000" for index in range(10)]
+    live = [f"{index:08x}-2222-4000-8000-000000000000" for index in range(10)]
+    for job_id in gone:
+        await _save_job_async(job_id, f"gone-{job_id}")
+        await storage.delete_job(job_id)
+        await storage.insert_audit_event(
+            action="user.job_delete",
+            actor="bob",
+            target_type="job",
+            target_id=job_id,
+        )
+        await storage.insert_audit_event(
+            action="job.metadata_delete",
+            actor="alice",
+            target_type="job",
+            target_id=job_id,
+        )
+    for job_id in live:
+        await _save_job_async(job_id, f"live-{job_id}")
+        await storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id=job_id,
+        )
+
+    calls: list[list[tuple[str, str, str]]] = []
+    original = storage._audit_target_deletions
+
+    async def _spy(
+        db: Any, keys: list[tuple[str, str, str]]
+    ) -> dict[tuple[str, str, str], tuple[str, str, int]]:
+        calls.append(list(keys))
+        return await original(db, keys)
+
+    monkeypatch.setattr(storage, "_audit_target_deletions", _spy)
+    events = (await storage.list_audit_events(limit=50))["events"]
+
+    assert len(events) == 30
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted(("job", "", job_id) for job_id in gone)
+    resolved = [event for event in events if event["target_deleted_by"]]
+    assert {event["target_id"] for event in resolved} == set(gone)
+
+
+def test_audit_cross_reference_never_enters_the_hash(audit_db: Path) -> None:
+    _save_job(JOB_ID, JOB_NAME)
+    _delete_job_and_audit(JOB_ID)
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_delete",
+            actor="alice",
+            target_type="job",
+            target_id=JOB_ID,
+        )
+    )
+
+    event = asyncio.run(storage.list_audit_events())["events"][0]
+    assert event["target_deleted_by"] == "bob"
+    assert asyncio.run(storage.verify_audit_chain())["ok"] is True
+
+    metadata_delete = asyncio.run(_export_all())[1]
+    assert metadata_delete["action"] == "job.metadata_delete"
+    for name in (
+        "target_deleted_by",
+        "target_deleted_at",
+        "target_delete_event_id",
+    ):
+        assert name not in metadata_delete["hash_payload"]
+        assert name not in metadata_delete
+
+
+# --- the same cross-reference for every target type (#379) -----------------
+
+#: The three read-time fields, for the "nothing to say" assertions.
+_NO_DELETION = (None, None, None)
+
+
+def _only(events: list[dict[str, Any]], action: str) -> dict[str, Any]:
+    """The single event with this action on the page."""
+    matches = [event for event in events if event["action"] == action]
+    assert len(matches) == 1, events
+    return matches[0]
+
+
+def _make_user(name: str) -> None:
+    asyncio.run(storage.create_user(name))
+
+
+def _drop_user(name: str) -> None:
+    asyncio.run(storage.delete_user(name))
+
+
+def _store_provider_key(provider: str) -> None:
+    asyncio.run(storage.set_server_ai_credential(provider, "server-key", "admin"))
+
+
+def _store_setting(key: str) -> None:
+    asyncio.run(storage.set_server_setting(key, "value", "admin"))
+
+
+def test_audit_list_cross_references_a_user_removal(audit_db: Path) -> None:
+    """A username that is gone points at the row that deleted it."""
+    _make_user("alice")
+    removal = _insert_audit(
+        action="admin.user_delete",
+        actor="root",
+        target_type="user",
+        target_id="Alice",
+        details={"role": "reviewer"},
+    )
+    _drop_user("alice")
+    # Recorded in the other case — a username is an identity string.
+    _insert_audit(
+        action="admin.user_role_change",
+        actor="root",
+        target_type="user",
+        target_id="ALICE",
+    )
+
+    event = _only(_events(), "admin.user_role_change")
+    assert _deletion_fields(event) == ("root", removal["created_at"], removal["id"])
+
+
+def test_audit_list_skips_the_cross_reference_for_a_live_user(
+    audit_db: Path,
+) -> None:
+    """A user that still exists was not removed, so no evidence is borrowed."""
+    _make_user("alice")
+    _insert_audit(
+        action="admin.user_delete",
+        actor="root",
+        target_type="user",
+        target_id="bob",
+    )
+    _insert_audit(
+        action="user.self_key_rotate",
+        actor="alice",
+        target_type="user",
+        target_id="alice",
+    )
+
+    assert _deletion_fields(_only(_events(), "user.self_key_rotate")) == _NO_DELETION
+
+
+def test_audit_list_admits_an_unknown_user_removal(audit_db: Path) -> None:
+    """Deleted before the trail existed: no evidence, so no claim."""
+    _make_user("alice")
+    _drop_user("alice")
+    _insert_audit(
+        action="admin.user_role_change",
+        actor="root",
+        target_type="user",
+        target_id="alice",
+    )
+
+    assert _deletion_fields(_only(_events(), "admin.user_role_change")) == (
+        _NO_DELETION
+    )
+
+
+def test_audit_list_cross_references_a_provider_removal(audit_db: Path) -> None:
+    """A provider no longer configured points at its ``provider.remove`` row."""
+    _store_provider_key("gemini")
+    removal = _insert_audit(
+        action="provider.remove",
+        actor="root",
+        target_type="provider",
+        target_id="gemini",
+    )
+    asyncio.run(storage.delete_server_ai_provider("gemini"))
+    _insert_audit(
+        action="provider.models_set",
+        actor="root",
+        target_type="provider",
+        target_id="Gemini",
+    )
+
+    event = _only(_events(), "provider.models_set")
+    assert _deletion_fields(event) == ("root", removal["created_at"], removal["id"])
+
+
+def test_audit_list_skips_the_cross_reference_for_a_configured_provider(
+    audit_db: Path,
+) -> None:
+    """A provider with a key, a selection or a free pair is still configured."""
+    _store_provider_key("gemini")
+    _insert_audit(
+        action="provider.remove",
+        actor="root",
+        target_type="provider",
+        target_id="openai",
+    )
+    _insert_audit(
+        action="provider.models_set",
+        actor="root",
+        target_type="provider",
+        target_id="gemini",
+    )
+
+    assert _deletion_fields(_only(_events(), "provider.models_set")) == (_NO_DELETION)
+
+
+def test_audit_list_admits_an_unknown_provider_removal(audit_db: Path) -> None:
+    _store_provider_key("gemini")
+    asyncio.run(storage.delete_server_ai_provider("gemini"))
+    _insert_audit(
+        action="provider.models_set",
+        actor="root",
+        target_type="provider",
+        target_id="gemini",
+    )
+
+    assert _deletion_fields(_only(_events(), "provider.models_set")) == (_NO_DELETION)
+
+
+def test_audit_list_cross_references_a_users_own_credential(audit_db: Path) -> None:
+    """A per-user key is explained only by that user's own credential delete."""
+    _make_user("alice")
+    asyncio.run(storage.update_user_ai_credential("alice", "gemini", "user-key"))
+    _insert_audit(
+        action="user.ai_credential_set",
+        actor="alice",
+        target_type="provider",
+        target_id="gemini",
+    )
+    removal = _insert_audit(
+        action="user.ai_credential_delete",
+        actor="alice",
+        target_type="provider",
+        target_id="gemini",
+    )
+    asyncio.run(storage.update_user_ai_credential("alice", "gemini", None))
+
+    events = _events()
+    for action in ("user.ai_credential_set", "user.ai_credential_delete"):
+        assert _deletion_fields(_only(events, action)) == (
+            "alice",
+            removal["created_at"],
+            removal["id"],
+        )
+
+
+def test_audit_list_never_borrows_another_users_credential_removal(
+    audit_db: Path,
+) -> None:
+    """One user's key deletion never explains another user's key."""
+    _make_user("alice")
+    asyncio.run(storage.update_user_ai_credential("alice", "gemini", "user-key"))
+    asyncio.run(storage.update_user_ai_credential("alice", "gemini", None))
+    _insert_audit(
+        action="user.ai_credential_delete",
+        actor="bob",
+        target_type="provider",
+        target_id="gemini",
+    )
+    _insert_audit(
+        action="user.ai_credential_set",
+        actor="alice",
+        target_type="provider",
+        target_id="gemini",
+    )
+
+    assert _deletion_fields(_only(_events(), "user.ai_credential_set")) == (
+        _NO_DELETION
+    )
+
+
+def test_audit_list_skips_the_cross_reference_for_a_key_still_held(
+    audit_db: Path,
+) -> None:
+    """The key was put back: the delete row is history, not the target's state."""
+    _make_user("alice")
+    asyncio.run(storage.update_user_ai_credential("alice", "gemini", "user-key"))
+    _insert_audit(
+        action="user.ai_credential_delete",
+        actor="alice",
+        target_type="provider",
+        target_id="gemini",
+    )
+    _insert_audit(
+        action="user.ai_credential_set",
+        actor="alice",
+        target_type="provider",
+        target_id="gemini",
+    )
+
+    assert _deletion_fields(_only(_events(), "user.ai_credential_set")) == (
+        _NO_DELETION
+    )
+
+
+def test_audit_list_cross_references_a_setting_reset(audit_db: Path) -> None:
+    """A setting with no DB override points at its ``settings.reset`` row."""
+    _store_setting("ai_model")
+    reset = _insert_audit(
+        action="settings.reset",
+        actor="root",
+        target_type="setting",
+        target_id="ai_model",
+    )
+    asyncio.run(storage.delete_server_setting("ai_model", "root"))
+    _insert_audit(
+        action="settings.update",
+        actor="root",
+        target_type="setting",
+        target_id="ai_model",
+    )
+
+    event = _only(_events(), "settings.update")
+    assert _deletion_fields(event) == ("root", reset["created_at"], reset["id"])
+
+
+def test_audit_list_skips_the_cross_reference_for_a_live_setting(
+    audit_db: Path,
+) -> None:
+    """A key with a DB override still exists; another key's reset is not evidence."""
+    _store_setting("ai_model")
+    _insert_audit(
+        action="settings.reset",
+        actor="root",
+        target_type="setting",
+        target_id="ai_provider",
+    )
+    _insert_audit(
+        action="settings.update",
+        actor="root",
+        target_type="setting",
+        target_id="ai_model",
+    )
+
+    assert _deletion_fields(_only(_events(), "settings.update")) == _NO_DELETION
+
+
+def test_audit_list_admits_an_unknown_setting_reset(audit_db: Path) -> None:
+    _store_setting("ai_model")
+    asyncio.run(storage.delete_server_setting("ai_model", "root"))
+    _insert_audit(
+        action="settings.update",
+        actor="root",
+        target_type="setting",
+        target_id="ai_model",
+    )
+
+    assert _deletion_fields(_only(_events(), "settings.update")) == _NO_DELETION
+
+
+def test_audit_list_cross_references_a_comment_to_its_own_removal(
+    audit_db: Path,
+) -> None:
+    """A comment's own row is the evidence, so it points at itself, like a delete."""
+    deletion = _insert_audit(
+        action="comment.delete",
+        actor="alice",
+        target_type="comment",
+        target_id="122",
+        details={"job_id": JOB_ID},
+    )
+
+    event = _only(_events(), "comment.delete")
+    assert event["target_gone"] is True
+    assert _deletion_fields(event) == (
+        "alice",
+        deletion["created_at"],
+        deletion["id"],
+    )
+
+
+def test_audit_list_never_invents_a_transcript_removal(audit_db: Path) -> None:
+    """Transcripts are pruned by sidecar retention: rootcoz deletes none."""
+    assert "transcript" not in storage._AUDIT_REMOVAL_ACTIONS
+    for session in ("session-1", "session-2"):
+        _insert_audit(
+            action="transcript.download",
+            actor="root",
+            target_type="transcript",
+            target_id=session,
+        )
+
+    assert [_deletion_fields(event) for event in _events()] == [_NO_DELETION] * 2
+
+
+@pytest.mark.parametrize(
+    "target_type",
+    ["failure", "feedback", "audit", "database", "logs", "metadata", "settings"],
+)
+def test_audit_list_never_fills_targets_nothing_removes(
+    audit_db: Path, target_type: str
+) -> None:
+    _insert_audit(
+        action="action.other",
+        actor="alice",
+        target_type=target_type,
+        target_id="x",
+    )
+
+    assert _deletion_fields(_only(_events(), "action.other")) == _NO_DELETION
+
+
+async def test_audit_cross_references_a_mixed_page_in_one_query(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Job, user, provider and setting rows share one evidence query."""
+    await _save_job_async(JOB_ID, JOB_NAME)
+    await storage.delete_job(JOB_ID)
+    await storage.insert_audit_event(
+        action="user.job_delete", actor="bob", target_type="job", target_id=JOB_ID
+    )
+    await storage.insert_audit_event(
+        action="job.metadata_delete", actor="alice", target_type="job", target_id=JOB_ID
+    )
+    await storage.create_user("alice")
+    await storage.insert_audit_event(
+        action="admin.user_delete",
+        actor="root",
+        target_type="user",
+        target_id="alice",
+    )
+    await storage.delete_user("alice")
+    await storage.insert_audit_event(
+        action="admin.user_role_change",
+        actor="root",
+        target_type="user",
+        target_id="alice",
+    )
+    await storage.set_server_ai_credential("gemini", "server-key", "admin")
+    await storage.insert_audit_event(
+        action="provider.remove",
+        actor="root",
+        target_type="provider",
+        target_id="gemini",
+    )
+    await storage.delete_server_ai_provider("gemini")
+    await storage.insert_audit_event(
+        action="provider.models_set",
+        actor="root",
+        target_type="provider",
+        target_id="gemini",
+    )
+    await storage.set_server_setting("ai_model", "value", "admin")
+    await storage.insert_audit_event(
+        action="settings.reset",
+        actor="root",
+        target_type="setting",
+        target_id="ai_model",
+    )
+    await storage.delete_server_setting("ai_model", "root")
+    await storage.insert_audit_event(
+        action="settings.update",
+        actor="root",
+        target_type="setting",
+        target_id="ai_model",
+    )
+
+    calls: list[list[tuple[str, str, str]]] = []
+    original = storage._audit_target_deletions
+
+    async def _spy(
+        db: Any, keys: list[tuple[str, str, str]]
+    ) -> dict[tuple[str, str, str], tuple[str, str, int]]:
+        calls.append(list(keys))
+        return await original(db, keys)
+
+    monkeypatch.setattr(storage, "_audit_target_deletions", _spy)
+    events = (await storage.list_audit_events(limit=50))["events"]
+
+    assert len(events) == 8
+    assert len(calls) == 1
+    assert sorted(calls[0]) == sorted(
+        [
+            ("job", "", JOB_ID),
+            ("user", "", "alice"),
+            ("provider", "", "gemini"),
+            ("setting", "", "ai_model"),
+        ]
+    )
+    filled = {event["target_type"] for event in events if event["target_deleted_by"]}
+    assert filled == {"job", "user", "provider", "setting"}
+
+
+def test_audit_cross_reference_never_enters_the_hash_for_other_target_types(
+    audit_db: Path,
+) -> None:
+    _make_user("alice")
+    _store_provider_key("gemini")
+    _store_setting("ai_model")
+    removals = [
+        _insert_audit(
+            action="admin.user_delete",
+            actor="root",
+            target_type="user",
+            target_id="alice",
+        ),
+        _insert_audit(
+            action="provider.remove",
+            actor="root",
+            target_type="provider",
+            target_id="gemini",
+        ),
+        _insert_audit(
+            action="settings.reset",
+            actor="root",
+            target_type="setting",
+            target_id="ai_model",
+        ),
+    ]
+    _drop_user("alice")
+    asyncio.run(storage.delete_server_ai_provider("gemini"))
+    asyncio.run(storage.delete_server_setting("ai_model", "root"))
+
+    # Each removal row is its own target's evidence, newest first.
+    assert [event["target_delete_event_id"] for event in _events()] == [
+        removal["id"] for removal in reversed(removals)
+    ]
+    assert asyncio.run(storage.verify_audit_chain())["ok"] is True
+
+    for exported in asyncio.run(_export_all()):
+        for name in (
+            "target_deleted_by",
+            "target_deleted_at",
+            "target_delete_event_id",
+        ):
+            assert name not in exported["hash_payload"]
+            assert name not in exported
+
+
+def test_audit_endpoint_returns_one_event_by_id(app_client, temp_db_path: Path) -> None:
+    """``id`` is the link target: exactly that event, or an empty list."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    wanted = _insert_audit(action="action.wanted", actor="alice")
+    _insert_audit(action="action.other", actor="bob")
+
+    body = app_client.get("/api/admin/audit", params={"id": wanted["id"]}).json()
+    assert (body["total"], [event["id"] for event in body["events"]]) == (
+        1,
+        [wanted["id"]],
+    )
+
+    unknown = app_client.get("/api/admin/audit", params={"id": 987654})
+    assert unknown.status_code == 200, unknown.text
+    assert (unknown.json()["total"], unknown.json()["events"]) == (0, [])
+
+    # The same redaction applies on the single-event path.
+    leaked = _insert_audit(
+        action="admin.db_query",
+        actor="alice",
+        details={"request_params": {"github_token": _SECRET}},
+    )
+    single = app_client.get("/api/admin/audit", params={"id": leaked["id"]})
+    assert single.status_code == 200, single.text
+    assert _SECRET not in single.text
+
+
+def test_audit_endpoint_pagination_and_ordering(app_client, temp_db_path: Path) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    for index in range(5):
+        _insert_audit(action=f"action.{index}", actor="alice", target_id=str(index))
+
+    first = app_client.get("/api/admin/audit", params={"limit": 2}).json()
+    assert first["total"] == 5
+    assert [event["action"] for event in first["events"]] == ["action.4", "action.3"]
+
+    last = app_client.get("/api/admin/audit", params={"limit": 2, "offset": 4}).json()
+    assert [event["action"] for event in last["events"]] == ["action.0"]
+
+
+def test_audit_endpoint_limit_cap(app_client) -> None:
+    admin_login(app_client)
+    assert app_client.get("/api/admin/audit", params={"limit": 501}).status_code == 422
+    assert app_client.get("/api/admin/audit", params={"limit": 500}).status_code == 200
+
+
+# --- /api/admin/audit/actions ----------------------------------------------
+
+
+def test_audit_actions_returns_counts_and_labels(app_client) -> None:
+    admin_login(app_client)
+    for _ in range(3):
+        _insert_audit(action="auth.login", actor="alice")
+    _insert_audit(action="user.job_delete", actor="bob")
+
+    response = app_client.get("/api/admin/audit/actions")
+    assert response.status_code == 200, response.text
+    actions = {entry["action"]: entry for entry in response.json()["actions"]}
+    # admin_login itself records one auth.login event.
+    assert actions["auth.login"]["count"] == 4
+    assert actions["auth.login"]["label"] == "Auth Login"
+    assert actions["auth.login"]["last_seen"]
+    assert actions["user.job_delete"]["count"] == 1
+    assert actions["user.job_delete"]["label"] == "User Job Delete"
+
+
+# --- Admin gating ----------------------------------------------------------
+
+
+def test_audit_endpoints_reject_non_admin(app_client) -> None:
+    registered = app_client.post("/api/auth/register", json={"username": "bob"})
+    assert registered.status_code == 200
+    session = registered.cookies.get("rootcoz_session")
+
+    for path in ("/api/admin/audit", "/api/admin/audit/actions"):
+        response = app_client.get(
+            path, headers={"Authorization": ""}, cookies={"rootcoz_session": session}
+        )
+        assert response.status_code == 403, path
+
+
+def test_audit_endpoints_reject_unauthenticated(app_client) -> None:
+    """No credentials at all: the admin gate rejects, as on every /api/admin/*.
+
+    The middleware's admin gate runs before the authentication check, so the
+    status is 403 here (not 401) — consistent with the rest of the admin API,
+    and no audit data is returned either way.
+    """
+    app_client.cookies.clear()
+    for path in (
+        "/api/admin/audit",
+        "/api/admin/audit/actions",
+        "/api/admin/audit/stream",
+    ):
+        assert app_client.get(path).status_code == 403, path
+
+
+# --- SSE stream ------------------------------------------------------------
+
+
+async def test_audit_stream_emits_new_event(audit_db: Path) -> None:
+    request = AsyncMock()
+    request.state.is_admin = True
+    request.is_disconnected = AsyncMock(return_value=False)
+
+    response = await main.stream_audit_events(request)
+    body = response.body_iterator
+    # First chunk is the immediate connect comment so the browser fires
+    # EventSource.onopen without waiting for an event or the keepalive.
+    assert await asyncio.wait_for(anext(body), timeout=1) == ": connected\n\n"
+    pending = asyncio.create_task(anext(body))
+    await asyncio.sleep(0)  # let the generator register its listener
+    try:
+        await main.record_audit(
+            action="admin.user_create",
+            actor="admin",
+            message="Admin 'admin' created reviewer user 'carol'",
+            target_type="user",
+            target_id="carol",
+        )
+        chunk = await asyncio.wait_for(pending, timeout=1)
+    finally:
+        await body.aclose()
+
+    assert chunk.startswith("event: audit:event\ndata: ")
+    payload = json.loads(chunk.split("data: ", 1)[1].removesuffix("\n\n"))
+    assert payload["action"] == "admin.user_create"
+    assert payload["target_id"] == "carol"
+    assert payload["created_at"]
+
+
+async def test_audit_stream_requires_admin() -> None:
+    request = AsyncMock()
+    request.state.is_admin = False
+
+    with pytest.raises(Exception) as exc_info:
+        await main.stream_audit_events(request)
+    assert getattr(exc_info.value, "status_code", None) == 403
+
+
+def _sse_payload(chunk: str) -> dict[str, Any]:
+    return json.loads(chunk.split("data: ", 1)[1].removesuffix("\n\n"))
+
+
+async def test_audit_stream_strips_nested_credentials(audit_db: Path) -> None:
+    """A queued event is projected like the list endpoint before it is sent."""
+    request = AsyncMock()
+    request.state.is_admin = True
+    request.is_disconnected = AsyncMock(return_value=False)
+
+    response = await main.stream_audit_events(request)
+    body = response.body_iterator
+    assert await asyncio.wait_for(anext(body), timeout=1) == ": connected\n\n"
+    pending = asyncio.create_task(anext(body))
+    await asyncio.sleep(0)  # let the generator register its listener
+    try:
+        main.notify_audit_event(
+            {
+                "action": "admin.setting_set",
+                "details": {
+                    "request_params": {
+                        "jira_api_token": "s3cret-value",
+                        "job_name": "job-1",
+                    }
+                },
+            }
+        )
+        chunk = await asyncio.wait_for(pending, timeout=1)
+    finally:
+        await body.aclose()
+
+    assert "s3cret-value" not in chunk
+    payload = _sse_payload(chunk)
+    assert payload["details"]["request_params"] == {"job_name": "job-1"}
+
+
+async def test_slow_audit_subscriber_gets_one_gap_event(audit_db: Path) -> None:
+    """Dropped payloads are reported once, then normal events flow again."""
+    broadcast = main._PayloadBroadcast()
+    overflow = 3
+    async with broadcast.subscribe() as subscription:
+        for index in range(main._SSE_QUEUE_MAXSIZE + overflow):
+            broadcast.publish({"id": index})
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # let call_soon_threadsafe enqueue everything
+
+        request = AsyncMock()
+        request.is_disconnected = AsyncMock(return_value=False)
+
+        def _render(event: dict[str, Any]) -> str:
+            return f"event: audit:event\ndata: {json.dumps(event)}\n\n"
+
+        chunks = main._queue_sse_events(
+            request, subscription, _render, gap_event="audit-gap"
+        )
+        try:
+            assert await anext(chunks) == ": connected\n\n"
+            gap = await anext(chunks)
+            assert gap.startswith("event: audit-gap\ndata: ")
+            assert _sse_payload(gap) == {"dropped": overflow}
+            assert _sse_payload(await anext(chunks)) == {"id": 0}
+
+            broadcast.publish({"id": "late"})
+            late = None
+            for _ in range(main._SSE_QUEUE_MAXSIZE + 2):
+                late = await asyncio.wait_for(anext(chunks), timeout=1)
+                # No second gap: the count was reported and reset.
+                assert not late.startswith("event: audit-gap")
+                if _sse_payload(late) == {"id": "late"}:
+                    break
+            assert late is not None and _sse_payload(late) == {"id": "late"}
+        finally:
+            await chunks.aclose()
+
+
+# --- tamper evidence: the hash chain --------------------------------------
+
+_LEGACY_AUDIT_SCHEMA = """
+    CREATE TABLE audit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        actor TEXT NOT NULL,
+        actor_role TEXT,
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        action TEXT NOT NULL,
+        target_type TEXT,
+        target_id TEXT,
+        outcome TEXT NOT NULL DEFAULT 'success',
+        details TEXT DEFAULT '{}',
+        request_ip TEXT
+    )
+"""
+
+
+def _chain_rows(db_path: Path) -> list[tuple[int, str | None, str | None]]:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT id, prev_hash, entry_hash FROM audit_events ORDER BY id"
+        ).fetchall()
+
+
+# The v1 hash field list, frozen here as the literal the pre-v2 code covered.
+# Restating it (instead of importing ``storage._AUDIT_HASH_FIELDS``) is what
+# makes these tests prove old hashes still verify: an edit to the storage list
+# fails here rather than silently un-verifying every stored row.
+_V1_HASH_FIELDS = (
+    "id",
+    "created_at",
+    "actor",
+    "actor_role",
+    "is_admin",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "details",
+    "request_ip",
+)
+_V1_INSERT_COLUMNS = (
+    "created_at",
+    "actor",
+    "actor_role",
+    "is_admin",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "details",
+    "request_ip",
+    "throttle_rescue",
+    "prev_hash",
+)
+
+
+def _insert_pre_v2_row(
+    db_path: Path, *, prev_hash: str = storage._AUDIT_GENESIS_HASH, **fields: Any
+) -> dict[str, Any]:
+    """Write a row exactly as the pre-v2 code wrote it: version 1, v1 hash."""
+    row: dict[str, Any] = {
+        "created_at": storage.audit_timestamp(),
+        "actor": "alice",
+        "actor_role": None,
+        "is_admin": 0,
+        "action": "auth.login",
+        "target_type": None,
+        "target_id": None,
+        "outcome": "success",
+        "details": "{}",
+        "request_ip": None,
+        "throttle_rescue": 0,
+        "prev_hash": prev_hash,
+        "hash_version": 1,
+    }
+    row.update(fields)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            f"INSERT INTO audit_events ({', '.join(_V1_INSERT_COLUMNS)})"
+            f" VALUES ({', '.join('?' * len(_V1_INSERT_COLUMNS))})",
+            tuple(row[name] for name in _V1_INSERT_COLUMNS),
+        )
+        row["id"] = cursor.lastrowid
+        payload = json.dumps(
+            {name: row[name] for name in _V1_HASH_FIELDS},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        row["entry_hash"] = hashlib.sha256((payload + prev_hash).encode()).hexdigest()
+        conn.execute(
+            "UPDATE audit_events SET hash_version = 1, entry_hash = ? WHERE id = ?",
+            (row["entry_hash"], row["id"]),
+        )
+    return row
+
+
+def _insert_pre_chain_row(db_path: Path, **fields: Any) -> dict[str, Any]:
+    """Write a row as the pre-chain code did: NULL ``prev_hash``/``entry_hash``."""
+    row: dict[str, Any] = {
+        "created_at": "2021-03-04T05:06:07.000000Z",
+        "actor": "alice",
+        "action": "auth.login",
+    }
+    row.update(fields)
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute(
+            f"INSERT INTO audit_events ({', '.join(row)})"
+            f" VALUES ({', '.join('?' * len(row))})",
+            tuple(row.values()),
+        )
+        row["id"] = cursor.lastrowid
+    return row
+
+
+async def test_chain_links_each_row_to_its_predecessor(audit_db: Path) -> None:
+    for index in range(3):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+
+    rows = _chain_rows(audit_db)
+    assert rows[0][1] == storage._AUDIT_GENESIS_HASH
+    assert rows[1][1] == rows[0][2]
+    assert rows[2][1] == rows[1][2]
+    assert all(row[2] for row in rows)
+
+    assert await storage.verify_audit_chain() == {
+        "checked": 3,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+
+
+async def test_verify_chain_flags_a_tampered_row(audit_db: Path) -> None:
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    middle = await storage.insert_audit_event(action="action.two", actor="alice")
+    await storage.insert_audit_event(action="action.three", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory' WHERE id = ?", (middle["id"],)
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == middle["id"]
+    assert result["checked"] == 3
+
+
+async def test_a_new_row_is_v2_and_covers_throttle_rescue(audit_db: Path) -> None:
+    """The rescue budget is hashed from v2 on, so editing it breaks the chain."""
+    event = await storage.insert_audit_event(
+        action="auth.login_failed", actor="mallory"
+    )
+    assert event["hash_version"] == 2
+
+    payloads = [
+        json.loads(exported["hash_payload"])
+        async for batch in storage.iter_audit_events()
+        for exported in batch
+    ]
+    assert payloads[-1]["throttle_rescue"] == 0
+    assert (await storage.verify_audit_chain())["ok"] is True
+
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET throttle_rescue = 1 WHERE id = ?",
+            (event["id"],),
+        )
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == event["id"]
+
+
+async def test_a_pre_v2_row_still_verifies_against_the_v1_field_list(
+    audit_db: Path,
+) -> None:
+    """A v1 row keeps its stored hash: the version bump rewrites nothing."""
+    old = _insert_pre_v2_row(audit_db)
+    new = await storage.insert_audit_event(action="auth.login", actor="alice")
+    assert new is not None
+    assert new["hash_version"] == 2
+    # The new row links to the v1 hash it found at the tail, unrewritten.
+    assert new["prev_hash"] == old["entry_hash"]
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is True
+    assert (result["checked"], result["legacy"]) == (2, 0)
+    assert _chain_rows(audit_db)[0][2] == old["entry_hash"]
+
+
+async def test_verify_chain_flags_a_deleted_row(audit_db: Path) -> None:
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    middle = await storage.insert_audit_event(action="action.two", actor="alice")
+    last = await storage.insert_audit_event(action="action.three", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute("DELETE FROM audit_events WHERE id = ?", (middle["id"],))
+
+    # The gap breaks the successor's prev_hash link, not the deleted row.
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == last["id"]
+
+
+async def test_verify_chain_reports_a_pruned_head_as_truncated(audit_db: Path) -> None:
+    for index in range(4):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+    assert await storage.enforce_audit_row_cap(3) == 1
+    oldest = (await storage.list_audit_events())["events"][-1]["id"]
+
+    # Retention deleted the predecessor of the oldest survivor: the window
+    # starts mid-chain, which is truncation, not tampering.
+    result = await storage.verify_audit_chain()
+    assert result == {
+        "checked": 3,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": True,
+        "truncated_before_id": oldest,
+    }
+
+
+async def test_verify_chain_still_flags_a_tampered_surviving_row(
+    audit_db: Path,
+) -> None:
+    """A pruned boundary must not hide a mismatch inside the window."""
+    events = [
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+        for index in range(5)
+    ]
+    await storage.enforce_audit_row_cap(4)
+    middle = events[2]
+    assert middle is not None
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory' WHERE id = ?", (middle["id"],)
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["truncated"] is True
+    assert result["ok"] is False
+    assert result["first_broken_id"] == middle["id"]
+
+
+async def test_verify_chain_rejects_a_prefix_deleted_outside_retention(
+    audit_db: Path,
+) -> None:
+    """No checkpoint means the prefix was not cut by the retention job."""
+    events = [
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+        for index in range(4)
+    ]
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute("DELETE FROM audit_events WHERE id <= ?", (events[1]["id"],))
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["truncated"] is False
+    assert result["truncated_before_id"] is None
+    assert result["first_broken_id"] == events[2]["id"]
+
+
+async def test_a_second_prune_advances_the_retention_checkpoint(
+    audit_db: Path,
+) -> None:
+    events = [
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+        for index in range(6)
+    ]
+    assert await storage.enforce_audit_row_cap(5) == 1
+    assert await storage.enforce_audit_row_cap(3) == 2
+
+    with sqlite3.connect(audit_db) as conn:
+        checkpoint = conn.execute(
+            "SELECT pruned_through_id, pruned_last_hash FROM audit_chain_state"
+        ).fetchone()
+    assert checkpoint == (events[2]["id"], events[2]["entry_hash"])
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is True
+    assert result["truncated"] is True
+    assert result["truncated_before_id"] == events[3]["id"]
+
+
+async def test_prune_by_cutoff_advances_the_retention_checkpoint(
+    audit_db: Path,
+) -> None:
+    old = await storage.insert_audit_event(action="action.old", actor="alice")
+    await storage.insert_audit_event(action="action.new", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = '2020-01-01T00:00:00.000000Z'"
+            " WHERE id = ?",
+            (old["id"],),
+        )
+
+    assert await storage.prune_audit_events("2021-01-01 00:00:00") == 1
+    result = await storage.verify_audit_chain()
+    assert (result["ok"], result["truncated"]) == (True, True)
+    assert result["truncated_before_id"] is not None
+
+
+async def test_verify_chain_reports_legacy_rows_separately(audit_db: Path) -> None:
+    for _ in range(2):
+        _insert_pre_chain_row(audit_db)
+    await storage.insert_audit_event(action="action.chained", actor="alice")
+
+    # Pre-chain rows are counted, not called broken, and not faked into it.
+    result = await storage.verify_audit_chain()
+    assert result == {
+        "checked": 1,
+        "legacy": 2,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+    assert _chain_rows(audit_db)[0][2] is None
+
+
+async def test_verify_chain_flags_a_cleared_hash_on_the_newest_row(
+    audit_db: Path,
+) -> None:
+    """Clearing the newest hash must not demote a tampered row to "legacy"."""
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    last = await storage.insert_audit_event(action="action.two", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory', entry_hash = NULL WHERE id = ?",
+            (last["id"],),
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == last["id"]
+    assert result["legacy"] == 0
+
+
+async def test_verify_chain_flags_a_cleared_hash_inside_the_chain(
+    audit_db: Path,
+) -> None:
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    middle = await storage.insert_audit_event(action="action.two", actor="alice")
+    await storage.insert_audit_event(action="action.three", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET entry_hash = NULL WHERE id = ?", (middle["id"],)
+        )
+
+    result = await storage.verify_audit_chain()
+    assert result["ok"] is False
+    assert result["first_broken_id"] == middle["id"]
+    assert result["legacy"] == 0
+
+
+async def test_verify_chain_still_counts_a_pre_chain_row_as_legacy(
+    audit_db: Path,
+) -> None:
+    """A NULL hash *before* the first chained row stays legacy, not a break."""
+    _insert_pre_chain_row(audit_db)
+    await storage.insert_audit_event(action="action.one", actor="alice")
+    await storage.insert_audit_event(action="action.two", actor="alice")
+
+    result = await storage.verify_audit_chain()
+    assert result == {
+        "checked": 2,
+        "legacy": 1,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+
+
+async def test_verify_chain_limit_checks_only_the_newest_rows(audit_db: Path) -> None:
+    first = await storage.insert_audit_event(action="action.one", actor="alice")
+    for index in range(2, 6):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+    with sqlite3.connect(audit_db) as conn:
+        conn.execute(
+            "UPDATE audit_events SET actor = 'mallory' WHERE id = ?", (first["id"],)
+        )
+
+    window = await storage.verify_audit_chain(limit=2)
+    assert window == {
+        "checked": 2,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+
+    everything = await storage.verify_audit_chain()
+    assert everything["ok"] is False
+    assert everything["first_broken_id"] == first["id"]
+
+
+async def test_concurrent_inserts_keep_one_linear_chain(audit_db: Path) -> None:
+    await asyncio.gather(
+        *(
+            storage.insert_audit_event(action=f"action.{index}", actor="alice")
+            for index in range(6)
+        )
+    )
+
+    result = await storage.verify_audit_chain()
+    assert result["checked"] == 6
+    assert result["ok"] is True
+
+
+# --- created_at is explicit UTC -------------------------------------------
+
+
+async def test_stored_created_at_carries_an_explicit_utc_marker(
+    audit_db: Path,
+) -> None:
+    event = await storage.insert_audit_event(action="auth.login", actor="alice")
+    assert event["created_at"].endswith("Z")
+    parsed = datetime.fromisoformat(event["created_at"])
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+
+
+def test_init_db_migrates_a_legacy_audit_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing DB gets the chain columns; naive UTC timestamps are rewritten."""
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(storage, "DB_PATH", db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(_LEGACY_AUDIT_SCHEMA)
+        conn.execute(
+            "INSERT INTO audit_events (created_at, actor, action)"
+            " VALUES ('2021-03-04 05:06:07', 'alice', 'auth.login')"
+        )
+
+    asyncio.run(storage.init_db())
+    with sqlite3.connect(db_path) as conn:
+        migrated = conn.execute(
+            "SELECT created_at, prev_hash, entry_hash FROM audit_events"
+        ).fetchone()
+    assert migrated == ("2021-03-04T05:06:07.000000Z", None, None)
+
+    # Idempotent: a second startup neither re-adds nor re-rewrites anything.
+    asyncio.run(storage.init_db())
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute("SELECT created_at FROM audit_events").fetchone()[0]
+            == "2021-03-04T05:06:07.000000Z"
+        )
+
+    assert asyncio.run(storage.verify_audit_chain())["legacy"] == 1
+
+
+def test_audit_timestamp_treats_naive_input_as_utc() -> None:
+    assert storage.audit_timestamp(datetime(2026, 6, 15, 12)) == (
+        "2026-06-15T12:00:00.000000Z"
+    )
+    # An explicit offset is converted, not dropped.
+    assert (
+        storage.audit_timestamp(
+            datetime(2026, 6, 15, 14, tzinfo=timezone(timedelta(hours=2)))
+        )
+        == "2026-06-15T12:00:00.000000Z"
+    )
+
+
+# --- timezone-correct filtering -------------------------------------------
+
+
+def _set_created_at(db_path: Path, event_id: int, value: str) -> None:
+    """Rewrite one row's ``created_at`` (to place it on a known instant)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = ? WHERE id = ?", (value, event_id)
+        )
+
+
+def test_audit_endpoint_honours_explicit_offsets(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    late = _insert_audit(action="action.late", actor="alice")
+    _set_created_at(temp_db_path, late["id"], "2026-06-15T22:30:00.000000Z")
+
+    # 2026-06-16T00:30+02:00 is the same instant as the row: included.
+    same = app_client.get(
+        "/api/admin/audit",
+        params={
+            "since": "2026-06-16T00:30:00+02:00",
+            "until": "2026-06-16T01:00:00+02:00",
+        },
+    ).json()
+    assert [event["action"] for event in same["events"]] == ["action.late"]
+
+    # An hour later in the same offset excludes it.
+    after = app_client.get(
+        "/api/admin/audit", params={"since": "2026-06-16T01:30:00+02:00"}
+    ).json()
+    assert after["events"] == []
+
+
+def test_audit_endpoint_date_only_bounds_are_utc_days(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    first = _insert_audit(action="action.early", actor="alice")
+    _set_created_at(temp_db_path, first["id"], "2026-06-15T00:00:00.000000Z")
+    last = _insert_audit(action="action.late", actor="alice")
+    _set_created_at(temp_db_path, last["id"], "2026-06-15T23:59:59.999999Z")
+
+    day = app_client.get(
+        "/api/admin/audit", params={"since": "2026-06-15", "until": "2026-06-15"}
+    ).json()
+    assert [event["action"] for event in day["events"]] == [
+        "action.late",
+        "action.early",
+    ]
+
+
+def test_audit_endpoint_reads_a_naive_bound_as_utc(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    event = _insert_audit(action="action.only", actor="alice")
+    _set_created_at(temp_db_path, event["id"], "2026-06-15T22:30:00.000000Z")
+
+    naive = app_client.get(
+        "/api/admin/audit", params={"until": "2026-06-15T22:30:00"}
+    ).json()
+    assert [entry["action"] for entry in naive["events"]] == ["action.only"]
+
+
+# --- GET /api/admin/audit/verify ------------------------------------------
+
+
+def test_audit_verify_endpoint_reports_an_intact_and_a_broken_chain(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    first = _insert_audit(action="action.one", actor="alice")
+    _insert_audit(action="action.two", actor="alice")
+
+    intact = app_client.get("/api/admin/audit/verify")
+    assert intact.status_code == 200, intact.text
+    assert intact.json() == {
+        "checked": 2,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET outcome = 'denied' WHERE id = ?", (first["id"],)
+        )
+    broken = app_client.get("/api/admin/audit/verify").json()
+    assert broken["ok"] is False
+    assert broken["first_broken_id"] == first["id"]
+
+    # A window that excludes the tampered row is intact; its link is seeded.
+    window = app_client.get("/api/admin/audit/verify", params={"limit": 1}).json()
+    assert window == {
+        "checked": 1,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+
+
+def test_audit_verify_requires_admin(app_client) -> None:
+    app_client.cookies.clear()
+    assert app_client.get("/api/admin/audit/verify").status_code == 403
+
+
+# --- GET /api/admin/audit/export ------------------------------------------
+
+
+def _export(client, **params: Any) -> Any:
+    return client.get("/api/admin/audit/export", params=params)
+
+
+def test_audit_export_json_returns_every_match_in_order(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    for index in range(3):
+        _insert_audit(action=f"action.{index}", actor="alice", details={"n": index})
+
+    response = _export(app_client, format="json")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-disposition"] == (
+        "attachment; filename=audit-export.json"
+    )
+    events = json.loads(response.text)
+    # Ascending id: the exported rows walk the chain oldest-first, so
+    # prev_hash of row N is entry_hash of row N-1 in the same file.
+    assert [event["action"] for event in events] == [
+        "action.0",
+        "action.1",
+        "action.2",
+    ]
+    assert all(len(event["entry_hash"]) == 64 for event in events)
+    assert events[1]["prev_hash"] == events[0]["entry_hash"]
+    assert events[0]["details"] == {"n": 0}
+
+
+def test_audit_export_json_hash_payload_verifies_every_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """``sha256(hash_payload + prev_hash)`` matches for every exported row."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = [
+        _insert_audit(action="action.0", actor="alice", details={"n": 0}),
+        _insert_audit(
+            action="action.1",
+            actor="bob",
+            is_admin=True,
+            details={"n": 1, "note": "naïve"},
+        ),
+        _insert_audit(action="action.2", actor="alice", target_id="job-1"),
+    ]
+
+    events = _export(app_client, format="json").json()
+    assert [event["id"] for event in events] == [row["id"] for row in stored]
+    for event in events:
+        # No field re-mapping and no coercion: an exported row is verifiable as-is.
+        assert _export_hash(event) == event["entry_hash"]
+    assert events[1]["prev_hash"] == events[0]["entry_hash"]
+
+
+def test_audit_export_hash_payload_is_the_stored_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """The payload decodes to the stored hash fields, not the API rendering."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(
+        action="user.job_delete",
+        actor="alice",
+        actor_role="admin",
+        is_admin=True,
+        target_type="job",
+        target_id="job-1",
+        details={"note": "naïve"},
+        request_ip="203.0.113.9",
+    )
+
+    event = _export(app_client, format="json").json()[0]
+    assert json.loads(event["hash_payload"]) == {
+        "id": stored["id"],
+        "created_at": stored["created_at"],
+        "actor": "alice",
+        "actor_role": "admin",
+        "is_admin": 1,  # stored as 1/0 while the event renders a bool
+        "action": "user.job_delete",
+        "target_type": "job",
+        "target_id": "job-1",
+        "outcome": "success",
+        "details": '{"note":"naïve"}',  # the stored text, not the object
+        "request_ip": "203.0.113.9",
+        "throttle_rescue": 0,  # v2 hashes the rescue flag
+    }
+    assert event["is_admin"] is True
+    assert json.loads(event["hash_payload"])["details"] == event["details_raw"]
+
+
+def test_audit_export_hash_payload_exposes_a_tampered_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """A direct edit behind the API's back stops matching the stored hash."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(action="user.job_delete", actor="alice", details={"n": 1})
+    before = _export(app_client, format="json").json()[0]
+    assert _export_hash(before) == before["entry_hash"]
+
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE audit_events SET details = ? WHERE id = ?",
+            ('{"n":2}', stored["id"]),
+        )
+
+    after = _export(app_client, format="json").json()[0]
+    # The edit rewrites the payload and leaves the stored hash column alone, so
+    # the exported row no longer reproduces its own hash.
+    assert after["entry_hash"] == before["entry_hash"]
+    assert after["hash_payload"] != before["hash_payload"]
+    assert _export_hash(after) != after["entry_hash"]
+    verify = app_client.get("/api/admin/audit/verify").json()
+    assert verify["first_broken_id"] == stored["id"]
+
+
+def test_audit_export_csv_carries_a_verifiable_hash_payload(
+    app_client, temp_db_path: Path
+) -> None:
+    """The CSV cell quotes and unquotes back to the bytes the hash covers."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    _insert_audit(action="action.0", actor="alice", details={"n": 0})
+    _insert_audit(
+        action="action.1",
+        actor="alice",
+        details={"reason": 'quote ", comma , and naïveté'},
+    )
+
+    rows = list(csv.DictReader(io.StringIO(_export(app_client, format="csv").text)))
+    assert len(rows) == 2
+    for row in rows:
+        assert _export_hash(row) == row["entry_hash"]
+        payload = json.loads(row["hash_payload"])
+        assert payload["is_admin"] == int(row["is_admin"])
+        assert payload["details"] == row["details"]
+    assert rows[1]["prev_hash"] == rows[0]["entry_hash"]
+
+
+def test_audit_export_json_carries_verifiable_details_text(
+    app_client, temp_db_path: Path
+) -> None:
+    """``details_raw`` is the stored text, so the hash can be recomputed."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(
+        action="action.raw", actor="alice", details={"n": 1, "note": "naïve"}
+    )
+
+    event = _export(app_client, format="json").json()[0]
+    assert json.loads(event["details_raw"]) == event["details"]
+    restored = {name: event[name] for name in storage._audit_hash_fields(event)}
+    restored["is_admin"] = int(bool(event["is_admin"]))
+    restored["details"] = event["details_raw"]
+    # The version travels with the row; without it the payload is read as v1.
+    restored["hash_version"] = event["hash_version"]
+    assert (
+        storage._audit_entry_hash(restored, event["prev_hash"]) == stored["entry_hash"]
+    )
+
+
+def test_audit_export_verifies_a_mixed_v1_v2_trail(
+    app_client, temp_db_path: Path
+) -> None:
+    """Each exported row reproduces its own hash, whatever version wrote it."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    old = _insert_pre_v2_row(temp_db_path, action="auth.login_failed")
+    _insert_audit(action="action.new", actor="bob")
+
+    events = _export(app_client, format="json").json()
+    assert [event["id"] for event in events] == [old["id"], old["id"] + 1]
+    assert [event["hash_version"] for event in events] == [1, 2]
+    for event in events:
+        assert _export_hash(event) == event["entry_hash"]
+        # ``hash_version`` is what tells an offline verifier which field list
+        # the payload was built from.
+        assert ("throttle_rescue" in json.loads(event["hash_payload"])) is (
+            event["hash_version"] == 2
+        )
+    assert app_client.get("/api/admin/audit/verify").json()["ok"] is True
+
+
+@pytest.mark.parametrize("fmt", ["json", "csv"])
+def test_audit_export_omits_the_payload_of_an_unverifiable_row(
+    app_client, temp_db_path: Path, fmt: str
+) -> None:
+    """A pre-chain row ships no ``hash_payload``, so it cannot look verifiable.
+
+    The rule consumers rely on: the payload's presence means "checkable here",
+    so a row with no ``entry_hash`` omits the field in JSON and leaves the CSV
+    cell empty. A chained row in the same export keeps it.
+    """
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    legacy = _insert_pre_chain_row(temp_db_path, action="auth.login")
+    chained = _insert_audit(action="action.chained", actor="alice")
+
+    if fmt == "json":
+        rows = {
+            event["id"]: event for event in _export(app_client, format="json").json()
+        }
+        assert "hash_payload" not in rows[legacy["id"]]
+    else:
+        rows = {
+            int(row["id"]): row
+            for row in csv.DictReader(
+                io.StringIO(_export(app_client, format="csv").text)
+            )
+        }
+    # Absent in JSON, empty cell in CSV: a legacy row is not checkable, and says so.
+    assert not rows[legacy["id"]].get("hash_payload")
+    assert rows[chained["id"]]["hash_payload"]
+    # Every row that does carry a payload still reproduces its own hash.
+    assert _export_hash(rows[chained["id"]]) == rows[chained["id"]]["entry_hash"]
+
+    assert app_client.get("/api/admin/audit/verify").json()["legacy"] == 1
+
+
+def test_audit_export_streams_past_the_batch_size(
+    app_client, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    for index in range(5):
+        _insert_audit(action=f"action.{index}", actor="alice")
+    monkeypatch.setattr(main, "_AUDIT_EXPORT_BATCH", 2)
+
+    events = _export(app_client, format="json").json()
+    assert len(events) == 5
+    assert [event["action"] for event in events] == [
+        f"action.{index}" for index in range(5)
+    ]
+
+
+def test_audit_export_csv_has_the_documented_columns(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    _insert_audit(
+        action="user.job_delete",
+        actor="alice",
+        actor_role="operator",
+        target_type="job",
+        target_id="job-1",
+        details={"reason": "cleanup"},
+        request_ip="203.0.113.9",
+    )
+
+    response = _export(app_client, format="csv")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-disposition"] == (
+        "attachment; filename=audit-export.csv"
+    )
+    reader = csv.DictReader(io.StringIO(response.text))
+    rows = list(reader)
+    assert reader.fieldnames == [
+        "id",
+        "created_at",
+        "actor",
+        "actor_role",
+        "is_admin",
+        "action",
+        "target_type",
+        "target_id",
+        "outcome",
+        "request_ip",
+        "details",
+        "hash_version",
+        "prev_hash",
+        "entry_hash",
+        "hash_payload",
+    ]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["hash_version"] == "2"
+    assert row["actor"] == "alice"
+    assert row["actor_role"] == "operator"
+    assert row["is_admin"] == "0"
+    assert row["action"] == "user.job_delete"
+    assert row["target_id"] == "job-1"
+    assert row["outcome"] == "success"
+    assert row["request_ip"] == "203.0.113.9"
+    assert row["details"] == '{"reason":"cleanup"}'
+    # The chain columns travel with the CSV, so a retained export can be
+    # checked without the server.
+    assert row["prev_hash"] == storage._AUDIT_GENESIS_HASH
+    assert len(row["entry_hash"]) == 64
+
+
+async def test_iter_audit_events_never_repeats_a_row_while_writes_continue(
+    audit_db: Path,
+) -> None:
+    """Keyset paging: rows inserted mid-export cannot shift a yielded row."""
+    created = []
+    for index in range(3):
+        event = await storage.insert_audit_event(
+            action=f"action.{index}", actor="alice"
+        )
+        assert event is not None
+        created.append(event["id"])
+
+    exported: list[int] = []
+    batches = 0
+    async for batch in storage.iter_audit_events(batch_size=2):
+        batches += 1
+        exported.extend(event["id"] for event in batch)
+        if batches == 1:
+            # New events land at the head between the two batches.
+            for index in range(2):
+                await storage.insert_audit_event(action=f"late.{index}", actor="alice")
+
+    # Every row that existed when the export started appears exactly once and
+    # in id order: rows written during the walk can only join the tail, so the
+    # evidence has neither duplicates nor gaps.
+    assert exported[: len(created)] == created
+    assert exported == sorted(set(exported))
+    assert len(exported) == len(created) + 2
+
+
+def test_audit_export_neutralizes_spreadsheet_formulas(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    formula = "=cmd|' /C calc'!A0"
+    _insert_audit(
+        action="auth.login_failed",
+        actor=formula,
+        target_id="-2+3",
+        details={"note": formula},
+        request_ip="@SUM(1+1)",
+    )
+    _insert_audit(action="auth.login", actor="alice", target_id="job-1")
+
+    rows = list(csv.DictReader(io.StringIO(_export(app_client, format="csv").text)))
+    flagged = next(row for row in rows if row["actor"] == f"'{formula}")
+    assert flagged["target_id"] == "'-2+3"
+    assert flagged["request_ip"] == "'@SUM(1+1)"
+    # A details cell always starts with its JSON object, so it is not a formula.
+    assert flagged["details"] == f'{{"note":"{formula}"}}'
+    # Normal text is untouched and id columns stay castable.
+    normal = next(row for row in rows if row["actor"] == "alice")
+    assert normal["target_id"] == "job-1"
+    assert normal["id"].isdigit()
+    assert normal["is_admin"] in {"0", "1"}
+
+
+@pytest.mark.parametrize(
+    ("name", "stored", "exported"),
+    [
+        ("actor", "=cmd|' /C calc'!A0", "'=cmd|' /C calc'!A0"),
+        ("actor", "-x", "'-x"),
+        ("actor", "'quoted", "''quoted"),
+        ("actor", "alice", "alice"),
+        ("id", "-1", "-1"),
+    ],
+)
+def test_audit_csv_escaping_is_invertible(
+    name: str, stored: str, exported: str
+) -> None:
+    """Escaping is one added apostrophe, so it is always undoable."""
+    assert main._audit_csv_cell(name, stored) == exported
+    assert _csv_unescape(exported) == stored
+
+
+def test_audit_export_unescapes_to_the_hashed_row(
+    app_client, temp_db_path: Path
+) -> None:
+    """A formula-shaped text cell unescapes back to the value in the hash."""
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    stored = _insert_audit(
+        action="auth.login_failed",
+        actor="-x",
+        actor_role="anon",
+        target_type="user",
+        target_id="'quoted",
+        outcome="failure",
+        details={"note": "x"},
+        request_ip="@10.0.0.1",
+    )
+
+    rows = list(csv.DictReader(io.StringIO(_export(app_client, format="csv").text)))
+    row = next(candidate for candidate in rows if candidate["id"] == str(stored["id"]))
+    payload = json.loads(row["hash_payload"])
+    restored = {
+        "id": int(row["id"]),
+        "created_at": row["created_at"],
+        "actor": _csv_unescape(row["actor"]),
+        "actor_role": _csv_unescape(row["actor_role"]),
+        "is_admin": int(row["is_admin"]),
+        "action": _csv_unescape(row["action"]),
+        "target_type": _csv_unescape(row["target_type"]),
+        "target_id": _csv_unescape(row["target_id"]),
+        "outcome": _csv_unescape(row["outcome"]),
+        "details": _csv_unescape(row["details"]),
+        "request_ip": _csv_unescape(row["request_ip"]),
+        # Not a CSV column: the payload is where a CSV-only verifier reads it.
+        "throttle_rescue": payload["throttle_rescue"],
+        "hash_version": int(row["hash_version"]),
+    }
+    assert restored["actor"] == "-x"
+    assert restored["target_id"] == "'quoted"
+    assert (
+        storage._audit_entry_hash(restored, stored["prev_hash"])
+        == (stored["entry_hash"])
+    )
+
+
+def test_audit_export_honours_the_list_filters(app_client, temp_db_path: Path) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    keep = _insert_audit(action="action.keep", actor="alice", outcome="denied")
+    _insert_audit(action="action.skip", actor="bob")
+
+    events = _export(app_client, format="json", outcome="denied").json()
+    assert [event["id"] for event in events] == [keep["id"]]
+
+
+@pytest.mark.parametrize("fmt", ["json", "csv"])
+def test_audit_export_strips_sensitive_detail_fields(
+    app_client, temp_db_path: Path, fmt: str
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    _insert_audit(
+        action="admin.db_query",
+        actor="alice",
+        details={"request_params": {"github_token": _SECRET, "job_name": "keep"}},
+    )
+
+    response = _export(app_client, format=fmt)
+    assert response.status_code == 200, response.text
+    assert _SECRET not in response.text
+    if fmt == "json":
+        event = response.json()[0]
+        assert event["details"] == {"request_params": {"job_name": "keep"}}
+        # The stored bytes still hold the token, so the raw hash fields are
+        # withheld rather than leaked: the row is not verifiable, and says so.
+        assert "hash_payload" not in event
+        assert "details_raw" not in event
+    else:
+        row = next(iter(csv.DictReader(io.StringIO(response.text))))
+        assert row["details"] == '{"request_params":{"job_name":"keep"}}'
+        assert row["hash_payload"] == ""
+
+
+def test_audit_export_rejects_non_admin(app_client) -> None:
+    registered = app_client.post("/api/auth/register", json={"username": "bob"})
+    assert registered.status_code == 200
+    session = registered.cookies.get("rootcoz_session")
+
+    response = app_client.get(
+        "/api/admin/audit/export",
+        params={"format": "json"},
+        headers={"Authorization": ""},
+        cookies={"rootcoz_session": session},
+    )
+    assert response.status_code == 403
+
+
+def test_audit_export_rejects_an_unknown_format(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.get("/api/admin/audit/export", params={"format": "xml"})
+    assert response.status_code == 422
+
+
+# --- AUDIT_MAX_ROWS size ceiling ------------------------------------------
+
+
+async def test_row_cap_deletes_the_oldest_rows(audit_db: Path) -> None:
+    for index in range(5):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+
+    assert await storage.enforce_audit_row_cap(3) == 2
+    remaining = await storage.list_audit_events()
+    assert [event["action"] for event in remaining["events"]] == [
+        "action.4",
+        "action.3",
+        "action.2",
+    ]
+
+
+async def test_row_cap_zero_disables_the_ceiling(audit_db: Path) -> None:
+    for index in range(3):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+
+    assert await storage.enforce_audit_row_cap(0) == 0
+    assert (await storage.list_audit_events())["total"] == 3
+
+
+async def test_prune_enforces_the_row_cap_with_retention_off(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for index in range(4):
+        await storage.insert_audit_event(action=f"action.{index}", actor="alice")
+    monkeypatch.setattr(main, "_last_audit_prune_at", 0.0)
+    monkeypatch.setattr(
+        main,
+        "get_settings",
+        lambda: SimpleNamespace(audit_retention_days=0, audit_max_rows=2),
+    )
+
+    assert await main.prune_audit_events_periodically() == 2
+    remaining = await storage.list_audit_events()
+    assert [event["action"] for event in remaining["events"]] == [
+        "action.3",
+        "action.2",
+    ]
+
+
+# --- audit write failure signal -------------------------------------------
+
+
+def _health_settings() -> SimpleNamespace:
+    return SimpleNamespace(jenkins_url="", reportportal_enabled=False)
+
+
+async def test_audit_write_failure_degrades_health(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    monkeypatch.setattr(monitoring, "_audit_suppressed_auth_events", 0)
+    with patch.object(
+        storage,
+        "insert_audit_event",
+        AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
+    ):
+        await main.record_audit(action="auth.login", actor="alice", message="m")
+    assert monitoring._audit_write_failures == 1
+
+    with patch.object(
+        monitoring, "check_ai_provider", AsyncMock(return_value={"status": "ok"})
+    ):
+        health = await monitoring.build_health_response(
+            _health_settings(), str(audit_db)
+        )
+    assert health["checks"]["audit"] == {
+        "status": "degraded",
+        "write_failures": 1,
+        "suppressed_auth_events": 0,
+    }
+    assert health["status"] == "degraded"
+
+
+async def test_audit_write_failure_is_logged_at_error(
+    audit_db: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    try:
+        with patch.object(
+            storage,
+            "insert_audit_event",
+            AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
+        ):
+            await main.record_audit(action="auth.login", actor="alice", message="m")
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    record = next(
+        entry
+        for entry in caplog.records
+        if "Failed to persist audit event" in entry.getMessage()
+    )
+    assert record.levelno == logging.ERROR
+    assert "1 audit write failure(s)" in record.getMessage()
+
+
+async def test_successful_audit_write_keeps_health_ok(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    monkeypatch.setattr(monitoring, "_audit_suppressed_auth_events", 0)
+    await main.record_audit(action="auth.login", actor="alice", message="m")
+
+    with patch.object(
+        monitoring, "check_ai_provider", AsyncMock(return_value={"status": "ok"})
+    ):
+        health = await monitoring.build_health_response(
+            _health_settings(), str(audit_db)
+        )
+    assert health["checks"]["audit"] == {
+        "status": "ok",
+        "write_failures": 0,
+        "suppressed_auth_events": 0,
+    }
+    assert health["status"] == "healthy"
+
+
+def test_metrics_expose_the_audit_write_failure_gauge(
+    app_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 3)
+    text = app_client.get("/metrics").text
+    assert "rootcoz_audit_write_failures 3" in text
+
+
+# --- redaction of credential-shaped text ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "sk-live-4f9c2b7d1e6a8c3f5b0d2e7a9c4b6f8d",  # pragma: allowlist secret  # gitleaks:allow
+        "ddsat_9f8e7d6c5b4a39281706f5e4d3c2b1a0",  # pragma: allowlist secret  # gitleaks:allow
+        "ddapp_4f9c2b7d1e6a8c3f5b0d",  # pragma: allowlist secret  # gitleaks:allow
+        "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee",  # pragma: allowlist secret  # gitleaks:allow
+        "github_pat_11ABCDEFG0abcdefghijklmnop",  # pragma: allowlist secret  # gitleaks:allow
+        "xoxb-123456789012-abcdefghijkl",  # pragma: allowlist secret  # gitleaks:allow
+        "AKIAIOSFODNN7EXAMPLE",  # pragma: allowlist secret  # gitleaks:allow
+        "dGhpcy1pcy1hLXZlcnktbG9uZy1zZWNyZXQtdG9rZW4",
+        # Split so the private-key scanner does not treat this sample as a key.
+        "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n"
+        "-----END RSA " + "PRIVATE KEY-----",
+    ],
+)
+def test_redact_details_scrubs_credential_shaped_text(secret: str) -> None:
+    redacted = main._redact_details({"reason": f"rotated {secret} for alice"})
+    # Only the matched substring goes; the sentence around it survives.
+    assert redacted == {"reason": "rotated [redacted] for alice"}
+
+
+def test_redact_details_keeps_normal_text_and_non_strings() -> None:
+    details = {
+        "reason": "Admin alice deleted job 42 after the review finished",
+        "count": 3,
+        "is_admin": True,
+        "nothing": None,
+        "keys": ["ai_model"],
+        "notes": ["no secret here either"],
+    }
+    assert main._redact_details(details) == details
+
+
+def test_redact_details_keeps_long_identifiers_without_digits() -> None:
+    """A long CamelCase/node id is an identifier, not a credential."""
+    details = {
+        "test_name": "com.example.PaymentServiceTest.testChargeDeclinesWhenCardExpired"
+    }
+    assert main._redact_details(details) == details
+
+
+def test_redact_details_scrubs_long_opaque_token_with_digits() -> None:
+    token = (
+        "AbCdEf0123456789AbCdEf0123456789"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    redacted = main._redact_details({"note": f"pasted {token} here"})
+    assert token not in redacted["note"]
+    assert "[redacted]" in redacted["note"]
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "AbCdEfGhIjKlMnOpQrStUvWx",  # 24 characters, no digit
+        "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGhIjKlMn",  # 40 characters, no digit
+    ],
+)
+def test_redact_details_scrubs_random_mixed_case_token_without_digits(
+    token: str,
+) -> None:
+    """Random case alternation is credential-shaped at any length >= 24."""
+    redacted = main._redact_details({"note": f"pasted {token} here"})
+    assert redacted == {"note": "pasted [redacted] here"}
+
+
+def test_redact_details_keeps_a_long_pascal_case_identifier() -> None:
+    """Few case changes mark an identifier, even at 40+ characters."""
+    identifier = "PaymentServiceTestChargeDeclinesWhenCardExpired"
+    assert len(identifier) == 47
+    details = {"test_name": identifier}
+    assert main._redact_details(details) == details
+
+
+def test_redact_details_keeps_a_lowercase_hex_digest() -> None:
+    """A digest we store on purpose survives even though it contains digits."""
+    digest = "4f9c2b7d1e6a8c3f5b0d2e7a9c4b6f8d"  # pragma: allowlist secret
+    assert len(digest) == 32
+    details = {"sql_hash": digest}
+    assert main._redact_details(details) == details
+
+
+def test_redact_details_keeps_a_long_lowercase_word() -> None:
+    """A long single-case word is prose or an identifier, not a token."""
+    word = "miscellaneous" * 5  # 65 characters, all lowercase, no digit
+    details = {"note": f"the {word} value"}
+    assert main._redact_details(details) == details
+
+
+@pytest.mark.parametrize(
+    "keep",
+    [
+        # A canonical uuid4 job id: hex and dashes, no case alternation.
+        "123e4567-e89b-12d3-a456-426614174000",
+        # Dated model name and test name: a digit proves nothing on its own.
+        "claude-sonnet-4-5-20250929",
+        "test_foo_20240101_abcdef",
+    ],
+)
+def test_redact_details_keeps_digit_bearing_identifiers(keep: str) -> None:
+    details = {"value": keep}
+    assert main._redact_details(details) == details
+    assert keep in main._redact_details({"note": f"handled {keep} today"})["note"]
+
+
+def test_redact_details_keeps_a_40_char_lowercase_hex_digest() -> None:
+    """The whole-value digest exemption covers the 40-char (sha1) length too."""
+    digest = "4f9c2b7d1e6a8c3f5b0d2e7a9c4b6f8d1a2b3c4d"  # pragma: allowlist secret
+    assert main._redact_details({"sql_hash": digest}) == {"sql_hash": digest}
+
+
+def test_redact_details_scrubs_a_mixed_case_token_with_digits() -> None:
+    """With digits, mixed case is what separates a token from an identifier."""
+    token = (
+        "Ab3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    assert main._redact_details({"note": f"pasted {token} here"}) == {
+        "note": "pasted [redacted] here"
+    }
+
+
+def test_redact_details_keeps_only_our_own_digests() -> None:
+    """The hex exemption is keyed on the detail name, not on the value shape."""
+    token = (
+        "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    assert main._redact_details({"sql_hash": token}) == {"sql_hash": token}
+    assert main._redact_details({"note": token}) == {"note": "[redacted]"}
+
+
+def test_redact_details_scrubs_secrets_inside_lists() -> None:
+    redacted = main._redact_details(
+        {"notes": ["first is fine", "second has sk-live-abc123def456ghi789jkl012"]}
+    )
+    assert redacted == {"notes": ["first is fine", "second has [redacted]"]}
+
+
+async def test_record_audit_scrubs_a_secret_pasted_into_free_text(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    secret = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+    try:
+        await main.record_audit(
+            action="provider.key.rotate",
+            actor="admin",
+            message="Admin 'admin' rotated a server provider key",
+            details={"reason": f"rotated {secret} manually"},
+            request=_fake_request(),
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    event = (await storage.list_audit_events(action="provider.key.rotate"))["events"][0]
+    assert event["details"] == {"reason": "rotated [redacted] manually"}
+    assert secret not in json.dumps(event)
+    assert secret not in caplog.text
+
+
+async def test_record_audit_stores_identity_verbatim(
+    audit_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Root cause fix (#379): identity is not a detail, so it is never scrubbed."""
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    token = (
+        "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
+    )
+    try:
+        await main.record_audit(
+            action="auth.login_failed",
+            actor=token,
+            message=f"Failed login attempt for username '{token}'",
+            target_type="user",
+            target_id=token,
+            outcome="failure",
+            request=_fake_request(),
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
+    assert event["actor"] == token
+    assert event["target_id"] == token
+    # The log line follows the stored identity, so log and table agree.
+    assert f"Failed login attempt for username '{token}'" in caplog.text
+
+    # A normal username (including CSV-formula characters) survives untouched.
+    await main.record_audit(
+        action="auth.login_failed",
+        actor="-x",
+        message="Failed login attempt for username '-x'",
+        target_id="-x",
+        outcome="failure",
+        request=_fake_request(),
+    )
+    newest = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
+    assert newest["actor"] == "-x"
+    assert newest["target_id"] == "-x"
+
+
+async def test_record_audit_falls_back_for_empty_or_missing_identity(
+    audit_db: Path,
+) -> None:
+    await main.record_audit(
+        action="auth.login", actor="", message="Login success", target_id=None
+    )
+
+    event = (await storage.list_audit_events(action="auth.login"))["events"][0]
+    assert event["actor"] == "anonymous"
+    assert event["target_id"] is None
+
+
+async def test_record_audit_keeps_a_real_account_that_looks_like_a_token(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A token-shaped account name keeps its own attribution and throttle budget."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
+    account = "svc-ci-pipeline-Prod2024-runner"
+    # Users are stored normalized, so the rescue lookup matches case-insensitively.
+    _add_existing_user(audit_db, account.lower())
+
+    await _failed_logins(2, actor=account)
+    assert monitoring._audit_suppressed_auth_events == 1
+    # Another actor still has its own budget: no shared bucket.
+    await _failed_logins(1, actor="mallory")
+
+    stored = await storage.list_audit_events(action="auth.login_failed")
+    assert [event["actor"] for event in stored["events"]] == ["mallory", account]
+    by_actor = await storage.list_audit_events(
+        action="auth.login_failed", actor=account
+    )
+    assert by_actor["total"] == 1
+
+
+# --- volume guard for auth failures ---------------------------------------
+
+
+def _throttle_settings(limit: int) -> SimpleNamespace:
+    """Settings stub with only what the guard reads."""
+    return SimpleNamespace(audit_auth_failure_max_per_minute=limit)
+
+
+def _reset_suppression(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(monitoring, "_audit_suppressed_auth_events", 0)
+    monkeypatch.setattr(monitoring, "_audit_auth_suppression_windows", {})
+
+
+async def _failed_logins(
+    count: int, action: str = "auth.login_failed", actor: str = "mallory"
+) -> None:
+    for index in range(count):
+        await main.record_audit(
+            action=action,
+            actor=actor,
+            message=f"Failed login attempt #{index} for username '{actor}'",
+            outcome="failure" if action == "auth.login_failed" else "denied",
+        )
+
+
+async def _distinct_name_logins(prefix: str, count: int) -> None:
+    """One attempt per username, so no single name hits its own budget."""
+    await asyncio.gather(
+        *(
+            main.record_audit(
+                action="auth.login_failed",
+                actor=f"{prefix}{index}",
+                message=f"Failed login attempt for '{prefix}{index}'",
+                outcome="failure",
+            )
+            for index in range(count)
+        )
+    )
+
+
+def _add_existing_user(db_path: Path, username: str) -> None:
+    """A users row for an account the login attempt targets."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO users (username) VALUES (?)", (username,))
+
+
+async def test_auth_failure_guard_caps_stored_rows_per_actor(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(3))
+
+    await _failed_logins(5)
+
+    stored = await storage.list_audit_events(action="auth.login_failed")
+    assert stored["total"] == 3
+    assert monitoring._audit_suppressed_auth_events == 2
+
+    with patch.object(
+        monitoring, "check_ai_provider", AsyncMock(return_value={"status": "ok"})
+    ):
+        health = await monitoring.build_health_response(
+            _health_settings(), str(audit_db)
+        )
+    assert health["checks"]["audit"]["suppressed_auth_events"] == 2
+
+
+async def test_auth_failure_guard_counts_failed_and_blocked_together(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One budget for the actor, not one per action id."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(2))
+
+    await _failed_logins(2, "auth.login_failed")
+    await _failed_logins(2, "auth.login_blocked")
+
+    failed = await storage.list_audit_events(action="auth.login_failed")
+    blocked = await storage.list_audit_events(action="auth.login_blocked")
+    assert (failed["total"], blocked["total"]) == (2, 0)
+    assert monitoring._audit_suppressed_auth_events == 2
+
+
+async def test_auth_failure_guard_zero_disables_it(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(0))
+
+    await _failed_logins(5)
+
+    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == 5
+    assert monitoring._audit_suppressed_auth_events == 0
+
+
+async def test_parallel_failed_logins_cannot_exceed_the_budget(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Count-and-insert is one transaction, so 50 racers store only 5 rows."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await asyncio.gather(*(_failed_logins(1) for _ in range(50)))
+
+    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == 5
+    assert monitoring._audit_suppressed_auth_events == 45
+
+
+async def test_login_flood_across_usernames_stays_under_the_global_cap(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cycling usernames buys no fresh budget, but 30 is under the 50 cap."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await _distinct_name_logins("user", 30)
+
+    stored = await storage.list_audit_events(action="auth.login_failed")
+    assert stored["total"] == 30
+    assert stored["total"] <= 5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    assert monitoring._audit_suppressed_auth_events == 0
+
+
+async def test_distributed_flood_still_hits_the_global_cap(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different username every time is bounded by the server-wide budget."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await _distinct_name_logins("user", 60)
+
+    assert (await storage.list_audit_events(action="auth.login_failed"))["total"] == (
+        5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    )
+    assert monitoring._audit_suppressed_auth_events == 10
+
+
+async def test_junk_username_flood_cannot_starve_the_target(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60 junk attempts across 5 names are capped at 5 rows each, so the
+    targeted username's rows still fit under the server-wide budget."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await asyncio.gather(
+        *(
+            main.record_audit(
+                action="auth.login_failed",
+                actor=f"junk{index % 5}",
+                message=f"Failed login attempt for 'junk{index % 5}'",
+                outcome="failure",
+            )
+            for index in range(60)
+        )
+    )
+    for index in range(3):
+        await main.record_audit(
+            action="auth.login_failed",
+            actor="admin",
+            message=f"Failed login attempt #{index} for 'admin'",
+            outcome="failure",
+        )
+
+    events = await storage.list_audit_events(action="auth.login_failed", limit=500)
+    per_actor: dict[str, int] = {}
+    for event in events["events"]:
+        per_actor[event["actor"]] = per_actor.get(event["actor"], 0) + 1
+    assert per_actor["admin"] == 3
+    assert all(count <= 5 for name, count in per_actor.items() if name != "admin")
+    assert per_actor.get("junk0") == 5
+
+
+def _counts_by_actor(events: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in events:
+        counts[event["actor"]] = counts.get(event["actor"], 0) + 1
+    return counts
+
+
+async def test_existing_account_is_recorded_once_when_the_budget_is_spent(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """60 junk names spend the 50-row budget; the real target keeps a row.
+
+    One rescue per account per window, not one per attempt: the invariant is
+    "at least one row", and anything more would let the rescue be flooded.
+    """
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    _add_existing_user(audit_db, "admin")
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(3, actor="admin")
+
+    counts = _counts_by_actor(
+        (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+            "events"
+        ]
+    )
+    assert counts["admin"] == 1
+    assert sum(n for name, n in counts.items() if name != "admin") == (
+        5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    )
+    assert monitoring._audit_suppressed_auth_events == 12
+
+
+async def test_unknown_target_stays_suppressed_when_the_budget_is_spent(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rescue covers existing accounts only — junk names stay capped."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(3, actor="ghost")
+
+    events = (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+        "events"
+    ]
+    assert len(events) == 5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER
+    assert "ghost" not in _counts_by_actor(events)
+    assert monitoring._audit_suppressed_auth_events == 13
+
+
+async def test_rescue_is_one_row_per_account_per_window(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeating the target's attempts gives one rescued row, not five."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    _add_existing_user(audit_db, "admin")
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(5, actor="admin")
+
+    counts = _counts_by_actor(
+        (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+            "events"
+        ]
+    )
+    assert counts["admin"] == 1
+    assert monitoring._audit_suppressed_auth_events == 14
+
+
+def _rescue_flags(db_path: Path) -> dict[int, int]:
+    """``id → throttle_rescue`` for every stored audit row."""
+    with sqlite3.connect(db_path) as conn:
+        return {
+            row[0]: row[1]
+            for row in conn.execute("SELECT id, throttle_rescue FROM audit_events")
+        }
+
+
+async def test_rescue_cap_holds_when_the_attacker_creates_the_accounts(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Open registration buys nothing: at most `limit` rescued rows per window.
+
+    60 junk names spend the 50-row server-wide budget, then ten registered
+    accounts each attempt once. Only the first five fit the rescue cap, so the
+    window holds 5×10 + 5 = 55 rows — never one per account.
+    """
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    for index in range(10):
+        _add_existing_user(audit_db, f"farm{index}")
+
+    await _distinct_name_logins("junk", 60)
+    for index in range(10):
+        await _failed_logins(1, actor=f"farm{index}")
+
+    events = (await storage.list_audit_events(action="auth.login_failed", limit=500))[
+        "events"
+    ]
+    flags = _rescue_flags(audit_db)
+    counts = _counts_by_actor(events)
+    assert len(events) == 5 * storage.AUDIT_GLOBAL_THROTTLE_MULTIPLIER + 5
+    assert list(flags.values()).count(1) == 5
+    assert [counts.get(f"farm{index}") for index in range(10)] == [
+        1,
+        1,
+        1,
+        1,
+        1,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
+    assert monitoring._audit_suppressed_auth_events == 15
+
+
+async def test_a_rescued_row_exposes_the_flag_and_hashes_it(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag marks the rescue and is part of the v2 payload from now on."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(5))
+    _add_existing_user(audit_db, "admin")
+
+    await _distinct_name_logins("junk", 60)
+    await _failed_logins(1, actor="admin")
+
+    flags = _rescue_flags(audit_db)
+    assert list(flags.values()).count(1) == 1
+    event = next(
+        event
+        for event in (
+            await storage.list_audit_events(action="auth.login_failed", limit=500)
+        )["events"]
+        if event["actor"] == "admin"
+    )
+    assert flags[event["id"]] == 1
+    assert event["throttle_rescue"] == 1
+    exported = [
+        row
+        async for batch in storage.iter_audit_events()
+        for row in batch
+        if row["id"] == event["id"]
+    ]
+    assert json.loads(exported[0]["hash_payload"])["throttle_rescue"] == 1
+    assert (await storage.verify_audit_chain()) == {
+        "checked": 51,
+        "legacy": 0,
+        "ok": True,
+        "first_broken_id": None,
+        "truncated": False,
+        "truncated_before_id": None,
+    }
+
+
+async def test_volume_guard_never_throttles_other_actions(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
+
+    for index in range(4):
+        await main.record_audit(
+            action="user.job_delete", actor="mallory", message=f"delete {index}"
+        )
+        await main.record_audit(
+            action="auth.login", actor="mallory", message=f"login {index}"
+        )
+
+    assert (await storage.list_audit_events(action="user.job_delete"))["total"] == 4
+    assert (await storage.list_audit_events(action="auth.login"))["total"] == 4
+    assert monitoring._audit_suppressed_auth_events == 0
+
+
+async def test_suppressed_auth_failures_still_log_once_per_window(
+    audit_db: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    # The one-per-window summary is logged by the monitoring module.
+    monitoring_logger = monitoring.logger
+    monitoring_logger.setLevel(logging.INFO)
+    monitoring_logger.addHandler(caplog.handler)
+    try:
+        await _failed_logins(4)
+    finally:
+        main_logger.removeHandler(caplog.handler)
+        monitoring_logger.removeHandler(caplog.handler)
+
+    # The existing per-event line survives for every attempt, stored or not.
+    for index in range(4):
+        assert f"Failed login attempt #{index}" in caplog.text
+    summaries = [r for r in caplog.records if "volume guard" in r.getMessage()]
+    assert len(summaries) == 1
+    assert summaries[0].levelno == logging.WARNING
+    assert "beyond 1 per minute" in summaries[0].getMessage()
+
+
+def test_suppression_tracking_is_capped_for_junk_usernames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flood of fresh usernames cannot grow the tracking dict past the cap."""
+    _reset_suppression(monkeypatch)
+    monkeypatch.setattr(monitoring.logger, "warning", lambda *a, **k: None)
+    cap = monitoring._AUDIT_AUTH_SUPPRESSION_MAX_ACTORS
+
+    for index in range(5 * cap):
+        monitoring.record_audit_auth_suppression(f"junk{index}", limit=1)
+
+    windows = monitoring._audit_auth_suppression_windows
+    assert len(windows) == cap
+    # The newest window survived; the oldest tracked names were dropped.
+    assert "junk4999" in windows
+    assert "junk0" not in windows
+    assert monitoring._audit_suppressed_auth_events == 5 * cap
+
+
+def test_suppression_tracking_is_pruned_one_window_after_the_roll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rolled entry keeps its count for the next summary, then is dropped."""
+    _reset_suppression(monkeypatch)
+    window = monitoring._AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
+    now = monitoring.time.monotonic()
+    monitoring._audit_auth_suppression_windows.update(
+        {"gone": (now - 2 * window - 1, 5), "last": (now - window - 1, 5)}
+    )
+
+    monitoring.record_audit_auth_suppression("fresh", limit=1)
+
+    assert list(monitoring._audit_auth_suppression_windows) == ["last", "fresh"]
+
+
+def test_suppression_summary_reports_its_own_previous_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another actor's window roll must not erase this actor's count."""
+    _reset_suppression(monkeypatch)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        monitoring.logger, "warning", lambda msg, *args, **kw: messages.append(msg)
+    )
+    window = monitoring._AUDIT_AUTH_SUPPRESSION_WINDOW_SECONDS
+    now = monitoring.time.monotonic()
+
+    # Window 1: actor A drops three rows.
+    for _ in range(3):
+        monitoring.record_audit_auth_suppression("A", limit=1)
+    # Window 2: B's first drop rolls the window, so the prune runs.
+    monitoring._audit_auth_suppression_windows["B"] = (now - window - 1, 1)
+    monitoring.record_audit_auth_suppression("B", limit=1)
+    # Window 3: A's next window still knows what its previous window dropped.
+    monitoring._audit_auth_suppression_windows["A"] = (now - window - 1, 3)
+    monitoring.record_audit_auth_suppression("A", limit=1)
+
+    assert "previous window dropped 3" in messages[-1]
+
+
+async def test_audit_write_retries_a_contended_lock(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A burst of writers can outlast ``busy_timeout``.
+
+    The row must still be written: a lost audit row is a compliance hole, not a
+    missing log line. Only the lock is retried, and the retry lives inside the
+    insert itself so no forwarding layer can drop an argument.
+    """
+    real_connect = storage._connect_db
+    calls = {"count": 0}
+
+    @contextlib.asynccontextmanager
+    async def flaky_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        async with real_connect(*args, **kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(storage, "_connect_db", flaky_connect)
+    monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
+
+    row = await storage.insert_audit_event(action="auth.login", actor="alice")
+
+    assert row is not None
+    assert calls["count"] == 3, "two contended attempts then a successful one"
+
+
+async def test_audit_write_does_not_retry_a_real_storage_error(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine storage fault must surface, never be masked as contention."""
+    calls = {"count": 0}
+
+    @contextlib.asynccontextmanager
+    async def broken_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        raise sqlite3.OperationalError("no such table: audit_events")
+        yield  # pragma: no cover - unreachable, keeps this a generator
+
+    monkeypatch.setattr(storage, "_connect_db", broken_connect)
+    monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
+
+    with pytest.raises(sqlite3.OperationalError):
+        await storage.insert_audit_event(action="auth.login", actor="alice")
+
+    assert calls["count"] == 1, "not retried"
+
+
+async def test_audit_write_keeps_the_client_ip_through_the_retry_wrapper(
+    audit_db: Path,
+) -> None:
+    """The retry wrapper must forward every field, including ``request_ip``.
+
+    The trusted-proxy address is only recorded when ``TRUST_PROXY_HEADERS`` is on,
+    so this is the one place that proves the wrapper does not drop it.
+    """
+    row = await storage.insert_audit_event(
+        action="auth.login", actor="alice", request_ip="203.0.113.7"
+    )
+
+    assert row is not None
+    assert row["request_ip"] == "203.0.113.7"
+    listed = await storage.list_audit_events(action="auth.login")
+    assert listed["events"][0]["request_ip"] == "203.0.113.7"
+
+
+# --- the details matrix: a row that says nothing is not useful (#379) ------
+
+#: Action id → the keys its unit test above asserts. The gate below walks this
+#: table, so a row that silently loses all its detail fails the build.
+_DETAIL_KEYS: dict[str, set[str]] = {
+    "admin.user_create": {"role", "can_view_reports", "approval"},
+    "admin.user_delete": {"role", "can_view_reports", "can_use_server_providers"},
+    "admin.user_reject": {"requested_role"},
+    "admin.user_key_rotate": {"sessions_invalidated"},
+    "auth.login": {"method"},
+    "auth.login_failed": {"reason"},
+    "transcript.download": {"session_id"},
+    "job.metadata_delete": {"cleared"},
+    "job.metadata_set": {"keys"},
+    "job.tags_set": {"added", "removed", "tags"},
+    "pattern.override": {"test_name", "to"},
+    "analysis.submit": {"ingest_only", "job_name"},
+    "export.push": {"plugin", "pushed", "outcome"},
+    "provider.remove": {"provider", "had_stored_key", "models"},
+    "provider.models_set": {"provider", "total"},
+    "comment.delete": {"job_id", "test_name"},
+    "comment.enrich": {"count", "job_id"},
+    "tracked_in.set": {"test_name", "changed"},
+    "user.ai_credential_set": {"provider", "model"},
+}
+
+
+def test_admin_user_create_records_the_admission(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.post(
+        "/api/admin/users/create",
+        json={"username": "new-hire", "role": "operator"},
+    )
+    assert response.status_code == 200, response.text
+
+    event = _events(action="admin.user_create")[0]
+    assert event["details"] == {
+        "role": "operator",
+        "can_view_reports": False,
+        "can_use_server_providers": False,
+        "approval": "active",
+    }
+
+
+def test_admin_user_delete_records_the_account_it_destroyed(app_client) -> None:
+    """A permission that disappears with the account must stay explainable."""
+    admin_login(app_client)
+    created = app_client.post(
+        "/api/admin/users/create",
+        json={
+            "username": "leaver",
+            "role": "reviewer",
+            "can_view_reports": True,
+            "can_use_server_providers": True,
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    deleted = app_client.delete("/api/admin/users/leaver")
+    assert deleted.status_code == 200, deleted.text
+
+    details = _events(action="admin.user_delete")[0]["details"]
+    assert details == {
+        "role": "reviewer",
+        "can_view_reports": True,
+        "can_use_server_providers": True,
+        "status": "active",
+    }
+
+
+def test_admin_user_reject_records_the_requested_role(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(storage.create_user("hopeful", status="pending", role="operator"))
+
+    response = app_client.post("/api/admin/users/hopeful/reject")
+    assert response.status_code == 200, response.text
+
+    event = _events(action="admin.user_reject")[0]
+    assert event["details"] == {"requested_role": "operator"}
+
+
+def test_admin_user_key_rotate_says_the_sessions_were_invalidated(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(storage.create_user("rotated", role="reviewer"))
+
+    response = app_client.post("/api/admin/users/rotated/rotate-key")
+    assert response.status_code == 200, response.text
+
+    event = _events(action="admin.user_key_rotate")[0]
+    assert event["details"] == {"sessions_invalidated": True}
+
+
+def test_provider_models_set_counts_the_whole_selection(app_client) -> None:
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_get_model_catalog",
+        AsyncMock(
+            return_value=[
+                {"provider": "google", "id": "gemini-2.5-pro"},
+                {"provider": "google", "id": "gemini-2.5-flash"},
+            ]
+        ),
+    ):
+        response = app_client.put(
+            "/api/admin/server-providers/google/models",
+            json={
+                "models": [
+                    {"id": "gemini-2.5-pro", "included": True, "free": False},
+                    {"id": "gemini-2.5-flash", "included": False, "free": False},
+                ]
+            },
+        )
+    assert response.status_code == 200, response.text
+
+    event = _events(action="provider.models_set")[0]
+    assert event["details"] == {
+        "provider": "google",
+        "included": 1,
+        "free": 0,
+        "total": 2,
+    }
+
+
+def test_provider_remove_says_whether_a_key_was_discarded(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(
+        storage.set_server_ai_credential("google", "google-key-0123456789", "admin")
+    )
+    asyncio.run(
+        storage.set_server_provider_models(
+            "google",
+            [{"id": "gemini-2.5-pro", "included": True, "free": False}],
+            "admin",
+        )
+    )
+
+    response = app_client.delete("/api/admin/server-providers/google")
+    assert response.status_code == 200, response.text
+
+    event = _events(action="provider.remove")[0]
+    assert event["details"] == {
+        "provider": "google",
+        "had_stored_key": True,
+        "models": 1,
+    }
+    assert "google-key-0123456789" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_ai_credential_failure_rows_name_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused key names the provider *and* the model it was checked with."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ai-model.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    from rootcoz import ai_client
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="rejected"))
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+
+    await main.set_user_ai_credential(
+        "openai",
+        main.AiCredentialInput(
+            api_key="refused-key-000000",  # pragma: allowlist secret
+            model="gpt-4o",
+        ),
+        request,
+    )
+
+    recorded = await storage.list_audit_events(action="user.ai_credential_set")
+    event = recorded["events"][0]
+    assert event["details"] == {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "replaced": False,
+        "reason": "rejected",
+    }
+
+
+#: The actions the details matrix says must gain details or stop being thin.
+#: Restated here as literals so adding one to the matrix without declaring its
+#: keys fails this gate instead of slipping through.
+_MATRIX_ACTIONS = frozenset(
+    {
+        "admin.user_create",
+        "admin.user_delete",
+        "admin.user_key_rotate",
+        "admin.user_reject",
+        "auth.login",
+        "auth.login_failed",
+        "transcript.download",
+        "job.metadata_delete",
+        "job.metadata_set",
+        "job.tags_set",
+        "pattern.override",
+        "analysis.submit",
+        "export.push",
+        "provider.remove",
+        "comment.delete",
+        "comment.enrich",
+        "provider.models_set",
+        "tracked_in.set",
+        "user.ai_credential_set",
+    }
+)
+
+
+def _audit_calls(action: str) -> list[ast.Call]:
+    """Every ``record_audit(action=<action>, ...)`` call in ``main.py``."""
+    tree = ast.parse(MAIN_PATH.read_text())
+    calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or getattr(node.func, "id", None) != (
+            "record_audit"
+        ):
+            continue
+        for keyword in node.keywords:
+            if (
+                keyword.arg == "action"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == action
+            ):
+                calls.append(node)
+    return calls
+
+
+def test_the_matrix_actions_and_their_detail_keys_stay_in_step() -> None:
+    assert set(_DETAIL_KEYS) == _MATRIX_ACTIONS
+
+
+@pytest.mark.parametrize("action", sorted(_MATRIX_ACTIONS))
+def test_a_matrix_action_never_writes_an_empty_details_map(action: str) -> None:
+    """No ``record_audit`` for these actions may omit ``details`` or write ``{}``.
+
+    That is exactly how the empty rows happened, so the gate is static: it
+    fails on the call site instead of waiting for a live request to prove it.
+    """
+    calls = _audit_calls(action)
+    assert calls, f"no record_audit call records {action}"
+    assert _DETAIL_KEYS[action], f"{action} declares no meaningful detail key"
+    for call in calls:
+        details = next((kw for kw in call.keywords if kw.arg == "details"), None)
+        assert details is not None, f"{action} has a record_audit call with no details"
+        assert not (isinstance(details.value, ast.Dict) and not details.value.keys), (
+            f"{action} writes an empty details map"
+        )

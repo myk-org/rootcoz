@@ -186,10 +186,6 @@ class BaseAnalysisRequest(BaseModel):
         default=None,
         description="AI model to use (overrides env var default)",
     )
-    force_server_credentials: bool | None = Field(
-        default=None,
-        description="Use server AI credentials even when a user key exists",
-    )
     enable_jira: bool | None = Field(
         default=None,
         description="Enable Jira bug search (default: true when Jira is configured, set false to skip)",
@@ -1263,7 +1259,6 @@ class ReAnalyzeFailureRequest(BaseModel):
 
     ai_provider: str | None = None
     ai_model: str | None = None
-    force_server_credentials: bool | None = None
     ai_call_timeout: int | None = None
     raw_prompt: str | None = None
     peer_ai_configs: list[dict[str, Any]] | None = None
@@ -1483,7 +1478,6 @@ class ChatInitRequest(BaseModel):
 
     ai_provider: str = Field(min_length=1)
     ai_model: str = Field(min_length=1)
-    force_server_credentials: bool
 
 
 class ChatMessageRequest(BaseModel):
@@ -1509,10 +1503,6 @@ class ChatMessageRequest(BaseModel):
     ai_model: str | None = Field(
         default=None,
         description="Selected chat model (must match the active session)",
-    )
-    force_server_credentials: bool | None = Field(
-        default=None,
-        description="Selected chat credential source (must match the active session)",
     )
 
 
@@ -1563,6 +1553,12 @@ class SetCanUseServerProvidersRequest(BaseModel):
     """Admin grant for server AI credentials."""
 
     can_use_server_providers: Annotated[bool, Strict()]
+
+
+class SetUserDisabledRequest(BaseModel):
+    """Admin PUT /api/admin/users/{username}/disabled body (#379 §I.2)."""
+
+    disabled: Annotated[bool, Strict()]
 
 
 class FreeAiModelEntry(BaseModel):

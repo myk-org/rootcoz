@@ -78,21 +78,22 @@ it('loads history without POST init and starts only with a valid catalog pair', 
   await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
   await user.click(screen.getByRole('option', { name: /gpt.*User/i }))
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
-  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openai', ai_model: 'gpt', force_server_credentials: false }))
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openai', ai_model: 'gpt' }))
   expect(screen.queryByRole('combobox', { name: 'AI Provider' })).not.toBeInTheDocument()
   expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'hello')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
-  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'openai', ai_model: 'gpt', force_server_credentials: false })
+  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'openai', ai_model: 'gpt' })
 })
 
-it('requires grant for server selection, explains restriction, and pins server source in messages', async () => {
+it('offers server models only with the grant, and pins the reported source in messages', async () => {
   setup()
   grant = false
   const user = userEvent.setup()
   const { unmount } = render(page('claude', 'sonnet'))
   expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeDisabled()
-  expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
+  // No switch overrides the user's own credentials: the grant alone decides.
+  expect(screen.queryByRole('switch', { name: 'Use server credentials' })).not.toBeInTheDocument()
   expect(screen.getByText(/Server credentials are restricted/)).toBeInTheDocument()
   // It must not read as ordinary grey helper text: users missed it entirely.
   const notice = screen.getByText(/Server credentials are restricted/).closest('[role="note"]')
@@ -103,28 +104,12 @@ it('requires grant for server selection, explains restriction, and pins server s
   unmount()
   grant = true
   render(page('claude', 'sonnet'))
-  await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
-  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true }))
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'claude', ai_model: 'sonnet' }))
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'hello')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
-  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true })
-})
-
-it('requires the server toggle for a granted server-only model even when the default catalog includes it', async () => {
-  setup()
-  const user = userEvent.setup()
-  render(page('claude', 'sonnet'))
-  await waitFor(() => expect(get).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=false'))
-  expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
-  expect(screen.getByText(/Use server credentials to start with this model/)).toBeInTheDocument()
-  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
-  expect(post).not.toHaveBeenCalledWith('/api/chat/job/init', expect.anything())
-  await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
-  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
-  expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true })
+  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'claude', ai_model: 'sonnet' })
 })
 
 it('does not POST init after a history load failure', async () => {
@@ -170,7 +155,7 @@ it('retries history after confirmed init without reinitializing or deleting the 
   expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'followup')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
-  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'followup', ai_provider: 'openai', ai_model: 'gpt', force_server_credentials: false })
+  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'followup', ai_provider: 'openai', ai_model: 'gpt' })
   expect(post.mock.calls.filter(([path]) => path === '/api/chat/job/init')).toHaveLength(1)
   expect(remove).not.toHaveBeenCalled()
 })
@@ -198,7 +183,7 @@ it('does not POST init when no usable catalog pair exists', async () => {
   const user = userEvent.setup()
   render(page('', ''))
   await screen.findByRole('button', { name: 'Start Chat' })
-  await waitFor(() => expect(get).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=false'))
+  await waitFor(() => expect(get).toHaveBeenCalledWith('/api/ai-models'))
   expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
   await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
   await user.click(screen.getByRole('option', { name: /Openai · User/i }))
@@ -217,7 +202,7 @@ it('shows existing history before starting and clears explicitly without reiniti
   expect(screen.getByText('openai / gpt · User')).toBeInTheDocument()
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'followup')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
-  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'followup', ai_provider: 'openai', ai_model: 'gpt', force_server_credentials: false })
+  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'followup', ai_provider: 'openai', ai_model: 'gpt' })
   get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models') ? catalog : { messages: [{ id: 3, job_id: 'job', role: 'assistant', content: 'done', username: '', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: '2026-01-01T00:00:00Z' }], total: 1, active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }, active_session_version: 'current-version' }))
   act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
   await screen.findByText('done')
@@ -245,23 +230,8 @@ it('keeps orphaned history readable but requires Start before sending', async ()
   expect(screen.getByPlaceholderText(/Ask a question/)).toBeDisabled()
   expect(remove).not.toHaveBeenCalled()
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
-  expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openai', ai_model: 'gpt', force_server_credentials: false })
+  expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openai', ai_model: 'gpt' })
   expect(remove).not.toHaveBeenCalled()
-})
-
-it('invalidates a stale selection when credential source changes', async () => {
-  setup()
-  const user = userEvent.setup()
-  render(page('openai', 'gpt'))
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
-  await user.click(screen.getByRole('switch', { name: 'Use server credentials' }))
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled())
-  // Raw value so the field stays editable; unavailability is enforced by the
-  // disabled Start Chat button (asserted above), not by decorating the input.
-  const staleModel = screen.getByRole('combobox', { name: 'AI Model' })
-  expect(staleModel).toHaveValue('gpt')
-  expect(staleModel).not.toHaveAttribute('readonly')
-  expect(post).not.toHaveBeenCalledWith('/api/chat/job/init', expect.anything())
 })
 
 it('blocks sends while clearing an existing session', async () => {
@@ -357,7 +327,7 @@ it('pins an externally started session from SSE history', async () => {
   act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
   await waitFor(() => expect(screen.getByText('claude / sonnet · Server')).toBeInTheDocument())
   await userEvent.setup().type(screen.getByPlaceholderText(/Ask a question/), 'hello{enter}')
-  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true })
+  expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'claude', ai_model: 'sonnet' })
 })
 
 it('ignores an older SSE history response after a newer reconnect response', async () => {
@@ -514,7 +484,7 @@ it('accepts manual model IDs only when a user key cannot list models', async () 
   await user.type(screen.getByRole('combobox', { name: 'AI Model' }), 'manual-id')
   expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled()
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
-  expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openrouter', ai_model: 'manual-id', force_server_credentials: false })
+  expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'openrouter', ai_model: 'manual-id' })
 })
 
 it('does not delete a same-metadata replacement started in another tab before preflight', async () => {

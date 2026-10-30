@@ -50,7 +50,7 @@ That single authenticated GET returns the stored analysis for one job, including
    | `operator` | Everything a reviewer can, plus submit analyses, re-analyze, abort, delete own jobs, push to exporters |
    | `admin` | Everything an operator can, plus delete any job, manage users and roles, server settings, token usage, log stream, admin chat |
 
-   `can_view_reports` is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the `ALLOWED_USERS` allow list, which is empty (open) by default and always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; `tests/test_allow_list_coverage.py` enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and `DELETE /api/user/ai-credentials/{provider}` — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.
+   `can_view_reports` is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the `ALLOWED_USERS` write allow-list — a deployment-level bound for SSO/proxy setups where a wide population authenticates but only a known team should write. It is empty by default (no username restriction; roles decide), never grants a permission, and is always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; `tests/test_allow_list_coverage.py` enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and `DELETE /api/user/ai-credentials/{provider}` — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.
 
    > **Warning:** A role you do not hold returns `403`, not `404`. `403 Admin access required`, `403 Reviewer access required`, and `403 Operator access required` name the exact gate you hit.
 
@@ -59,8 +59,8 @@ That single authenticated GET returns the stored analysis for one job, including
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
-| GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable |
-| GET | `/metrics` | Prometheus metrics |
+| GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable. `checks.audit` reports `{status, write_failures}`: `degraded` once an audit row has failed to persist since process start |
+| GET | `/metrics` | Prometheus metrics, including `rootcoz_audit_write_failures` |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
 | POST | `/api/auth/register` | Create a user, returns the raw API key once |
@@ -113,7 +113,7 @@ The shared body accepts the server defaults as per-request overrides:
 | `raw_xml`, `failures`, `passed_tests`, `skipped_tests` | File and raw sources |
 | `prow_job_name`, `build_id`, `gcs_prefix` | Prow build identity and artifact prefix |
 | `prow_url`, `gcs_bucket` | Prow server defaults, overridable per request |
-| `ai_provider`, `ai_model`, `force_server_credentials` | `claude`, `gemini`, or `cursor` |
+| `ai_provider`, `ai_model` | `claude`, `gemini`, or `cursor` |
 | `ai_call_timeout`, `max_concurrent_ai_calls` | AI budget for this run |
 | `peer_ai_configs`, `peer_analysis_max_rounds` | Multi-AI debate settings |
 | `additional_repos` | Extra repositories to clone for context |
@@ -211,7 +211,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | --- | --- | --- | --- |
 | GET | `/api/chat/{job_id}` | viewer | `limit` (1–500), `offset` |
 | POST | `/api/chat/{job_id}` | reviewer | `message` plus optional AI overrides; returns `202`, answer arrives over SSE |
-| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model`, `force_server_credentials` |
+| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model` |
 | POST | `/api/chat/{job_id}/abort` | reviewer | Cancel the in-flight answer |
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
 | DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
@@ -229,6 +229,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | `/api/chat/{job_id}/stream` | viewer | Per-job chat messages |
 | `/api/admin/token-usage/stream` | admin | Token usage changes. Enforced by middleware before the handler runs |
 | `/api/admin/logs/stream` | admin | Live server log tail; `lines` and `level` query parameters |
+| `/api/admin/audit/stream` | admin | New audit events as they are recorded, one `audit:event` SSE event per row with the same JSON shape as the list endpoint |
 | `/api/admin/settings/stream` | admin | Server setting changes |
 
 Use `/api/stream` when you want one connection instead of six. It accepts up to 50 comma-separated topics; `token-usage` and `settings` are delivered only to admins.
@@ -262,7 +263,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/notifications/vapid-public-key` | viewer | Web Push public key |
 | POST | `/api/notifications/subscribe` | viewer | `endpoint`, `p256dh_key`, `auth_key` |
 | POST | `/api/notifications/unsubscribe` | viewer | Removes a subscription |
-| GET | `/api/ai-models` | viewer | `provider`, `force_server_credentials`; lists models for `claude`, `gemini`, `cursor` |
+| GET | `/api/ai-models` | viewer | `provider`; lists models for `claude`, `gemini`, `cursor` |
 | GET | `/api/capabilities` | viewer | Feature toggles and whether server credentials exist |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue |
@@ -300,6 +301,10 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin/token-usage/{job_id}` | Per-job usage |
 | GET | `/api/admin/transcripts` | List session transcripts with joined context (`job_id` filter) |
 | GET | `/api/admin/transcripts/{session_id}` | Download one transcript JSONL (streaming, no truncation) |
+| GET | `/api/admin/audit` | Recorded audit events, newest first: `actor` (exact, case-insensitive), `action` (repeat the parameter or comma-separate), `target_type`, `target_id`, `outcome` (`success`/`failure`/`denied`), `q` (substring over `details`), `since`/`until` (ISO 8601), `limit` (50, max 500), `offset`. Returns `{events, total, limit, offset}` |
+| GET | `/api/admin/audit/actions` | Distinct recorded actions as `{actions: [{action, count, last_seen, label}]}` |
+| GET | `/api/admin/audit/verify` | Recompute the audit hash chain: `{checked, legacy, ok, first_broken_id}`; `limit` verifies only the newest N events |
+| GET | `/api/admin/audit/export` | Stream every event matching the list filters: `format` (`json`/`csv`) plus the same filters as `/api/admin/audit`. Uncapped — the way to retain evidence before retention deletes it |
 | POST | `/api/admin/ai-models/refresh` | Re-discover models from the sidecar |
 | GET | `/api/admin/component-versions` | Backend, sidecar, and chart versions |
 | GET | `/api/admin/db/schema` | Read-only schema dump |
@@ -313,6 +318,40 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin-chat/artifacts/{artifact_id}` | Download that artifact |
 
 See [Configuration Reference](configuration-reference.html) for the full environment variable surface behind these admin settings.
+
+#### Account state
+
+`GET /api/admin/users` rows carry `locked` (bool), `locked_at` (UTC timestamp or null), `disabled` (bool) and `failed_login_count` (int) alongside the role and grants, so an admin can see why an account cannot sign in without opening anything else.
+
+`POST /api/admin/users/{username}/unlock` clears both the lock and the consecutive-failure counter and records `admin.user_unlock` (details: `was_locked_at`, `failed_attempts`).
+
+`PUT /api/admin/users/{username}/disabled` with `{"disabled": true|false}` disables or re-enables the account and records `admin.user_disabled` / `admin.user_enabled`. A disabled account is refused with the *same* `401` body as a wrong credential — the response never reveals which condition applied — while its history, comments, jobs and audit rows stay intact.
+
+#### Audit events
+
+Each entry of `GET /api/admin/settings` carries `is_set` (whether a value exists, without revealing a sensitive one), `label` (the human name), `env_var`, `options`/`options_source`/`multiple`/`allow_custom` (for enumerated settings) and `server_only`/`derived`/`persistable`. A client renders `(empty)` from `is_set: false` rather than masking a value that does not exist.
+
+`GET /api/admin/audit` returns `{events, total, limit, offset}` newest-first. Each event carries `id`, `created_at` (UTC ISO-8601 with a trailing `Z`), `actor`, `actor_role`, `is_admin`, `action`, `target_type`, `target_id`, `target_label`, `target_job_id`, `outcome`, `details` (the stored JSON object, already parsed), `request_ip`, and the chain columns `prev_hash` and `entry_hash`.
+
+`target_label` and `target_job_id` are resolved **when the row is read** and are never stored or hashed: `target_label` is the human name of the target (the job's display name for a `job` target — whether `target_id` holds a uuid or the job name — and the containing job's name for a `comment` target), and `target_job_id` is the job uuid a client can link to, resolved from `target_id` for `job` targets and from `details.job_id` for `comment` targets. Both are `null` when nothing resolves, so a client can tell "no destination" from "destination unknown yet" and never render a dead link.
+
+```bash
+curl -s "$BASE/api/admin/audit?actor=alice&action=admin.job_delete&since=2026-04-01T00:00:00Z&limit=20" \
+  -H "Authorization: Bearer $KEY"
+```
+
+Filters combine with AND. `actor` must match the stored value exactly but ignores case. `action` accepts one id or several, either as a repeated parameter (`?action=a&action=b`) or comma-separated (`?action=a,b`). `q` is a substring match over the event's `details` object. `since` and `until` are inclusive and accept any ISO 8601 timestamp; a value that cannot be parsed is rejected with `400`.
+
+Time bounds are timezone-correct. A bare `YYYY-MM-DD` means a UTC day, so `since=2026-06-15` starts at `00:00:00Z` and `until=2026-06-15` covers through `23:59:59.999999Z`. An explicit offset (`2026-06-15T22:00:00+02:00`) is honoured and converted to UTC; a timestamp with no offset is read as UTC. Every stored `created_at` carries an explicit `Z`, so a filtered result means the same instant no matter which timezone you built the query in.
+
+`GET /api/admin/audit/actions` lists the action ids seen so far with their event count, last-seen timestamp, and a display label (`auth.login_failed` becomes `Auth Login Failed`) for building filter menus.
+
+`GET /api/admin/audit/verify` recomputes the chain: each row's `entry_hash` is `sha256(canonical_json(row) + prev_hash)` and its `prev_hash` is the previous row's `entry_hash`. It returns `{checked, legacy, ok, first_broken_id, truncated, truncated_before_id}`. `checked` is how many chained rows were verified and `legacy` how many rows predate the chain — those are counted separately, never reported as broken. Legacy means a NULL hash on a row **older than the first chained row**; a NULL hash above that boundary is a break, so clearing a row's hash cannot launder an edited row. `ok` is false when a row was edited or deleted, and `first_broken_id` names the oldest offending row. Retention pruning removes the head of the chain by design, so the oldest surviving row points at a deleted hash: that boundary is reported as `truncated: true` with `truncated_before_id`, and the walk continues from the recorded `prev_hash` instead of failing. Truncation is only accepted when it matches the stored prune checkpoint — the id and hash of the last row the retention job (or the row cap) deleted. A prefix removed any other way does not match the checkpoint and is reported as a break (`ok: false`, `first_broken_id` = the oldest surviving row), so deleting old rows by hand is still tampering. A mismatch inside the surviving window always sets `ok: false`.
+
+`GET /api/admin/audit/export` streams every event the same filters match — `format=json` (a JSON array) or `format=csv`, with columns `id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, hash_version, prev_hash, entry_hash, hash_payload`. Both hash columns are included so an export verifies on its own after the server has pruned the originals. Each JSON event also carries `details_raw` (the exact stored `details` text) and `hash_payload` — the exact canonical JSON that was hashed. Verification is therefore one line on either format: `sha256(hash_payload + prev_hash) == entry_hash`. `hash_version` says which field list the payload covers: version `1` is the original field set (every row written before the rescue counter existed), version `2` adds `throttle_rescue`, so the rescue budget itself is tamper-evident. A trail can mix both versions and verifies row by row; nothing is rewritten when the field list grows. Re-mapping fields yourself will not work, because the API renders `is_admin` as a boolean while the stored row hashed `1`; `hash_payload` carries the stored form. A row written before the chain existed, or one whose stored bytes would expose a credential that read-time redaction removes, ships without `hash_payload` — treat a missing payload as "not verifiable", never as verified. Responses are streamed in batches, and the batches page by row id rather than by offset, so events written mid-export can only join the tail — a row is never repeated and never skipped. This is the supported way to retain audit evidence before retention pruning or the row cap deletes it. CSV text cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return are prefixed with `'` so a spreadsheet cannot execute them as formulas; a cell that already starts with `'` is prefixed too (`'abc` exports as `''abc`), which makes the escaping reversible. To recompute a hash from an exported CSV, remove exactly one leading apostrophe from each text cell — the unescaped value is byte-identical to the stored column. Numbers and ids are never escaped.
+
+All audit read endpoints require `admin` and return `403 Admin access required` otherwise. `GET /api/admin/audit/stream` pushes each new event as it is written, so an audit page can stay live without polling. Events pass through the same redaction as the list endpoint. A subscriber that cannot keep up is never silently starved: when its queue overflows the stream emits an `audit-gap` event with `{"dropped": N}` before the next normal event, so a client can tell the administrator that events were missed instead of showing a broken view as live.
+
 
 ## Advanced Usage
 

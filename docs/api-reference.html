@@ -298,7 +298,7 @@
 </tr>
 </tbody>
 </table></div>
-<p><code>can_view_reports</code> is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the <code>ALLOWED_USERS</code> allow list, which is empty (open) by default and always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; <code>tests/test_allow_list_coverage.py</code> enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and <code>DELETE /api/user/ai-credentials/{provider}</code> — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.</p>
+<p><code>can_view_reports</code> is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the <code>ALLOWED_USERS</code> write allow-list — a deployment-level bound for SSO/proxy setups where a wide population authenticates but only a known team should write. It is empty by default (no username restriction; roles decide), never grants a permission, and is always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; <code>tests/test_allow_list_coverage.py</code> enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and <code>DELETE /api/user/ai-credentials/{provider}</code> — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.</p>
 <blockquote>
 <p><strong>Warning:</strong> A role you do not hold returns <code>403</code>, not <code>404</code>. <code>403 Admin access required</code>, <code>403 Reviewer access required</code>, and <code>403 Operator access required</code> name the exact gate you hit.</p>
 </blockquote>
@@ -320,12 +320,12 @@
 <tr>
 <td>GET</td>
 <td><code>/api/health</code></td>
-<td>Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable</td>
+<td>Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable. <code>checks.audit</code> reports <code>{status, write_failures}</code>: <code>degraded</code> once an audit row has failed to persist since process start</td>
 </tr>
 <tr>
 <td>GET</td>
 <td><code>/metrics</code></td>
-<td>Prometheus metrics</td>
+<td>Prometheus metrics, including <code>rootcoz_audit_write_failures</code></td>
 </tr>
 <tr>
 <td>GET</td>
@@ -549,7 +549,7 @@
 <td>Prow server defaults, overridable per request</td>
 </tr>
 <tr>
-<td><code>ai_provider</code>, <code>ai_model</code>, <code>force_server_credentials</code></td>
+<td><code>ai_provider</code>, <code>ai_model</code></td>
 <td><code>claude</code>, <code>gemini</code>, or <code>cursor</code></td>
 </tr>
 <tr>
@@ -949,7 +949,7 @@
 <td>POST</td>
 <td><code>/api/chat/{job_id}/init</code></td>
 <td>reviewer</td>
-<td>Explicit <code>ai_provider</code>, <code>ai_model</code>, <code>force_server_credentials</code></td>
+<td>Explicit <code>ai_provider</code>, <code>ai_model</code></td>
 </tr>
 <tr>
 <td>POST</td>
@@ -1026,6 +1026,11 @@
 <td><code>/api/admin/logs/stream</code></td>
 <td>admin</td>
 <td>Live server log tail; <code>lines</code> and <code>level</code> query parameters</td>
+</tr>
+<tr>
+<td><code>/api/admin/audit/stream</code></td>
+<td>admin</td>
+<td>New audit events as they are recorded, one <code>audit:event</code> SSE event per row with the same JSON shape as the list endpoint</td>
 </tr>
 <tr>
 <td><code>/api/admin/settings/stream</code></td>
@@ -1147,7 +1152,7 @@
 <td>GET</td>
 <td><code>/api/ai-models</code></td>
 <td>viewer</td>
-<td><code>provider</code>, <code>force_server_credentials</code>; lists models for <code>claude</code>, <code>gemini</code>, <code>cursor</code></td>
+<td><code>provider</code>; lists models for <code>claude</code>, <code>gemini</code>, <code>cursor</code></td>
 </tr>
 <tr>
 <td>GET</td>
@@ -1326,6 +1331,26 @@
 <td>Download one transcript JSONL (streaming, no truncation)</td>
 </tr>
 <tr>
+<td>GET</td>
+<td><code>/api/admin/audit</code></td>
+<td>Recorded audit events, newest first: <code>actor</code> (exact, case-insensitive), <code>action</code> (repeat the parameter or comma-separate), <code>target_type</code>, <code>target_id</code>, <code>outcome</code> (<code>success</code>/<code>failure</code>/<code>denied</code>), <code>q</code> (substring over <code>details</code>), <code>since</code>/<code>until</code> (ISO 8601), <code>limit</code> (50, max 500), <code>offset</code>. Returns <code>{events, total, limit, offset}</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/audit/actions</code></td>
+<td>Distinct recorded actions as <code>{actions: [{action, count, last_seen, label}]}</code></td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/audit/verify</code></td>
+<td>Recompute the audit hash chain: <code>{checked, legacy, ok, first_broken_id}</code>; <code>limit</code> verifies only the newest N events</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/admin/audit/export</code></td>
+<td>Stream every event matching the list filters: <code>format</code> (<code>json</code>/<code>csv</code>) plus the same filters as <code>/api/admin/audit</code>. Uncapped — the way to retain evidence before retention deletes it</td>
+</tr>
+<tr>
 <td>POST</td>
 <td><code>/api/admin/ai-models/refresh</code></td>
 <td>Re-discover models from the sidecar</td>
@@ -1383,6 +1408,24 @@
 </tbody>
 </table></div>
 <p>See <a href="configuration-reference.html">Configuration Reference</a> for the full environment variable surface behind these admin settings.</p>
+<h4 id="account-state">Account state</h4>
+<p><code>GET /api/admin/users</code> rows carry <code>locked</code> (bool), <code>locked_at</code> (UTC timestamp or null), <code>disabled</code> (bool) and <code>failed_login_count</code> (int) alongside the role and grants, so an admin can see why an account cannot sign in without opening anything else.</p>
+<p><code>POST /api/admin/users/{username}/unlock</code> clears both the lock and the consecutive-failure counter and records <code>admin.user_unlock</code> (details: <code>was_locked_at</code>, <code>failed_attempts</code>).</p>
+<p><code>PUT /api/admin/users/{username}/disabled</code> with <code>{"disabled": true|false}</code> disables or re-enables the account and records <code>admin.user_disabled</code> / <code>admin.user_enabled</code>. A disabled account is refused with the <em>same</em> <code>401</code> body as a wrong credential — the response never reveals which condition applied — while its history, comments, jobs and audit rows stay intact.</p>
+<h4 id="audit-events">Audit events</h4>
+<p>Each entry of <code>GET /api/admin/settings</code> carries <code>is_set</code> (whether a value exists, without revealing a sensitive one), <code>label</code> (the human name), <code>env_var</code>, <code>options</code>/<code>options_source</code>/<code>multiple</code>/<code>allow_custom</code> (for enumerated settings) and <code>server_only</code>/<code>derived</code>/<code>persistable</code>. A client renders <code>(empty)</code> from <code>is_set: false</code> rather than masking a value that does not exist.</p>
+<p><code>GET /api/admin/audit</code> returns <code>{events, total, limit, offset}</code> newest-first. Each event carries <code>id</code>, <code>created_at</code> (UTC ISO-8601 with a trailing <code>Z</code>), <code>actor</code>, <code>actor_role</code>, <code>is_admin</code>, <code>action</code>, <code>target_type</code>, <code>target_id</code>, <code>target_label</code>, <code>target_job_id</code>, <code>outcome</code>, <code>details</code> (the stored JSON object, already parsed), <code>request_ip</code>, and the chain columns <code>prev_hash</code> and <code>entry_hash</code>.</p>
+<p><code>target_label</code> and <code>target_job_id</code> are resolved <strong>when the row is read</strong> and are never stored or hashed: <code>target_label</code> is the human name of the target (the job's display name for a <code>job</code> target — whether <code>target_id</code> holds a uuid or the job name — and the containing job's name for a <code>comment</code> target), and <code>target_job_id</code> is the job uuid a client can link to, resolved from <code>target_id</code> for <code>job</code> targets and from <code>details.job_id</code> for <code>comment</code> targets. Both are <code>null</code> when nothing resolves, so a client can tell "no destination" from "destination unknown yet" and never render a dead link.</p>
+<div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$BASE</span><span class="s2">/api/admin/audit?actor=alice&amp;action=admin.job_delete&amp;since=2026-04-01T00:00:00Z&amp;limit=20"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$KEY</span><span class="s2">"</span>
+</code></pre></div>
+
+<p>Filters combine with AND. <code>actor</code> must match the stored value exactly but ignores case. <code>action</code> accepts one id or several, either as a repeated parameter (<code>?action=a&amp;action=b</code>) or comma-separated (<code>?action=a,b</code>). <code>q</code> is a substring match over the event's <code>details</code> object. <code>since</code> and <code>until</code> are inclusive and accept any ISO 8601 timestamp; a value that cannot be parsed is rejected with <code>400</code>.</p>
+<p>Time bounds are timezone-correct. A bare <code>YYYY-MM-DD</code> means a UTC day, so <code>since=2026-06-15</code> starts at <code>00:00:00Z</code> and <code>until=2026-06-15</code> covers through <code>23:59:59.999999Z</code>. An explicit offset (<code>2026-06-15T22:00:00+02:00</code>) is honoured and converted to UTC; a timestamp with no offset is read as UTC. Every stored <code>created_at</code> carries an explicit <code>Z</code>, so a filtered result means the same instant no matter which timezone you built the query in.</p>
+<p><code>GET /api/admin/audit/actions</code> lists the action ids seen so far with their event count, last-seen timestamp, and a display label (<code>auth.login_failed</code> becomes <code>Auth Login Failed</code>) for building filter menus.</p>
+<p><code>GET /api/admin/audit/verify</code> recomputes the chain: each row's <code>entry_hash</code> is <code>sha256(canonical_json(row) + prev_hash)</code> and its <code>prev_hash</code> is the previous row's <code>entry_hash</code>. It returns <code>{checked, legacy, ok, first_broken_id, truncated, truncated_before_id}</code>. <code>checked</code> is how many chained rows were verified and <code>legacy</code> how many rows predate the chain — those are counted separately, never reported as broken. Legacy means a NULL hash on a row <strong>older than the first chained row</strong>; a NULL hash above that boundary is a break, so clearing a row's hash cannot launder an edited row. <code>ok</code> is false when a row was edited or deleted, and <code>first_broken_id</code> names the oldest offending row. Retention pruning removes the head of the chain by design, so the oldest surviving row points at a deleted hash: that boundary is reported as <code>truncated: true</code> with <code>truncated_before_id</code>, and the walk continues from the recorded <code>prev_hash</code> instead of failing. Truncation is only accepted when it matches the stored prune checkpoint — the id and hash of the last row the retention job (or the row cap) deleted. A prefix removed any other way does not match the checkpoint and is reported as a break (<code>ok: false</code>, <code>first_broken_id</code> = the oldest surviving row), so deleting old rows by hand is still tampering. A mismatch inside the surviving window always sets <code>ok: false</code>.</p>
+<p><code>GET /api/admin/audit/export</code> streams every event the same filters match — <code>format=json</code> (a JSON array) or <code>format=csv</code>, with columns <code>id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, hash_version, prev_hash, entry_hash, hash_payload</code>. Both hash columns are included so an export verifies on its own after the server has pruned the originals. Each JSON event also carries <code>details_raw</code> (the exact stored <code>details</code> text) and <code>hash_payload</code> — the exact canonical JSON that was hashed. Verification is therefore one line on either format: <code>sha256(hash_payload + prev_hash) == entry_hash</code>. <code>hash_version</code> says which field list the payload covers: version <code>1</code> is the original field set (every row written before the rescue counter existed), version <code>2</code> adds <code>throttle_rescue</code>, so the rescue budget itself is tamper-evident. A trail can mix both versions and verifies row by row; nothing is rewritten when the field list grows. Re-mapping fields yourself will not work, because the API renders <code>is_admin</code> as a boolean while the stored row hashed <code>1</code>; <code>hash_payload</code> carries the stored form. A row written before the chain existed, or one whose stored bytes would expose a credential that read-time redaction removes, ships without <code>hash_payload</code> — treat a missing payload as "not verifiable", never as verified. Responses are streamed in batches, and the batches page by row id rather than by offset, so events written mid-export can only join the tail — a row is never repeated and never skipped. This is the supported way to retain audit evidence before retention pruning or the row cap deletes it. CSV text cells that start with <code>=</code>, <code>+</code>, <code>-</code>, <code>@</code>, a tab or a carriage return are prefixed with <code>'</code> so a spreadsheet cannot execute them as formulas; a cell that already starts with <code>'</code> is prefixed too (<code>'abc</code> exports as <code>''abc</code>), which makes the escaping reversible. To recompute a hash from an exported CSV, remove exactly one leading apostrophe from each text cell — the unescaped value is byte-identical to the stored column. Numbers and ids are never escaped.</p>
+<p>All audit read endpoints require <code>admin</code> and return <code>403 Admin access required</code> otherwise. <code>GET /api/admin/audit/stream</code> pushes each new event as it is written, so an audit page can stay live without polling. Events pass through the same redaction as the list endpoint. A subscriber that cannot keep up is never silently starved: when its queue overflows the stream emits an <code>audit-gap</code> event with <code>{"dropped": N}</code> before the next normal event, so a client can tell the administrator that events were missed instead of showing a broken view as live.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
 <p>Prefer the CLI when you can. Most endpoints above have a <code>rootcoz</code> command counterpart. SSE streams have none, because the CLI is a one-shot tool, and the user-token endpoints (<code>GET</code>/<code>PUT /api/user/tokens</code>) have client methods but no registered CLI command either. See <a href="cli-reference.html">CLI Command Reference</a> and <a href="automate-common-tasks-with-the-cli.html">Automating Common Tasks with the CLI</a>.</p>
 <p>A three-call integration that skips the UI entirely:</p>

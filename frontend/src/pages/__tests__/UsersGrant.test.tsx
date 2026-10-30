@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UsersPage } from '@/pages/UsersPage'
@@ -26,11 +27,11 @@ afterEach(() => { get.mockReset(); post.mockReset(); put.mockReset(); refreshAut
 
 describe('server provider grants', () => {
   it('sends explicit grants on create and approval, then revokes via row switch', async () => {
-    get.mockResolvedValue({ users })
+    get.mockResolvedValue({ users, total: users.length, limit: 25, offset: 0 })
     post.mockResolvedValue({ username: 'new', api_key: '' })
     put.mockResolvedValue({})
     const user = userEvent.setup()
-    render(<UsersPage />)
+    render(<MemoryRouter><UsersPage /></MemoryRouter>)
     await user.click(await screen.findByRole('button', { name: 'Add User' }))
     await user.type(screen.getByPlaceholderText('e.g. john.doe'), 'new')
     expect(screen.getByRole('switch', { name: 'Allow server providers' })).toHaveAttribute('aria-checked', 'false')
@@ -50,10 +51,10 @@ describe('server provider grants', () => {
   })
 
   it('shows migrated grants, but admins always have access even when the stored flag is false', async () => {
-    get.mockResolvedValue({ users })
+    get.mockResolvedValue({ users, total: users.length, limit: 25, offset: 0 })
     post.mockResolvedValue({})
     const user = userEvent.setup()
-    render(<UsersPage />)
+    render(<MemoryRouter><UsersPage /></MemoryRouter>)
     const adminRow = (await screen.findByText('admin2')).closest('tr')!
     expect(within(adminRow).getAllByText('Always')).toHaveLength(2)
     expect(within(adminRow).queryByRole('switch', { name: 'Allow server providers for admin2' })).not.toBeInTheDocument()
@@ -69,7 +70,10 @@ describe('server provider grants', () => {
 
   it('does not persist an implicit grant when a new admin is demoted', async () => {
     let boss: (typeof users)[number] | undefined
-    get.mockImplementation(async () => ({ users: boss ? [...users, boss] : users }))
+    get.mockImplementation(async () => {
+      const list = boss ? [...users, boss] : users
+      return { users: list, total: list.length, limit: 25, offset: 0 }
+    })
     post.mockImplementation(async (_path, payload) => {
       boss = { username: payload.username, role: payload.role, status: 'active', can_use_server_providers: payload.can_use_server_providers, can_view_reports: false, created_at: '', last_seen: null }
       return { username: boss.username, api_key: 'secret' } // pragma: allowlist secret
@@ -79,7 +83,7 @@ describe('server provider grants', () => {
       return { username: boss.username, role: boss.role }
     })
     const user = userEvent.setup()
-    render(<UsersPage />)
+    render(<MemoryRouter><UsersPage /></MemoryRouter>)
     await user.click(await screen.findByRole('button', { name: 'Add User' }))
     await user.type(screen.getByPlaceholderText('e.g. john.doe'), 'boss')
     await user.click(screen.getByRole('switch', { name: 'Allow server providers' }))

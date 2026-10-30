@@ -19,6 +19,7 @@
   --color-signal-red: #f85149;
   --color-signal-green: #3fb950;
   --color-signal-orange: #f0883e;
+  --color-signal-amber: #d29922;
   --color-signal-blue: #388bfd;
   --color-signal-purple: #bc8cff;
 
@@ -95,6 +96,7 @@ html[data-theme='light'] {
   --color-signal-red: #cf222e;
   --color-signal-green: #1a7f37;
   --color-signal-orange: #bc4c00;
+  --color-signal-amber: #9a6700;
   --color-signal-blue: #0969da;
   --color-signal-purple: #8250df;
 

@@ -1897,6 +1897,185 @@ class TestRootCozClientAdminUsers:
         assert "users" in result
         assert result["users"][0]["username"] == "admin"
 
+    def test_admin_list_users_drops_absent_paging(self):
+        def handler(request):
+            assert dict(request.url.params) == {}
+            return httpx.Response(200, json={"users": []})
+
+        assert _make_client(handler).admin_list_users()["users"] == []
+
+    def test_admin_list_users_forwards_paging_and_query(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/users"
+            assert request.url.params.get("limit") == "2"
+            assert request.url.params.get("offset") == "2"
+            assert request.url.params.get("q") == "ali"
+            return httpx.Response(
+                200,
+                json={"users": [], "total": 3, "limit": 2, "offset": 2},
+            )
+
+        result = _make_client(handler).admin_list_users(limit=2, offset=2, q="ali")
+
+        assert result["total"] == 3
+
+    def test_admin_list_audit_forwards_filters(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit"
+            assert request.url.params.get("actor") == "alice"
+            assert request.url.params.get("outcome") == "denied"
+            assert request.url.params.get("target_type") == "job"
+            assert request.url.params.get("target_id") == "job-1"
+            assert request.url.params.get("q") == "cleanup"
+            assert request.url.params.get("since") == "2026-01-01T00:00:00Z"
+            assert request.url.params.get("until") == "2026-02-01T00:00:00Z"
+            assert request.url.params.get("limit") == "5"
+            assert request.url.params.get("offset") == "10"
+            return httpx.Response(
+                200,
+                json={"events": [{"action": "auth.login"}], "total": 1},
+            )
+
+        client = _make_client(handler)
+        result = client.admin_list_audit(
+            actor="alice",
+            target_type="job",
+            target_id="job-1",
+            outcome="denied",
+            q="cleanup",
+            since="2026-01-01T00:00:00Z",
+            until="2026-02-01T00:00:00Z",
+            limit=5,
+            offset=10,
+        )
+        assert result["total"] == 1
+
+    def test_admin_list_audit_forwards_event_id(self):
+        def handler(request):
+            assert request.url.params.get("id") == "42"
+            return httpx.Response(200, json={"events": [], "total": 0})
+
+        client = _make_client(handler)
+        client.admin_list_audit(event_id=42)
+
+    def test_admin_list_audit_omits_a_missing_event_id(self):
+        def handler(request):
+            assert "id" not in request.url.params
+            return httpx.Response(200, json={"events": [], "total": 0})
+
+        client = _make_client(handler)
+        client.admin_list_audit(actor="alice")
+
+    def test_admin_list_audit_repeats_each_action(self):
+        def handler(request):
+            assert request.url.params.get_list("action") == ["auth.login", "job.delete"]
+            assert "actor" not in request.url.params
+            return httpx.Response(200, json={"events": [], "total": 0})
+
+        client = _make_client(handler)
+        result = client.admin_list_audit(action=["auth.login", "job.delete"])
+        assert result["total"] == 0
+
+    def test_admin_audit_actions(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit/actions"
+            return httpx.Response(
+                200,
+                json={
+                    "actions": [
+                        {"action": "auth.login", "label": "Auth Login", "count": 2}
+                    ]
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.admin_audit_actions()
+        assert result["actions"][0]["label"] == "Auth Login"
+
+    def test_admin_verify_audit(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit/verify"
+            assert request.url.params.get("limit") == "5"
+            return httpx.Response(
+                200,
+                json={"checked": 5, "legacy": 0, "ok": True, "first_broken_id": None},
+            )
+
+        client = _make_client(handler)
+        result = client.admin_verify_audit(limit=5)
+        assert result["ok"] is True
+        assert result["checked"] == 5
+
+    def test_admin_verify_audit_omits_an_absent_limit(self):
+        def handler(request):
+            assert "limit" not in request.url.params
+            return httpx.Response(
+                200,
+                json={"checked": 1, "legacy": 0, "ok": True, "first_broken_id": None},
+            )
+
+        assert _make_client(handler).admin_verify_audit()["ok"] is True
+
+    def test_admin_export_audit_streams_to_a_file(self, tmp_path):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/audit/export"
+            assert request.url.params.get("format") == "csv"
+            assert request.url.params.get("actor") == "alice"
+            assert request.url.params.get_list("action") == ["auth.login"]
+            assert "limit" not in request.url.params
+            return httpx.Response(200, content=b"id,action\n1,auth.login\n")
+
+        target = tmp_path / "audit.csv"
+        written = _make_client(handler).admin_export_audit(
+            fmt="csv", output=str(target), actor="alice", action=["auth.login"]
+        )
+        assert written == len(target.read_bytes())
+        assert target.read_text() == "id,action\n1,auth.login\n"
+
+    def test_admin_export_audit_rejects_a_bad_status(self, tmp_path):
+        client = _make_client(
+            lambda request: httpx.Response(
+                403, json={"detail": "Admin access required"}
+            )
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.admin_export_audit(output=str(tmp_path / "audit.json"))
+        assert exc_info.value.status_code == 403
+
+    def test_admin_export_audit_writes_no_partial_file_on_a_stream_error(
+        self, tmp_path
+    ):
+        """A dropped connection must not leave an evidence file that looks valid."""
+
+        def handler(request):
+            def chunks():
+                yield b"id,action\n"
+                raise httpx.ReadError("connection dropped")
+
+            return httpx.Response(200, content=chunks())
+
+        target = tmp_path / "audit.csv"
+        with pytest.raises(RootCozError):
+            _make_client(handler).admin_export_audit(output=str(target))
+        assert not target.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_admin_export_audit_replaces_the_target_only_when_complete(self, tmp_path):
+        def handler(request):
+            return httpx.Response(200, content=b"id,action\n1,auth.login\n")
+
+        target = tmp_path / "audit.csv"
+        target.write_text("stale")
+        written = _make_client(handler).admin_export_audit(output=str(target))
+        assert written == len(target.read_bytes())
+        assert target.read_text() == "id,action\n1,auth.login\n"
+        assert list(tmp_path.iterdir()) == [target]
+
     def test_admin_component_versions(self):
         def handler(request):
             assert request.method == "GET"
@@ -2700,7 +2879,6 @@ class TestRootCozClientChat:
             assert body["message"] == "Why did this test fail?"
             assert "ai_provider" not in body
             assert "ai_model" not in body
-            assert "force_server_credentials" not in body
             return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
@@ -2731,20 +2909,6 @@ class TestRootCozClientChat:
         )
         assert result["user_message"]["status"] == "completed"
 
-    @pytest.mark.parametrize("source", [True, False])
-    def test_send_chat_message_explicit_source(self, source):
-        def handler(request):
-            assert request.url.path == "/api/chat/job-1"
-            assert json.loads(request.content) == {
-                "message": "hello",
-                "force_server_credentials": source,
-            }
-            return httpx.Response(202, json={"queued": True})
-
-        assert _make_client(handler).send_chat_message(
-            "job-1", "hello", force_server_credentials=source
-        )["queued"]
-
     def test_clear_chat(self):
         calls = []
 
@@ -2774,39 +2938,29 @@ class TestRootCozClientChat:
 class TestRootCozClientAdminChat:
     """Tests for admin chat client methods."""
 
-    @pytest.mark.parametrize("source", [True, False])
-    def test_init_chat_explicit_selection(self, source):
+    def test_init_chat_explicit_selection(self):
         with patch.object(
             RootCozClient, "_request", return_value={"ready": True}
         ) as request:
             client = RootCozClient(server_url="http://localhost:8000")
-            client.init_chat("job", "openai", "m", force_server_credentials=source)
+            client.init_chat("job", "openai", "m")
             request.assert_called_once_with(
                 "POST",
                 "/api/chat/job/init",
-                json={
-                    "ai_provider": "openai",
-                    "ai_model": "m",
-                    "force_server_credentials": source,
-                },
+                json={"ai_provider": "openai", "ai_model": "m"},
             )
 
-    @pytest.mark.parametrize("source", [True, False])
-    def test_init_admin_chat_explicit_selection(self, source):
+    def test_init_admin_chat_explicit_selection(self):
         def handler(request):
             assert request.url.path == "/api/admin/chat/init"
             assert json.loads(request.content) == {
                 "ai_provider": "openai",
                 "ai_model": "m",
-                "force_server_credentials": source,
             }
             return httpx.Response(200, json={"ready": True, "session_id": "sid"})
 
-        assert (
-            _make_client(handler).init_admin_chat(
-                "openai", "m", force_server_credentials=source
-            )["session_id"]
-            == "sid"
+        assert _make_client(handler).init_admin_chat("openai", "m")["session_id"] == (
+            "sid"
         )
 
     def test_init_admin_chat(self):
@@ -2877,7 +3031,6 @@ class TestRootCozClientAdminChat:
             assert body["message"] == "Server status?"
             assert "ai_provider" not in body
             assert "ai_model" not in body
-            assert "force_server_credentials" not in body
             return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
@@ -2906,20 +3059,6 @@ class TestRootCozClientAdminChat:
             "Explain", ai_provider="claude", ai_model="opus-4"
         )
         assert result["user_message"]["status"] == "completed"
-
-    @pytest.mark.parametrize("source", [True, False])
-    def test_send_admin_chat_message_explicit_source(self, source):
-        def handler(request):
-            assert request.url.path == "/api/admin/chat"
-            assert json.loads(request.content) == {
-                "message": "hello",
-                "force_server_credentials": source,
-            }
-            return httpx.Response(202, json={"queued": True})
-
-        assert _make_client(handler).send_admin_chat_message(
-            "hello", force_server_credentials=source
-        )["queued"]
 
     def test_clear_admin_chat(self):
         calls = []
@@ -3283,6 +3422,18 @@ class TestRootCozClientTranscripts:
         with pytest.raises(RootCozError) as exc_info:
             client.admin_download_transcript("00000000-0000-0000-0000-000000000002")
         assert "Transcript not found" in str(exc_info.value)
+
+    def test_download_transcript_to_stdout_is_untouched(self, capsys):
+        """``-`` keeps streaming straight to stdout, no temp file involved."""
+        session = "00000000-0000-0000-0000-000000000007"
+        payload = '{"type": "turn"}\n'
+
+        def handler(request):
+            return httpx.Response(200, content=payload.encode())
+
+        written = _make_client(handler).admin_download_transcript_to_file(session, "-")
+        assert written == len(payload)
+        assert capsys.readouterr().out == payload
 
     def test_download_transcript_to_file_streams(self, tmp_path):
         """--output streams chunks to disk instead of buffering the download."""

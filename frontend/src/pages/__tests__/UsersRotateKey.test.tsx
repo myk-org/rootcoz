@@ -1,4 +1,5 @@
 import { render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { UsersPage } from '@/pages/UsersPage'
@@ -37,10 +38,10 @@ afterEach(() => {
 
 describe('admin API key rotation', () => {
   it('confirms first, then shows the new key once with a copy button', async () => {
-    get.mockResolvedValue({ users })
+    get.mockResolvedValue({ users, total: users.length, limit: 25, offset: 0 })
     post.mockResolvedValue({ username: 'alice', new_api_key: 'rk_new_secret' }) // pragma: allowlist secret
     const user = userEvent.setup()
-    render(<UsersPage />)
+    render(<MemoryRouter><UsersPage /></MemoryRouter>)
 
     await user.click(await screen.findByRole('button', { name: 'Rotate key for alice' }))
 
@@ -66,8 +67,8 @@ describe('admin API key rotation', () => {
   })
 
   it('offers no rotate action for a rejected user', async () => {
-    get.mockResolvedValue({ users })
-    render(<UsersPage />)
+    get.mockResolvedValue({ users, total: users.length, limit: 25, offset: 0 })
+    render(<MemoryRouter><UsersPage /></MemoryRouter>)
 
     expect(await screen.findByText('mallory')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Rotate key for mallory' })).not.toBeInTheDocument()
@@ -76,10 +77,10 @@ describe('admin API key rotation', () => {
   })
 
   it('keeps the confirmation open and shows the error when rotation fails', async () => {
-    get.mockResolvedValue({ users })
+    get.mockResolvedValue({ users, total: users.length, limit: 25, offset: 0 })
     post.mockRejectedValue(new ApiError(404, { detail: 'User not found' }))
     const user = userEvent.setup()
-    render(<UsersPage />)
+    render(<MemoryRouter><UsersPage /></MemoryRouter>)
 
     await user.click(await screen.findByRole('button', { name: 'Rotate key for alice' }))
     const confirmDialog = await screen.findByRole('dialog')

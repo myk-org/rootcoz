@@ -35,9 +35,6 @@ logger = get_child_logger(__name__)
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
-force_server_credentials: ContextVar[bool] = ContextVar(
-    "force_server_credentials", default=False
-)
 _selected_credential_source: ContextVar[str] = ContextVar(
     "selected_credential_source", default=""
 )
@@ -462,7 +459,7 @@ async def is_free_ai_pair(provider: str, model: str) -> bool:
 async def session_key(provider: str) -> str | None:
     """Resolve the current initiator's exact provider key; missing means server auth."""
     username = ai_username.get()
-    if force_server_credentials.get() or not username:
+    if not username:
         return None
     from rootcoz.storage import get_user_ai_credential_with_generation
 
@@ -1202,7 +1199,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 "can_use_server_providers": allowed,
                 "verified": True,
             }
-    if ai_username.get() and not force_server_credentials.get():
+    if ai_username.get():
         from rootcoz.storage import get_user_ai_credentials
 
         credentials = await get_user_ai_credentials(ai_username.get())
@@ -1304,22 +1301,7 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
         provider = _catalog_provider_spelling(
             (*scoped.keys(), *status.keys()), provider
         )
-        if (
-            force_server_credentials.get()
-            and not is_server_provider_active(provider)
-            and provider in build_friendly_catalog(await _get_model_catalog())
-        ):
-            # scoped_models withdrew the deactivated provider's server
-            # source, so its models cannot match below — say why.
-            _raise_inactive_server_provider(provider)
-        if force_server_credentials.get():
-            # Same clarity for deselected models: scoped_models withdrew
-            # the pair's server source, so it cannot match below.
-            await require_selected_server_pair(provider, model)
-        if (
-            status.get(provider, {}).get("unavailable")
-            and not force_server_credentials.get()
-        ):
+        if status.get(provider, {}).get("unavailable"):
             raise ValueError(
                 "Key-scoped model discovery unavailable; retry or select server credentials"
             )
@@ -1327,17 +1309,9 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
             if entry["id"] == model and (
                 entry["verified"] or "server" in entry["credential_sources"]
             ):
-                source = (
-                    "server"
-                    if force_server_credentials.get()
-                    else entry["credential_sources"][0]
-                )
-                if source not in entry["credential_sources"]:
-                    if source == "server" and not is_server_provider_active(provider):
-                        _raise_inactive_server_provider(provider)
-                    raise ValueError(
-                        f"Unknown Pi-sidecar provider/model pair: {provider}/{model}"
-                    )
+                # scoped_models ranks the caller's own key ahead of the
+                # server pool, so the first source is the one to use.
+                source = entry["credential_sources"][0]
                 if source == "server":
                     await require_server_provider_grant(provider, model)
                 _selected_credential_source.set(source)
@@ -1349,12 +1323,18 @@ async def resolve_catalog_pair(provider: str, model: str) -> tuple[str, str]:
         # Manual IDs require an affirmative no-listing response for this key.
         if (
             model
-            and not force_server_credentials.get()
             and provider in status
             and not status[provider]["modelListingSupported"]
         ):
             _selected_credential_source.set("user")
             return provider, model
+        # scoped_models withdrew this pair's server source — the
+        # administrator deactivated the provider or deselected the model —
+        # so nothing above could match it: say why.
+        if provider in build_friendly_catalog(await _get_model_catalog()):
+            if not is_server_provider_active(provider):
+                _raise_inactive_server_provider(provider)
+            await require_selected_server_pair(provider, model)
         raise ValueError(f"Unknown Pi-sidecar provider/model pair: {provider}/{model}")
     catalog = await _get_model_catalog()
     provider = _catalog_provider_spelling(

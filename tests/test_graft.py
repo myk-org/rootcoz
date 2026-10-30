@@ -541,11 +541,19 @@ def test_workspace_budget_skips_then_retries_after_cleanup(tmp_path, monkeypatch
         (graft._root(workspace) / name / "graph").exists() for name in skipped
     )
 
-    # Refreshing an existing graph releases its old space rather than counting it twice.
+    # Refreshing an existing graph releases its old space rather than counting it
+    # twice. Pin the ceiling so the refresh fits ONLY if the old graph is
+    # released: with the cap one byte under ``used + MAX_GRAPH_BYTES``, counting
+    # the old graph again would exceed it by exactly its own size. Without this
+    # the assertion depended on how many builds happened to fit, so a parallel
+    # full-suite run could legitimately land on the other side and fail.
     kept = next(
         name for name, result in outcomes.items() if result["status"] == "indexed"
     )
     (repos[kept] / "a.py").write_text("changed")
+    monkeypatch.setattr(
+        graft, "MAX_WORKSPACE_GRAPH_BYTES", used + graft.MAX_GRAPH_BYTES - 1
+    )
     assert (
         graft.index_repositories(workspace, {kept: repos[kept]})[kept]["status"]
         == "indexed"

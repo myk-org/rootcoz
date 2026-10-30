@@ -11,6 +11,7 @@ import {
   MessageSquare,
   ScrollText,
   Settings,
+  ShieldCheck,
   Users,
   type LucideIcon,
 } from 'lucide-react'
@@ -49,6 +50,7 @@ const REPORTS_ITEM: NavItem = { to: '/reports', label: 'Reports', icon: BarChart
 
 const ADMIN_NAV_ITEMS: NavItem[] = [
   { to: '/admin/users', label: 'Users', icon: Users },
+  { to: '/admin/audit', label: 'Audit', icon: ShieldCheck },
   { to: '/admin/token-usage', label: 'Tokens', icon: Coins },
   { to: '/admin/chat', label: 'Chat', icon: MessageSquare },
   { to: '/admin/logs', label: 'Logs', icon: ScrollText },
