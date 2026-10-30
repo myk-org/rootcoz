@@ -874,6 +874,22 @@ SECURE_COOKIES=false
 <td>yes</td>
 </tr>
 <tr>
+<td><code>LOGIN_LOCKOUT_ENABLED</code></td>
+<td><code>true</code></td>
+<td>boolean</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>LOGIN_LOCKOUT_ENABLED</code></td>
+<td><code>login_lockout_enabled</code></td>
+<td>Auth &amp; Security</td>
+<td>runtime</td>
+<td></td>
+<td></td>
+</tr>
+<tr>
 <td><code>LOGIN_LOCKOUT_THRESHOLD</code></td>
 <td><code>5</code></td>
 <td>integer ≥ 0</td>
@@ -888,7 +904,7 @@ SECURE_COOKIES=false
 <p><strong>Warning:</strong> Set <code>SECURE_COOKIES=false</code> only for local HTTP development. Behind a TLS-terminating proxy, leave it <code>true</code> or sessions will not be stored by the browser.</p>
 </blockquote>
 <p><code>TRUST_PROXY_HEADERS=true</code> makes <code>X-Forwarded-User</code> a valid identity for every route, which means the proxy becomes the authentication boundary. Only enable it behind a proxy you control.</p>
-<p><code>LOGIN_LOCKOUT_THRESHOLD</code> is a different control from the audit cap below, and the two must not be confused: it counts <strong>consecutive failed logins for one account</strong> and locks that account after this many, refusing further attempts (with the same <code>401</code> as a wrong key) until an administrator unlocks it. <code>0</code> disables lockout entirely. The lock does not expire on its own — an attacker who can wait out a timer is not deterred by one. A lock only refuses <strong>new sign-ins</strong>: existing sessions and API keys keep working, so nobody can use the public login endpoint as a kill-switch for another account's CI access (<code>disabled</code>, by contrast, refuses every path). Every lock, unlock, disable and enable is audited, and a locked or disabled account still produces <code>auth.login_blocked</code> rows with <code>reason: locked</code> / <code>reason: disabled</code>.</p>
+<p><code>LOGIN_LOCKOUT_ENABLED</code> is the switch that turns account lockout on or off at runtime (Server Settings → Auth &amp; Security, no restart): while it is off the threshold is ignored and no account is locked, but accounts locked earlier stay locked until an admin unlocks them — a security control never releases people silently. <code>LOGIN_LOCKOUT_THRESHOLD</code> is a different control from the audit cap below, and the two must not be confused: it counts <strong>consecutive failed logins for one account</strong> and locks that account after this many, refusing further attempts (with the same <code>401</code> as a wrong key) until an administrator unlocks it. <code>0</code> disables lockout entirely. The lock does not expire on its own — an attacker who can wait out a timer is not deterred by one. A lock only refuses <strong>new sign-ins</strong>: existing sessions and API keys keep working, so nobody can use the public login endpoint as a kill-switch for another account's CI access (<code>disabled</code>, by contrast, refuses every path). Every lock, unlock, disable and enable is audited, and a locked or disabled account still produces <code>auth.login_blocked</code> rows with <code>reason: locked</code> / <code>reason: disabled</code>.</p>
 <div class="highlight"><pre><span></span><code>  `AUDIT_AUTH_FAILURE_MAX_PER_MINUTE` bounds the brute-force end of the audit trail: before storing an `auth.login_failed` or `auth.login_blocked` row, the server counts the rows for those two actions in the last 60 seconds — per username at this limit, and server-wide at ten times it — and once either budget is spent the row is skipped. The server-wide budget is what bounds a distributed flood, and it is deliberately larger than the per-username one: with equal budgets, 20 junk usernames would exhaust the shared allowance and the trail would then lose the rows for a targeted account (say `admin`), which is the evidence that matters. The trail also guarantees at least one row per minute for an attempt against an existing account even when both budgets are spent, so a flood of invented usernames can never erase the first sign that someone is attacking a real one. Those rescued rows are themselves capped at this limit per window server-wide, so the hard ceiling on failed-login rows is 11 × the limit per minute no matter how many accounts exist or who creates them — the rescue cannot be farmed by registering accounts, and it cannot be used to flood the table. The check and the insert run in one transaction, so parallel attempts cannot all pass a stale count. The attempt is still logged as its usual `[AUDIT]` line, one summary line is logged per window with the number of drops, and the running total is reported as `suppressed_auth_events` in `checks.audit` on `GET /api/health`. Only those two actions are throttled — every other action, including a successful `auth.login`, is always stored. `0` disables the limit.
 </code></pre></div>
 
