@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from rootcoz import storage
 from rootcoz.exporters.reportportal import ReportPortalClient
 
 
@@ -35,12 +36,57 @@ def _install_rp_client_mock(mock_rp_class, mock_rp=None):
 
 @pytest.fixture(autouse=True)
 def _mock_storage_reviews():
-    """Auto-mock storage helpers used during RP push context building."""
+    """Auto-mock storage helpers used during RP push context building.
+
+    Review entries are derived from the (per-test mocked) stored result:
+    every failure the job carries — including child-job failures — counts
+    as reviewed, so push-mechanics tests pass the review gate. The gate
+    itself has dedicated tests that override this patch with their own
+    review maps.
+    """
+
+    def _collect_reviewed(node, reviews, child_job_name="", child_build_number=0):
+        for failure in node.get("failures", []) or []:
+            if isinstance(failure, dict) and failure.get("test_name"):
+                key = storage.review_key(
+                    failure["test_name"], child_job_name, child_build_number
+                )
+                reviews[key] = {
+                    "reviewed": True,
+                    "username": "admin",
+                    "updated_at": "",
+                }
+        for child in node.get("child_job_analyses", []) or []:
+            if isinstance(child, dict):
+                _collect_reviewed(
+                    child,
+                    reviews,
+                    child.get("job_name", ""),
+                    child.get("build_number", 0),
+                )
+        for child in node.get("failed_children", []) or []:
+            if isinstance(child, dict):
+                _collect_reviewed(
+                    child,
+                    reviews,
+                    child.get("job_name", ""),
+                    child.get("build_number", 0),
+                )
+
+    async def _reviews_for_job(job_id):
+        from rootcoz import main as main_module
+
+        stored = await main_module.get_result(job_id)
+        reviews: dict = {}
+        result = stored.get("result") if isinstance(stored, dict) else None
+        if isinstance(result, dict):
+            _collect_reviewed(result, reviews)
+        return reviews
+
     with (
         patch(
             "rootcoz.main.storage.get_reviews_for_job",
-            new_callable=AsyncMock,
-            return_value={},
+            side_effect=_reviews_for_job,
         ),
         patch(
             "rootcoz.main.storage.get_tracked_in_for_scope",
@@ -172,7 +218,7 @@ class TestPushReportPortalEndpoint:
     )
     @patch("rootcoz.main.get_result")
     def test_returns_422_on_invalid_stored_failures(
-        self, mock_get_result, mock_rp_class, _rp_enabled_env
+        self, mock_get_result, mock_rp_class, _rp_enabled_unreviewed_push_env
     ):
         mock_get_result.return_value = {
             "result": {
@@ -192,6 +238,10 @@ class TestPushReportPortalEndpoint:
             raise_server_exceptions=False,
             headers={"Authorization": "Bearer test-admin-key-16chars"},
         )
+        # The corrupt failure carries no test_name, so no review can ever
+        # match it — the identity-based gate (correctly) blocks it. Use the
+        # rp_allow_unreviewed_push escape hatch to reach the stored-failures
+        # validation this test exercises.
         response = client.post("/results/corrupt-job/push-reportportal")
         assert response.status_code == 422
         detail = response.json()["detail"]
@@ -2582,3 +2632,141 @@ class TestPushedByForwarding:
         push_call = mock_rp.push_classifications.call_args
         # Exact (build 42) wins over wildcard (build 0)
         assert push_call.kwargs["reviewed_by"] == {"test_a": "exact_reviewer"}
+
+
+@pytest.fixture
+def _rp_enabled_unreviewed_push_env():
+    """Environment with RP enabled and unreviewed RP pushes allowed."""
+    env = {**_BASE_RP_ENABLED_ENV, "RP_ALLOW_UNREVIEWED_PUSH": "true"}
+    with patch.dict(os.environ, env, clear=True):
+        from rootcoz.config import get_settings
+
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
+
+
+_STORED_ONE_FAILURE = {
+    "status": "completed",
+    "result": {
+        "job_name": "my-job",
+        "build_number": 42,
+        "jenkins_url": "https://jenkins.example.com/job/my-job/42/",
+        "failures": [
+            {
+                "test_name": "test_a",
+                "error": "err",
+                "analysis": {"classification": "PRODUCT BUG", "details": "Bug found"},
+            }
+        ],
+    },
+}
+
+
+class TestPushReportPortalUnreviewedGating:
+    """Manual legacy RP pushes require all failures reviewed, per exporter."""
+
+    @patch("rootcoz.main.get_result")
+    def test_unreviewed_returns_409(self, mock_get_result, _rp_enabled_env):
+        """No review for the single failure → 409 before RP is contacted."""
+        mock_get_result.return_value = _STORED_ONE_FAILURE
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        with patch(
+            "rootcoz.main.storage.get_reviews_for_job",
+            new_callable=AsyncMock,
+            return_value={},
+        ):
+            response = client.post("/results/some-job-id/push-reportportal")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == (
+            "job has 1 unreviewed failure(s) — review them before pushing"
+            " — an admin can allow this with RP_ALLOW_UNREVIEWED_PUSH=true"
+        )
+
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
+    def test_all_reviewed_pushes(self, mock_get_result, mock_rp_class, _rp_enabled_env):
+        """Every failure reviewed → the legacy push goes through."""
+        mock_get_result.return_value = _STORED_ONE_FAILURE
+        mock_rp = _install_rp_client_mock(mock_rp_class)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        with patch(
+            "rootcoz.main.storage.get_reviews_for_job",
+            new_callable=AsyncMock,
+            return_value={
+                "test_a": {"reviewed": True, "username": "admin", "updated_at": ""}
+            },
+        ):
+            response = client.post("/results/some-job-id/push-reportportal")
+
+        assert response.status_code == 200, f"Response: {response.text}"
+        assert response.json()["pushed"] == 1
+        mock_rp.push_classifications.assert_called_once()
+
+    @patch("rootcoz.main.ReportPortalClient")
+    @patch("rootcoz.main.get_result")
+    def test_toggle_allows_unreviewed_push(
+        self, mock_get_result, mock_rp_class, _rp_enabled_unreviewed_push_env
+    ):
+        """rp_allow_unreviewed_push=true is the RP-only escape hatch."""
+        mock_get_result.return_value = _STORED_ONE_FAILURE
+        mock_rp = _install_rp_client_mock(mock_rp_class)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "errors": [],
+            "launch_id": 100,
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        with patch(
+            "rootcoz.main.storage.get_reviews_for_job",
+            new_callable=AsyncMock,
+            return_value={},
+        ):
+            response = client.post("/results/some-job-id/push-reportportal")
+
+        assert response.status_code == 200, f"Response: {response.text}"
+        assert response.json()["pushed"] == 1
+        mock_rp.push_classifications.assert_called_once()

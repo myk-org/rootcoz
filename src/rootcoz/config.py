@@ -601,6 +601,67 @@ class Settings(BaseSettings):
         default=True,
         description="Include Jira/GitHub issue links as external system issues on Report Portal test items.",
     )
+    rp_allow_unreviewed_push: bool = Field(
+        default=False,
+        description=(
+            "Allow manual Report Portal pushes of jobs that still have unreviewed"
+            " failures. By default all failures must be reviewed before a manual push."
+        ),
+    )
+
+    # Datadog Events integration (optional). Emits one event per failed
+    # test when results are pushed to the 'datadog' exporter plugin.
+    datadog_api_key: SecretStr | None = None
+    datadog_app_key: SecretStr | None = None
+    datadog_site: str | None = Field(
+        default=None,
+        description=(
+            "Datadog site hostname for the v2 event intake, e.g. datadoghq.eu."
+            " Required to enable the exporter."
+        ),
+    )
+    datadog_service: str | None = Field(
+        default=None,
+        description="Value of the service: tag on emitted Datadog events (optional).",
+    )
+    datadog_env: str | None = Field(
+        default=None,
+        description="Value of the env: tag on emitted Datadog events (optional).",
+    )
+    enable_datadog: bool | None = Field(
+        default=None,
+        description=(
+            "Push each analysis to Datadog as one event per failed test."
+            " When None, enabled if DATADOG_API_KEY, DATADOG_APP_KEY, and"
+            " DATADOG_SITE are configured."
+        ),
+    )
+    dd_push_classifications: bool = Field(
+        default=True,
+        description=(
+            "Include classification in Datadog events. Adds the tfa.classification tag,"
+            " the [classification] title prefix, and the classification line in the"
+            " event text."
+        ),
+    )
+    dd_push_rootcoz_url: bool = Field(
+        default=True,
+        description=(
+            "Include the rootcoz report link in Datadog event text"
+            " (only when PUBLIC_BASE_URL is set)."
+        ),
+    )
+    dd_push_tracker_links: bool = Field(
+        default=True,
+        description="Include tracked-in Jira/GitHub issue links in Datadog event text.",
+    )
+    dd_allow_unreviewed_push: bool = Field(
+        default=False,
+        description=(
+            "Allow manual Datadog pushes of jobs that still have unreviewed"
+            " failures. By default all failures must be reviewed before a manual push."
+        ),
+    )
 
     # Web Push (VAPID) configuration (optional, server-only)
     vapid_public_key: str = ""
@@ -937,6 +998,8 @@ class Settings(BaseSettings):
             "jira_oauth_client_secret",
             "jira_atst_token",
             "reportportal_api_token",
+            "datadog_api_key",
+            "datadog_app_key",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -1084,6 +1147,31 @@ class Settings(BaseSettings):
             if self.enable_reportportal is True:
                 logger.warning(
                     "enable_reportportal is True but REPORTPORTAL_PROJECT is not configured"
+                )
+            return False
+        return True
+
+    @property
+    def datadog_enabled(self) -> bool:
+        """Check if the Datadog Events exporter is enabled and configured."""
+        if self.enable_datadog is False:
+            return False
+        if not self.datadog_api_key or not self.datadog_api_key.get_secret_value():
+            if self.enable_datadog is True:
+                logger.warning(
+                    "enable_datadog is True but DATADOG_API_KEY is not configured"
+                )
+            return False
+        if not self.datadog_app_key or not self.datadog_app_key.get_secret_value():
+            if self.enable_datadog is True:
+                logger.warning(
+                    "enable_datadog is True but DATADOG_APP_KEY is not configured"
+                )
+            return False
+        if not self.datadog_site:
+            if self.enable_datadog is True:
+                logger.warning(
+                    "enable_datadog is True but DATADOG_SITE is not configured"
                 )
             return False
         return True

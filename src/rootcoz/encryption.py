@@ -47,6 +47,8 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "github_token",
         "tests_repo_token",
         "reportportal_api_token",
+        "datadog_api_key",
+        "datadog_app_key",
     }
 )
 

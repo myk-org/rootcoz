@@ -96,6 +96,10 @@ services:
       # Gemini CLI - API Key
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
 
+      # Datadog event exporter - API key + application key (optional, both required)
+      - DATADOG_API_KEY=${DATADOG_API_KEY:-}
+      - DATADOG_APP_KEY=${DATADOG_APP_KEY:-}
+
       # Cursor Agent — CURSOR_API_KEY does NOT expire (unlike browser `agent login`).
       # When set in the container env, Cursor auth keeps working. Dashboard → API Keys.
       # - CURSOR_API_KEY=${CURSOR_API_KEY:-}

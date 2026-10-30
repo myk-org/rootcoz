@@ -105,7 +105,7 @@ interface SettingsImportResult {
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
-  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Prow',
+  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
   'Auth & Security', 'Web Push', 'Notifications', 'Sidecar',
 ]
 
@@ -115,6 +115,7 @@ const TEST_INTEGRATIONS: Record<string, string> = {
   Jira: 'jira',
   GitHub: 'github',
   'Report Portal': 'reportportal',
+  Datadog: 'datadog',
   Prow: 'prow',
 }
 
@@ -2202,6 +2203,9 @@ function SingleValuePicker({ setting, options, saving, onSave }: EnumPickerProps
       multiple={false}
       values={setting.value ? [setting.value] : []}
       options={choices.map(value => ({ value }))}
+      // Enumerated values the server lets an admin extend (a newly published
+      // Datadog region) must be typable here too, not only pickable.
+      allowCustom={setting.allow_custom}
       disabled={saving}
       placeholder="Not set"
       onChange={next => onSave(next[0])}

@@ -164,10 +164,30 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `RP_PUSH_CLASSIFICATIONS` | `true` | boolean | no | no | yes |
    | `RP_PUSH_ROOTCOZ_URL` | `true` | boolean | no | no | yes |
    | `RP_PUSH_TRACKER_LINKS` | `true` | boolean | no | no | yes |
+   | `RP_ALLOW_UNREVIEWED_PUSH` | `false` | boolean | no | no | yes |
 
-   Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`).
+   Auto-detection mirrors GitHub: with the toggle unset, Report Portal is on when URL, token, and project are all set. `RP_PUSH_CLASSIFICATIONS` maps RootCoz classifications to Report Portal defect types (`PRODUCT_BUG`, `AUTOMATION_BUG`, `SYSTEM_ISSUE`). `RP_ALLOW_UNREVIEWED_PUSH` is the escape hatch for the manual-push review gate: by default a manual push is refused with `409 job has N unreviewed failure(s) — review them before pushing` until every failure in the pushed scope is reviewed; set it to `true` to let Report Portal pushes through regardless. The gate covers the scope the push is about, not the whole job: a child-scoped push (`child_job_name` + `child_build_number`) is reviewed against that child's failures alone, so a fully reviewed child can be published while a sibling or the parent still waits. The `409` names this setting, so an operator reading the error knows the hatch exists. It is a server-level toggle (env var or Server Settings) with no request-payload or CLI equivalent.
 
-8. **Auth and Security category.**
+8. **Datadog category.**
+
+   | Variable | Default | Type | Secret | Restart | After login |
+   | --- | --- | --- | --- | --- | --- |
+   | `DATADOG_API_KEY` | unset | string | yes | no | yes |
+   | `DATADOG_APP_KEY` | unset | string | yes | no | yes |
+   | `DATADOG_SITE` | unset | string | no | no | yes |
+   | `DATADOG_SERVICE` | unset | string | no | no | yes |
+   | `DATADOG_ENV` | unset | string | no | no | yes |
+   | `ENABLE_DATADOG` | unset | boolean | no | no | yes |
+   | `DD_PUSH_CLASSIFICATIONS` | `true` | boolean | no | no | yes |
+   | `DD_PUSH_ROOTCOZ_URL` | `true` | boolean | no | no | yes |
+   | `DD_PUSH_TRACKER_LINKS` | `true` | boolean | no | no | yes |
+   | `DD_ALLOW_UNREVIEWED_PUSH` | `false` | boolean | no | no | yes |
+
+   Same enable semantics as Report Portal: when `ENABLE_DATADOG` is unset, the exporter is enabled automatically once `DATADOG_API_KEY`, `DATADOG_APP_KEY`, **and** `DATADOG_SITE` are all configured; set `ENABLE_DATADOG=false` to force it off. RootCoz posts to the Datadog **v2 event intake** (`https://event-management-intake.{site}/api/v2/events`), which authenticates every request with **both** keys. `DATADOG_API_KEY` is the API key (32 hex characters, sent as the `DD-API-KEY` header) that identifies the organization; `DATADOG_APP_KEY` is the application key (`ddapp…` prefix or exactly 40 hex characters, sent as the `DD-APPLICATION-KEY` header) that authorizes the request. The v2 intake rejects an API key on its own, which is why the exporter stays disabled until both are set. A missing key fails fast with its own message naming that setting. An application key pasted into `DATADOG_API_KEY` is rejected with an error telling you to move it to `DATADOG_APP_KEY`, and a 32-hex API key pasted into `DATADOG_APP_KEY` is rejected the same way. Service Access Tokens (`ddsat…` prefix — no event write scope exists in Datadog) are rejected in either slot. `DATADOG_SITE` is the Datadog site hostname (`datadoghq.eu`, `datadoghq.com`, …) — there is no built-in default, you choose your regional site. Server Settings offers Datadog's published sites as a picker rather than a free-text box, and the server stores the bare hostname: a pasted `https://datadoghq.eu/` or `api.datadoghq.com` is saved as `datadoghq.eu` / `datadoghq.com`, so one site never ends up with two spellings. A value that is not a hostname is rejected at save time with the accepted sites named, instead of being stored and failing later at push time; the picker still accepts a typed hostname, so a newly published region works before the list is updated — and it is used both for the intake host and for the connection test. `DATADOG_SERVICE` and `DATADOG_ENV` optionally feed the `service:` and `env:` tags on emitted events; the tags are omitted when unset. The Server Settings **Test connection** button validates the API key only, with the documented `GET https://api.{site}/api/v1/validate`. There is no documented side-effect-free probe for the event-write permission the intake needs, so the application key is checked for presence and shape (prefix/hex format, right slot, not a Service Access Token) and reported as present; Datadog validates its write permission when the first event is published — a failed first push is the only true test of that permission.
+
+   The three `DD_PUSH_*` toggles mirror the `RP_PUSH_*` trio and control what goes into each event: `DD_PUSH_CLASSIFICATIONS` adds the `tfa.classification` tag, the `[classification]` title prefix, and the classification line in the event message; `DD_PUSH_ROOTCOZ_URL` adds the RootCoz report link to the event message (only when `PUBLIC_BASE_URL` is set); `DD_PUSH_TRACKER_LINKS` adds the tracked-in Jira/GitHub issue links to the event message. Every event is sent with `category: alert` — the v2 schema's `category` is an enum of `change` | `alert` with no generic event category, and a failed test is an alert — and the exporter never sets a severity: classification (root cause) and severity are unrelated axes. Datadog's documented v2 limits are enforced: a title over 500 characters or a message over 4000 is truncated and marked `… [truncated]`, never silently cut. `DD_ALLOW_UNREVIEWED_PUSH` is the Datadog-side escape hatch for the manual-push review gate: by default a manual push is refused with `409 job has N unreviewed failure(s) — review them before pushing` until every failure in the pushed scope is reviewed (same child-scoping as Report Portal); set it to `true` to let Datadog pushes through regardless. Each exporter's toggle is independent — enabling the Report Portal one does not ungate Datadog, and unknown/future exporters have no toggle and stay gated.
+
+9. **Auth and Security category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -182,8 +202,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `AUDIT_MAX_ROWS` | `0` | integer ≥ 0 | no | no | yes |
    | `AUDIT_AUTH_FAILURE_MAX_PER_MINUTE` | `20` | integer ≥ 0 | no | no | yes |
    | `LOGIN_LOCKOUT_ENABLED` | `true` | boolean | no | no | yes |
-   | `LOGIN_LOCKOUT_ENABLED` | `login_lockout_enabled` | Auth & Security | runtime |
-| `LOGIN_LOCKOUT_THRESHOLD` | `5` | integer ≥ 0 | no | no | yes |
+   | `LOGIN_LOCKOUT_THRESHOLD` | `5` | integer ≥ 0 | no | no | yes |
 
    `ADMIN_KEY` bootstraps the `admin` superuser that lives outside the database; log in as `admin` with that key. It is environment-only: Server Settings shows it masked (read-only) but rejects any attempt to set, persist, or reset it — keep the env var authoritative. `DEFAULT_USER_ROLE` accepts only `viewer`, `reviewer`, or `operator` — any other value fails validation at startup. `ALLOWED_USERS` is the deployment's **write** allow-list — it exists for the case where a wide population can authenticate (self-registration, or a trusted proxy/SSO through `TRUST_PROXY_HEADERS`) while only a known team should be able to create or modify data. It is a comma-separated list of usernames and is empty by default, which means no username restriction: every authenticated user is then limited only by their role. Setting it does not grant anything — a listed reviewer is still a reviewer — it restricts the write routes to the listed accounts. When it is non-empty it is enforced at two points, not one: at registration, where a username that is not on the list is rejected with `403 Registration is restricted. Contact an admin.` before the account is created; and after authentication, on the protected routes that call the allow-list check, where admins always bypass it and any other off-list or unauthenticated caller gets `403 User not allowed. Contact an administrator to be added to the allow list.` A user who was registered before the list tightened can therefore still hold an account but gets 403 on those routes, and an operator who is not listed loses the writes their role would otherwise allow — which is the intended effect of a non-empty list. It is editable in Server Settings like any other server-wide setting (the deployment env supplies the default, a saved value overrides it) — one console for the server, and an admin bypasses the list so tightening it can never lock them out.
 
@@ -197,7 +216,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    The audit trail also records the events an operator needs to explain a job or an account after the fact, each as its own id: `analysis.rerun` (target `job`, details `provider`, `model`, `trigger`, and `previous_classification` when the job already had a classified failure), `auth.logout`, `comment.delete` (target `comment`, details `job_id`), and `user.tracker_token_set` / `user.tracker_token_delete` (details name the tracker — `jira` or `github` — never the token). Comment edits are not audited because no comment-edit endpoint exists, and there is no session-revocation endpoint to audit: sessions end by logging out, rotating a key, or deleting the account, and each of those is recorded.
 
-9. **Prow category.**
+10. **Prow category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -206,7 +225,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Both are validated on load rather than transformed. `PROW_URL` must start with `https://`, must contain a hostname, and must not embed credentials (`prow_validation.normalize_prow_url`) — surrounding whitespace is trimmed, but a trailing slash is left in place, so `https://prow.example.com/` and `https://prow.example.com` are both accepted and stay as written. `GCS_BUCKET` must match `[a-z0-9][a-z0-9._-]*` after trimming (`normalize_gcs_bucket`), so a `gs://` prefix is **rejected** rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.
 
-10. **Server category.**
+11. **Server category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -225,13 +244,13 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     `METADATA_RULES_FILE` points at a YAML or JSON file of name-based metadata rules. Rules load once and cache for the process lifetime, so edits need a restart. A broken rules file logs a warning and yields no rules rather than failing the server.
 
-    `AUTO_PUSH_EXPORTERS` takes a comma-separated exporter list such as `reportportal`, and only applies when `ENABLE_AUTO_REVIEW` is also on.
+    `AUTO_PUSH_EXPORTERS` takes a comma-separated exporter list such as `reportportal`, and only applies when `ENABLE_AUTO_REVIEW` is also on. It runs once every failure in the job is reviewed — whether the AI auto-reviewed it or a human did, since a human review is the stronger signal — and it pushes one analysis per scope: the job's own failures plus each child job that has failures, so a pipeline whose failures live only in child jobs still publishes them instead of sending an empty list.
    
    `ENABLE_FREE_MODELS` lets every user run the admin-declared free provider+model pairs (Users page → *Free AI models*) on server credentials; the free-providers grant is not needed for admins or users who already have `can_use_server_providers`.
 
    `AMBIENT_AUTH_PROVIDERS` lists provider IDs that authenticate via ambient credentials (ADC, OAuth, CLI login) and never consume a per-session user API key. They are excluded from the user credential flow even when the sidecar reports them as key-capable — without this, users can store a key the provider ignores (and any garbage key passes verification, because the provider authenticates via ADC regardless). Their models remain available with server credentials. Set it to an empty string to trust the sidecar's capability reporting entirely.
 
-11. **Web Push category.**
+12. **Web Push category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -241,7 +260,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that changing the public key or claim email invalidates subscriptions already registered with browsers — they are restart-required and best managed at deployment time.
 
-12. **Notifications category** (added with #347).
+13. **Notifications category** (added with #347).
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -255,7 +274,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Email alerts need `SMTP_HOST` + `ALERT_EMAIL_TO` (from address defaults to `SMTP_USER`, then `rootcoz@<host>`); Slack alerts need `SLACK_WEBHOOK_URL`. The env var stays the deployment default — a saved setting overrides it.
 
-13. **Sidecar category** (added with #347 — restart required).
+14. **Sidecar category** (added with #347 — restart required).
 
     The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. An empty field means "no override": the deployment environment governs.
 
@@ -324,6 +343,17 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `RP_PUSH_CLASSIFICATIONS` | `rp_push_classifications` | Report Portal | runtime |
 | `RP_PUSH_ROOTCOZ_URL` | `rp_push_rootcoz_url` | Report Portal | runtime |
 | `RP_PUSH_TRACKER_LINKS` | `rp_push_tracker_links` | Report Portal | runtime |
+| `RP_ALLOW_UNREVIEWED_PUSH` | `rp_allow_unreviewed_push` | Report Portal | runtime |
+| `DATADOG_API_KEY` | `datadog_api_key` | Datadog | runtime (sensitive) |
+| `DATADOG_APP_KEY` | `datadog_app_key` | Datadog | runtime (sensitive) |
+| `DATADOG_SITE` | `datadog_site` | Datadog | runtime |
+| `DATADOG_SERVICE` | `datadog_service` | Datadog | runtime |
+| `DATADOG_ENV` | `datadog_env` | Datadog | runtime |
+| `ENABLE_DATADOG` | `enable_datadog` | Datadog | runtime |
+| `DD_PUSH_CLASSIFICATIONS` | `dd_push_classifications` | Datadog | runtime |
+| `DD_PUSH_ROOTCOZ_URL` | `dd_push_rootcoz_url` | Datadog | runtime |
+| `DD_PUSH_TRACKER_LINKS` | `dd_push_tracker_links` | Datadog | runtime |
+| `DD_ALLOW_UNREVIEWED_PUSH` | `dd_allow_unreviewed_push` | Datadog | runtime |
 | `ADMIN_KEY` | `admin_key` | Auth & Security | env-only (read-only display) |
 | `SECURE_COOKIES` | `secure_cookies` | Auth & Security | restart |
 | `TRUST_PROXY_HEADERS` | `trust_proxy_headers` | Auth & Security | restart |
@@ -335,6 +365,8 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `AUDIT_RETENTION_DAYS` | `audit_retention_days` | Auth & Security | runtime |
 | `AUDIT_MAX_ROWS` | `audit_max_rows` | Auth & Security | runtime |
 | `AUDIT_AUTH_FAILURE_MAX_PER_MINUTE` | `audit_auth_failure_max_per_minute` | Auth & Security | runtime |
+| `LOGIN_LOCKOUT_ENABLED` | `login_lockout_enabled` | Auth & Security | runtime |
+| `LOGIN_LOCKOUT_THRESHOLD` | `login_lockout_threshold` | Auth & Security | runtime |
 | `PROW_URL` | `prow_url` | Prow | runtime |
 | `GCS_BUCKET` | `gcs_bucket` | Prow | runtime |
 | `PROW_ARTIFACTS_MAX_SIZE_MB` | `prow_artifacts_max_size_mb` | Prow | runtime |
@@ -594,9 +626,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, `DATADOG_APP_KEY`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only six of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, and `REPORTPORTAL_API_TOKEN`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only eight of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, and `DATADOG_APP_KEY`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.  

@@ -10,7 +10,9 @@ import { GroupSelectAll } from './GroupSelectAll'
 import { Badge } from '@/components/ui/badge'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { ChevronDown, ChevronRight, ExternalLink, GitFork } from 'lucide-react'
+import { useAuth } from '@/lib/auth'
 import { ReportPortalButton } from './ReportPortalButton'
+import { DatadogButton } from './DatadogButton'
 import { TestListSection } from './TestListSection'
 import { useReportState } from '@/pages/report/reportState'
 
@@ -26,6 +28,7 @@ interface ChildJobSectionProps {
 
 export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHashId }: ChildJobSectionProps) {
   const state = useReportState()
+  const { isOperator } = useAuth()
   const hashId = childJobHashId(child.job_name, child.build_number, parentHashId)
   const sectionExpandKey = expandKey(jobId, hashId)
   const sectionRef = useRef<HTMLDivElement>(null)
@@ -105,8 +108,18 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
         <Badge variant="outline" className="shrink-0">
           {failures.length} {failures.length === 1 ? 'failure' : 'failures'}
         </Badge>
-        {state.reportportalAvailable && (
+        {isOperator && state.reportportalAvailable && (
           <ReportPortalButton
+            jobId={jobId}
+            jobName={child.job_name}
+            buildNumber={child.build_number}
+            childJobName={child.job_name}
+            childBuildNumber={child.build_number}
+            hasFailures={failures.length > 0}
+          />
+        )}
+        {isOperator && state.datadogAvailable && (
+          <DatadogButton
             jobId={jobId}
             jobName={child.job_name}
             buildNumber={child.build_number}

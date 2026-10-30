@@ -3747,7 +3747,7 @@ def admin_settings_import(
 @admin_settings_app.command("test")
 def admin_settings_test(
     integration: str = typer.Argument(
-        help="Integration to test (jenkins, jira, github, reportportal, prow)."
+        help="Integration to test (jenkins, jira, github, reportportal, datadog, prow)."
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:

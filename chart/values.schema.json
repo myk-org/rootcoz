@@ -77,6 +77,13 @@
         }
       }
     },
+    "datadog": {
+      "type": "object",
+      "properties": {
+        "apiKey": { "type": "string" },
+        "appKey": { "type": "string" }
+      }
+    },
     "sidecar": {
       "type": "object",
       "properties": {
@@ -121,7 +128,9 @@
         "xdgConfigHome": { "type": "string" },
         "secureCookies": { "type": "string" },
         "publicBaseUrl": { "type": "string" },
-        "metadataRulesFile": { "type": "string" }
+        "metadataRulesFile": { "type": "string" },
+        "recordTranscripts": { "type": "boolean" },
+        "sidecarTranscriptsDir": { "type": "string" }
       }
     },
     "tuning": {

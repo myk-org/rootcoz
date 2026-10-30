@@ -199,7 +199,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz exporters` | — | Available exporter plugins and their enabled state. |
-| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number` | Push results through a named exporter plugin. |
+| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number` | Push results through a named exporter plugin (`reportportal`, `datadog`). |
 | `rootcoz push-reportportal JOB_ID` | `--child-job-name`, `--child-build-number` | Report Portal shortcut; `push-rp` is a hidden alias. |
 | `rootcoz release` | `--json` | Latest GitHub release, the running server version, and whether an update is available. |
 

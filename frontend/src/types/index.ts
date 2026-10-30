@@ -447,8 +447,21 @@ export interface ResultResponse {
     server_jira_project_key?: string
     reportportal?: boolean
     reportportal_project?: string
+    datadog?: boolean
+    /** Available exporter plugins (`GET /api/exporters` entries, job-scoped). */
+    exporters?: ExporterInfo[]
     feedback_enabled?: boolean
   }
+}
+
+/** Entry of `GET /api/exporters` — also embedded in result `capabilities.exporters`. */
+export interface ExporterInfo {
+  name: string
+  display_name: string
+  enabled: boolean
+  /** Escape hatch for the unreviewed-failure push gate. Absent on older
+   *  servers — read as false so the gate stays on (matches backend default). */
+  allow_unreviewed_push?: boolean
 }
 
 // -- Report Portal --------------------------------------------------
@@ -458,6 +471,18 @@ export interface ReportPortalPushResult {
   unmatched: string[]
   errors: string[]
   launch_id: number | null
+}
+
+// -- Datadog -------------------------------------------------------
+
+/** Response of `POST /results/{jobId}/push/datadog` (generic exporter push). */
+export interface DatadogPushResult {
+  success: boolean
+  message: string
+  pushed: number
+  total: number
+  errors: string[]
+  skipped: number
 }
 
 // -- Comment enrichment ---------------------------------------------
