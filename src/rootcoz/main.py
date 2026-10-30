@@ -141,8 +141,10 @@ from rootcoz.engine.core import (
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.exporters.base import ExportContext, Exporter
 from rootcoz.exporters.datadog import (
+    DATADOG_SITES,
     DatadogExporter,
     _auth_headers,
+    normalize_datadog_site,
     validate_datadog_credentials,
 )
 from rootcoz.exporters.reportportal import (
@@ -497,6 +499,10 @@ _SETTING_CHOICES: dict[str, dict[str, Any]] = {
     "default_user_role": {"options": list(DEFAULT_USER_ROLES)},
     "jira_auth_mode": {"options": list(JIRA_AUTH_MODES)},
     "log_level": {"options": list(_VALID_LOG_LEVELS)},
+    # Datadog publishes a finite site list; the picker offers it and the
+    # server canonicalises to the bare hostname. Custom stays allowed so a
+    # new region works before this list ships an update.
+    "datadog_site": {"options": list(DATADOG_SITES), "allow_custom": True},
     "auto_push_exporters": {"options_source": "exporters", "multiple": True},
     "ambient_auth_providers": {"options_source": "providers", "multiple": True},
     "allowed_users": {
@@ -707,6 +713,7 @@ _LABEL_ACRONYMS: frozenset[str] = frozenset(
         "MCP",
         "PR",
         "RP",
+        "DD",
         "RBAC",
         "DSN",
         "VAPID",
@@ -724,6 +731,8 @@ _LABEL_ACRONYMS: frozenset[str] = frozenset(
 _LABEL_PROPER_CASE: dict[str, str] = {
     "GITHUB": "GitHub",
     "REPORTPORTAL": "ReportPortal",
+    "ROOTCOZ": "RootCoz",
+    "DATADOG": "Datadog",
 }
 
 # A trailing token that is a unit renders as a parenthetical suffix instead of
@@ -16953,6 +16962,19 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
     if key == "ambient_auth_providers":
         ids, error = await _normalize_ambient_auth_providers(value)
         return ", ".join(ids), error
+    if key == "datadog_site":
+        # Store the bare hostname the exporter builds its URLs from, so a
+        # pasted "https://datadoghq.eu/" cannot leave two spellings of one
+        # site in the database. Anything that is not a hostname is refused
+        # with the same hostname hint the exporter raises at push time.
+        site = normalize_datadog_site(str(value))
+        if not site:
+            return value, (
+                f"datadog_site: {value!r} is not a Datadog site hostname — "
+                f"pick one of {', '.join(DATADOG_SITES)}, or type the bare "
+                "hostname of your regional site"
+            )
+        return site, None
     return value, None
 
 

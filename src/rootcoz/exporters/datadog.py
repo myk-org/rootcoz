@@ -63,6 +63,21 @@ _EVENTS_PATH = "/api/v2/events"
 #: Per-request timeout (seconds) for event submission.
 _REQUEST_TIMEOUT = 30.0
 
+#: Datadog's published sites (#379 "known values are picked, never typed"):
+#: Server Settings offers these as a picker, and the server canonicalises any
+#: saved value to the bare hostname this list is written in. ``allow_custom``
+#: stays on so a newly published region works before the list is updated.
+DATADOG_SITES: tuple[str, ...] = (
+    "datadoghq.com",
+    "us3.datadoghq.com",
+    "us5.datadoghq.com",
+    "datadoghq.eu",
+    "ap1.datadoghq.com",
+    "ap2.datadoghq.com",
+    "ddog-gov.com",
+    "us3.ddog-gov.com",
+)
+
 #: Valid Datadog site hostname: lowercase alphanumerics, hyphens, and dots,
 #: with at least one dot (``datadoghq.eu``, ``ddog.us``, ``us3.datadoghq.com``).
 _SITE_HOSTNAME_RE = re.compile(
@@ -253,7 +268,7 @@ def validate_datadog_credentials(
         raise ValueError(APP_KEY_SERVICE_TOKEN_ERROR)
     if _API_KEY_RE.fullmatch(app):
         raise ValueError(API_KEY_IN_APP_SLOT_ERROR)
-    site_host = _normalize_site(site)
+    site_host = normalize_datadog_site(site)
     if not site_host:
         raise ValueError(
             f"Invalid Datadog site {site!r} — set DATADOG_SITE to a Datadog "
@@ -262,7 +277,7 @@ def validate_datadog_credentials(
     return site_host
 
 
-def _normalize_site(site: str | None) -> str:
+def normalize_datadog_site(site: str | None) -> str:
     """Normalize a configured Datadog site value to a bare hostname.
 
     Accepts full URLs (``https://datadoghq.eu``), values with an ``api.``

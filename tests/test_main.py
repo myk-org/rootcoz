@@ -10398,6 +10398,23 @@ _ENUM_SETTING_CHOICES: dict[str, dict[str, Any]] = {
         "multiple": True,
         "allow_custom": True,
     },
+    # Datadog publishes a finite site list; custom stays on so a new region
+    # works before the list ships an update.
+    "datadog_site": {
+        "options": [
+            "datadoghq.com",
+            "us3.datadoghq.com",
+            "us5.datadoghq.com",
+            "datadoghq.eu",
+            "ap1.datadoghq.com",
+            "ap2.datadoghq.com",
+            "ddog-gov.com",
+            "us3.ddog-gov.com",
+        ],
+        "options_source": None,
+        "multiple": False,
+        "allow_custom": True,
+    },
 }
 
 _STATIC_ENUM_ACCEPTED_VALUES = [
@@ -10441,6 +10458,7 @@ class TestEnumeratedSettings:
             ("default_user_role", "admin"),
             ("jira_auth_mode", "none"),
             ("log_level", "LOUD"),
+            ("datadog_site", "https://not a site/"),
         ],
     )
     def test_static_enum_rejects_a_value_outside_the_set(
@@ -10464,6 +10482,10 @@ class TestEnumeratedSettings:
             # keeps working through the persist path.
             ("log_level", " info ", "INFO"),
             ("jira_auth_mode", "PAT", "pat"),
+            # A pasted URL is stored as the bare hostname the exporter builds
+            # its intake URL from, so one site has exactly one spelling.
+            ("datadog_site", " https://datadoghq.eu/ ", "datadoghq.eu"),
+            ("datadog_site", "api.datadoghq.com", "datadoghq.com"),
         ],
     )
     def test_enum_value_is_stored_in_canonical_form(
@@ -10474,6 +10496,25 @@ class TestEnumeratedSettings:
         )
         assert response.status_code == 200, response.json()
         assert _settings_item(test_client, key)["value"] == stored
+
+    @pytest.mark.parametrize(
+        ("key", "label"),
+        [
+            # Brand casing survives the humaniser: a label that reads
+            # "Enable datadog" or "Dd push …" is a UI defect, not a style nit.
+            ("enable_datadog", "Enable Datadog"),
+            ("datadog_site", "Datadog site"),
+            ("datadog_api_key", "Datadog API key"),
+            ("dd_push_classifications", "DD push classifications"),
+            ("dd_allow_unreviewed_push", "DD allow unreviewed push"),
+            ("enable_reportportal", "Enable ReportPortal"),
+            ("rp_push_rootcoz_url", "RP push RootCoz URL"),
+        ],
+    )
+    def test_setting_labels_keep_brand_casing(
+        self, test_client, key: str, label: str
+    ) -> None:
+        assert _settings_item(test_client, key)["label"] == label
 
     def test_auto_push_exporters_accepts_a_registry_plugin(self, test_client) -> None:
         """A known plugin saves in the registry's spelling (case-insensitive)."""
