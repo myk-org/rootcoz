@@ -138,8 +138,8 @@ async def test_deactivated_provider_mid_chat_gets_deactivation_message(
 
 
 @pytest.mark.asyncio
-async def test_forced_server_credentials_rejected_for_inactive_provider(monkeypatch):
-    """force_server_credentials cannot bypass the deactivation."""
+async def test_inactive_provider_still_usable_with_own_key(monkeypatch):
+    """Deactivation withdraws the server source only — never the user's own key."""
     _catalog(monkeypatch, "openai", "anthropic")
     monkeypatch.setattr(
         storage, "get_user_ai_credentials", AsyncMock(return_value={"openai": "secret"})
@@ -159,14 +159,15 @@ async def test_forced_server_credentials_rejected_for_inactive_provider(monkeypa
     )
     _set_active(monkeypatch, "anthropic")
     token = ai_client.ai_username.set("alice")
-    force = ai_client.force_server_credentials.set(True)
     try:
-        with pytest.raises(ai_client.InactiveServerProviderError, match="deactivated"):
-            await ai_client.resolve_catalog_pair("openai", "openai-model")
+        assert await ai_client.resolve_catalog_pair("openai", "openai-model") == (
+            "openai",
+            "openai-model",
+        )
+        assert ai_client._selected_credential_source.get() == "user"
     finally:
-        ai_client.force_server_credentials.reset(force)
         ai_client.ai_username.reset(token)
-    # Direct server-catalog path (no user scope) is rejected too.
+    # Direct server-catalog path (no user scope) is rejected.
     with pytest.raises(ai_client.InactiveServerProviderError, match="deactivated"):
         await ai_client.resolve_catalog_pair("openai", "openai-model")
 

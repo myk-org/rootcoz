@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useId } from 'react'
 import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
+import { CONTROL_CLASS } from '@/lib/controlStyles'
 import { credentialLabel } from '@/lib/analysisAi'
 import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip } from '@/components/shared/CredentialSourceLabel'
 import { ChevronDown } from 'lucide-react'
@@ -275,7 +276,10 @@ export function ModelCombobox({
         <input
           ref={inputRef}
           type="text"
-          className="flex h-9 w-full rounded-full border border-border-default bg-surface-elevated px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
+          className={cn(
+            CONTROL_CLASS,
+            'flex w-full px-4 pr-8 py-1 text-sm text-text-primary transition-colors placeholder:text-text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50',
+          )}
           placeholder={placeholder}
           value={value}
           aria-label={ariaLabel}

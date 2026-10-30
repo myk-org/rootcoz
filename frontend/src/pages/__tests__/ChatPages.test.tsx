@@ -24,13 +24,13 @@ it('prefills job analysis defaults without starting chat', async () => {
 })
 
 it('prefills admin defaults without starting chat', async () => {
-  get.mockImplementation(async (path: string) => path === '/api/default-server-settings' ? { ai_provider: 'openai', ai_model: 'gpt', force_server_credentials: true }
+  get.mockImplementation(async (path: string) => path === '/api/default-server-settings' ? { ai_provider: 'openai', ai_model: 'gpt' }
     : path.startsWith('/api/ai-models') ? { providers: { openai: [{ id: 'gpt', provider: 'openai', name: 'GPT', credential_sources: ['server'] }] } }
       : { messages: [], total: 0 })
   render(<AdminChatPage />)
   expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeInTheDocument()
   await waitFor(() => expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('gpt'))
-  expect(screen.getByRole('switch', { name: 'Use server credentials' })).toHaveAttribute('aria-checked', 'true')
+  expect(screen.queryByRole('switch', { name: 'Use server credentials' })).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled()
   expect(post).not.toHaveBeenCalledWith('/api/admin/chat/init', expect.anything())
 })

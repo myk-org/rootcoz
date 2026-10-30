@@ -1897,6 +1897,29 @@ class TestRootCozClientAdminUsers:
         assert "users" in result
         assert result["users"][0]["username"] == "admin"
 
+    def test_admin_list_users_drops_absent_paging(self):
+        def handler(request):
+            assert dict(request.url.params) == {}
+            return httpx.Response(200, json={"users": []})
+
+        assert _make_client(handler).admin_list_users()["users"] == []
+
+    def test_admin_list_users_forwards_paging_and_query(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/users"
+            assert request.url.params.get("limit") == "2"
+            assert request.url.params.get("offset") == "2"
+            assert request.url.params.get("q") == "ali"
+            return httpx.Response(
+                200,
+                json={"users": [], "total": 3, "limit": 2, "offset": 2},
+            )
+
+        result = _make_client(handler).admin_list_users(limit=2, offset=2, q="ali")
+
+        assert result["total"] == 3
+
     def test_admin_list_audit_forwards_filters(self):
         def handler(request):
             assert request.method == "GET"
@@ -1928,6 +1951,22 @@ class TestRootCozClientAdminUsers:
             offset=10,
         )
         assert result["total"] == 1
+
+    def test_admin_list_audit_forwards_event_id(self):
+        def handler(request):
+            assert request.url.params.get("id") == "42"
+            return httpx.Response(200, json={"events": [], "total": 0})
+
+        client = _make_client(handler)
+        client.admin_list_audit(event_id=42)
+
+    def test_admin_list_audit_omits_a_missing_event_id(self):
+        def handler(request):
+            assert "id" not in request.url.params
+            return httpx.Response(200, json={"events": [], "total": 0})
+
+        client = _make_client(handler)
+        client.admin_list_audit(actor="alice")
 
     def test_admin_list_audit_repeats_each_action(self):
         def handler(request):
@@ -2840,7 +2879,6 @@ class TestRootCozClientChat:
             assert body["message"] == "Why did this test fail?"
             assert "ai_provider" not in body
             assert "ai_model" not in body
-            assert "force_server_credentials" not in body
             return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
@@ -2871,20 +2909,6 @@ class TestRootCozClientChat:
         )
         assert result["user_message"]["status"] == "completed"
 
-    @pytest.mark.parametrize("source", [True, False])
-    def test_send_chat_message_explicit_source(self, source):
-        def handler(request):
-            assert request.url.path == "/api/chat/job-1"
-            assert json.loads(request.content) == {
-                "message": "hello",
-                "force_server_credentials": source,
-            }
-            return httpx.Response(202, json={"queued": True})
-
-        assert _make_client(handler).send_chat_message(
-            "job-1", "hello", force_server_credentials=source
-        )["queued"]
-
     def test_clear_chat(self):
         calls = []
 
@@ -2914,39 +2938,29 @@ class TestRootCozClientChat:
 class TestRootCozClientAdminChat:
     """Tests for admin chat client methods."""
 
-    @pytest.mark.parametrize("source", [True, False])
-    def test_init_chat_explicit_selection(self, source):
+    def test_init_chat_explicit_selection(self):
         with patch.object(
             RootCozClient, "_request", return_value={"ready": True}
         ) as request:
             client = RootCozClient(server_url="http://localhost:8000")
-            client.init_chat("job", "openai", "m", force_server_credentials=source)
+            client.init_chat("job", "openai", "m")
             request.assert_called_once_with(
                 "POST",
                 "/api/chat/job/init",
-                json={
-                    "ai_provider": "openai",
-                    "ai_model": "m",
-                    "force_server_credentials": source,
-                },
+                json={"ai_provider": "openai", "ai_model": "m"},
             )
 
-    @pytest.mark.parametrize("source", [True, False])
-    def test_init_admin_chat_explicit_selection(self, source):
+    def test_init_admin_chat_explicit_selection(self):
         def handler(request):
             assert request.url.path == "/api/admin/chat/init"
             assert json.loads(request.content) == {
                 "ai_provider": "openai",
                 "ai_model": "m",
-                "force_server_credentials": source,
             }
             return httpx.Response(200, json={"ready": True, "session_id": "sid"})
 
-        assert (
-            _make_client(handler).init_admin_chat(
-                "openai", "m", force_server_credentials=source
-            )["session_id"]
-            == "sid"
+        assert _make_client(handler).init_admin_chat("openai", "m")["session_id"] == (
+            "sid"
         )
 
     def test_init_admin_chat(self):
@@ -3017,7 +3031,6 @@ class TestRootCozClientAdminChat:
             assert body["message"] == "Server status?"
             assert "ai_provider" not in body
             assert "ai_model" not in body
-            assert "force_server_credentials" not in body
             return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
@@ -3046,20 +3059,6 @@ class TestRootCozClientAdminChat:
             "Explain", ai_provider="claude", ai_model="opus-4"
         )
         assert result["user_message"]["status"] == "completed"
-
-    @pytest.mark.parametrize("source", [True, False])
-    def test_send_admin_chat_message_explicit_source(self, source):
-        def handler(request):
-            assert request.url.path == "/api/admin/chat"
-            assert json.loads(request.content) == {
-                "message": "hello",
-                "force_server_credentials": source,
-            }
-            return httpx.Response(202, json={"queued": True})
-
-        assert _make_client(handler).send_admin_chat_message(
-            "hello", force_server_credentials=source
-        )["queued"]
 
     def test_clear_admin_chat(self):
         calls = []

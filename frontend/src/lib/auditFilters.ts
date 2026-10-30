@@ -9,6 +9,24 @@ export interface AuditEvent {
   action: string
   target_type: string | null
   target_id: string | null
+  /** Read-time display name of the target job (null for other targets or a gone job).
+   *  Absent on live-streamed events, which keep their ids only. */
+  target_label?: string | null
+  /** Read-time job uuid behind ``target_id`` (which may be a job name), null for
+   *  other targets or a gone job. Absent on live-streamed events. */
+  target_job_id?: string | null
+  /** Actor of the audit event that deleted the target job. Null when the job is
+   *  live or its deletion predates the audit trail. Absent on streamed events. */
+  target_deleted_by?: string | null
+  /** UTC timestamp of that delete event, with the same null rules as
+   *  ``target_deleted_by``. */
+  target_deleted_at?: string | null
+  /** Id of that delete event — the row that proves the deletion happened. */
+  target_delete_event_id?: number | null
+  /** Read-time answer to "does this target still exist". ``true`` means the
+   *  read model resolved it and found nothing, so the row shows a gone marker
+   *  instead of a link. Absent on live-streamed events, which are not resolved. */
+  target_gone?: boolean | null
   outcome: string
   details: Record<string, unknown>
   request_ip: string | null
@@ -21,6 +39,8 @@ export interface AuditFilters {
   since: string
   until: string
   q: string
+  /** Id of one pinned row (`?event=`), not a match rule for any other row. */
+  event: string
 }
 
 export const EMPTY_FILTERS: AuditFilters = {
@@ -30,6 +50,7 @@ export const EMPTY_FILTERS: AuditFilters = {
   since: '',
   until: '',
   q: '',
+  event: '',
 }
 
 /**
@@ -61,6 +82,10 @@ export function detailsSearchTexts(details: Record<string, unknown> | null | und
  * rules have to be applied here before a live row enters the table.
  */
 export function matchesFilters(event: AuditEvent, filters: AuditFilters): boolean {
+  // A pinned row is the whole view: a streamed event would be a second one.
+  const pinned = filters.event.trim()
+  if (pinned && String(event.id) !== pinned) return false
+
   const actor = filters.actor.trim().toLowerCase()
   if (actor && event.actor.toLowerCase() !== actor) return false
 
@@ -84,10 +109,62 @@ export function matchesFilters(event: AuditEvent, filters: AuditFilters): boolea
     if (until !== null && createdAt > until) return false
   }
 
+  // The server searches actor, target id, action and details; a live row has to
+  // pass the same test or the tail would drop rows the list would show.
   const needle = filters.q.trim().toLowerCase()
-  if (needle && !detailsSearchTexts(event.details).some((text) => text.toLowerCase().includes(needle))) {
-    return false
+  if (needle) {
+    const haystack = [
+      event.actor,
+      event.target_id ?? '',
+      event.action,
+      ...detailsSearchTexts(event.details),
+    ]
+    if (!haystack.some((text) => text.toLowerCase().includes(needle))) return false
   }
 
   return true
+}
+
+/** Relative time shortcuts: `hours` of window behind the click, 0 = no bound. */
+export const TIME_PRESETS = [
+  { id: '1h', label: 'Last hour', hours: 1 },
+  { id: '24h', label: 'Last 24 hours', hours: 24 },
+  { id: '7d', label: 'Last 7 days', hours: 7 * 24 },
+  { id: 'all', label: 'All time', hours: 0 },
+] as const
+
+export type TimePresetId = (typeof TIME_PRESETS)[number]['id']
+
+/**
+ * How far `since` may sit from the live window start and still be that preset.
+ * A preset stamps `since` once and the URL keeps it, so "now" moves on: a
+ * reload minutes later must still recognise the choice, and a window that has
+ * genuinely aged out of its preset stops claiming it.
+ */
+const PRESET_DRIFT_MS = 5 * 60_000
+
+/** The `since` a preset writes, from the click instant — UTC, and fixed from then on. */
+export function presetSince(hours: number, now: number = Date.now()): string {
+  return new Date(now - hours * 3_600_000).toISOString()
+}
+
+/**
+ * Which preset the URL's bounds describe, or null for a hand-picked range.
+ * A preset never carries `until`, so an `until` means the admin overrode it.
+ */
+export function activeTimePreset(
+  filters: AuditFilters,
+  now: number = Date.now(),
+): TimePresetId | null {
+  if (filters.until.trim()) return null
+  const since = filters.since.trim()
+  if (!since) return 'all'
+  const millis = parseApiTimestamp(since).getTime()
+  if (Number.isNaN(millis)) return null
+  for (const preset of TIME_PRESETS) {
+    if (preset.hours && Math.abs(now - millis - preset.hours * 3_600_000) <= PRESET_DRIFT_MS) {
+      return preset.id
+    }
+  }
+  return null
 }

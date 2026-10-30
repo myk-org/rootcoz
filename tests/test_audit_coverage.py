@@ -173,6 +173,11 @@ def test_exemptions_are_not_stale() -> None:
         "provider.models_refresh",
         "admin.settings_export",
         "audit.export",
+        # §I account lockout, disable and unlock.
+        "auth.account_locked",
+        "admin.user_unlock",
+        "admin.user_disabled",
+        "admin.user_enabled",
     ],
 )
 def test_contract_action_is_implemented(action: str) -> None:

@@ -70,7 +70,6 @@ from rootcoz.ai_client import (
     build_friendly_catalog,
     call_ai_once,
     clear_cursor_auth_cache,
-    force_server_credentials,
     format_chat_ai_user_error,
     is_cursor_provider,
     list_models,
@@ -104,6 +103,8 @@ from rootcoz.comment_enrichment import (
     fetch_jira_ticket_status,
 )
 from rootcoz.config import (
+    DEFAULT_USER_ROLES,
+    JIRA_AUTH_MODES,
     Settings,
     atlassian_cloud_id_error,
     get_settings,
@@ -209,6 +210,7 @@ from rootcoz.models import (
     SetReviewedRequest,
     SetServerProviderModelsRequest,
     SetTrackedInRequest,
+    SetUserDisabledRequest,
     StoreDeploymentProviderKeyRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
@@ -342,7 +344,9 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
 # Everything else is admin-settable via Server Settings (#347); these are
 # process/deployment bootstrap with no Settings field at all, plus
 # ADMIN_KEY — a Settings field, but a server-only bootstrap secret that
-# must never become settable or persistable at runtime (AGENTS.md).
+# must never become settable or persistable at runtime (AGENTS.md), and
+# DB_PATH/DEBUG — needed before the settings store exists. Everything else,
+# ALLOWED_USERS included, is admin-editable in Server Settings: one console.
 _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
     {
         "db_path",
@@ -449,6 +453,46 @@ _JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Valid log levels shared by the PUT allowlist and the env-persist path
+# (#347): Settings.log_level itself is unconstrained, so both write paths
+# must enforce the same set.
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _log_level_error(value: object) -> str | None:
+    """Validate a log level; return the error message, or None when valid.
+
+    Case-insensitive (an existing ``LOG_LEVEL=info`` env must keep working)
+    and always stored uppercase, so the saved value is one the picker offers.
+    """
+    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
+        return (
+            "log_level: must be one of "
+            f"{', '.join(_VALID_LOG_LEVELS)} (case-insensitive)"
+        )
+    return None
+
+
+# Enumerated settings (#379): "One console" wants a picker in Server Settings,
+# so the API must describe the choices, not leave a free-text box.
+# ``options`` is a fixed set; ``options_source`` names the set the server only
+# knows at runtime (the UI fetches exporters/providers/users from their own
+# endpoints); ``multiple`` means comma-separated list semantics; and
+# ``allow_custom`` lets the admin type a value the server does not list —
+# an SSO user may legitimately not exist yet.
+_SETTING_CHOICES: dict[str, dict[str, Any]] = {
+    "default_user_role": {"options": list(DEFAULT_USER_ROLES)},
+    "jira_auth_mode": {"options": list(JIRA_AUTH_MODES)},
+    "log_level": {"options": list(_VALID_LOG_LEVELS)},
+    "auto_push_exporters": {"options_source": "exporters", "multiple": True},
+    "ambient_auth_providers": {"options_source": "providers", "multiple": True},
+    "allowed_users": {
+        "options_source": "users",
+        "multiple": True,
+        "allow_custom": True,
+    },
+}
+
 # Category grouping for UI display
 _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "Jenkins": [
@@ -463,7 +507,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "AI": [
         "ai_provider",
         "ai_model",
-        "force_server_credentials",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "peer_ai_configs",
@@ -518,6 +561,8 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "allowed_users",
         "default_user_role",
         "session_ttl_hours",
+        "login_lockout_enabled",
+        "login_lockout_threshold",
         "audit_retention_days",
         "audit_max_rows",
         "audit_auth_failure_max_per_minute",
@@ -576,6 +621,123 @@ for _cat, _fields in _SETTINGS_CATEGORIES.items():
         _FIELD_TO_CATEGORY[_f] = _cat
 
 
+# Server Settings rows show a human label next to the copyable machine key.
+# These read badly when humanised mechanically, so they are named explicitly.
+_SETTING_LABEL_OVERRIDES: dict[str, str] = {
+    "admin_key": "Admin API key",
+    "log_level": "Log level",
+    "ai_provider": "AI provider",
+    "ai_model": "AI model",
+    "ai_call_timeout": "AI call timeout",
+    "max_concurrent_ai_calls": "Max concurrent AI calls",
+    "session_ttl_hours": "Session lifetime (hours)",
+    "jira_atst_token": "Jira service account scoped token",
+    "jira_pat": "JIRA personal access token",
+    "atlassian_oauth_cloud_id": "Atlassian OAuth cloud ID",
+    "prow_url": "Prow Deck URL",
+    "gcs_bucket": "GCS bucket",
+    "tests_repo_url": "Tests repository URL",
+    "allowed_users": "Allowed users (write allow-list)",
+    "default_user_role": "Default role for new users",
+    "trust_proxy_headers": "Trust proxy identity headers",
+    "secure_cookies": "Secure cookies",
+    "require_approval": "Require admin approval",
+    "admin_wait_approve_msg": "Approval wait message",
+    "enable_free_models": "Enable free AI models",
+    "cli_agents": "CLI agents",
+    "acpx_agents": "ACPX agents",
+    "login_lockout_enabled": "Enable login lockout",
+    "login_lockout_threshold": "Failed logins before lockout",
+    "audit_auth_failure_max_per_minute": "Audit rows kept per minute",
+}
+
+# Tokens the humaniser keeps uppercase — "Ai model" is not an English label.
+_LABEL_ACRONYMS: frozenset[str] = frozenset(
+    {
+        "AI",
+        "API",
+        "URL",
+        "URI",
+        "ID",
+        "SSO",
+        "TLS",
+        "SSL",
+        "SMTP",
+        "DNS",
+        "JSON",
+        "CSV",
+        "XML",
+        "YAML",
+        "HTTP",
+        "JIRA",
+        "GITHUB",
+        "GIT",
+        "CI",
+        "DB",
+        "GCS",
+        "AWS",
+        "GCP",
+        "LLM",
+        "MCP",
+        "PR",
+        "RP",
+        "RBAC",
+        "DSN",
+        "VAPID",
+        "OIDC",
+        "SAML",
+        "TTL",
+        "CPU",
+        "GPU",
+        "HTML",
+        "PDF",
+    }
+)
+
+# Brand casing for acronym words that are not written all-caps.
+_LABEL_PROPER_CASE: dict[str, str] = {
+    "GITHUB": "GitHub",
+    "REPORTPORTAL": "ReportPortal",
+}
+
+# A trailing token that is a unit renders as a parenthetical suffix instead of
+# a word: audit_retention_days → "Audit retention (days)".
+_LABEL_UNITS: dict[str, str] = {
+    "DAYS": "days",
+    "HOURS": "hours",
+    "MINUTES": "minutes",
+    "SECONDS": "seconds",
+    "BYTES": "bytes",
+    "PERCENT": "percent",
+    "MB": "MB",
+}
+
+
+def _label_word(word: str) -> str:
+    """Render one key token: an acronym keeps its casing, the rest is lowercased."""
+    upper = word.upper()
+    if upper in _LABEL_PROPER_CASE:
+        return _LABEL_PROPER_CASE[upper]
+    return upper if upper in _LABEL_ACRONYMS else word.lower()
+
+
+def _humanize_setting_key(key: str) -> str:
+    """Mechanical label for a setting key: ``audit_max_rows`` → ``Audit max rows``."""
+    words = [word for word in key.split("_") if word]
+    unit = ""
+    if len(words) > 1 and words[-1].upper() in _LABEL_UNITS:
+        unit = f" ({_LABEL_UNITS[words.pop().upper()]})"
+    labels = [_label_word(word) for word in words]
+    if labels[0] == words[0].lower():  # not an acronym/brand → sentence case
+        labels[0] = labels[0].capitalize()
+    return " ".join(labels) + unit
+
+
+def _setting_label(field_name: str) -> str:
+    """Human label for a Settings field — an override, else the humanised key."""
+    return _SETTING_LABEL_OVERRIDES.get(field_name) or _humanize_setting_key(field_name)
+
+
 def _get_settings_metadata() -> list[dict[str, Any]]:
     """Build metadata for all Settings fields with current values and sources."""
     settings = get_settings()
@@ -626,13 +788,20 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
             default_str = str(default) if default != "" else ""
 
         is_sensitive = field_name in _SENSITIVE_SETTINGS
+        choices = _SETTING_CHOICES.get(field_name, {})
+        # Whether a value exists at all (#379 E2E-J09): the UI cannot tell an
+        # empty secret from a stored one by its masked value, so this flag
+        # comes from the value itself — a boolean, never a hint of its content.
+        is_set = value is not None and str(value).strip() != ""
 
         result.append(
             {
                 "key": field_name,
+                "label": _setting_label(field_name),
                 # jira_auth_mode is DB-only (Server Settings) — no env var
                 "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
                 "value": display_value,
+                "is_set": is_set,
                 "default": default_str,
                 "description": description,
                 "type": field_type,
@@ -640,6 +809,12 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
                 "sensitive": is_sensitive,
                 "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
                 "source": "default",  # Will be overridden by caller
+                # Enumerated-setting contract (#379): every item carries the
+                # four keys so the UI renders a picker without special cases.
+                "options": choices.get("options"),
+                "options_source": choices.get("options_source"),
+                "multiple": bool(choices.get("multiple", False)),
+                "allow_custom": bool(choices.get("allow_custom", False)),
                 # Persistability contract (#347): server-only settings are
                 # env bootstrap the persist/reset/PUT paths always reject,
                 # and derived settings must not be pinned (see
@@ -1111,7 +1286,15 @@ async def _bind_job_id(job_id: str) -> None:
 # value. ``is_sensitive_key`` matches the "key" substring in all of them, so
 # they are exempted explicitly — the value they name is never included.
 _AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset(
-    {"key", "keys", "changed_keys", "redacted_keys"}
+    {
+        "key",
+        "keys",
+        "changed_keys",
+        "redacted_keys",
+        # A yes/no fact about a provider's stored credential, added by the
+        # details matrix (#379) — the credential itself is never recorded.
+        "had_stored_key",
+    }
 )
 
 # The only actions the volume guard throttles (#379): a brute-force run can
@@ -1771,7 +1954,6 @@ def _validate_decrypted_sensitive_fields(decrypted_params: dict[str, Any]) -> No
 _ANALYSIS_SETTINGS_FIELDS = (
     "ai_provider",
     "ai_model",
-    "force_server_credentials",
     "raw_prompt",
     "issue_prompt",
     "tests_repo_url",
@@ -1854,7 +2036,6 @@ def _reconstruct_from_params(
         "name": params.get("name") or None,
         "ai_provider": params.get("ai_provider", ""),
         "ai_model": params.get("ai_model", ""),
-        "force_server_credentials": params.get("force_server_credentials"),
         "wait_for_completion": params.get("wait_for_completion", True),
         "poll_interval_minutes": params.get("poll_interval_minutes", 2),
         "max_wait_minutes": params.get("max_wait_minutes", 0),
@@ -1904,7 +2085,6 @@ def _reconstruct_from_params(
         "jira_site_url",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
-        "force_server_credentials",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
         "peer_analysis_max_rounds",
@@ -2386,6 +2566,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await storage.cleanup_expired_sessions()
     await _cleanup_revoked_ai_sessions()
 
+    # Before load_db_settings, so a stale server-only override cannot be
+    # cached (and applied) even once.
+
     # Load DB setting overrides BEFORE config validation so
     # validate_startup_config() sees merged env + DB values.
     from rootcoz.config import load_db_settings
@@ -2862,12 +3045,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return blocked
 
         username_token = ai_username.set(username)
-        force_token = force_server_credentials.set(settings.force_server_credentials)
         try:
             response = await call_next(request)
         finally:
             ai_username.reset(username_token)
-            force_server_credentials.reset(force_token)
 
         # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
         if getattr(request.state, "set_proxy_cookie", None):
@@ -3172,11 +3353,6 @@ async def _resolve_ai_config_allow_defer(
     Unsupported providers fail immediately even when model is missing (defer
     only applies to incomplete config, not invalid providers).
     """
-    force_server_credentials.set(
-        body.force_server_credentials
-        if body.force_server_credentials is not None
-        else settings.force_server_credentials
-    )
     provider, model = _resolve_ai_provider_model(
         body.ai_provider, body.ai_model, settings=settings
     )
@@ -3307,7 +3483,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "jira_site_url",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
-        "force_server_credentials",
         "enable_jira",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
@@ -4104,7 +4279,6 @@ def _apply_base_analysis_overrides(
     unified ``/analyze`` endpoint and the file/raw re-analyze path need.
     Mutates *params* in place.
     """
-    params["force_server_credentials"] = merged.force_server_credentials
     params["enable_jira"] = _resolve_enable_jira(body, merged)
     # Jira credentials are Server Settings only — persist the effective
     # (server) values so stored request_params replay exactly what the
@@ -5040,7 +5214,6 @@ async def _process_ci_source_analysis(
     """Background task for CISource plugin analysis (file/raw/prow/jenkins)."""
     job_id_var.set(job_id)
     ai_username.set(username)
-    force_server_credentials.set(merged.force_server_credentials)
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
@@ -5224,7 +5397,6 @@ async def _process_ci_source_analysis(
         peer_ai_configs = effective.peer_ai_configs
         additional_repos_list = effective.additional_repos
         merged = effective.settings
-        force_server_credentials.set(merged.force_server_credentials)
 
         tests_dir_name = (
             tests_cloned_path.name if tests_cloned_path is not None else None
@@ -5697,6 +5869,17 @@ def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
     )
 
 
+def _resolve_submitted_job_name(body: UnifiedAnalyzeRequest, display_name: str) -> str:
+    """The job name the caller submitted (#379).
+
+    ``_resolve_request_display_name`` answers what the dashboard shows, which
+    for file/raw is a generic fallback — an audit row has to name the job the
+    caller asked for, so a submitted name wins and the fallback only fills in
+    when the request carried none.
+    """
+    return body.job_name or body.prow_job_name or display_name
+
+
 @app.post("/analyze", status_code=202, response_model=None, operation_id="analyze")
 async def analyze(
     request: Request,
@@ -5713,7 +5896,7 @@ async def analyze(
     base_url = _extract_base_url()
 
     async def _run() -> tuple[
-        str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
+        str, str, str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
     ]:
         # Every preliminary check lives inside the audited scope: a denial, an
         # AI/peer config error or a settings-merge failure is an attempt too.
@@ -5730,6 +5913,7 @@ async def analyze(
             ai_username.reset(token)
 
         display_name = _resolve_request_display_name(body)
+        job_name = _resolve_submitted_job_name(body, display_name)
 
         async def _enqueue() -> dict[str, Any]:
             return await _enqueue_ci_source_analysis(
@@ -5744,7 +5928,7 @@ async def analyze(
                 is_admin=bool(request.state.is_admin),
             )
 
-        return provider, model, _enqueue
+        return provider, model, job_name, display_name, _enqueue
 
     return await _enqueue_audited_analysis(
         request=request, ingest_only=False, prepare=_run
@@ -5766,12 +5950,13 @@ async def submit(
     base_url = _extract_base_url()
 
     async def _run() -> tuple[
-        str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
+        str, str, str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
     ]:
         # Preliminary checks stay inside the audited scope (see ``analyze``).
         _require_operator(request)
         _check_allow_list(request)
         display_name = _resolve_request_display_name(body)
+        job_name = _resolve_submitted_job_name(body, display_name)
         merged = _merge_settings(body, settings)
 
         async def _enqueue() -> dict[str, Any]:
@@ -5788,7 +5973,7 @@ async def submit(
                 ingest_only=True,
             )
 
-        return "", "", _enqueue
+        return "", "", job_name, display_name, _enqueue
 
     return await _enqueue_audited_analysis(
         request=request, ingest_only=True, prepare=_run
@@ -5871,7 +6056,13 @@ async def _enqueue_audited_analysis(
         Coroutine[
             Any,
             Any,
-            tuple[str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]],
+            tuple[
+                str,
+                str,
+                str,
+                str,
+                Callable[[], Coroutine[Any, Any, dict[str, Any]]],
+            ],
         ],
     ],
 ) -> dict[str, Any]:
@@ -5879,26 +6070,32 @@ async def _enqueue_audited_analysis(
 
     Shared by ``POST /analyze`` and ``POST /submit``, which promise the same
     thing: one row per attempt whatever the outcome. ``prepare`` performs every
-    preliminary check and returns ``(provider, model, enqueue)`` with the AI pair
-    actually resolved by ``_resolve_ai_config_allow_defer`` — never the raw
-    request fields, so a server default is recorded as the model that ran.
-    ``ingest_only`` says which endpoint it came from, and the job id is recorded
-    only once the enqueue produced one. The row is written from ``finally`` so a
-    refusal and a crash leave the same evidence as a success, through one call
-    site.
+    preliminary check and returns ``(provider, model, job_name, display_name,
+    enqueue)`` with the AI pair actually resolved by
+    ``_resolve_ai_config_allow_defer`` — never the raw request fields, so a
+    server default is recorded as the model that ran. ``job_name`` is the name
+    the caller submitted; ``display_name`` is what the dashboard will show and
+    is recorded only when it says something else. ``ingest_only`` says which
+    endpoint it came from, and the job id is recorded only once the enqueue
+    produced one. The row is written from ``finally`` so a refusal and a crash
+    leave the same evidence as a success, through one call site.
     """
-    details: dict[str, Any] = {
-        "provider": "",
-        "model": "",
-        "ingest_only": ingest_only,
-    }
+    # ``ingest_only`` first: it is the one thing every submission knows. The
+    # provider/model pair joins it only when a real analysis was resolved, so a
+    # row never ships an empty string as a value.
+    details: dict[str, Any] = {"ingest_only": ingest_only}
     outcome: Literal["success", "failure", "denied"] = "success"
     queued: dict[str, Any] = {}
     job_id = ""
     try:
-        provider, model, enqueue = await prepare()
-        details["provider"] = provider
-        details["model"] = model
+        provider, model, job_name, display_name, enqueue = await prepare()
+        details["job_name"] = job_name
+        if display_name != job_name:
+            details["display_name"] = display_name
+        if provider:
+            details["provider"] = provider
+        if model:
+            details["model"] = model
         queued = await enqueue()
         job_id = str(queued.get("job_id") or "")
     except HTTPException as exc:
@@ -5916,8 +6113,8 @@ async def _enqueue_audited_analysis(
         raise
     finally:
         what = "an ingest-only job" if ingest_only else "an analysis"
-        provider = details["provider"] or "<deferred>"
-        model = details["model"] or "<deferred>"
+        provider = details.get("provider") or "<deferred>"
+        model = details.get("model") or "<deferred>"
         await record_audit(
             action="analysis.submit",
             actor=request.state.username,
@@ -6559,12 +6756,6 @@ async def _reanalyze_failure_background(
     """Background task: re-analyze a single failure in-place."""
     job_id_var.set(job_id)
     ai_username.set(username)
-    force_server_credentials.set(
-        (source_params or {}).get(
-            "force_server_credentials",
-            (settings or get_settings()).force_server_credentials,
-        )
-    )
     auth_header = ""
     repo_manager: RepositoryManager | None = None
     repo_path: Path | None = None
@@ -6735,13 +6926,6 @@ async def _reanalyze_failure_background(
             shim_data["ai_call_timeout"] = ai_call_timeout
         if peer_ai_configs is not None:
             shim_data["peer_ai_configs"] = peer_ai_configs
-        if (
-            source_params is not None
-            and source_params.get("force_server_credentials") is not None
-        ):
-            shim_data["force_server_credentials"] = source_params[
-                "force_server_credentials"
-            ]
         # Stored/override concurrency + peer rounds are request-tier
         shim_data["peer_analysis_max_rounds"] = peer_analysis_max_rounds
         shim_data["max_concurrent_ai_calls"] = max_concurrent_ai_calls
@@ -6764,7 +6948,6 @@ async def _reanalyze_failure_background(
             ai_model = effective.ai_model
             peer_ai_configs = effective.peer_ai_configs
             additional_repos_list = effective.additional_repos
-            force_server_credentials.set(effective.settings.force_server_credentials)
             # Request-tier values win; effective mirrors shim for these fields
             peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
             if ai_call_timeout is None:
@@ -7146,11 +7329,6 @@ async def re_analyze_failure(
                     ai_provider=ai_provider or None,
                     ai_model=ai_model or None,
                     tests_repo_url=tests_repo_url or None,
-                    force_server_credentials=(
-                        overrides.force_server_credentials
-                        if overrides.force_server_credentials is not None
-                        else decrypted_params.get("force_server_credentials")
-                    ),
                 ),
                 settings,
                 request=request,
@@ -7243,13 +7421,6 @@ async def re_analyze_failure(
             analysis_type=decrypted_params.get("analysis_type", "jenkins"),
             source_params={
                 **decrypted_params,
-                "force_server_credentials": (
-                    overrides.force_server_credentials
-                    if overrides.force_server_credentials is not None
-                    else decrypted_params.get(
-                        "force_server_credentials", settings.force_server_credentials
-                    )
-                ),
             },
             settings=get_settings(),
             child_job_name=match.get("child_job_name", ""),
@@ -7636,11 +7807,13 @@ async def delete_comment_endpoint(
 
     # Fetch comment text before deletion to notify mentioned users
     comment_text = ""
+    comment_test = ""
     try:
         comments = await storage.get_comments_for_job(job_id)
         for c in comments:
             if c.get("id") == comment_id:
                 comment_text = c.get("comment", "")
+                comment_test = c.get("test_name", "")
                 break
     except Exception:
         logger.debug(
@@ -7668,7 +7841,13 @@ async def delete_comment_endpoint(
         message=f"User '{username}' deleted comment {comment_id} in job {job_id}",
         target_type="comment",
         target_id=str(comment_id),
-        details={"job_id": job_id},
+        # Which failure the deleted comment belonged to, not only which job.
+        # The lookup can fail (mentions are best-effort), so an unknown test
+        # name is left out rather than recorded as an empty string.
+        details={
+            "job_id": job_id,
+            **({"test_name": comment_test} if comment_test else {}),
+        },
         request=request,
     )
     return {"status": "deleted"}
@@ -7857,6 +8036,7 @@ async def enrich_comments(
             target_type="job",
             target_id=job_id,
             exc=exc,
+            details={"job_id": job_id},
         )
         raise
     except Exception:
@@ -7866,6 +8046,7 @@ async def enrich_comments(
             message=message,
             target_type="job",
             target_id=job_id,
+            details={"job_id": job_id},
         )
         raise
     await record_audit(
@@ -7877,7 +8058,7 @@ async def enrich_comments(
         ),
         target_type="job",
         target_id=job_id,
-        details={"count": len(enrichments)},
+        details={"count": len(enrichments), "job_id": job_id},
         request=request,
     )
     return {"enrichments": enrichments}
@@ -8963,6 +9144,18 @@ async def set_tracked_in_endpoint(
         if not tracked_type:
             tracked_type = _detect_tracker_type(body.url)
 
+        # The upsert keys on (job, test, scope, url): the same url again updates
+        # an existing link, anything else adds one.
+        existing_urls = {
+            link["tracked_in_url"]
+            for link in (
+                await storage.get_tracked_in_for_scope(
+                    job_id, body.child_job_name, body.child_build_number
+                )
+            ).get(body.test_name, [])
+        }
+        changed = "updated" if body.url in existing_urls else "added"
+
         link_id = await storage.add_tracked_in_link(
             job_id,
             body.test_name,
@@ -8994,6 +9187,7 @@ async def set_tracked_in_endpoint(
             "test_name": body.test_name,
             "type": tracked_type,
             "link_id": link_id,
+            "changed": changed,
         },
         request=request,
     )
@@ -9072,6 +9266,7 @@ async def delete_tracked_in_endpoint(
             "link_id": link_id,
             "type": link.get("type", ""),
             "test_name": link.get("test_name", ""),
+            "changed": "cleared",
         },
         request=request,
     )
@@ -9135,6 +9330,9 @@ async def push_to_reportportal(
                 raise HTTPException(
                     status_code=422, detail=detail or "Invalid stored failures"
                 )
+            outcome: Literal["success", "failure"] = (
+                "failure" if push_result.get("errors") else "success"
+            )
             await record_audit(
                 action="export.push",
                 actor=safe_username,
@@ -9144,10 +9342,11 @@ async def push_to_reportportal(
                 ),
                 target_type="job",
                 target_id=job_id,
-                outcome="success" if not push_result.get("errors") else "failure",
+                outcome=outcome,
                 details={
                     "plugin": "reportportal",
-                    "pushed": push_result.get("pushed"),
+                    "pushed": int(push_result.get("pushed") or 0),
+                    "outcome": outcome,
                 },
                 request=request,
             )
@@ -9253,6 +9452,9 @@ async def push_to_exporter(
                 detail=f"Exporter '{plugin_name}' failed unexpectedly",
             ) from exc
 
+        outcome: Literal["success", "failure"] = (
+            "success" if result.success else "failure"
+        )
         await record_audit(
             action="export.push",
             actor=safe_username,
@@ -9262,8 +9464,12 @@ async def push_to_exporter(
             ),
             target_type="job",
             target_id=job_id,
-            outcome="success" if result.success else "failure",
-            details={"plugin": plugin_name},
+            outcome=outcome,
+            details={
+                "plugin": plugin_name,
+                "pushed": int(result.details.get("pushed") or 0),
+                "outcome": outcome,
+            },
             request=request,
         )
         return {**result.details, "success": result.success, "message": result.message}
@@ -9890,7 +10096,12 @@ async def update_tags(
         message=message,
         target_type="job",
         target_id=job_id,
-        details={"tags": tags},
+        # The diff is what an admin can read; the absolute list alone is not.
+        details={
+            "added": [tag for tag in tags if tag not in old_tags],
+            "removed": [tag for tag in old_tags if tag not in tags],
+            "tags": tags,
+        },
         request=request,
     )
     return {"job_id": job_id, "tags": tags}
@@ -10017,6 +10228,15 @@ async def override_pattern_endpoint(
         body.test_name, job_id=job_id
     )
 
+    # What the pattern axis said before this change, from the same lookup the
+    # classification override uses, so both rows read "from → to".
+    previous_pattern = await storage.get_history_classification(
+        job_id,
+        body.test_name,
+        child_job_name=body.child_job_name,
+        child_build_number=body.child_build_number,
+    )
+
     group_tests = await storage.override_pattern(
         job_id=job_id,
         test_name=body.test_name,
@@ -10051,7 +10271,13 @@ async def override_pattern_endpoint(
         message=message,
         target_type="job",
         target_id=job_id,
-        details={"test_name": body.test_name, "pattern": body.pattern},
+        # "from" is absent when there was no pattern before, never an empty
+        # string; the pair reads from → to like the classification override.
+        details={
+            "test_name": body.test_name,
+            **({"from": previous_pattern} if previous_pattern else {}),
+            "to": body.pattern,
+        },
         request=request,
     )
     return {"status": "ok", "pattern": body.pattern}
@@ -11458,19 +11684,12 @@ def _cursor_model_count(models_by_provider: Mapping[str, Sequence[Any]]) -> int:
 
 async def scoped_models_for_request(
     request: Request,
-    force_server: bool | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Discover models using the authenticated caller's credential scope."""
     token = ai_username.set(request.state.username)
-    force_token = force_server_credentials.set(
-        get_settings().force_server_credentials
-        if force_server is None
-        else force_server
-    )
     try:
         return await scoped_models()
     finally:
-        force_server_credentials.reset(force_token)
         ai_username.reset(token)
 
 
@@ -11481,7 +11700,6 @@ async def list_ai_models(
         "",
         description="Filter by an exact Pi-sidecar provider identifier.",
     ),
-    force_server_credentials: bool | None = None,
 ) -> dict[str, Any]:
     """List available AI models for one or all configured providers.
 
@@ -11496,7 +11714,7 @@ async def list_ai_models(
     logger.debug("GET /api/ai-models provider=%s", provider)
     is_admin = bool(getattr(request.state, "is_admin", False))
     try:
-        scoped = await scoped_models_for_request(request, force_server_credentials)
+        scoped = await scoped_models_for_request(request)
         listing_status = model_listing_status.get() or {}
         if provider:
             provider = normalize_provider(provider)
@@ -12119,6 +12337,98 @@ def _check_allow_list(request: Request) -> None:
         )
 
 
+async def _login_authentication_method(request: Request, settings: Settings) -> str:
+    """How the caller of ``POST /api/auth/login`` was authenticated (#379).
+
+    The endpoint's own credential is the API key, but an admin reading the row
+    needs the whole answer: an identity the trusted proxy vouched for (SSO),
+    a caller who already holds a live session, or a key typed by a fresh
+    client. The proxy wins because it is the outermost credential; a live
+    session beats the key because the caller was already logged in.
+    """
+    if settings.trust_proxy_headers:
+        proxy_user = request.headers.get("x-forwarded-user", "").strip()
+        if proxy_user:
+            return "proxy"
+    session_token = _read_cookie(request, "rootcoz_session")
+    if session_token and await storage.get_session(session_token):
+        return "session"
+    return "api_key"
+
+
+async def _login_failure_reason(
+    *,
+    overlong: bool,
+    username: str,
+    settings: Settings,
+    account: dict[str, Any] | None,
+) -> str:
+    """Why a login attempt was refused (#379), from the decisions already made.
+
+    ``bad_key`` means the username names an account and the key did not match
+    it; ``unknown_user`` is reserved for a username that names nothing. Which
+    of the two it is never reaches the caller — both answers are the same 401.
+
+    ``blocked`` is not decided here: a pending/rejected account is refused on
+    its own ``auth.login_blocked`` row, after the key was verified. The extra
+    read below only runs for a key that belongs to no account, so a login that
+    the key resolves never pays for it.
+    """
+    if overlong:
+        return "overlong"
+    if account is not None or (username == "admin" and settings.admin_key):
+        # The key resolved to a real account, or the name is the bootstrap
+        # admin, which exists outside the users table.
+        return "bad_key"
+    known = await storage.get_user_by_username(username) is not None
+    return "bad_key" if known else "unknown_user"
+
+
+async def _lock_after_failed_login(
+    username: str, settings: Settings, request: Request
+) -> dict[str, Any] | None:
+    """Count a failed login and write ``auth.account_locked`` at the threshold.
+
+    Returns the state from :func:`storage.record_failed_login` (``None`` for a
+    username that names no account, which never increments anything). The lock
+    is the security event: one row, with the threshold that fired and how many
+    attempts reached it.
+
+    Lockout is active only when ``login_lockout_enabled`` is true AND the
+    threshold is positive: either one off means no counting and no lock, so a
+    later threshold change cannot lock an account on failures suffered while
+    lockout was off.
+    """
+    threshold = (
+        settings.login_lockout_threshold if settings.login_lockout_enabled else 0
+    )
+    state = await storage.record_failed_login(username, threshold=threshold)
+    if state is not None and state["newly_locked"]:
+        logger.warning(
+            "Account '%s' locked after %d consecutive failed logins (threshold %d)",
+            username,
+            state["failed_attempts"],
+            threshold,
+        )
+        await record_audit(
+            action="auth.account_locked",
+            actor=username,
+            message=(
+                f"Account '{username}' locked after {state['failed_attempts']}"
+                f" consecutive failed logins (threshold {threshold})"
+            ),
+            target_type="user",
+            target_id=username,
+            outcome="failure",
+            details={
+                "threshold": threshold,
+                "failed_attempts": state["failed_attempts"],
+            },
+            request=request,
+        )
+    return state
+
+
 @app.post("/api/auth/login", operation_id="login")
 async def login(request: Request) -> JSONResponse:
     """Authenticate any user with username + API key.
@@ -12131,7 +12441,8 @@ async def login(request: Request) -> JSONResponse:
     username = str(body.get("username", "")).strip().lower()
     api_key = str(body.get("api_key", ""))
 
-    if len(username) > _LOGIN_MAX_USERNAME_LENGTH:
+    overlong = len(username) > _LOGIN_MAX_USERNAME_LENGTH
+    if overlong:
         # An over-long name cannot name an account (usernames are at most 50
         # characters), so it is refused like any bad credential. Keep the
         # attempt visible in the trail, but bounded, so the row never grows
@@ -12148,6 +12459,7 @@ async def login(request: Request) -> JSONResponse:
     can_view_reports = False
     can_use_server_providers = False
     can_use_free_providers = False
+    account: dict[str, Any] | None = None
 
     # Check admin_key — username must be "admin"
     if (
@@ -12164,6 +12476,7 @@ async def login(request: Request) -> JSONResponse:
     else:
         # Check user API key
         user = await storage.get_user_by_key(api_key)
+        account = user
         if user and user["username"] == username:
             authenticated = True
             resolved_role = str(user.get("role", "reviewer"))
@@ -12178,13 +12491,42 @@ async def login(request: Request) -> JSONResponse:
             can_use_free_providers = await storage.can_user_use_free_providers(username)
 
     if not authenticated:
+        reason = await _login_failure_reason(
+            overlong=overlong, username=username, settings=settings, account=account
+        )
         await record_audit(
             action="auth.login_failed",
             actor=username or "anonymous",
-            message=f"Failed login attempt for username '{username}'",
+            message=f"Failed login attempt for username '{username}' ({reason})",
             target_type="user",
             target_id=username,
             outcome="failure",
+            details={"reason": reason},
+            request=request,
+        )
+        locked = await _lock_after_failed_login(username, settings, request)
+        logger.debug(
+            "Login refused for '%s' (%s) failed_attempts=%s newly_locked=%s",
+            username,
+            reason,
+            locked["failed_attempts"] if locked else 0,
+            bool(locked and locked["newly_locked"]),
+        )
+        raise HTTPException(status_code=401, detail="Invalid username or API key")
+
+    # Lockout and disable state is refused with the same body as a wrong key:
+    # the caller learns "not allowed", never which of the three applied.
+    block_reason = await storage.settle_login_attempt(username)
+    if block_reason is not None:
+        await record_audit(
+            action="auth.login_blocked",
+            actor=username,
+            message=f"Login blocked for '{block_reason}' user '{username}'",
+            actor_role=resolved_role,
+            target_type="user",
+            target_id=username,
+            outcome="denied",
+            details={"reason": block_reason},
             request=request,
         )
         raise HTTPException(status_code=401, detail="Invalid username or API key")
@@ -12202,7 +12544,7 @@ async def login(request: Request) -> JSONResponse:
                 target_type="user",
                 target_id=username,
                 outcome="denied",
-                details={"status": user_status},
+                details={"status": user_status, "reason": "blocked"},
                 request=request,
             )
             return blocked
@@ -12252,6 +12594,7 @@ async def login(request: Request) -> JSONResponse:
         is_admin=is_admin,
         target_type="user",
         target_id=username,
+        details={"method": await _login_authentication_method(request, settings)},
         request=request,
     )
     return response
@@ -12702,7 +13045,12 @@ async def set_user_ai_credential(
     """Encrypt and save a key for a sidecar-confirmed provider."""
     username = request.state.username
     message = f"User '{username}' set their {provider} AI credential"
+    # The model is known before verification, so a failed row names the key's
+    # provider and the model it was checked against (#379) — never the key.
+    model = body.model.strip()
     details: dict[str, Any] = {"provider": provider}
+    if model:
+        details["model"] = model
     replaced = False
     try:
         _require_reviewer(request)
@@ -12724,12 +13072,10 @@ async def set_user_ai_credential(
             raise HTTPException(status_code=400, detail=error)
         from rootcoz.ai_client import verify_ai_key
 
-        model = body.model.strip()
         if not model:
             raise HTTPException(
                 status_code=400, detail="Select a model to verify the key"
             )
-        details["model"] = model
         outcome = await verify_ai_key(provider, model, key)
         if outcome == "accepted":
             # Read before the write, or every save looks like a replace. Only
@@ -13422,7 +13768,13 @@ def _audit_filter_params(
         str | None, Query(description="success, failure, or denied")
     ] = None,
     q: Annotated[
-        str | None, Query(description="Substring search over event details")
+        str | None,
+        Query(
+            description=(
+                "Case-insensitive substring search over actor, target_id, "
+                "action and details"
+            )
+        ),
     ] = None,
     since: Annotated[
         str | None,
@@ -13534,12 +13886,22 @@ def _audit_action_label(action: str) -> str:
 async def list_audit_events_endpoint(
     request: Request,
     filters: Annotated[dict[str, Any], Depends(_audit_filter_params)],
+    event_id: Annotated[
+        int | None, Query(alias="id", ge=1, description="Return only this event id")
+    ] = None,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    """List recorded audit events newest-first, with the total match count."""
+    """List recorded audit events newest-first, with the total match count.
+
+    ``id`` returns just that event, which is what an "this job was deleted"
+    link opens; an unknown id is an empty list, not a 404 — a list endpoint
+    answers "no match" the same way it does for any other filter.
+    """
     _require_admin(request)
-    result = await storage.list_audit_events(**filters, limit=limit, offset=offset)
+    result = await storage.list_audit_events(
+        **filters, event_id=event_id, limit=limit, offset=offset
+    )
     result["events"] = [_audit_public_event(event) for event in result["events"]]
     logger.debug(
         "GET /api/admin/audit: returning %d of %d events (limit=%d offset=%d)",
@@ -13693,9 +14055,11 @@ async def stream_audit_events(request: Request) -> StreamingResponse:
 
     Each event is sent as ``event: audit:event`` with the same public
     projection as the list endpoint (credentials in nested ``details`` are
-    stripped). If a slow subscriber's queue overflows, the skipped payloads are
-    not silently lost: ``event: audit-gap`` carries ``{"dropped": N}`` before
-    the stream resumes, so the client can refetch the missed range.
+    stripped). One event at a time, so ``target_label`` is not resolved here:
+    the client keeps the ids it already has. If a slow subscriber's queue
+    overflows, the skipped payloads are not silently lost: ``event: audit-gap``
+    carries ``{"dropped": N}`` before the stream resumes, so the client can
+    refetch the missed range.
     """
     _require_admin(request)
 
@@ -13858,6 +14222,13 @@ async def download_session_transcript(
     """
     _require_admin(request)
 
+    # Which transcript, and the run it belongs to when the usage rows know it:
+    # without this the row says someone downloaded *a* transcript.
+    details: dict[str, Any] = {"session_id": session_id}
+    usage = (await storage.get_usage_context_for_sessions([session_id])).get(session_id)
+    if usage and usage.get("job_id"):
+        details["job_id"] = usage["job_id"]
+
     path = transcript_path(session_id)
     if path is None:
         await record_audit(
@@ -13869,6 +14240,7 @@ async def download_session_transcript(
             target_type="transcript",
             target_id=session_id,
             outcome="failure",
+            details=details,
             request=request,
         )
         raise HTTPException(
@@ -13886,6 +14258,7 @@ async def download_session_transcript(
             target_type="transcript",
             target_id=session_id,
             outcome="failure",
+            details=details,
             request=request,
         )
         raise HTTPException(status_code=404, detail="Transcript not found")
@@ -13903,6 +14276,7 @@ async def download_session_transcript(
         message=f"Admin '{request.state.username}' downloaded transcript {session_id}",
         target_type="transcript",
         target_id=session_id,
+        details=details,
         request=request,
     )
 
@@ -13950,6 +14324,8 @@ async def admin_create_user_endpoint(
     # must not leave an accidental grant). Response uses effective value.
     stored_can_view_reports = body.can_view_reports
     server_grant = body.can_use_server_providers
+    # An admin-created account is usable immediately, never pending approval.
+    status = "active"
 
     try:
         if role == "admin":
@@ -13961,7 +14337,7 @@ async def admin_create_user_endpoint(
         else:
             _, raw_key = await storage.create_user(
                 username,
-                status="active",
+                status=status,
                 role=role,
                 can_view_reports=stored_can_view_reports,
                 can_use_server_providers=server_grant,
@@ -13986,6 +14362,8 @@ async def admin_create_user_endpoint(
             "role": role,
             "can_view_reports": stored_can_view_reports,
             "can_use_server_providers": server_grant,
+            # Creation is not approval: the row says which one happened.
+            "approval": status,
         },
         request=request,
     )
@@ -14010,6 +14388,9 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if username == request.state.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
+    # Read the account before it is gone: the row has to say what that account
+    # had, or a permission that disappears with it can never be explained.
+    snapshot = await storage.get_user_audit_snapshot(username)
     try:
         deleted = await storage.delete_user(username)
     except ValueError as exc:
@@ -14025,6 +14406,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
         message=f"Admin '{request.state.username}' deleted user '{username}'",
         target_type="user",
         target_id=username,
+        details=snapshot,
         request=request,
     )
     return {"deleted": username}
@@ -15625,6 +16007,9 @@ async def set_server_provider_models_endpoint(
             "provider": provider,
             "included": sum(1 for e in entries if e["included"]),
             "free": sum(1 for e in entries if e["free"]),
+            # How many models the selection was judged against: "0 included
+            # of 23" is legible, "0 included" alone is not.
+            "total": len(entries),
         },
         request=request,
     )
@@ -15653,16 +16038,10 @@ async def delete_server_provider_endpoint(
     has_key = provider.lower() in {
         row["provider"].lower() for row in await storage.list_server_ai_providers()
     }
-    current = await storage.list_server_provider_models()
-    has_selection = any(row["provider"].lower() == provider.lower() for row in current)
-    # Free pairs alone configure a provider too (#347 r4): deletion removes
+    # A free pair alone configures a provider too (#347 r4): deletion removes
     # them, so the existence check must see them or a free-pairs-only
     # provider 404s while its free pairs survive untouched.
-    has_free = any(
-        row["provider"].lower() == provider.lower()
-        for row in await storage.list_free_ai_models()
-    )
-    if not has_key and not has_selection and not has_free:
+    if provider.lower() not in await storage.list_configured_server_providers():
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' is not configured"
         )
@@ -15677,7 +16056,13 @@ async def delete_server_provider_endpoint(
         ),
         target_type="provider",
         target_id=provider,
-        details={"provider": provider},
+        details={
+            "provider": provider,
+            # A removal that discarded a key is not the same event as one that
+            # removed a selection only.
+            "had_stored_key": has_key,
+            "models": len(affected["selected_models"]),
+        },
         request=request,
     )
     return JSONResponse(
@@ -15687,11 +16072,27 @@ async def delete_server_provider_endpoint(
 
 
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
-async def list_users_endpoint(request: Request) -> dict[str, Any]:
-    """List all users (admin and regular)."""
+async def list_users_endpoint(
+    request: Request,
+    limit: int | None = Query(
+        None, ge=1, le=500, description="Page size (omit for every user)"
+    ),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    q: str = Query(
+        "", description="Case-insensitive substring search over the username"
+    ),
+) -> dict[str, Any]:
+    """List all users (admin and regular), optionally paged and searched."""
     _require_admin(request)
-    users = await storage.list_users()
-    return {"users": users}
+    users, total = await storage.list_users_page(limit=limit, offset=offset, q=q)
+    return {
+        "users": users,
+        "total": total,
+        # An omitted limit means everything was returned, and then offset was
+        # not applied either — report what the server did, not what was asked.
+        "limit": total if limit is None else limit,
+        "offset": 0 if limit is None else offset,
+    }
 
 
 @app.get("/api/admin/users/pending", operation_id="listPendingUsersEndpoint")
@@ -15743,9 +16144,10 @@ async def approve_user(
 async def reject_user(username: str, request: Request) -> dict[str, Any]:
     """Reject a pending user registration."""
     _require_admin(request)
-    status = await storage.get_user_status(username)
-    if status is None:
+    snapshot = await storage.get_user_audit_snapshot(username)
+    if snapshot is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    status = snapshot["status"]
     if status != "pending":
         raise HTTPException(
             status_code=400,
@@ -15759,6 +16161,8 @@ async def reject_user(username: str, request: Request) -> dict[str, Any]:
         message=f"Admin '{request.state.username}' rejected user '{username}'",
         target_type="user",
         target_id=username,
+        # What the rejected account was asking for.
+        details={"requested_role": snapshot["role"]},
         request=request,
     )
     return {
@@ -15811,12 +16215,88 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
         message=f"Admin '{request.state.username}' rotated key for '{username}'",
         target_type="user",
         target_id=username,
+        # Rotation is not a silent session kill: both stores delete every
+        # session of the account, and the row says so.
+        details={"sessions_invalidated": True},
         request=request,
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/api/admin/users/{username}/unlock", operation_id="unlockUserEndpoint")
+async def unlock_user_endpoint(username: str, request: Request) -> dict[str, Any]:
+    """Clear an account lock and its consecutive-failure counter (#379 §I.3)."""
+    _require_admin(request)
+    prior = await storage.unlock_user(username)
+    if prior is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    logger.info(
+        "Admin '%s' unlocked user '%s' (was_locked_at=%s failed_attempts=%d)",
+        request.state.username,
+        username,
+        prior["locked_at"],
+        prior["failed_login_count"],
+    )
+    await record_audit(
+        action="admin.user_unlock",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' unlocked user '{username}'",
+        target_type="user",
+        target_id=username,
+        details={
+            "was_locked_at": prior["locked_at"],
+            "failed_attempts": prior["failed_login_count"],
+        },
+        request=request,
+    )
+    return {
+        "username": username,
+        "locked": False,
+        "failed_login_count": 0,
+        "was_locked_at": prior["locked_at"],
+    }
+
+
+@app.put("/api/admin/users/{username}/disabled", operation_id="setUserDisabledEndpoint")
+async def set_user_disabled_endpoint(
+    username: str, request: Request, body: SetUserDisabledRequest
+) -> dict[str, Any]:
+    """Disable or re-enable an account without deleting it (#379 §I.2)."""
+    _require_admin(request)
+    prior = await storage.set_user_disabled(username, body.disabled)
+    if prior is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    state = "disabled" if body.disabled else "enabled"
+    logger.info(
+        "Admin '%s' %s user '%s' (was_disabled=%s sessions_invalidated=%s)",
+        request.state.username,
+        state,
+        username,
+        prior["disabled"],
+        prior["sessions_invalidated"],
+    )
+    await record_audit(
+        action="admin.user_disabled" if body.disabled else "admin.user_enabled",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' {state} user '{username}'",
+        target_type="user",
+        target_id=username,
+        details={
+            "role": prior["role"],
+            "disabled": prior["disabled"],
+            "sessions_invalidated": prior["sessions_invalidated"],
+        },
+        request=request,
+    )
+    return {
+        "username": username,
+        "disabled": body.disabled,
+        "role": prior["role"],
+        "sessions_invalidated": prior["sessions_invalidated"],
+    }
 
 
 # --- SSE for settings changes ---
@@ -15920,19 +16400,6 @@ async def get_admin_settings(
     return JSONResponse(content=metadata)
 
 
-# Valid log levels shared by the PUT allowlist and the env-persist path
-# (#347): Settings.log_level itself is unconstrained, so both write paths
-# must enforce the same set.
-_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-
-
-def _log_level_error(value: object) -> str | None:
-    """Validate a log level; return the error message, or None when valid."""
-    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
-        return "log_level: must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
-    return None
-
-
 def _settings_dotenv_values() -> dict[str, str]:
     """The dotenv values Settings merges (DotEnvSettingsSource), by field.
 
@@ -15995,8 +16462,73 @@ def _known_providers_hint(known: set[str]) -> str:
     return ", ".join(sorted(known))
 
 
+async def _deployment_authenticated_provider_ids(
+    ids: list[str],
+) -> frozenset[str] | None:
+    """Normalized provider IDs the deployment itself can authenticate.
+
+    An ambient provider never consumes a per-session key, so something else
+    must hold its credential. Two sources answer that, both the runtime's:
+
+    1. :func:`deployment_provider_credentials` — the same lookup sessions and
+       key-scoped listings use: an ambient ``<PROVIDER>_API_KEY`` variable or
+       a manifest ``$VAR``/``${VAR}`` ``apiKey``.
+    2. The sidecar's own auth status for the provider
+       (``authStatus.configured``), which is how a provider authenticated
+       from the deployment environment — ADC, OAuth, a CLI/ACPX login —
+       reports itself. A provider the sidecar does not register answers
+       ``404`` and stays unauthenticated.
+
+    ``None`` means the deployment could not be inspected — cold catalog,
+    unreadable manifest, unreachable sidecar, an answer without
+    ``authStatus`` — and must never be read as "no provider is authenticated".
+    """
+    from pi_sidecar_client import get_sidecar_client
+
+    from rootcoz.ai_client import deployment_provider_credentials
+
+    credentials = deployment_provider_credentials()
+    if credentials is None:
+        return None
+    authenticated = {normalize_provider(name) for name in credentials}
+    for provider in ids:
+        if normalize_provider(provider) in authenticated:
+            continue
+        try:
+            status = await get_sidecar_client().get_model_provider_status(provider)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                # Not registered on the sidecar: nothing authenticates it.
+                continue
+            logger.warning(
+                "Provider status unavailable for provider=%s (HTTP %d) — "
+                "accepting AMBIENT_AUTH_PROVIDERS without validating it",
+                provider,
+                exc.response.status_code,
+            )
+            return None
+        except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+            logger.warning(
+                "Provider status unavailable for provider=%s — accepting "
+                "AMBIENT_AUTH_PROVIDERS without validating it",
+                provider,
+            )
+            return None
+        auth_status = status.get("authStatus") if isinstance(status, dict) else None
+        if not isinstance(auth_status, dict) or "configured" not in auth_status:
+            logger.warning(
+                "Sidecar reported no auth status for provider=%s — accepting "
+                "AMBIENT_AUTH_PROVIDERS without validating it",
+                provider,
+            )
+            return None
+        if auth_status["configured"] is True:
+            authenticated.add(normalize_provider(provider))
+    return frozenset(authenticated)
+
+
 async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str | None]:
-    """Canonical AMBIENT_AUTH_PROVIDERS IDs, plus a rejection when unknown.
+    """Canonical AMBIENT_AUTH_PROVIDERS IDs, plus a rejection when unbacked.
 
     Shared by every write path (PUT, settings import, persist-from-env): the
     returned IDs are stored, and an accepted ID is replaced with the spelling
@@ -16005,11 +16537,20 @@ async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str 
     exclusion cannot match. An empty known set means a cold catalog *and* no
     key-capable answer from discovery — far more likely a transient sidecar
     gap than a real "no providers exist" — so the value is accepted unchanged
-    rather than failing a save.
+    rather than failing a save, as is a value whose deployment credentials
+    cannot be resolved right now (#379 E2E-J08).
     """
     ids = parse_ambient_auth_provider_ids(value)
+    if not ids:
+        # Nothing declared ambient: no catalog or credential lookup is needed.
+        return ids, None
     spellings = await _live_provider_spellings()
     if not spellings:
+        logger.warning(
+            "No provider catalog — accepting AMBIENT_AUTH_PROVIDERS=%r "
+            "without validating the provider IDs",
+            value,
+        )
         return ids, None
     # Currently stored ambient IDs stay valid: ``supported_key_providers()``
     # excludes them from its own answer, so an unchanged re-save must not fail.
@@ -16024,7 +16565,103 @@ async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str 
             "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS: "
             f"{', '.join(unknown)} (known: {_known_providers_hint(known)})"
         )
+    authenticated = await _deployment_authenticated_provider_ids(ids)
+    if authenticated is None:
+        logger.warning(
+            "Deployment credentials unknown — accepting "
+            "AMBIENT_AUTH_PROVIDERS=%r without checking that the deployment "
+            "authenticates its providers",
+            value,
+        )
+    elif unbacked := [
+        provider
+        for provider in ids
+        if normalize_provider(provider) not in authenticated
+    ]:
+        return ids, (
+            "AMBIENT_AUTH_PROVIDERS: no deployment credential for "
+            f"{', '.join(unbacked)} — a provider declared ambient must be "
+            "one the deployment authenticates itself (an ambient "
+            '<PROVIDER>_API_KEY variable, a manifest "$VAR" apiKey, or a '
+            "credential the sidecar reports as configured)"
+        )
     return [spellings.get(provider.lower(), provider) for provider in ids], None
+
+
+def _exporter_plugin_names() -> list[str]:
+    """Machine names of the registered exporter plugins.
+
+    Read through the registry (not ``_available_exporters``) so a configured
+    but currently-disabled plugin is still a valid value: an admin may save
+    the target before enabling its credentials. Empty means no plugin has
+    been loaded yet, which must never be read as "no exporter exists".
+    """
+    return list(_EXPORTER_CLASSES)
+
+
+def _normalize_auto_push_exporters(value: str) -> tuple[list[str], str | None]:
+    """Canonical exporter plugin names, plus a rejection when unknown.
+
+    Case-insensitive against the plugin registry, and an accepted name is
+    replaced with the registry's spelling — the auto-push consumer matches
+    plugin names exactly, so a differently-cased spelling would be silently
+    dropped. Fails open on an empty registry (cold start): an admin must not
+    be blocked from saving because no plugin loaded yet.
+    """
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    spellings = {name.lower(): name for name in _exporter_plugin_names()}
+    if not spellings:
+        logger.warning(
+            "Exporter registry is empty — accepting auto_push_exporters=%r "
+            "without validating the plugin names",
+            value,
+        )
+        return names, None
+    if unknown := [name for name in names if name.lower() not in spellings]:
+        return names, (
+            "auto_push_exporters: unknown exporter plugin(s): "
+            f"{', '.join(unknown)} "
+            f"(known: {', '.join(sorted(spellings.values()))})"
+        )
+    return [spellings[name.lower()] for name in names], None
+
+
+def _normalize_allowed_users(value: str) -> tuple[list[str], str | None]:
+    """Comma-separated usernames, stripped and in order, plus a shape error.
+
+    Only the shape is validated: a username the store does not know is
+    legitimate (SSO and trusted-proxy deployments provision the account on
+    first login), so membership is never checked here.
+    """
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    if any(any(ch.isspace() for ch in name) for name in names):
+        return names, (
+            "allowed_users: must be comma-separated usernames — "
+            "one username per entry, no spaces inside a name"
+        )
+    return names, None
+
+
+async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | None]:
+    """Canonical value for an enumerated setting, plus a rejection when invalid.
+
+    Shared by every write path (PUT, settings import, persist-from-env) so the
+    stored value is always one the picker offers and no path can save a value
+    the server would then silently ignore. Keys without an enumerated rule
+    (the pydantic-validated ones) pass through untouched.
+    """
+    if key == "log_level":
+        return str(value).strip().upper(), _log_level_error(value)
+    if key == "auto_push_exporters":
+        names, error = _normalize_auto_push_exporters(value)
+        return ", ".join(names), error
+    if key == "allowed_users":
+        names, error = _normalize_allowed_users(value)
+        return ", ".join(names), error
+    if key == "ambient_auth_providers":
+        ids, error = await _normalize_ambient_auth_providers(value)
+        return ", ".join(ids), error
+    return value, None
 
 
 async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
@@ -16081,8 +16718,14 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key == "log_level" and (message := _log_level_error(value)):
-            errors.append(message)
+        # Enumerated settings (#379): one rule per kind, shared with every
+        # other write path, and the canonical form is what gets stored.
+        if key in _SETTING_CHOICES:
+            canonical, enum_error = await _normalize_enumerated_value(key, str(value))
+            if enum_error:
+                errors.append(enum_error)
+            else:
+                settings_updates[key] = canonical
         if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
         # Sidecar listener overrides persist under /data and every restart
@@ -16164,20 +16807,6 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
 
-    # AMBIENT_AUTH_PROVIDERS is consumed as raw provider IDs by
-    # supported_key_providers(): a typo is stored silently and never excludes
-    # anything (the provider it was meant to exclude keeps offering key UI),
-    # while a real ID typed there silently disables a provider's key UI.
-    # :func:`_normalize_ambient_auth_providers` checks every ID against the
-    # providers that actually exist and returns the canonical form to store —
-    # padding, duplicates and a non-registered spelling never persist.
-    if settings_updates.get("ambient_auth_providers") is not None:
-        ids, ambient_error = await _normalize_ambient_auth_providers(
-            str(settings_updates["ambient_auth_providers"])
-        )
-        if ambient_error:
-            errors.append(ambient_error)
-        settings_updates["ambient_auth_providers"] = ", ".join(ids)
     return errors
 
 
@@ -16693,11 +17322,15 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400,
             detail=f"Setting '{key}' has no env value set",
         )
-    # log_level has no Settings constraint — apply the shared PUT allowlist
-    # so an invalid level cannot survive the persist path either.
-    if key == "log_level" and (message := _log_level_error(env_value)) is not None:
+    # Enumerated settings get the shared canonicalisation and validation
+    # (#379) so persist-from-env cannot store a value the PUT/import paths
+    # would reject — or a spelling the picker does not offer. A no-op for
+    # every other key.
+    env_value, enum_error = await _normalize_enumerated_value(key, env_value)
+    if enum_error:
         raise HTTPException(
-            status_code=400, detail=f"Invalid env value for '{key}': {message}"
+            status_code=400,
+            detail=f"Invalid env value for '{key}': {enum_error}",
         )
     # Same validation the PUT path applies to admin-typed values
     try:
@@ -16706,18 +17339,6 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}'"
         ) from exc
-    # AMBIENT_AUTH_PROVIDERS needs the shared provider-ID validation and
-    # canonicalisation too (#378): the per-field model check accepts any
-    # string, so an env typo the PUT/import paths reject would otherwise be
-    # persisted as a DB override, and a non-registered spelling would survive.
-    if key == "ambient_auth_providers":
-        ids, ambient_error = await _normalize_ambient_auth_providers(env_value)
-        if ambient_error:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid env value for '{key}': {ambient_error}",
-            )
-        env_value = ", ".join(ids)
 
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)
@@ -17334,6 +17955,9 @@ async def set_job_metadata_endpoint(
         message=message,
         target_type="job",
         target_id=job_name,
+        # Which fields this write touched: a replace and a single-field edit
+        # must be distinguishable afterwards.
+        details={"keys": sorted(body.model_fields_set)},
         request=request,
     )
     return saved
@@ -17352,6 +17976,13 @@ async def delete_job_metadata_endpoint(
         f"Admin '{request.state.username}' deleted the metadata of job '{job_name}'"
     )
     try:
+        # Read before deleting: the point of a delete row is what was lost.
+        current = await storage.get_job_metadata(job_name) or {}
+        cleared = {
+            key: value
+            for key, value in current.items()
+            if key != "job_name" and value not in (None, "", [])
+        }
         deleted = await storage.delete_job_metadata(job_name)
         if not deleted:
             raise HTTPException(
@@ -17373,6 +18004,9 @@ async def delete_job_metadata_endpoint(
         message=message,
         target_type="job",
         target_id=job_name,
+        # Deliberately ``{"cleared": {}}`` when the stored row held nothing:
+        # the row still says a delete happened and that nothing was lost.
+        details={"cleared": cleared},
         request=request,
     )
     return {"status": "deleted", "job_name": job_name}
@@ -17414,7 +18048,15 @@ async def bulk_set_job_metadata(
         actor=request.state.username,
         message=message,
         target_type="metadata",
-        details={"bulk": True, "count": saved["updated"]},
+        details={
+            "bulk": True,
+            "count": saved["updated"],
+            # ``job_name`` is the identity, not a field the import set.
+            "keys": sorted(
+                {field for item in body.items for field in item.model_fields_set}
+                - {"job_name"}
+            ),
+        },
         request=request,
     )
     return saved
@@ -18167,15 +18809,6 @@ def _build_ci_workspace_params(
     }
 
 
-def _require_explicit_chat_source(source: str, force_server: bool) -> None:
-    """Reject a server-only model when chat explicitly selected user credentials."""
-    if source == "server" and not force_server:
-        raise HTTPException(
-            status_code=422,
-            detail="This model requires server credentials; select Server and Start again",
-        )
-
-
 async def _validate_chat_selection(
     body: ChatInitRequest, username: str
 ) -> tuple[str, str]:
@@ -18184,18 +18817,12 @@ async def _validate_chat_selection(
         body.ai_provider,
         body.ai_model,
         username=username,
-        force_server=body.force_server_credentials,
     )
     if not provider or not model:
         raise HTTPException(status_code=422, detail="Select an AI provider and model")
     from rootcoz.ai_client import _selected_credential_source
 
     source = _selected_credential_source.get()
-    if body.force_server_credentials and source != "server":
-        raise HTTPException(
-            status_code=422, detail="Server credential selection unavailable"
-        )
-    _require_explicit_chat_source(source, body.force_server_credentials)
     if source == "server":
         token = ai_username.set(username)
         try:
@@ -18293,7 +18920,7 @@ async def _available_chat_session(
 
 async def _current_chat_choice(
     job_id: str, username: str
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], str]:
     """Load the selected session and its persisted credential source."""
     active = await storage.get_latest_chat_session(job_id, username)
     if not active:
@@ -18310,7 +18937,7 @@ async def _current_chat_choice(
         raise HTTPException(
             status_code=409, detail="Chat session unavailable; start a new chat"
         )
-    return active, source == "server"
+    return active, source
 
 
 async def _check_chat_session_choice(
@@ -18318,22 +18945,22 @@ async def _check_chat_session_choice(
     username: str,
     provider: str,
     model: str,
-    force_server: bool | None,
+    source: str | None,
     *,
     allow_empty: bool = False,
-) -> tuple[str, bool]:
+) -> tuple[str, str]:
     """Pin chat turns to the last Start's owner, model and credential source."""
     if allow_empty and not await _available_chat_session(job_id, username):
-        return "", False
-    active, selected_force = await _current_chat_choice(job_id, username)
+        return "", ""
+    active, active_source = await _current_chat_choice(job_id, username)
     if (provider, model) != (active["ai_provider"], active["ai_model"]) or (
-        force_server is not None and force_server != selected_force
+        source is not None and source != active_source
     ):
         raise HTTPException(
             status_code=409,
             detail="Clear chat and Start a new session to change model or credentials",
         )
-    return active["session_id"], selected_force
+    return active["session_id"], active_source
 
 
 # Sentinel for "the user SELECTED a Jira credential but it is unusable"
@@ -18586,12 +19213,15 @@ async def _init_chat_under_barrier(
         result_data = stored["result"]
         params = result_data.get("request_params", {})
         ai_provider, ai_model = await _validate_chat_selection(body, username)
+        from rootcoz.ai_client import _selected_credential_source
+
+        credential_source = _selected_credential_source.get()
         existing_session_id, _ = await _check_chat_session_choice(
             job_id,
             username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
             allow_empty=True,
         )
         workspace = ensure_chat_workspace(job_id, username=username)
@@ -18663,14 +19293,13 @@ async def _init_chat_under_barrier(
         custom_tools.extend(graph_http_tools(workspace, job_id))
         credential_generation = (
             None
-            if body.force_server_credentials
+            if credential_source == "server"
             else await storage.get_user_ai_credential_generation(username, ai_provider)
         )
-        from rootcoz.ai_client import _selected_credential_source, chat_session_source
+        from rootcoz.ai_client import chat_session_source
 
         token = ai_username.set(username)
-        force_token = force_server_credentials.set(body.force_server_credentials)
-        source_token = chat_session_source.set(_selected_credential_source.get())
+        source_token = chat_session_source.set(credential_source)
         set_chat_prep_phase(job_id, username, "starting_session")
         try:
             session_id = await init_chat_session(
@@ -18687,7 +19316,6 @@ async def _init_chat_under_barrier(
         finally:
             chat_session_source.reset(source_token)
             ai_username.reset(token)
-            force_server_credentials.reset(force_token)
         if job_id in _chat_jobs_deleting and session_id:
             await _discard_unsaved_ai_session(session_id, username, ai_provider)
         _raise_if_chat_job_deleted(job_id)
@@ -19006,7 +19634,6 @@ async def _normalize_and_validate_ai_params(
     ai_model: str | None,
     *,
     username: str,
-    force_server: bool,
 ) -> tuple[str | None, str | None]:
     """Normalize and validate AI provider/model from request body.
 
@@ -19029,11 +19656,9 @@ async def _normalize_and_validate_ai_params(
 
         _selected_credential_source.set("")
         user_token = ai_username.set(username)
-        force_token = force_server_credentials.set(force_server)
         try:
             return await _validate_catalog_pair(provider, model)
         finally:
-            force_server_credentials.reset(force_token)
             ai_username.reset(user_token)
     return provider, model
 
@@ -19118,14 +19743,11 @@ async def send_chat_message(
             raise HTTPException(
                 status_code=422, detail="Select both provider and model"
             )
-        session, selected_force = await _current_chat_choice(
-            job_id, request.state.username
-        )
+        session, _ = await _current_chat_choice(job_id, request.state.username)
         ai_provider, ai_model = await _normalize_and_validate_ai_params(
             body.ai_provider or session["ai_provider"],
             body.ai_model or session["ai_model"],
             username=request.state.username,
-            force_server=selected_force,
         )
         if ai_provider is None or ai_model is None:
             raise HTTPException(
@@ -19133,13 +19755,13 @@ async def send_chat_message(
             )
         from rootcoz.ai_client import _selected_credential_source
 
-        _require_explicit_chat_source(_selected_credential_source.get(), selected_force)
+        credential_source = _selected_credential_source.get()
         await _check_chat_session_choice(
             job_id,
             request.state.username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
         )
         user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
             job_id=job_id,
@@ -19163,7 +19785,7 @@ async def send_chat_message(
         ai_model_override=ai_model,
         username=request.state.username,
         is_admin=bool(getattr(request.state, "is_admin", False)),
-        force_server=selected_force,
+        credential_source=credential_source,
     )
 
     return {
@@ -19188,7 +19810,7 @@ async def _process_chat_message(
     ai_model_override: str | None,
     username: str,
     is_admin: bool = False,
-    force_server: bool | None = None,
+    credential_source: str | None = None,
 ) -> None:
     """Background task: process a single chat message with AI."""
     ai_username.set(username)
@@ -19236,17 +19858,21 @@ async def _process_chat_message(
                         ai_provider, ai_model = ai_provider_override, ai_model_override
                         if not ai_provider or not ai_model:
                             raise ValueError("Chat selection missing")
-                        session_id, selected_force = await _check_chat_session_choice(
-                            job_id, username, ai_provider, ai_model, force_server
+                        (
+                            session_id,
+                            credential_source,
+                        ) = await _check_chat_session_choice(
+                            job_id,
+                            username,
+                            ai_provider,
+                            ai_model,
+                            credential_source,
                         )
-                        force_server_credentials.set(selected_force)
-                        source_token = chat_session_source.set(
-                            "server" if selected_force else "user"
-                        )
+                        source_token = chat_session_source.set(credential_source)
 
                         credential_generation = (
                             None
-                            if selected_force
+                            if credential_source == "server"
                             else await storage.get_user_ai_credential_generation(
                                 username, ai_provider
                             )
@@ -19438,7 +20064,7 @@ async def _process_chat_message(
                         return
 
                     if (
-                        selected_force
+                        credential_source == "server"
                         and not await storage.can_user_use_server_providers(username)
                     ):
                         logger.info(
@@ -19474,7 +20100,7 @@ async def _process_chat_message(
                         ai_model=ai_model,
                         session_id=new_session_id or "",
                         credential_generation=credential_generation,
-                        server_source=selected_force,
+                        server_source=credential_source == "server",
                     )
                     if not saved:
                         await _discard_unsaved_chat_response(
@@ -19769,12 +20395,15 @@ async def init_admin_chat(
     session_id: str | None = ""
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         ai_provider, ai_model = await _validate_chat_selection(body, username)
+        from rootcoz.ai_client import _selected_credential_source
+
+        credential_source = _selected_credential_source.get()
         session_id, _ = await _check_chat_session_choice(
             ADMIN_CHAT_JOB_ID,
             username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
             allow_empty=True,
         )
         workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
@@ -19794,19 +20423,15 @@ async def init_admin_chat(
 
             credential_generation = (
                 None
-                if body.force_server_credentials
+                if credential_source == "server"
                 else await storage.get_user_ai_credential_generation(
                     username, ai_provider
                 )
             )
-            from rootcoz.ai_client import (
-                _selected_credential_source,
-                chat_session_source,
-            )
+            from rootcoz.ai_client import chat_session_source
 
             token = ai_username.set(username)
-            force_token = force_server_credentials.set(body.force_server_credentials)
-            source_token = chat_session_source.set(_selected_credential_source.get())
+            source_token = chat_session_source.set(credential_source)
             try:
                 session_id = await init_admin_chat_session(
                     ai_provider=ai_provider,
@@ -19816,7 +20441,6 @@ async def init_admin_chat(
                 )
             finally:
                 chat_session_source.reset(source_token)
-                force_server_credentials.reset(force_token)
                 ai_username.reset(token)
             if session_id:
                 saved = await storage.add_chat_message(
@@ -19927,14 +20551,13 @@ async def send_admin_chat_message(
             raise HTTPException(
                 status_code=422, detail="Select both provider and model"
             )
-        session, selected_force = await _current_chat_choice(
+        session, _ = await _current_chat_choice(
             ADMIN_CHAT_JOB_ID, request.state.username
         )
         ai_provider, ai_model = await _normalize_and_validate_ai_params(
             body.ai_provider or session["ai_provider"],
             body.ai_model or session["ai_model"],
             username=request.state.username,
-            force_server=selected_force,
         )
         if ai_provider is None or ai_model is None:
             raise HTTPException(
@@ -19942,13 +20565,13 @@ async def send_admin_chat_message(
             )
         from rootcoz.ai_client import _selected_credential_source
 
-        _require_explicit_chat_source(_selected_credential_source.get(), selected_force)
+        credential_source = _selected_credential_source.get()
         await _check_chat_session_choice(
             ADMIN_CHAT_JOB_ID,
             request.state.username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
         )
         user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
             job_id=ADMIN_CHAT_JOB_ID,
@@ -19969,7 +20592,7 @@ async def send_admin_chat_message(
         ai_provider_override=ai_provider,
         ai_model_override=ai_model,
         username=request.state.username,
-        force_server=selected_force,
+        credential_source=credential_source,
     )
 
     return {
@@ -19992,7 +20615,7 @@ async def _process_admin_chat_message(
     ai_provider_override: str | None,
     ai_model_override: str | None,
     username: str,
-    force_server: bool | None = None,
+    credential_source: str | None = None,
 ) -> None:
     """Background task: process a single admin chat message with AI."""
     from rootcoz.ai_client import chat_session_source
@@ -20007,23 +20630,23 @@ async def _process_admin_chat_message(
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         _admin_settings = get_settings()
         user_token = ai_username.set(username)
-        force_token = force_server_credentials.set(False)
         source_token = None
         try:
             ai_provider, ai_model = ai_provider_override, ai_model_override
             if not ai_provider or not ai_model:
                 raise ValueError("Chat selection missing")
-            session_id, selected_force = await _check_chat_session_choice(
-                ADMIN_CHAT_JOB_ID, username, ai_provider, ai_model, force_server
+            session_id, credential_source = await _check_chat_session_choice(
+                ADMIN_CHAT_JOB_ID,
+                username,
+                ai_provider,
+                ai_model,
+                credential_source,
             )
-            force_server_credentials.set(selected_force)
-            source_token = chat_session_source.set(
-                "server" if selected_force else "user"
-            )
+            source_token = chat_session_source.set(credential_source)
 
             credential_generation = (
                 None
-                if selected_force
+                if credential_source == "server"
                 else await storage.get_user_ai_credential_generation(
                     username, ai_provider
                 )
@@ -20148,8 +20771,9 @@ async def _process_admin_chat_message(
                 )
                 return
 
-            if selected_force and not await storage.can_user_use_server_providers(
-                username
+            if (
+                credential_source == "server"
+                and not await storage.can_user_use_server_providers(username)
             ):
                 logger.info(
                     "Admin chat: server grant revoked before completion for user=%s",
@@ -20183,7 +20807,7 @@ async def _process_admin_chat_message(
                 ai_model=ai_model,
                 session_id=new_session_id or "",
                 credential_generation=credential_generation,
-                server_source=selected_force,
+                server_source=credential_source == "server",
             )
             if not saved:
                 await _discard_unsaved_chat_response(
@@ -20222,7 +20846,6 @@ async def _process_admin_chat_message(
         finally:
             if source_token is not None:
                 chat_session_source.reset(source_token)
-            force_server_credentials.reset(force_token)
             ai_username.reset(user_token)
             _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
             # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers

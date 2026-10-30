@@ -7,6 +7,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { ChevronDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CONTROL_CLASS } from '@/lib/controlStyles'
 
 export interface MultiSelectFilterProps {
   label: string
@@ -32,7 +33,8 @@ export function MultiSelectFilter({ label, options, selected, onToggle, onClear,
           type="button"
           aria-label={label}
           className={cn(
-            "flex h-9 w-full items-center justify-between rounded-full border border-border-default bg-surface-elevated px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors hover:bg-surface-hover focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+            CONTROL_CLASS,
+            "flex w-full items-center justify-between gap-2 px-4 py-2 text-sm text-text-primary ring-offset-surface-card transition-colors focus:outline-none focus:ring-2 focus:ring-border-accent focus:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
             className,
           )}
         >

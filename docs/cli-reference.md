@@ -248,10 +248,13 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `audit actions` | — | Every recorded action id with its event count, last-seen timestamp, and display label. Admin only. |
 | `audit verify` | `--limit` (verify only the newest N events) | Recompute the tamper-evidence hash chain. Prints `Audit chain OK: N event(s) verified`, or the first broken event id and exits `1`. Rows written before the chain existed are reported as skipped, not broken, and a chain whose head was removed by retention pruning is reported as truncated (still exit `0` — a pruned boundary is not a break). `--json` prints the full result and still exits `1` on a broken chain. Admin only. |
 | `audit export` | `--format` (`json`, `csv`), `--output`/`-o` (file, or `-` for stdout), plus the `audit list` filters | Stream the whole matching set to a file or stdout — uncapped, unlike `audit list`. This is how evidence is retained before retention pruning deletes it, which is why both hash columns travel with it. CSV columns: `id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, hash_version, prev_hash, entry_hash, hash_payload`; `sha256(hash_payload + prev_hash) == entry_hash` verifies a row offline, and a text cell starting with `'`, `=`, `+`, `-`, `@`, a tab or a CR carries one leading `'` escape (remove exactly one to recover the stored value). A row with no `hash_payload` is not verifiable — never treat it as verified. Admin only. |
-| `users list` | — | All users, roles, and grants. |
+| `users list` | `--limit` (1–500), `--offset`, `--query` (case-insensitive username substring) | Users, roles, grants and account state. The table always ends with `Showing 1–25 of 137 user(s)`, so a page never looks like the whole list; without `--limit` every user is returned. |
 | `users create USERNAME` | `--role` (required), `--can-view-reports`/`--no-can-view-reports`, `--can-use-server-providers`/`--no-can-use-server-providers` | Create a user; the API key is shown once. |
 | `users delete USERNAME` | `--force`/`-f` | Delete a user without the confirmation prompt. |
 | `users rotate-key USERNAME` | — | Issue a new key for a user. |
+| `users unlock USERNAME` | — | Clear a lockout (and its consecutive-failure counter). Records `admin.user_unlock`. |
+| `users disable USERNAME` | — | Disable an account without deleting it. Records `admin.user_disabled`. |
+| `users enable USERNAME` | — | Re-enable a previously disabled account. Records `admin.user_enabled`. |
 | `users change-role USERNAME ROLE` | — | Change role. Promoting to `admin` issues a key. |
 | `users set-can-view-reports USERNAME VALUE` | — | Grant or revoke report access. `VALUE` accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `users set-can-use-server-providers USERNAME VALUE` | — | Grant or revoke server AI credentials. |

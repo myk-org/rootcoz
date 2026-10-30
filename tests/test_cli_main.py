@@ -2593,27 +2593,6 @@ class TestAnalyzeConfigDefaults:
             result = runner.invoke(app, cli_args)
             return result, client
 
-    @pytest.mark.parametrize("configured", [None, False, True])
-    @pytest.mark.parametrize(
-        "flag", [None, "--force-server-credentials", "--no-force-server-credentials"]
-    )
-    def test_force_server_credentials_precedence(self, configured, flag):
-        args = ["analyze", "--job-name", "my-job", "--build-number", "1"]
-        if flag:
-            args.append(flag)
-        result, client = self._invoke_analyze(
-            args, ServerConfig(url=_TEST_SERVER, force_server_credentials=configured)
-        )
-        assert result.exit_code == 0
-        actual = client.analyze.call_args.kwargs.get("force_server_credentials")
-        assert actual is (
-            True
-            if flag == "--force-server-credentials"
-            else False
-            if flag
-            else configured
-        )
-
     def test_config_string_fields_used_as_defaults(self):
         """String config fields are sent when CLI flags are absent."""
         result, client = self._invoke_analyze(
@@ -4475,6 +4454,91 @@ class TestAdminUsersListCommand:
         parsed = json.loads(result.output)
         assert "users" in parsed
 
+    def test_admin_users_list_shows_the_account_state(self, mock_client):
+        mock_client.admin_list_users.return_value = {
+            "users": [
+                {"username": "active-one", "role": "reviewer"},
+                {
+                    "username": "locked-one",
+                    "role": "operator",
+                    "locked": True,
+                    "locked_at": "2026-01-01T00:00:00.000000Z",
+                    "failed_login_count": 3,
+                },
+                {"username": "off-one", "role": "viewer", "disabled": True},
+            ]
+        }
+        mock_client.admin_list_settings.return_value = [
+            {"key": "login_lockout_threshold", "value": "5"}
+        ]
+
+        result = runner.invoke(app, ["admin", "users", "list"])
+
+        assert result.exit_code == 0
+        assert "active" in result.output
+        assert "locked (3/5)" in result.output
+        assert "disabled" in result.output
+        # The denominator costs one settings read, and only when a row is locked.
+        mock_client.admin_list_settings.assert_called_once_with()
+
+    def test_admin_users_list_skips_the_settings_read_when_nothing_is_locked(
+        self, mock_client
+    ):
+        mock_client.admin_list_users.return_value = {
+            "users": [{"username": "active-one", "role": "reviewer"}]
+        }
+
+        result = runner.invoke(app, ["admin", "users", "list"])
+
+        assert result.exit_code == 0
+        mock_client.admin_list_settings.assert_not_called()
+
+    def test_admin_users_list_forwards_paging_and_query(self, mock_client):
+        mock_client.admin_list_users.return_value = {
+            "users": [{"username": "alice", "role": "viewer"}],
+            "total": 137,
+            "limit": 1,
+            "offset": 24,
+        }
+
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "users",
+                "list",
+                "--limit",
+                "1",
+                "--offset",
+                "24",
+                "--query",
+                "al",
+            ],
+        )
+
+        assert result.exit_code == 0
+        mock_client.admin_list_users.assert_called_once_with(limit=1, offset=24, q="al")
+        # The window is reported, so a page never looks like the whole list.
+        assert "25–25 of 137 user(s)" in result.output
+
+    def test_admin_users_list_reports_the_whole_range_when_unpaged(self, mock_client):
+        mock_client.admin_list_users.return_value = {
+            "users": [
+                {"username": "one", "role": "viewer"},
+                {"username": "two", "role": "viewer"},
+                {"username": "three", "role": "viewer"},
+            ],
+            "total": 3,
+            "limit": 3,
+            "offset": 0,
+        }
+
+        result = runner.invoke(app, ["admin", "users", "list"])
+
+        assert result.exit_code == 0
+        mock_client.admin_list_users.assert_called_once_with(limit=None, offset=0, q="")
+        assert "1–3 of 3 user(s)" in result.output
+
 
 class TestAdminUsersCreateCommand:
     def test_admin_users_create(self, mock_client):
@@ -4671,6 +4735,55 @@ class TestAdminUsersRotateKeyCommand:
         assert result.exit_code == 1
 
 
+class TestAdminUsersAccountStateCommands:
+    def test_unlock(self, mock_client):
+        mock_client.admin_unlock_user.return_value = {"username": "locked-one"}
+        result = runner.invoke(app, ["admin", "users", "unlock", "locked-one"])
+        assert result.exit_code == 0
+        assert "Unlocked user: locked-one" in result.output
+        mock_client.admin_unlock_user.assert_called_once_with("locked-one")
+
+    def test_unlock_json(self, mock_client):
+        mock_client.admin_unlock_user.return_value = {
+            "username": "locked-one",
+            "locked": False,
+            "failed_login_count": 0,
+        }
+        result = runner.invoke(
+            app, ["--json", "admin", "users", "unlock", "locked-one"]
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["locked"] is False
+
+    def test_disable(self, mock_client):
+        mock_client.admin_set_user_disabled.return_value = {
+            "username": "alice",
+            "disabled": True,
+        }
+        result = runner.invoke(app, ["admin", "users", "disable", "alice"])
+        assert result.exit_code == 0
+        assert "Disabled user: alice" in result.output
+        mock_client.admin_set_user_disabled.assert_called_once_with("alice", True)
+
+    def test_enable(self, mock_client):
+        mock_client.admin_set_user_disabled.return_value = {
+            "username": "alice",
+            "disabled": False,
+        }
+        result = runner.invoke(app, ["admin", "users", "enable", "alice"])
+        assert result.exit_code == 0
+        assert "Enabled user: alice" in result.output
+        mock_client.admin_set_user_disabled.assert_called_once_with("alice", False)
+
+    def test_state_commands_report_a_refusal(self, mock_client):
+        mock_client.admin_unlock_user.side_effect = RootCozError(
+            status_code=404, detail="User 'ghost' not found"
+        )
+        result = runner.invoke(app, ["admin", "users", "unlock", "ghost"])
+        assert result.exit_code == 1
+        assert "not found" in result.output
+
+
 class TestAdminUsersChangeRole:
     def test_change_role_promote(self, mock_client):
         mock_client.admin_change_role.return_value = {
@@ -4755,6 +4868,86 @@ def test_admin_audit_list_prints_table(mock_client):
     assert "Showing 1 of 12 event(s)" in result.output
 
 
+def test_admin_audit_list_prints_resolved_target_label(mock_client):
+    mock_client.admin_list_audit.return_value = {
+        "events": [
+            {
+                "created_at": "2026-04-18 10:00:00",
+                "actor": "admin",
+                "action": "admin.job_delete",
+                "target_type": "job",
+                "target_id": "job-1",
+                "target_label": "my-job",
+                "outcome": "success",
+            }
+        ],
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+    }
+    result = runner.invoke(app, ["admin", "audit", "list"])
+    assert result.exit_code == 0, result.output
+    assert "my-job (job-1)" in result.output
+
+
+def test_admin_audit_list_prints_comment_target_label(mock_client):
+    mock_client.admin_list_audit.return_value = {
+        "events": [
+            {
+                "created_at": "2026-04-18 10:00:00",
+                "actor": "admin",
+                "action": "comment.delete",
+                "target_type": "comment",
+                "target_id": "122",
+                "target_label": "my-job",
+                "outcome": "success",
+            }
+        ],
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+    }
+    result = runner.invoke(app, ["admin", "audit", "list"])
+    assert result.exit_code == 0, result.output
+    assert "comment on my-job (comment 122)" in result.output
+
+
+def test_admin_audit_list_prints_the_resolved_job_id_once(mock_client):
+    """A by-name target's own text is the label: only the id is worth printing."""
+    mock_client.admin_list_audit.return_value = {
+        "events": [
+            {
+                "created_at": "2026-04-18 10:00:00",
+                "actor": "admin",
+                "action": "job.metadata_set",
+                "target_type": "job",
+                "target_id": "my-job",
+                "target_job_id": "job-9",
+                "target_label": "my-job",
+                "outcome": "success",
+            },
+            {
+                "created_at": "2026-04-18 10:00:01",
+                "actor": "admin",
+                "action": "job.metadata_delete",
+                "target_type": "job",
+                "target_id": "gone-job",
+                "target_job_id": None,
+                "target_label": "gone-job",
+                "outcome": "success",
+            },
+        ],
+        "total": 2,
+        "limit": 50,
+        "offset": 0,
+    }
+    result = runner.invoke(app, ["admin", "audit", "list"])
+    assert result.exit_code == 0, result.output
+    assert "my-job (job-9)" in result.output
+    assert "my-job (my-job)" not in result.output
+    assert "gone-job" in result.output
+
+
 def test_admin_audit_list_passes_filters(mock_client):
     mock_client.admin_list_audit.return_value = {
         "events": [],
@@ -4802,10 +4995,47 @@ def test_admin_audit_list_passes_filters(mock_client):
         q="cleanup",
         since="2026-01-01T00:00:00Z",
         until="2026-02-01T00:00:00Z",
+        event_id=None,
         limit=5,
         offset=10,
     )
     assert "No results." in result.output
+
+
+def test_admin_audit_list_passes_event_id(mock_client):
+    """``--id`` is the evidence link target: one event, still a list."""
+    mock_client.admin_list_audit.return_value = {
+        "events": [
+            {
+                "id": 42,
+                "created_at": "2026-04-18 10:00:00",
+                "actor": "bob",
+                "action": "user.job_delete",
+                "target_type": "job",
+                "target_id": "job-1",
+                "outcome": "success",
+            }
+        ],
+        "total": 1,
+        "limit": 50,
+        "offset": 0,
+    }
+    result = runner.invoke(app, ["admin", "audit", "list", "--id", "42"])
+    assert result.exit_code == 0, result.output
+    mock_client.admin_list_audit.assert_called_once_with(
+        actor="",
+        action=[],
+        target_type="",
+        target_id="",
+        outcome="",
+        q="",
+        since="",
+        until="",
+        event_id=42,
+        limit=50,
+        offset=0,
+    )
+    assert "Showing 1 of 1 event(s)" in result.output
 
 
 def test_admin_audit_list_json(mock_client):
@@ -5415,6 +5645,19 @@ class TestAdminSettingsCommand:
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["updated"]["jenkins_url"] == "http://new"
+
+    def test_admin_settings_set_forwards_the_lockout_toggle(self, mock_client):
+        """E2E-I09: the boolean takes the same path as every other setting."""
+        mock_client.admin_set_setting.return_value = {
+            "updated": ["login_lockout_enabled"]
+        }
+        result = runner.invoke(
+            app, ["admin", "settings", "set", "LOGIN_LOCKOUT_ENABLED", "false"]
+        )
+        assert result.exit_code == 0
+        mock_client.admin_set_setting.assert_called_once_with(
+            "login_lockout_enabled", "false"
+        )
 
     def test_admin_settings_reset(self, mock_client):
         mock_client.admin_reset_setting.return_value = {"reset": "jenkins_url"}
@@ -6201,7 +6444,7 @@ class TestChatCommands:
             app, ["chat", "init", "job-1", "--provider", "openai", "--model", "m"]
         )
         assert result.exit_code == 0
-        mock_client.init_chat.assert_called_once_with("job-1", "openai", "m", False)
+        mock_client.init_chat.assert_called_once_with("job-1", "openai", "m")
         assert ("Chat started" in result.output) is bool(session_id and ready)
         assert ("Ready: True" in result.output) is bool(session_id and ready)
         if not (session_id and ready):
@@ -6209,25 +6452,15 @@ class TestChatCommands:
         assert "repo-a" in result.output
         assert "do-not-print" not in result.output
 
-    def test_chat_init_json_server_credentials(self, mock_client):
+    def test_chat_init_json(self, mock_client):
         mock_client.init_chat.return_value = {"ready": True, "session_id": "sid"}
         result = runner.invoke(
             app,
-            [
-                "--json",
-                "chat",
-                "init",
-                "job-1",
-                "-p",
-                "openai",
-                "-m",
-                "m",
-                "--server-credentials",
-            ],
+            ["--json", "chat", "init", "job-1", "-p", "openai", "-m", "m"],
         )
         assert result.exit_code == 0
         assert json.loads(result.output)["session_id"] == "sid"
-        mock_client.init_chat.assert_called_once_with("job-1", "openai", "m", True)
+        mock_client.init_chat.assert_called_once_with("job-1", "openai", "m")
 
     def test_chat_history(self, mock_client):
         mock_client.get_chat_history.return_value = {
@@ -6304,7 +6537,6 @@ class TestChatCommands:
             "Why did this test fail?",
             ai_provider="",
             ai_model="",
-            force_server_credentials=None,
         )
         assert "The test failed because of a null pointer." in result.output
 
@@ -6348,23 +6580,8 @@ class TestChatCommands:
             "Explain the error",
             ai_provider="claude",
             ai_model="opus-4",
-            force_server_credentials=None,
         )
         assert "The error is caused by a missing import." in result.output
-
-    def test_chat_send_server_credentials(self, mock_client):
-        mock_client.send_chat_message.return_value = {"user_message": {"id": 1}}
-        result = runner.invoke(
-            app, ["--json", "chat", "send", "job-1", "hello", "--server-credentials"]
-        )
-        assert result.exit_code == 0
-        mock_client.send_chat_message.assert_called_once_with(
-            "job-1",
-            "hello",
-            ai_provider="",
-            ai_model="",
-            force_server_credentials=True,
-        )
 
     def test_chat_send_json(self, mock_client):
         payload = {
@@ -6421,7 +6638,7 @@ class TestAdminChatCommands:
             app, ["admin-chat", "init", "--provider", "openai", "--model", "m"]
         )
         assert result.exit_code == 0
-        mock_client.init_admin_chat.assert_called_once_with("openai", "m", False)
+        mock_client.init_admin_chat.assert_called_once_with("openai", "m")
         assert "No results" not in result.output
         assert ("Admin chat started" in result.output) is bool(session_id and ready)
         assert ("Ready: True" in result.output) is bool(session_id and ready)
@@ -6429,24 +6646,15 @@ class TestAdminChatCommands:
             assert "not started" in result.output.lower()
         assert "do-not-print" not in result.output
 
-    def test_admin_chat_init_json_server_credentials(self, mock_client):
+    def test_admin_chat_init_json(self, mock_client):
         mock_client.init_admin_chat.return_value = {"ready": True, "session_id": "sid"}
         result = runner.invoke(
             app,
-            [
-                "--json",
-                "admin-chat",
-                "init",
-                "-p",
-                "openai",
-                "-m",
-                "m",
-                "--server-credentials",
-            ],
+            ["--json", "admin-chat", "init", "-p", "openai", "-m", "m"],
         )
         assert result.exit_code == 0
         assert json.loads(result.output)["session_id"] == "sid"
-        mock_client.init_admin_chat.assert_called_once_with("openai", "m", True)
+        mock_client.init_admin_chat.assert_called_once_with("openai", "m")
 
     def test_admin_chat_history(self, mock_client):
         mock_client.get_admin_chat_history.return_value = {
@@ -6518,7 +6726,7 @@ class TestAdminChatCommands:
             result = runner.invoke(app, ["admin-chat", "send", "Server status?"])
         assert result.exit_code == 0
         mock_client.send_admin_chat_message.assert_called_once_with(
-            "Server status?", ai_provider="", ai_model="", force_server_credentials=None
+            "Server status?", ai_provider="", ai_model=""
         )
         assert "All systems operational." in result.output
 
@@ -6561,19 +6769,8 @@ class TestAdminChatCommands:
             "Explain",
             ai_provider="claude",
             ai_model="opus-4",
-            force_server_credentials=None,
         )
         assert "The error is caused by a missing import." in result.output
-
-    def test_admin_chat_send_server_credentials(self, mock_client):
-        mock_client.send_admin_chat_message.return_value = {"user_message": {"id": 1}}
-        result = runner.invoke(
-            app, ["--json", "admin-chat", "send", "hello", "--server-credentials"]
-        )
-        assert result.exit_code == 0
-        mock_client.send_admin_chat_message.assert_called_once_with(
-            "hello", ai_provider="", ai_model="", force_server_credentials=True
-        )
 
     def test_admin_chat_send_json(self, mock_client):
         payload = {

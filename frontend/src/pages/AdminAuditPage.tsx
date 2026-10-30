@@ -1,9 +1,11 @@
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import { useNavigationType, useSearchParams } from 'react-router-dom'
+import { Link, useNavigationType, useSearchParams } from 'react-router-dom'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useSignOut } from '@/lib/useSignOut'
-import { EMPTY_FILTERS, matchesFilters, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
-import { formatRelativeTime, formatTimestamp } from '@/lib/utils'
+import { EMPTY_FILTERS, activeTimePreset, matchesFilters, presetSince, TIME_PRESETS, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
+import { parsePageSize } from '@/lib/pageParams'
+import { CONTROL_CLASS } from '@/lib/controlStyles'
+import { cn, formatRelativeTime, formatTimestamp } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -28,7 +30,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { ChevronDown, ChevronLeft, ChevronRight, Check } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, Check, Download } from 'lucide-react'
 
 interface AuditListResponse {
   events: AuditEvent[]
@@ -51,17 +53,25 @@ const SEARCH_DEBOUNCE_MS = 300
 
 const OUTCOME_FILTER_OPTIONS = ['success', 'failure', 'denied'] as const
 
+/** The one look for a single-line control in the filter bar. */
+const FILTER_CONTROL = `${CONTROL_CLASS} text-sm text-text-primary transition-colors`
+
+const EXPORT_FORMATS = ['csv', 'json'] as const
+type ExportFormat = (typeof EXPORT_FORMATS)[number]
+
+/** A `type="date"` input can only show a day — a preset's ISO `since` shows its UTC day. */
+function dateInputValue(value: string): string {
+  return value.slice(0, 10)
+}
+
 const OUTCOME_BADGE_VARIANT: Record<string, 'success' | 'destructive' | 'warning'> = {
   success: 'success',
   failure: 'destructive',
   denied: 'warning',
 }
 
-/** ?limit must be one of the offered page sizes — anything else means 50. */
-function parsePageSize(raw: string | null): PageSize {
-  const value = Number(raw)
-  return PAGE_SIZE_OPTIONS.includes(value as PageSize) ? (value as PageSize) : DEFAULT_PAGE_SIZE
-}
+/** ?limit is read against the sizes this page offers (see parsePageSize). */
+const pageSizeFrom = (raw: string | null) => parsePageSize(raw, PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE)
 
 /** The filters kept in the URL, so a copied link shows the same rows. */
 const FILTER_KEYS = Object.keys(EMPTY_FILTERS) as Array<keyof AuditFilters>
@@ -69,6 +79,8 @@ const FILTER_KEYS = Object.keys(EMPTY_FILTERS) as Array<keyof AuditFilters>
 function filtersFromParams(params: URLSearchParams): AuditFilters {
   const filters = { ...EMPTY_FILTERS }
   for (const key of FILTER_KEYS) filters[key] = params.get(key) ?? ''
+  // A pin is an event id, never arbitrary text that could only 422 the request.
+  if (filters.event && !/^\d+$/.test(filters.event.trim())) filters.event = ''
   return filters
 }
 
@@ -148,7 +160,7 @@ function initialState(params: URLSearchParams): AuditState {
   return {
     filters,
     offset: 0,
-    limit: parsePageSize(params.get('limit')),
+    limit: pageSizeFrom(params.get('limit')),
     livePhase: params.get('live') === '1' ? 'connecting' : 'off',
     actorDraft: filters.actor,
     qDraft: filters.q,
@@ -176,6 +188,13 @@ const LIVE_VIEW: Record<LivePhase, { dot: string; tooltip: string }> = {
 /** Query string for GET /api/admin/audit — empty filters are omitted. */
 function buildAuditQuery(filters: AuditFilters, offset: number, limit: PageSize): string {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  // A pinned row goes alone: the server calls it `id`, and the other filters are
+  // dropped so they cannot hide the event the admin followed a link for.
+  const pinned = filters.event.trim()
+  if (pinned) {
+    params.set('id', pinned)
+    return params.toString()
+  }
   for (const [key, value] of Object.entries(filters)) {
     if (value.trim()) params.set(key, value.trim())
   }
@@ -186,6 +205,233 @@ function targetLabel(event: AuditEvent): string {
   if (event.target_type && event.target_id) return `${event.target_type}:${event.target_id}`
   return event.target_type ?? event.target_id ?? '—'
 }
+
+/**
+ * Query string for GET /api/admin/audit/export — the list's filters, never its
+ * page bounds, so no page size can cap what the admin came to retain.
+ */
+function buildAuditExportUrl(filters: AuditFilters, format: ExportFormat): string {
+  const params = new URLSearchParams({ format })
+  for (const key of FILTER_KEYS) {
+    const value = filters[key].trim()
+    // The pin is a list-only `id` filter; the export endpoint has no such bound.
+    if (key !== 'event' && value) params.set(key, value)
+  }
+  return `/api/admin/audit/export?${params.toString()}`
+}
+
+/** The current filtered set as a file; the format is this click's only trace. */
+function ExportMenu({
+  disabled,
+  onExport,
+}: {
+  disabled: boolean
+  onExport: (format: ExportFormat) => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label="Export filtered audit events"
+          className={cn(
+            'flex items-center gap-1.5 px-4 disabled:cursor-not-allowed disabled:opacity-50',
+            FILTER_CONTROL,
+          )}
+        >
+          <Download className="h-3.5 w-3.5 opacity-50" />
+          Export
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-30" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-24 p-1">
+        {EXPORT_FORMATS.map((format) => (
+          <button
+            key={format}
+            type="button"
+            onClick={() => {
+              setOpen(false)
+              onExport(format)
+            }}
+            className="flex w-full items-center rounded-lg px-2 py-1.5 text-left text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary"
+          >
+            {format.toUpperCase()}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+/** A job report URL, optionally scrolled to one of its comments. */
+function reportHref(jobId: string, commentId?: string): string {
+  return commentId ? `/results/${jobId}#comment-${commentId}` : `/results/${jobId}`
+}
+
+/** Job ids are uuids; a job *name* (metadata events store the name in
+ *  ``target_id``) addresses no report, so it never becomes a link. */
+const JOB_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Does the read model say this target no longer exists?
+ *
+ * A job or comment answers through the report id it resolved: an explicit null
+ * is a target the server found no row for, so linking it would 404 (a
+ * live-streamed event arrives without the field at all). Every other type has
+ * no such id, so the list states the answer outright in ``target_gone``.
+ */
+function targetGone(event: AuditEvent): boolean {
+  if (event.target_gone === true) return true
+  return (
+    (event.target_type === 'job' || event.target_type === 'comment') &&
+    event.target_job_id === null
+  )
+}
+
+/**
+ * Where the target lives, derived from the ids — never from the label, never
+ * stored, and never a dead link: a gone target has no destination.
+ *
+ * ``target_job_id`` is the report the server resolved for this row, whatever
+ * shape ``target_id`` has (uuid or job name); a uuid ``target_id`` already is
+ * its report on a streamed event, a name is not. Every other type is addressed
+ * by its own id in a query param the destination page honours.
+ */
+function targetHref(event: AuditEvent): string | null {
+  const { target_type: type, target_id: id, target_job_id: jobId, details } = event
+  if (!id || targetGone(event)) return null
+  switch (type) {
+    case 'job': {
+      const report = jobId === undefined ? (JOB_UUID.test(id) ? id : null) : jobId
+      return report ? reportHref(report) : null
+    }
+    case 'comment': {
+      const report = jobId === undefined ? details?.job_id : jobId
+      return report ? reportHref(String(report), id) : null
+    }
+    case 'user':
+      return `/admin/users?user=${encodeURIComponent(id)}`
+    case 'provider':
+      return '/admin/settings'
+    case 'setting':
+      return `/admin/settings?highlight=${encodeURIComponent(id)}`
+    case 'transcript':
+      return `/admin/transcripts?session=${encodeURIComponent(id)}`
+    case 'feedback': {
+      const url = details?.issue_url
+      return typeof url === 'string' && url ? url : null
+    }
+    case 'failure': {
+      const job = details?.job_id
+      return job ? reportHref(String(job)) : null
+    }
+    default:
+      return null
+  }
+}
+
+interface GoneTarget {
+  /** Marker text under the target name. */
+  text: string
+  /** The audit row that recorded the deletion, or null when nothing did. */
+  href: string | null
+  tooltip: string
+}
+
+/**
+ * What happened to a target that is gone.
+ *
+ * A live target is a link; a gone one has only the delete event, and a removal
+ * the trail never recorded is said to be unknown — never claimed without
+ * evidence, and never attributed to a person who did not do it.
+ */
+function goneTarget(event: AuditEvent): GoneTarget | null {
+  if (!targetGone(event)) return null
+  const deletion = event.target_delete_event_id
+  if (deletion === null || deletion === undefined) {
+    return {
+      text: 'not found',
+      href: null,
+      // The one type whose removal is nobody's audited act: say so plainly
+      // instead of implying a person or blaming the trail for losing it.
+      tooltip:
+        event.target_type === 'transcript'
+          ? "Transcripts are removed by the sidecar's retention, and that removal is not audited."
+          : 'No destination and no removal recorded — it may predate the audit trail.',
+    }
+  }
+  return {
+    text: `deleted by ${event.target_deleted_by ?? 'unknown'}`,
+    href: `/admin/audit?event=${deletion}`,
+    tooltip: `${formatTimestamp(event.target_deleted_at)} — open the deletion event`,
+  }
+}
+
+/** The muted marker under a gone target: the evidence link, or a plain note. */
+function GoneTargetMarker({ target }: { target: GoneTarget }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="mt-0.5 block text-text-tertiary">
+          {target.href ? (
+            <Link
+              to={target.href}
+              onClick={(e) => e.stopPropagation()}
+              className="select-text hover:underline"
+            >
+              {target.text}
+            </Link>
+          ) : (
+            target.text
+          )}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{target.tooltip}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** The visible text: the label when one resolved, else the bare id. */
+function targetText(event: AuditEvent): string {
+  const { target_type: type, target_id: id, target_label: label, details } = event
+  if (!id || !type) return targetLabel(event)
+  switch (type) {
+    case 'job':
+      return label ?? id
+    case 'comment':
+      return `comment on ${label ?? id}`
+    case 'feedback': {
+      const issue = details?.issue_number
+      return issue === undefined || issue === null || issue === '' ? id : `issue #${issue}`
+    }
+    case 'user':
+    case 'provider':
+    case 'setting':
+    case 'transcript':
+    case 'failure':
+      return label ?? id
+    default:
+      return targetLabel(event)
+  }
+}
+
+/** Details values that point at a report; unknown keys and values stay plain. */
+function detailHref(key: string, value: unknown, parentJobId: unknown): string | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null
+  const id = String(value)
+  if (!id) return null
+  if (key === 'job_id') return reportHref(id)
+  if (typeof parentJobId !== 'string' && typeof parentJobId !== 'number') return null
+  if (!String(parentJobId)) return null
+  if (key === 'failure_uuid') return reportHref(String(parentJobId))
+  if (key === 'comment_id') return reportHref(String(parentJobId), id)
+  return null
+}
+
+/** The one look for a target link, internal or external. */
+const TARGET_LINK_CLASS = 'select-text break-all text-text-link hover:underline'
 
 /** Searchable single-line picker fed by GET /api/admin/audit/actions. */
 function ActionFilter({
@@ -221,7 +467,10 @@ function ActionFilter({
         <button
           type="button"
           aria-label="Action filter"
-          className="flex h-9 w-full items-center justify-between gap-2 rounded-full border border-border-default bg-surface-elevated px-4 text-sm text-text-primary transition-colors hover:bg-surface-hover sm:w-52"
+          className={cn(
+            'flex w-full items-center justify-between gap-2 px-4 sm:w-52',
+            FILTER_CONTROL,
+          )}
         >
           <span className="truncate">{selected?.label ?? 'All actions'}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-30" />
@@ -336,7 +585,7 @@ export function AdminAuditPage() {
     urlRef.current = searchParams.toString()
     const current = stateRef.current
     const adopted = filtersFromParams(searchParams)
-    const adoptedLimit = parsePageSize(searchParams.get('limit'))
+    const adoptedLimit = pageSizeFrom(searchParams.get('limit'))
     const adoptedLive = searchParams.get('live') === '1'
     if (
       adoptedLimit === current.limit &&
@@ -360,6 +609,13 @@ export function AdminAuditPage() {
   const [dropped, setDropped] = useState(0)
   // Bumped by the notice's refresh action to refetch the current query.
   const [reloadToken, setReloadToken] = useState(0)
+  // The export confirmation belongs to the filter set it counted: a filter
+  // change hides it instead of reporting the previous set's rows.
+  const [exported, setExported] = useState<{
+    filters: string
+    count: number
+    format: ExportFormat
+  } | null>(null)
 
   // The request key doubles as the loading flag: a response for the current
   // key means the shown page matches the filters, anything else is stale.
@@ -490,104 +746,163 @@ export function AdminAuditPage() {
     writeParam('live', checked ? '1' : null)
   }
 
+  const filtersKey = JSON.stringify(filters)
+  const pinned = filters.event.trim() !== ''
+  const activePreset = activeTimePreset(filters)
+  const total = loaded?.total ?? 0
+  // A pinned row is one event, and the export endpoint cannot narrow to it:
+  // exporting then would hand back a file the count below does not describe.
+  const canExport = !pinned && loaded !== null
+  const exportNote = pinned
+    ? 'A pinned event is shown alone — clear the pin to export a set.'
+    : exported && exported.filters === filtersKey
+      ? `Exported ${exported.count} ${exported.count === 1 ? 'event' : 'events'} as ${exported.format.toUpperCase()}.`
+      : ''
+
   const clearFilters = () => {
     dispatch({ type: 'clear' })
   }
 
+  // A preset is a `since` stamp taken at click time; `until` goes back to
+  // unbounded. Both land in the URL like any other filter, so Back, Forward and
+  // a copied link reproduce the window.
+  const applyTimePreset = (hours: number) => {
+    dispatch({ type: 'filter', key: 'since', value: hours ? presetSince(hours) : '' })
+    dispatch({ type: 'filter', key: 'until', value: '' })
+  }
+
+  const runExport = (format: ExportFormat) => {
+    const link = document.createElement('a')
+    link.href = buildAuditExportUrl(filters, format)
+    link.download = `audit-export.${format}`
+    link.click()
+    setExported({ filters: filtersKey, count: total, format })
+  }
+
+  // One click from a row to everything that actor did; the box and the URL follow.
+  const filterByActor = (actor: string) => {
+    dispatch({ type: 'draft', field: 'actorDraft', value: actor })
+    dispatch({ type: 'filter', key: 'actor', value: actor })
+  }
+
   const hasFilters = Object.values(filters).some((value) => value.trim() !== '')
   const events = loaded?.events ?? []
-  const total = loaded?.total ?? 0
   const from = total === 0 ? 0 : offset + 1
   const to = offset + events.length
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Audit</h1>
-        <p className="text-sm text-muted-foreground">
-          Who did what, when. Usernames are recorded verbatim; credential values never are.
-        </p>
-      </div>
+    <TooltipProvider delayDuration={200}>
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-semibold">Audit</h1>
+          <p className="text-sm text-muted-foreground">
+            Who did what, when. Usernames are recorded verbatim; credential values never are.
+          </p>
+        </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Input
-          placeholder="Actor…"
-          aria-label="Actor filter"
-          value={actorDraft}
-          onChange={(e) => dispatch({ type: 'draft', field: 'actorDraft', value: e.target.value })}
-          className="sm:w-40"
-        />
-        <ActionFilter
-          value={filters.action}
-          actions={actions}
-          onChange={(value) => dispatch({ type: 'filter', key: 'action', value })}
-        />
-        <Select
-          value={filters.outcome || 'all'}
-          onValueChange={(value) =>
-            dispatch({ type: 'filter', key: 'outcome', value: value === 'all' ? '' : value })
-          }
-        >
-          <SelectTrigger aria-label="Outcome filter" className="sm:w-36">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All outcomes</SelectItem>
-            {OUTCOME_FILTER_OPTIONS.map((outcome) => (
-              <SelectItem key={outcome} value={outcome}>
-                {outcome}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Input
-          type="date"
-          aria-label="Since date"
-          value={filters.since}
-          onChange={(e) => dispatch({ type: 'filter', key: 'since', value: e.target.value })}
-          className="sm:w-40"
-        />
-        <Input
-          type="date"
-          aria-label="Until date"
-          value={filters.until}
-          onChange={(e) => dispatch({ type: 'filter', key: 'until', value: e.target.value })}
-          className="sm:w-40"
-        />
-        <Input
-          placeholder="Search details…"
-          aria-label="Search filter"
-          value={qDraft}
-          onChange={(e) => dispatch({ type: 'draft', field: 'qDraft', value: e.target.value })}
-          className="sm:w-52"
-        />
-        {hasFilters && (
-          <Button variant="ghost" size="sm" onClick={clearFilters}>
-            Clear
-          </Button>
-        )}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            placeholder="Actor…"
+            aria-label="Actor filter"
+            value={actorDraft}
+            onChange={(e) => dispatch({ type: 'draft', field: 'actorDraft', value: e.target.value })}
+            className="sm:w-40"
+          />
+          <ActionFilter
+            value={filters.action}
+            actions={actions}
+            onChange={(value) => dispatch({ type: 'filter', key: 'action', value })}
+          />
           <Select
-            value={String(limit)}
-            onValueChange={(value) => {
-              const next = Number(value) as PageSize
-              dispatch({ type: 'limit', value: next })
-              writeParam('limit', String(next))
-            }}
+            value={filters.outcome || 'all'}
+            onValueChange={(value) =>
+              dispatch({ type: 'filter', key: 'outcome', value: value === 'all' ? '' : value })
+            }
           >
-            <SelectTrigger aria-label="Rows per page" className="h-8 w-20">
+            <SelectTrigger aria-label="Outcome filter" className="sm:w-36">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {PAGE_SIZE_OPTIONS.map((size) => (
-                <SelectItem key={size} value={String(size)}>
-                  {size}
+              <SelectItem value="all">All outcomes</SelectItem>
+              {OUTCOME_FILTER_OPTIONS.map((outcome) => (
+                <SelectItem key={outcome} value={outcome}>
+                  {outcome}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-        </div>
-        <TooltipProvider delayDuration={200}>
+          {/* Shortcuts over the same `since` the date inputs below set: a preset
+              never removes the precise bound from the URL. */}
+          <div
+            role="group"
+            aria-label="Time range presets"
+            className={cn(FILTER_CONTROL, 'flex items-center gap-0.5 p-0.5 hover:bg-surface-elevated')}
+          >
+            {TIME_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                aria-pressed={activePreset === preset.id}
+                onClick={() => applyTimePreset(preset.hours)}
+                className={cn(
+                  'h-8 rounded-md px-3 text-xs transition-colors',
+                  activePreset === preset.id
+                    ? 'bg-signal-blue/10 text-signal-blue'
+                    : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
+                )}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+          <Input
+            type="date"
+            aria-label="Since date"
+            value={dateInputValue(filters.since)}
+            onChange={(e) => dispatch({ type: 'filter', key: 'since', value: e.target.value })}
+            className="sm:w-40"
+          />
+          <Input
+            type="date"
+            aria-label="Until date"
+            value={dateInputValue(filters.until)}
+            onChange={(e) => dispatch({ type: 'filter', key: 'until', value: e.target.value })}
+            className="sm:w-40"
+          />
+          <Input
+            placeholder="Search actor, target, action or details…"
+            aria-label="Search filter"
+            value={qDraft}
+            onChange={(e) => dispatch({ type: 'draft', field: 'qDraft', value: e.target.value })}
+            className="sm:w-52"
+          />
+          {hasFilters && (
+            <Button variant="ghost" size="sm" onClick={clearFilters}>
+              Clear
+            </Button>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            <ExportMenu disabled={!canExport} onExport={runExport} />
+            <Select
+              value={String(limit)}
+              onValueChange={(value) => {
+                const next = Number(value) as PageSize
+                dispatch({ type: 'limit', value: next })
+                writeParam('limit', String(next))
+              }}
+            >
+              <SelectTrigger aria-label="Rows per page" className="h-8 w-20">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PAGE_SIZE_OPTIONS.map((size) => (
+                  <SelectItem key={size} value={String(size)}>
+                    {size}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <Tooltip>
             <TooltipTrigger asChild>
               <div data-testid="live-status" className="flex items-center gap-1.5">
@@ -604,50 +919,54 @@ export function AdminAuditPage() {
             </TooltipTrigger>
             <TooltipContent>{LIVE_VIEW[livePhase].tooltip}</TooltipContent>
           </Tooltip>
-        </TooltipProvider>
-      </div>
-
-      {error && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-signal-red/40 bg-signal-red/10 px-3 py-2 text-sm text-signal-red">
-          <span>{error}</span>
-          {unauthorized && (
-            // Ends the session first: linking to /login while `authenticated`
-            // is still true sends RegisterPage straight back to the dashboard.
-            <button
-              type="button"
-              onClick={() => void signOut()}
-              className="font-medium underline underline-offset-2"
-            >
-              Sign in
-            </button>
-          )}
         </div>
-      )}
 
-      {/* Outside the toolbar and the table: no control reorders and no row resizes
-          when the notice appears. */}
-      {dropped > 0 && (
-        <CustomMessageBanner
-          message={`Missed ${dropped} live ${dropped === 1 ? 'event' : 'events'} since the last refresh — the stream fell behind, so this view has a gap.`}
-          action={
-            <Button variant="ghost" size="sm" onClick={refreshView}>
-              Refresh
-            </Button>
-          }
-        />
-      )}
+        {/* Always rendered, so a confirmation or a pinned-row note cannot push
+            the table down when it appears. */}
+        <p role="status" data-testid="export-status" className="min-h-5 text-sm text-text-secondary">
+          {exportNote}
+        </p>
 
-      <Card>
-        <CardContent className="p-0">
-          {/* Nothing may push the table sideways: the columns are fixed and
-              every cell wraps, so a pathological value only makes a row taller. */}
-          <div className="w-full overflow-x-hidden">
-            <Table className="table-fixed">
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-[9rem]">
-                    {/* Stored values and the date filters are UTC; the cells show local time. */}
-                    <TooltipProvider delayDuration={200}>
+        {error && (
+          <div className="flex flex-wrap items-center gap-2 rounded-lg border border-signal-red/40 bg-signal-red/10 px-3 py-2 text-sm text-signal-red">
+            <span>{error}</span>
+            {unauthorized && (
+              // Ends the session first: linking to /login while `authenticated`
+              // is still true sends RegisterPage straight back to the dashboard.
+              <button
+                type="button"
+                onClick={() => void signOut()}
+                className="font-medium underline underline-offset-2"
+              >
+                Sign in
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Outside the toolbar and the table: no control reorders and no row resizes
+            when the notice appears. */}
+        {dropped > 0 && (
+          <CustomMessageBanner
+            message={`Missed ${dropped} live ${dropped === 1 ? 'event' : 'events'} since the last refresh — the stream fell behind, so this view has a gap.`}
+            action={
+              <Button variant="ghost" size="sm" onClick={refreshView}>
+                Refresh
+              </Button>
+            }
+          />
+        )}
+
+        <Card>
+          <CardContent className="p-0">
+            {/* Nothing may push the table sideways: the columns are fixed and
+                every cell wraps, so a pathological value only makes a row taller. */}
+            <div className="w-full overflow-x-hidden">
+              <Table className="table-fixed">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[9rem]">
+                      {/* Stored values and the date filters are UTC; the cells show local time. */}
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <span
@@ -664,138 +983,208 @@ export function AdminAuditPage() {
                           time.
                         </TooltipContent>
                       </Tooltip>
-                    </TooltipProvider>
-                  </TableHead>
-                  <TableHead className="w-[22ch]">Actor</TableHead>
-                  <TableHead className="w-[26ch]">Action</TableHead>
-                  <TableHead className="w-[26ch]">Target</TableHead>
-                  <TableHead className="w-[8rem]">Outcome</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {loading &&
-                  Array.from({ length: 5 }, (_, i) => (
-                    <TableRow key={`skeleton-${i}`}>
-                      <TableCell colSpan={5}>
-                        <Skeleton className="h-4 w-full" />
+                    </TableHead>
+                    <TableHead className="w-[22ch]">Actor</TableHead>
+                    <TableHead className="w-[26ch]">Action</TableHead>
+                    <TableHead className="w-[26ch]">Target</TableHead>
+                    <TableHead className="w-[8rem]">Outcome</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {loading &&
+                    Array.from({ length: 5 }, (_, i) => (
+                      <TableRow key={`skeleton-${i}`}>
+                        <TableCell colSpan={5}>
+                          <Skeleton className="h-4 w-full" />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  {!loading && !error && events.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                        No audit events yet
                       </TableCell>
                     </TableRow>
-                  ))}
-                {!loading && !error && events.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
-                      No audit events yet
-                    </TableCell>
-                  </TableRow>
-                )}
-                {!loading &&
-                  events.map((event) => {
-                    const expanded = expandedId === event.id
-                    const label = actions.find((a) => a.action === event.action)?.label ?? event.action
-                    // A row with no details has nothing to expand; making it look
-                    // clickable only to reveal "{}" is a dead affordance.
-                    const hasDetails = Object.keys(event.details ?? {}).length > 0
-                    const toggle = () => {
-                      if (hasDetails) setExpandedId(expanded ? null : event.id)
-                    }
-                    return (
-                      <Fragment key={event.id}>
-                        <TableRow
-                          {...(hasDetails ? { 'aria-expanded': expanded, tabIndex: 0 } : {})}
-                          onClick={toggle}
-                          onKeyDown={(e) => {
-                            if (!hasDetails) return
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              toggle()
-                            }
-                          }}
-                          className={hasDetails ? 'cursor-pointer' : undefined}
-                        >
-                          <TableCell
-                            className="max-w-[9rem] whitespace-normal break-words align-top text-sm text-text-secondary"
-                            title={formatRelativeTime(event.created_at)}
+                  )}
+                  {!loading &&
+                    events.map((event) => {
+                      const expanded = expandedId === event.id
+                      const label = actions.find((a) => a.action === event.action)?.label ?? event.action
+                      const href = targetHref(event)
+                      const text = targetText(event)
+                      const gone = goneTarget(event)
+                      // A feedback target lives on GitHub, not in this app.
+                      const external = href !== null && /^https?:\/\//i.test(href)
+                      const details = event.details ?? {}
+                      // A row with no details has nothing to expand; making it look
+                      // clickable only to reveal "{}" is a dead affordance.
+                      const hasDetails = Object.keys(details).length > 0
+                      const toggle = () => {
+                        if (hasDetails) setExpandedId(expanded ? null : event.id)
+                      }
+                      return (
+                        <Fragment key={event.id}>
+                          <TableRow
+                            {...(hasDetails ? { 'aria-expanded': expanded, tabIndex: 0 } : {})}
+                            onClick={toggle}
+                            onKeyDown={(e) => {
+                              if (!hasDetails) return
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                toggle()
+                              }
+                            }}
+                            className={hasDetails ? 'cursor-pointer' : undefined}
                           >
-                            {formatTimestamp(event.created_at)}
-                          </TableCell>
-                          <TableCell className="max-w-[22ch] break-all align-top text-sm">
-                            <span className="block font-medium text-text-primary">{event.actor}</span>
-                            {event.actor_role && (
-                              <span className="mt-0.5 block text-xs text-text-tertiary">
-                                {event.actor_role}
-                              </span>
-                            )}
-                            {event.is_admin && event.actor_role !== 'admin' && (
-                              <span className="mt-0.5 block text-xs font-medium text-signal-blue">
-                                admin
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell className="max-w-[26ch] whitespace-normal break-words align-top text-sm">
-                            <span className="block max-w-[20ch]">{label}</span>
-                            {!hasDetails && (
-                              <span className="mt-0.5 block text-xs text-text-tertiary">
-                                No details recorded
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell className="max-w-[26ch] whitespace-normal break-words align-top font-mono text-xs text-text-secondary">
-                            {targetLabel(event)}
-                          </TableCell>
-                          <TableCell className="max-w-[8rem] whitespace-nowrap align-top">
-                            <Badge variant={OUTCOME_BADGE_VARIANT[event.outcome] ?? 'outline'}>
-                              {event.outcome}
-                            </Badge>
-                          </TableCell>
-                        </TableRow>
-                        {expanded && (
-                          <TableRow>
-                            <TableCell colSpan={5} className="bg-surface-elevated/40">
-                              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-text-secondary">
-                                {JSON.stringify(event.details ?? {}, null, 2)}
-                              </pre>
-                              {event.request_ip && (
-                                <p className="mt-2 font-mono text-xs text-text-tertiary">
-                                  request_ip: {event.request_ip}
-                                </p>
+                            <TableCell
+                              className="max-w-[9rem] whitespace-normal break-words align-top text-sm text-text-secondary"
+                              title={formatRelativeTime(event.created_at)}
+                            >
+                              {formatTimestamp(event.created_at)}
+                            </TableCell>
+                            <TableCell className="max-w-[22ch] break-all align-top text-sm">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  // The row toggles its details: filtering is this click's job.
+                                  e.stopPropagation()
+                                  filterByActor(event.actor)
+                                }}
+                                className="block text-left font-medium text-text-primary hover:text-text-link hover:underline"
+                              >
+                                {event.actor}
+                              </button>
+                              {event.actor_role && (
+                                <span className="mt-0.5 block text-xs text-text-tertiary">
+                                  {event.actor_role}
+                                </span>
+                              )}
+                              {event.is_admin && event.actor_role !== 'admin' && (
+                                <span className="mt-0.5 block text-xs font-medium text-signal-blue">
+                                  admin
+                                </span>
                               )}
                             </TableCell>
+                            <TableCell className="max-w-[26ch] whitespace-normal break-words align-top text-sm">
+                              <span className="block max-w-[20ch]">{label}</span>
+                              {!hasDetails && (
+                                <span className="mt-0.5 block text-xs text-text-tertiary">
+                                  No details recorded
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className="max-w-[26ch] whitespace-normal break-words align-top font-mono text-xs text-text-secondary">
+                              {href ? (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    {/* select-text: the link must not swallow copying the id. */}
+                                    {external ? (
+                                      <a
+                                        href={href}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className={TARGET_LINK_CLASS}
+                                      >
+                                        {text}
+                                      </a>
+                                    ) : (
+                                      <Link
+                                        to={href}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className={TARGET_LINK_CLASS}
+                                      >
+                                        {text}
+                                      </Link>
+                                    )}
+                                  </TooltipTrigger>
+                                  <TooltipContent className="font-mono">{targetLabel(event)}</TooltipContent>
+                                </Tooltip>
+                              ) : (
+                                text
+                              )}
+                              {/* Same cell, same name: only a gone target adds a line. */}
+                              {gone && <GoneTargetMarker target={gone} />}
+                            </TableCell>
+                            <TableCell className="max-w-[8rem] whitespace-nowrap align-top">
+                              <Badge variant={OUTCOME_BADGE_VARIANT[event.outcome] ?? 'outline'}>
+                                {event.outcome}
+                              </Badge>
+                            </TableCell>
                           </TableRow>
-                        )}
-                      </Fragment>
-                    )
-                  })}
-              </TableBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
+                          {expanded && (
+                            <TableRow>
+                              <TableCell colSpan={5} className="bg-surface-elevated/40">
+                                <dl
+                                  data-testid="event-details"
+                                  className="grid max-h-80 grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1 overflow-auto font-mono text-xs"
+                                >
+                                  {Object.entries(details).map(([key, value]) => {
+                                    const detailLink = detailHref(key, value, details.job_id)
+                                    const valueText =
+                                      typeof value === 'string' ? value : JSON.stringify(value)
+                                    return (
+                                      <Fragment key={key}>
+                                        <dt className="text-text-tertiary">{key}</dt>
+                                        <dd className="break-all text-text-secondary">
+                                          {detailLink ? (
+                                            <Link
+                                              to={detailLink}
+                                              className="select-text text-text-link hover:underline"
+                                            >
+                                              {valueText}
+                                            </Link>
+                                          ) : (
+                                            valueText
+                                          )}
+                                        </dd>
+                                      </Fragment>
+                                    )
+                                  })}
+                                </dl>
+                                {event.request_ip && (
+                                  <p className="mt-2 font-mono text-xs text-text-tertiary">
+                                    request_ip: {event.request_ip}
+                                  </p>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </Fragment>
+                      )
+                    })}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
 
-      <div className="flex items-center justify-between">
-        <span className="text-sm text-text-secondary">
-          Showing {from}–{to} of {total}
-        </span>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={offset === 0}
-            onClick={() => dispatch({ type: 'offset', value: Math.max(0, offset - limit) })}
-          >
-            <ChevronLeft className="h-4 w-4" />
-            Previous
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={to >= total}
-            onClick={() => dispatch({ type: 'offset', value: offset + limit })}
-          >
-            Next
-            <ChevronRight className="h-4 w-4" />
-          </Button>
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-text-secondary">
+            Showing {from}–{to} of {total}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={offset === 0}
+              onClick={() => dispatch({ type: 'offset', value: Math.max(0, offset - limit) })}
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={to >= total}
+              onClick={() => dispatch({ type: 'offset', value: offset + limit })}
+            >
+              Next
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
-    </div>
+    </TooltipProvider>
   )
 }

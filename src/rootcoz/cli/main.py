@@ -1306,8 +1306,6 @@ def _apply_common_config_defaults(
         extras[int_key] = int_value
 
     # Boolean fields — forward when they differ from the dataclass default
-    if cfg.force_server_credentials is not None:
-        extras["force_server_credentials"] = cfg.force_server_credentials
     if cfg.enable_jira is not None:
         extras["enable_jira"] = cfg.enable_jira
     if include_jenkins:
@@ -1497,11 +1495,6 @@ def analyze(
     jira_max_results: _JiraMaxResultsOpt = None,
     github_token: _GithubTokenOpt = "",
     ai_call_timeout: _AiCallTimeoutOpt = None,
-    force_server_credentials: bool | None = typer.Option(
-        None,
-        "--force-server-credentials/--no-force-server-credentials",
-        help="Use server-managed AI credentials instead of your provider key.",
-    ),
     raw_prompt: _RawPromptOpt = "",
     issue_prompt: _IssuePromptOpt = "",
     peers: _PeersOpt = "",
@@ -1652,7 +1645,6 @@ def analyze(
         bool_fields={
             "jenkins_ssl_verify": jenkins_ssl_verify,
             "get_job_artifacts": get_job_artifacts,
-            "force_server_credentials": force_server_credentials,
             "wait_for_completion": wait_for_completion,
         },
         max_concurrent=max_concurrent,
@@ -3209,14 +3201,68 @@ def auth_whoami(
 # -- Admin --------------------------------------------------------------------
 
 
+def _lockout_threshold(client: RootCozClient) -> int | None:
+    """The configured lockout limit, for the ``locked (3/5)`` state cell.
+
+    Read on demand (only when a row is locked) and ``None`` when unreadable: the
+    state still says ``locked``, just without the denominator.
+    """
+    try:
+        settings = client.admin_list_settings()
+    except RootCozError:
+        return None
+    value = next(
+        (
+            str(entry.get("value") or "")
+            for entry in settings
+            if entry.get("key") == "login_lockout_threshold"
+        ),
+        "",
+    )
+    try:
+        return int(value)
+    except TypeError, ValueError:
+        return None
+
+
+def _user_state(user: dict[str, Any], threshold: int | None) -> str:
+    """One cell answering "can this account log in": active/disabled/locked."""
+    if user.get("disabled"):
+        return "disabled"
+    if user.get("locked"):
+        attempts = user.get("failed_login_count", 0)
+        return (
+            f"locked ({attempts}/{threshold})" if threshold else f"locked ({attempts})"
+        )
+    return "active"
+
+
 @admin_users_app.command("list")
 def admin_users_list(
+    limit: int | None = typer.Option(
+        None, "--limit", min=1, max=500, help="Page size (omit for every user)."
+    ),
+    offset: int = typer.Option(0, "--offset", min=0, help="Pagination offset."),
+    query: str = typer.Option(
+        "", "--query", help="Case-insensitive substring search over the username."
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """List all users (admin and regular)."""
+    """List all users (admin and regular), with lock and disable state."""
+
+    def _fetch(c: RootCozClient) -> Any:
+        data = c.admin_list_users(limit=limit, offset=offset, q=query)
+        users = data.get("users", [])
+        threshold = (
+            _lockout_threshold(c) if any(u.get("locked") for u in users) else None
+        )
+        for user in users:
+            user["state"] = _user_state(user, threshold)
+        return data
+
     data = _run_client_command(
         json_output,
-        lambda c: c.admin_list_users(),
+        _fetch,
         emit_output=False,
     )
     if not _state.get("json", False):
@@ -3227,6 +3273,7 @@ def admin_users_list(
                 columns=[
                     "username",
                     "role",
+                    "state",
                     "can_view_reports",
                     "can_use_server_providers",
                     "created_at",
@@ -3239,6 +3286,11 @@ def admin_users_list(
                     "can_use_server_providers": "SERVER AI",
                 },
                 as_json=False,
+            )
+            first = data.get("offset", 0) + 1
+            typer.echo(
+                f"\nShowing {first}–{first + len(users) - 1}"
+                f" of {data.get('total', len(users))} user(s)"
             )
         else:
             typer.echo("No users found.")
@@ -3450,6 +3502,51 @@ def admin_users_reject(
     )
     if not _state.get("json", False):
         typer.echo(f"Rejected user: {data.get('username', username)}")
+
+
+@admin_users_app.command("unlock")
+def admin_users_unlock(
+    username: str = typer.Argument(..., help="Username to unlock."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Clear an account lock and its consecutive-failure counter."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_unlock_user(username),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Unlocked user: {data.get('username', username)}")
+
+
+@admin_users_app.command("disable")
+def admin_users_disable(
+    username: str = typer.Argument(..., help="Username to disable."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Disable an account: it can no longer log in, and keeps its data."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_set_user_disabled(username, True),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Disabled user: {data.get('username', username)}")
+
+
+@admin_users_app.command("enable")
+def admin_users_enable(
+    username: str = typer.Argument(..., help="Username to enable."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Re-enable a disabled account."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.admin_set_user_disabled(username, False),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        typer.echo(f"Enabled user: {data.get('username', username)}")
 
 
 # -- Admin Settings -----------------------------------------------------------
@@ -4162,9 +4259,23 @@ admin_app.add_typer(audit_app, name="audit")
 
 
 def _audit_target_label(event: dict[str, Any]) -> str:
-    """``job:job-1`` for a targeted event, ``-`` when it names no target."""
-    bits = [str(event.get(key) or "") for key in ("target_type", "target_id")]
-    return ":".join(bit for bit in bits if bit) or "-"
+    """``label (id)`` when the list resolved one, else ``job:job-1``/``-``.
+
+    A by-name target's own text is the label, so only the resolved job id adds
+    anything there: print it once, never ``my-job (my-job)``. Comment targets
+    read ``comment on <label> (comment <id>)`` so the job the comment belongs
+    to is recognised. With no ``target_label`` (an older server, or a target
+    type with no human name) the raw ids are printed.
+    """
+    target_type = str(event.get("target_type") or "")
+    target_id = str(event.get("target_id") or "")
+    label = event.get("target_label")
+    if label and target_id:
+        if target_type == "comment":
+            return f"comment on {label} (comment {target_id})"
+        job_id = str(event.get("target_job_id") or "") or target_id
+        return label if job_id == label else f"{label} ({job_id})"
+    return ":".join(bit for bit in (target_type, target_id) if bit) or "-"
 
 
 @audit_app.command("list")
@@ -4182,9 +4293,16 @@ def admin_audit_list(
     outcome: str = typer.Option(
         "", "--outcome", help="Filter by outcome: success, failure, denied."
     ),
-    q: str = typer.Option("", "--q", help="Substring search over event details."),
+    q: str = typer.Option(
+        "",
+        "--q",
+        help="Case-insensitive substring search over actor, target, action and details.",
+    ),
     since: str = typer.Option("", "--since", help="ISO 8601 lower bound (inclusive)."),
     until: str = typer.Option("", "--until", help="ISO 8601 upper bound (inclusive)."),
+    event_id: int | None = typer.Option(
+        None, "--id", min=1, help="Show only this event id (the evidence link target)."
+    ),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
     offset: int = typer.Option(0, "--offset", min=0),
     json_output: bool = _JSON_OPTION,
@@ -4201,6 +4319,7 @@ def admin_audit_list(
             q=q,
             since=since,
             until=until,
+            event_id=event_id,
             limit=limit,
             offset=offset,
         ),
@@ -4314,7 +4433,11 @@ def admin_audit_export(
     outcome: str = typer.Option(
         "", "--outcome", help="Filter by outcome: success, failure, denied."
     ),
-    q: str = typer.Option("", "--q", help="Substring search over event details."),
+    q: str = typer.Option(
+        "",
+        "--q",
+        help="Case-insensitive substring search over actor, target, action and details.",
+    ),
     since: str = typer.Option("", "--since", help="ISO 8601 lower bound (inclusive)."),
     until: str = typer.Option("", "--until", help="ISO 8601 upper bound inclusive."),
 ) -> None:
@@ -4722,13 +4845,12 @@ def chat_init(
     job_id: str = typer.Argument(help="Job ID to initialize chat for."),
     ai_provider: str = typer.Option(..., "--provider", "-p", help="AI provider."),
     ai_model: str = typer.Option(..., "--model", "-m", help="AI model."),
-    force_server_credentials: bool = typer.Option(False, "--server-credentials"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Start chat with an explicit model and credential source."""
+    """Start chat with an explicit model."""
     data = _run_client_command(
         json_output,
-        lambda c: c.init_chat(job_id, ai_provider, ai_model, force_server_credentials),
+        lambda c: c.init_chat(job_id, ai_provider, ai_model),
         emit_output=False,
     )
     if not _state.get("json", False):
@@ -4775,7 +4897,6 @@ def chat_send(
     message: str = typer.Argument(help="Message to send."),
     ai_provider: str = typer.Option("", "--provider", "-p", help="AI provider."),
     ai_model: str = typer.Option("", "--model", "-m", help="AI model."),
-    force_server_credentials: bool | None = typer.Option(None, "--server-credentials"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a chat message and queue AI processing."""
@@ -4788,7 +4909,6 @@ def chat_send(
             message,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            force_server_credentials=force_server_credentials,
         ),
         emit_output=False,
     )
@@ -4887,13 +5007,12 @@ app.add_typer(admin_chat_app, name="admin-chat")
 def admin_chat_init(
     ai_provider: str = typer.Option(..., "--provider", "-p"),
     ai_model: str = typer.Option(..., "--model", "-m"),
-    force_server_credentials: bool = typer.Option(False, "--server-credentials"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Start an admin chat explicitly."""
     data = _run_client_command(
         json_output,
-        lambda c: c.init_admin_chat(ai_provider, ai_model, force_server_credentials),
+        lambda c: c.init_admin_chat(ai_provider, ai_model),
         emit_output=False,
     )
     if not _state.get("json", False):
@@ -4905,7 +5024,6 @@ def admin_chat_send(
     message: str = typer.Argument(help="Message to send."),
     ai_provider: str = typer.Option("", "--provider", "-p", help="AI provider."),
     ai_model: str = typer.Option("", "--model", "-m", help="AI model."),
-    force_server_credentials: bool | None = typer.Option(None, "--server-credentials"),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a message to the admin server chat."""
@@ -4918,7 +5036,6 @@ def admin_chat_send(
             message,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            force_server_credentials=force_server_credentials,
         ),
         emit_output=False,
     )

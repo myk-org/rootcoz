@@ -115,12 +115,7 @@ async def test_scoped_discovery_and_call_fail_closed(monkeypatch):
         )
         with pytest.raises(ValueError):
             await ai_client.resolve_catalog_pair("openai", "claude")
-        ai_client.force_server_credentials.set(True)
-        with pytest.raises(ValueError):
-            await ai_client.resolve_catalog_pair("openai", "not-listed-anywhere")
-        assert await ai_client.session_key("openai") is None
     finally:
-        ai_client.force_server_credentials.set(False)
         ai_client.ai_username.reset(token)
 
 
@@ -218,12 +213,6 @@ async def test_no_listing_allows_manual_only_with_matching_key(monkeypatch):
             await ai_client.resolve_catalog_pair("openai", "manual-model")
         with pytest.raises(ValueError):
             await ai_client.resolve_catalog_pair("xai", "  ")
-        force = ai_client.force_server_credentials.set(True)
-        try:
-            with pytest.raises(ValueError):
-                await ai_client.resolve_catalog_pair("xai", "manual-model")
-        finally:
-            ai_client.force_server_credentials.reset(force)
         assert discovery.await_args.args == ("xai", "x-secret")
     finally:
         ai_client.ai_username.reset(token)
@@ -248,11 +237,6 @@ async def test_manual_only_provider_visible_in_endpoint(monkeypatch):
         AsyncMock(return_value={"models": [], "modelListingSupported": False}),
     )
     monkeypatch.setattr(main, "_require_authenticated", lambda request: None)
-    monkeypatch.setattr(
-        main,
-        "get_settings",
-        lambda: type("Settings", (), {"force_server_credentials": False})(),
-    )
     request = type(
         "Request",
         (),
@@ -299,11 +283,6 @@ async def test_missing_upstream_does_not_guess_user_models(monkeypatch):
         with pytest.raises(ValueError, match="Key-scoped model discovery unavailable"):
             await ai_client.resolve_catalog_pair("openai", "shared")
         monkeypatch.setattr(main, "_require_authenticated", lambda request: None)
-        monkeypatch.setattr(
-            main,
-            "get_settings",
-            lambda: type("Settings", (), {"force_server_credentials": False})(),
-        )
         request = type(
             "Request",
             (),

@@ -1069,8 +1069,8 @@
 </tr>
 <tr>
 <td><code>users list</code></td>
-<td>—</td>
-<td>All users, roles, and grants.</td>
+<td><code>--limit</code> (1–500), <code>--offset</code>, <code>--query</code> (case-insensitive username substring)</td>
+<td>Users, roles, grants and account state. The table always ends with <code>Showing 1–25 of 137 user(s)</code>, so a page never looks like the whole list; without <code>--limit</code> every user is returned.</td>
 </tr>
 <tr>
 <td><code>users create USERNAME</code></td>
@@ -1086,6 +1086,21 @@
 <td><code>users rotate-key USERNAME</code></td>
 <td>—</td>
 <td>Issue a new key for a user.</td>
+</tr>
+<tr>
+<td><code>users unlock USERNAME</code></td>
+<td>—</td>
+<td>Clear a lockout (and its consecutive-failure counter). Records <code>admin.user_unlock</code>.</td>
+</tr>
+<tr>
+<td><code>users disable USERNAME</code></td>
+<td>—</td>
+<td>Disable an account without deleting it. Records <code>admin.user_disabled</code>.</td>
+</tr>
+<tr>
+<td><code>users enable USERNAME</code></td>
+<td>—</td>
+<td>Re-enable a previously disabled account. Records <code>admin.user_enabled</code>.</td>
 </tr>
 <tr>
 <td><code>users change-role USERNAME ROLE</code></td>

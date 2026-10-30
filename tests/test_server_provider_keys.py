@@ -537,15 +537,11 @@ async def test_add_key_to_unmanaged_provider_seeds_full_selection(client, monkey
         ("google", "gemini-2.5-flash")
     ]
     # Discovery and the authorization check are unchanged for the provider.
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [m["id"] for m in scoped["google"]] == [
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-        ]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert [m["id"] for m in scoped["google"]] == [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ]
     await ai_client.require_selected_server_pair("google", "gemini-2.5-flash")
     # Untouched providers stay unmanaged with their full catalog.
     assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
@@ -660,22 +656,18 @@ async def test_add_captures_key_scoped_models_and_restricts_exposure(
     # scoped_models presents the key-scoped set only — the catalog model
     # the key cannot use is gone from the server pool, the non-catalog
     # model is there with its discovery metadata, verified.
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [m["id"] for m in scoped["google"]] == [
-            "gemini-2.5-pro",
-            "gemini-3-pro",
-        ]
-        gemini3 = next(m for m in scoped["google"] if m["id"] == "gemini-3-pro")
-        assert gemini3["verified"] is True
-        assert gemini3["name"] == "gemini-3-pro"
-        assert gemini3["capabilities"] == {
-            "inputTokenLimit": 2000000,
-            "outputTokenLimit": 65536,
-        }
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert [m["id"] for m in scoped["google"]] == [
+        "gemini-2.5-pro",
+        "gemini-3-pro",
+    ]
+    gemini3 = next(m for m in scoped["google"] if m["id"] == "gemini-3-pro")
+    assert gemini3["verified"] is True
+    assert gemini3["name"] == "gemini-3-pro"
+    assert gemini3["capabilities"] == {
+        "inputTokenLimit": 2000000,
+        "outputTokenLimit": 65536,
+    }
     await ai_client.require_selected_server_pair("google", "gemini-3-pro")
 
 
@@ -824,11 +816,7 @@ async def test_refresh_never_reseeds_a_deliberately_empty_selection(
     assert refreshed.status_code == 200
     # The empty selection survived — nothing was silently re-included.
     assert await storage.list_server_provider_models() == []
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        assert "google" not in await ai_client.scoped_models()
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    assert "google" not in await ai_client.scoped_models()
 
 
 async def test_empty_supported_listing_exposes_nothing(client, monkeypatch):
@@ -843,11 +831,7 @@ async def test_empty_supported_listing_exposes_nothing(client, monkeypatch):
     assert providers["google"]["key_scoped"] is True
     assert [m["id"] for m in providers["google"]["models"]] == []
     # Nothing is exposed on server credentials — NOT the catalog fallback.
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        assert "google" not in await ai_client.scoped_models()
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    assert "google" not in await ai_client.scoped_models()
 
 
 async def test_manifest_only_models_are_not_key_verified(client, monkeypatch):
@@ -881,13 +865,9 @@ async def test_non_catalog_provider_with_listing_appears_in_scoped_models(
     await storage.set_server_provider_models(
         "newprovider", [{"id": "newmodel"}], "admin"
     )
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [m["id"] for m in scoped["newprovider"]] == ["newmodel"]
-        assert scoped["newprovider"][0]["verified"] is True
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert [m["id"] for m in scoped["newprovider"]] == ["newmodel"]
+    assert scoped["newprovider"][0]["verified"] is True
 
 
 async def test_concurrent_rotation_supersedes_stale_capture(client, monkeypatch):
@@ -956,12 +936,8 @@ async def test_key_scoped_entry_with_broken_limits_is_skipped(tmp_path, monkeypa
     await storage.set_server_provider_models(
         "google", [{"id": "good-model"}, {"id": "broken-limits"}], "admin"
     )
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [m["id"] for m in scoped["google"]] == ["good-model"]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert [m["id"] for m in scoped["google"]] == ["good-model"]
 
 
 async def test_models_put_and_free_models_accept_key_scoped_pairs(client, monkeypatch):
@@ -1004,22 +980,18 @@ async def test_scoped_models_key_scoped_rows_restrict_and_extend(tmp_path, monke
     await storage.set_server_provider_key_models(
         "google", [{"id": "gemini-2.5-pro"}, {"id": "gemini-3-pro"}]
     )
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        # Managed by key rows alone (no selection): nothing exposed — the
-        # same managed-empty rule the selection applies.
-        assert "google" not in await ai_client.scoped_models()
-        await storage.set_server_provider_models(
-            "google", [{"id": "gemini-2.5-pro"}], "admin"
-        )
-        scoped = await ai_client.scoped_models()
-        # Selection filters the key-scoped set; the catalog-only model
-        # (gemini-2.5-flash) is gone even though it is selected-eligible.
-        assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
-        # Untouched providers keep their full catalog.
-        assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    # Managed by key rows alone (no selection): nothing exposed — the
+    # same managed-empty rule the selection applies.
+    assert "google" not in await ai_client.scoped_models()
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+    scoped = await ai_client.scoped_models()
+    # Selection filters the key-scoped set; the catalog-only model
+    # (gemini-2.5-flash) is gone even though it is selected-eligible.
+    assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
+    # Untouched providers keep their full catalog.
+    assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
 
 
 # --- Concurrent add/remove during verification (#347 r3) ---
@@ -1154,12 +1126,8 @@ async def test_list_reports_unmanaged_provider_whole_catalog_included(
         },
     )
     assert saved.status_code == 200
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
 
 
 async def test_models_endpoint_normalizes_free_subset_and_validates(
@@ -1289,23 +1257,19 @@ async def test_scoped_models_restricts_server_pool_to_selection(tmp_path, monkey
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "sp.db")
     await storage.init_db()
     _fake_catalog(monkeypatch, CATALOG)
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        before = await ai_client.scoped_models()
-        assert [m["id"] for m in before["google"]] == [
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-        ]
+    before = await ai_client.scoped_models()
+    assert [m["id"] for m in before["google"]] == [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ]
 
-        await storage.set_server_provider_models(
-            "google", [{"id": "gemini-2.5-pro"}], "admin"
-        )
-        after = await ai_client.scoped_models()
-        assert [m["id"] for m in after["google"]] == ["gemini-2.5-pro"]
-        # Untouched providers keep their full catalog.
-        assert [m["id"] for m in after["openai"]] == ["gpt-5.6-luna"]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    await storage.set_server_provider_models(
+        "google", [{"id": "gemini-2.5-pro"}], "admin"
+    )
+    after = await ai_client.scoped_models()
+    assert [m["id"] for m in after["google"]] == ["gemini-2.5-pro"]
+    # Untouched providers keep their full catalog.
+    assert [m["id"] for m in after["openai"]] == ["gpt-5.6-luna"]
 
 
 # --- Session integration: per-session apiKey, server source unchanged ---
@@ -1543,12 +1507,8 @@ async def test_deselected_model_is_not_stored_or_exposed(client, monkeypatch):
         ("google", "gemini-2.5-pro")
     ]
     # ...not in the scoped server pool...
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
     # ...and GET reports it excluded.
     providers = {
         p["provider"]: p
@@ -1575,14 +1535,10 @@ async def test_empty_selection_on_managed_provider_exposes_no_server_models(
     )
     assert cleared.status_code == 200
     assert await storage.list_server_provider_models() == []
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert scoped.get("google", []) == []
-        # Never-managed providers keep their full catalog.
-        assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert scoped.get("google", []) == []
+    # Never-managed providers keep their full catalog.
+    assert [m["id"] for m in scoped["openai"]] == ["gpt-5.6-luna"]
 
 
 # --- free ⊆ included normalization on the standalone endpoint (#347 review) ---
@@ -1607,13 +1563,9 @@ async def test_standalone_free_models_auto_include_into_managed_selection(
         ("google", "gemini-2.5-pro"),
         ("google", "gemini-2.5-flash"),
     }
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        by_id = {m["id"]: m for m in scoped["google"]}
-        assert by_id["gemini-2.5-flash"]["free"] is True
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    by_id = {m["id"]: m for m in scoped["google"]}
+    assert by_id["gemini-2.5-flash"]["free"] is True
     # A never-managed provider needs no selection row — its catalog is full.
     unmanaged = client.put(
         "/api/admin/free-models",
@@ -2045,12 +1997,8 @@ async def test_rotate_with_failing_discovery_clears_previous_key_rows(
     _add_google_provider(
         client, monkeypatch, [{"id": "gemini-2.5-pro"}, {"id": "gemini-3-pro"}]
     )
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert "gemini-3-pro" in [m["id"] for m in scoped["google"]]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert "gemini-3-pro" in [m["id"] for m in scoped["google"]]
 
     # Rotate to a different key whose discovery fails.
     _fake_catalog(monkeypatch, CATALOG)
@@ -2077,12 +2025,8 @@ async def test_rotate_with_failing_discovery_clears_previous_key_rows(
     # ...and its non-catalog model is no longer exposed at runtime: the
     # provider falls back to the catalog (the stale selection survivor is
     # ignored, so only the catalog model remains).
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert [m["id"] for m in scoped["google"]] == ["gemini-2.5-pro"]
 
     # A refresh that keeps failing reports unavailable but never clears the
     # captured rows once one exists (key unchanged — keep_on_failure).
@@ -2176,14 +2120,10 @@ async def test_non_catalog_provider_keeps_stored_casing(client, monkeypatch):
     assert "MyGateway" in providers
     assert "mygateway" not in providers
     assert [m["id"] for m in providers["MyGateway"]["models"]] == ["gw-model"]
-    token = ai_client.force_server_credentials.set(True)
-    try:
-        scoped = await ai_client.scoped_models()
-        assert "MyGateway" in scoped
-        assert "mygateway" not in scoped
-        assert scoped["MyGateway"][0]["verified"] is True
-    finally:
-        ai_client.force_server_credentials.reset(token)
+    scoped = await ai_client.scoped_models()
+    assert "MyGateway" in scoped
+    assert "mygateway" not in scoped
+    assert scoped["MyGateway"][0]["verified"] is True
 
 
 # --- Overlapping credential writes and capture bindings (#350 r3) ---

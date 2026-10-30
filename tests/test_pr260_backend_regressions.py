@@ -184,13 +184,8 @@ async def test_record_token_usage_does_not_resummarize(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_catalog_force_server_override_and_bad_key_isolation(monkeypatch):
+async def test_catalog_lists_server_pool_and_isolates_bad_key(monkeypatch):
     monkeypatch.setattr(main, "_require_authenticated", lambda request: None)
-    monkeypatch.setattr(
-        main,
-        "get_settings",
-        lambda: SimpleNamespace(force_server_credentials=False),
-    )
     monkeypatch.setattr(
         ai_client,
         "_get_model_catalog",
@@ -207,14 +202,10 @@ async def test_catalog_force_server_override_and_bad_key_isolation(monkeypatch):
     discover = AsyncMock(side_effect=ValueError("bad credential"))
     monkeypatch.setattr(ai_client, "models_for_api_key", discover)
     request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=False))
-    result = await main.list_ai_models(
-        request, provider="", force_server_credentials=False
-    )
+    result = await main.list_ai_models(request, provider="")
     assert result["providers"]["server"][0]["id"] == "model"
     assert result["provider_status"]["bad"]["unavailable"]
     discover.assert_awaited_once()
-    await main.list_ai_models(request, provider="", force_server_credentials=True)
-    discover.assert_awaited_once()  # Forced server discovery never touches the bad key.
 
 
 @pytest.mark.asyncio

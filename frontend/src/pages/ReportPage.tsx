@@ -293,10 +293,10 @@ function ReportContent() {
     }
   }, [state.loading, state.error, scrollKey])
 
-  // Scroll to comment when ?comment=ID is present in query params
+  // Scroll to comment when ?comment=ID or #comment-ID names one
   useEffect(() => {
     const params = new URLSearchParams(location.search)
-    const commentId = params.get('comment')
+    const commentId = params.get('comment') ?? location.hash.match(/^#comment-(.+)$/)?.[1]
     if (!commentId || state.loading || state.error) return
 
     let cancelled = false
@@ -322,7 +322,7 @@ function ReportContent() {
 
     tryScroll()
     return () => { cancelled = true }
-  }, [location.search, state.loading, state.error])
+  }, [location.search, location.hash, state.loading, state.error])
 
   // Save scroll position on scroll (debounced)
   useEffect(() => {

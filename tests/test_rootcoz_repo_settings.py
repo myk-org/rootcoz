@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from rootcoz import rootcoz_repo_settings as repo_settings_module
 from rootcoz.config import Settings
 from rootcoz.models import AdditionalRepo, AiConfigEntry, BaseAnalysisRequest
 from rootcoz.rootcoz_repo_settings import (
@@ -154,6 +156,30 @@ class TestLoadRootcozRepoSettings:
         _write_settings(tmp_path, {"jenkins_url": "https://x", "ai_provider": "claude"})
         with pytest.raises(RootcozSettingsError, match="Unknown keys.*jenkins_url"):
             load_rootcoz_repo_settings(tmp_path)
+
+    def test_retired_key_is_ignored_with_one_warning(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Repositories written before the key was removed keep working."""
+        retired = next(iter(repo_settings_module._DEPRECATED_SETTINGS_KEYS))
+        _write_settings(
+            tmp_path,
+            {retired: True, "ai_provider": "gemini", "ai_model": "gemini-2.5-flash"},
+        )
+        # The project loggers opt out of root propagation; caplog needs it back.
+        logger = logging.getLogger("rootcoz.rootcoz_repo_settings")
+        logger.propagate = True
+        try:
+            with caplog.at_level(logging.WARNING):
+                loaded = load_rootcoz_repo_settings(tmp_path)
+        finally:
+            logger.propagate = False
+        assert loaded is not None
+        assert loaded.ai_provider == "gemini"
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "settings.json" in warnings[0].getMessage()
+        assert retired in warnings[0].getMessage()
 
     def test_rejected_token_value_not_in_error(self, tmp_path: Path) -> None:
         secret = "super-secret-token-value"  # pragma: allowlist secret

@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, ApiError } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
+import { parsePageSize } from '@/lib/pageParams'
 import { RoleBadge } from '@/components/shared/RoleBadge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,12 +25,37 @@ import {
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle } from 'lucide-react'
+import { Copy, Check, RefreshCw, Trash2, UserPlus, Shield, CheckCircle, XCircle, Unlock, UserCheck, UserX, ChevronLeft, ChevronRight } from 'lucide-react'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { formatTimestamp, formatRelativeTime } from '@/lib/utils'
-import type { AdminUser, CreateUserRequest, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse, UserRole } from '@/types'
+import { formatTimestamp, formatRelativeTime, toIntInRange } from '@/lib/utils'
+import type { AdminUser, AdminUsersResponse, CreateUserRequest, CreateUserResponse, RotateKeyResponse, ChangeRoleResponse, UserRole } from '@/types'
 import { useAuth } from '@/lib/auth'
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const
+type PageSize = (typeof PAGE_SIZE_OPTIONS)[number]
+const DEFAULT_PAGE_SIZE: PageSize = 25
+const SEARCH_DEBOUNCE_MS = 300
+
+/**
+ * The one shape of an account-state badge: the box is identical in every state,
+ * so a row never changes height when the state changes.
+ */
+const STATE_BADGE = {
+  active: 'bg-signal-green/10 text-signal-green',
+  locked: 'bg-signal-amber/10 text-signal-amber',
+  pending: 'bg-signal-amber/10 text-signal-amber',
+  rejected: 'bg-signal-red/10 text-signal-red',
+  disabled: 'bg-surface-elevated text-text-tertiary',
+} as const
+
+function StateBadge({ state, children }: { state: keyof typeof STATE_BADGE; children: ReactNode }) {
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STATE_BADGE[state]}`}>
+      {children}
+    </span>
+  )
+}
 
 function CopyableKey({ label, value }: { label: string; value: string }) {
   const { isCopied, copy } = useClipboard()
@@ -57,8 +84,18 @@ function CopyableKey({ label, value }: { label: string; value: string }) {
 export function UsersPage() {
   const { username: currentUser, refreshAuth } = useAuth()
   const [users, setUsers] = useState<AdminUser[]>([])
+  // The server's count for the current needle — the only source of the total.
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Page bounds live in the URL, so a reload or a shared link shows the same rows.
+  const [searchParams, setSearchParams] = useSearchParams()
+  const limit = parsePageSize(searchParams.get('limit'), PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE)
+  const offset = toIntInRange(searchParams.get('offset') ?? '', 0, Number.MAX_SAFE_INTEGER, 0)
+  // ?user=<name> pre-fills the search, so an audit row lands on its account;
+  // from then on the settled needle lives in ?q= like the page bounds do.
+  const query = (searchParams.get('q') ?? searchParams.get('user') ?? '').trim()
+  const [search, setSearch] = useState(query)
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false)
@@ -87,6 +124,13 @@ export function UsersPage() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleting, setDeleting] = useState(false)
 
+  // Disable dialog + the in-flight guard shared by disable/enable/unlock
+  const [disableTarget, setDisableTarget] = useState<string | null>(null)
+  const [accountBusy, setAccountBusy] = useState<string | null>(null)
+  // Denominator of "locked (3/5)" — the users list carries the count, the limit
+  // lives in the login_lockout_threshold setting, so they are asked separately.
+  const [lockoutThreshold, setLockoutThreshold] = useState<number | null>(null)
+
   // Approve/reject — single guard prevents concurrent actions on same user
   const [actionInProgress, setActionInProgress] = useState<string | null>(null)
   // Toggle can_view_reports — track username while request in flight
@@ -95,20 +139,72 @@ export function UsersPage() {
   // Action error
   const [actionError, setActionError] = useState<string | null>(null)
 
+  /** Move the page window, keeping every other param in the URL. */
+  const setPage = useCallback(
+    (next: { limit?: PageSize; offset?: number }) => {
+      setSearchParams((prev) => {
+        const params = new URLSearchParams(prev)
+        if (next.limit !== undefined) params.set('limit', String(next.limit))
+        if (next.offset !== undefined) params.set('offset', String(next.offset))
+        return params
+      }, { replace: true })
+    },
+    [setSearchParams],
+  )
+
+  /**
+   * Adopt a settled needle in one URL write: the query and the offset must land
+   * together, or the page asks for the old window with the new filter first.
+   */
+  const setQuery = useCallback(
+    (needle: string) => {
+      setSearchParams((prev) => {
+        const params = new URLSearchParams(prev)
+        params.delete('user')
+        if (needle) params.set('q', needle)
+        else params.delete('q')
+        params.set('offset', '0')
+        return params
+      }, { replace: true })
+    },
+    [setSearchParams],
+  )
 
   const fetchUsers = useCallback(async () => {
     try {
-      const data = await api.get<{ users: AdminUser[] }>('/api/admin/users')
-      setUsers(data.users.filter((u: AdminUser) => u.username !== 'admin'))
+      // The server keeps no page state: every request names its own window.
+      const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+      if (query) params.set('q', query)
+      const data = await api.get<AdminUsersResponse>(`/api/admin/users?${params.toString()}`)
+      setUsers(data.users)
+      setTotal(data.total)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [limit, offset, query])
 
   useEffect(() => { fetchUsers() }, [fetchUsers])
+
+  useEffect(() => {
+    const needle = search.trim()
+    if (needle === query) return
+    // A new needle describes rows from the start, so page 3 cannot go missing.
+    const timer = setTimeout(() => setQuery(needle), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
+  }, [search, query, setQuery])
+
+  // Only asked when a row is actually locked; a failed read leaves the badge at
+  // the bare failure count rather than hiding the lock.
+  useEffect(() => {
+    if (lockoutThreshold !== null || !users.some((u) => u.locked)) return
+    api
+      .get<Array<{ key: string; value: string }>>('/api/admin/settings')
+      .then((settings) => setLockoutThreshold(Number(settings.find((s) => s.key === 'login_lockout_threshold')?.value) || 0))
+      .catch(() => {})
+  }, [users, lockoutThreshold])
 
   async function handleCreate() {
     const trimmed = newUsername.trim()
@@ -158,6 +254,26 @@ export function UsersPage() {
     }
   }
 
+  // Disable/enable/unlock are server-truth actions: refetch, never patch the row.
+  async function handleAccountState(username: string, action: 'disable' | 'enable' | 'unlock') {
+    setAccountBusy(username)
+    setActionError(null)
+    try {
+      if (action === 'unlock') {
+        await api.post(`/api/admin/users/${encodeURIComponent(username)}/unlock`)
+      } else {
+        await api.put(`/api/admin/users/${encodeURIComponent(username)}/disabled`, { disabled: action === 'disable' })
+      }
+      setDisableTarget(null)
+      await fetchUsers()
+    } catch (err) {
+      const body = err instanceof ApiError ? (err.body as { detail?: string } | null) : null
+      setActionError(body?.detail ?? `Failed to ${action} ${username}`)
+    } finally {
+      setAccountBusy(null)
+    }
+  }
+
   async function handleDelete() {
     if (!deleteTarget) return
     setDeleting(true)
@@ -165,6 +281,7 @@ export function UsersPage() {
     try {
       await api.delete(`/api/admin/users/${encodeURIComponent(deleteTarget)}`)
       setUsers((prev) => prev.filter((u) => u.username !== deleteTarget))
+      setTotal((prev) => Math.max(0, prev - 1))
       setDeleteTarget(null)
     } catch (err) {
       if (err instanceof ApiError) {
@@ -312,30 +429,43 @@ export function UsersPage() {
     }
   }
 
+  // An empty window reports 0–0 rather than page one of nothing.
+  const from = total === 0 ? 0 : offset + 1
+  const to = offset + users.length
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-display text-xl font-bold text-text-primary">
-            User Management
-            {(() => {
-              const pendingCount = users.filter((u) => u.status === 'pending').length
-              return pendingCount > 0 ? (
-                <span className="ml-2 inline-flex items-center rounded-full bg-signal-amber/10 px-2 py-0.5 text-xs font-medium text-signal-amber">
-                  {pendingCount} pending
-                </span>
-              ) : null
-            })()}
-          </h1>
-          <p className="mt-0.5 text-sm text-text-tertiary">
-            {users.length} {users.length === 1 ? 'user' : 'users'}
-          </p>
+        <h1 className="font-display text-xl font-bold text-text-primary">User Management</h1>
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="Search users…"
+            aria-label="Search users"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="sm:w-56"
+          />
+          <Select
+            value={String(limit)}
+            onValueChange={(value) => setPage({ limit: Number(value) as PageSize, offset: 0 })}
+          >
+            <SelectTrigger aria-label="Rows per page" className="w-24">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PAGE_SIZE_OPTIONS.map((size) => (
+                <SelectItem key={size} value={String(size)}>
+                  {size}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
+            <UserPlus className="h-4 w-4" />
+            Add User
+          </Button>
         </div>
-        <Button onClick={() => setCreateOpen(true)} className="gap-1.5">
-          <UserPlus className="h-4 w-4" />
-          Add User
-        </Button>
       </div>
 
       {/* Error */}
@@ -355,7 +485,9 @@ export function UsersPage() {
         </div>
       ) : users.length === 0 && !error ? (
         <div className="flex flex-col items-center justify-center rounded-lg border border-border-muted bg-surface-card py-16 text-center">
-          <p className="text-text-secondary">No users yet.</p>
+          <p className="text-text-secondary">
+            {query ? `No username matches “${query}”.` : 'No users yet.'}
+          </p>
         </div>
       ) : !error && (
         <Table>
@@ -378,28 +510,29 @@ export function UsersPage() {
                 className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}
               >
                 <TableCell>
-                  <span className="inline-flex items-center gap-1.5 font-mono text-sm text-text-primary">
+                  <span className={`inline-flex items-center gap-1.5 font-mono text-sm ${user.disabled ? 'text-text-tertiary' : 'text-text-primary'}`}>
                     {user.role === 'admin' ? (
-                      <Shield className="h-3.5 w-3.5 text-signal-amber" />
+                      <Shield className={`h-3.5 w-3.5 ${user.disabled ? 'text-text-tertiary' : 'text-signal-amber'}`} />
                     ) : (
-                      <span className={`h-2 w-2 rounded-full ${user.role === 'operator' ? 'bg-signal-blue' : 'bg-signal-green'}`} />
+                      <span className={`h-2 w-2 rounded-full ${user.disabled ? 'bg-text-tertiary' : user.role === 'operator' ? 'bg-signal-blue' : 'bg-signal-green'}`} />
                     )}
                     {user.username}
                   </span>
                 </TableCell>
                 <TableCell>
+                  {/* One axis: registration status, then the account state that overrides it. */}
                   {user.status === 'pending' ? (
-                    <span className="inline-flex items-center rounded-full bg-signal-amber/10 px-2 py-0.5 text-xs font-medium text-signal-amber">
-                      pending
-                    </span>
+                    <StateBadge state="pending">pending</StateBadge>
                   ) : user.status === 'rejected' ? (
-                    <span className="inline-flex items-center rounded-full bg-signal-red/10 px-2 py-0.5 text-xs font-medium text-signal-red">
-                      rejected
-                    </span>
+                    <StateBadge state="rejected">rejected</StateBadge>
+                  ) : user.disabled ? (
+                    <StateBadge state="disabled">disabled</StateBadge>
+                  ) : user.locked ? (
+                    <StateBadge state="locked">
+                      {lockoutThreshold === null ? 'locked' : `locked (${user.failed_login_count}/${lockoutThreshold})`}
+                    </StateBadge>
                   ) : (
-                    <span className="inline-flex items-center rounded-full bg-signal-green/10 px-2 py-0.5 text-xs font-medium text-signal-green">
-                      active
-                    </span>
+                    <StateBadge state="active">active</StateBadge>
                   )}
                 </TableCell>
                 <TableCell>
@@ -511,6 +644,50 @@ export function UsersPage() {
                   ) : (
                     <div className="flex items-center justify-end gap-1">
                       <TooltipProvider delayDuration={200}>
+                        {/* Account state — disable/enable, and unlock while locked */}
+                        {user.username !== currentUser && user.locked && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`Unlock ${user.username}`}
+                                className="h-7 w-7"
+                                disabled={accountBusy === user.username}
+                                onClick={() => handleAccountState(user.username, 'unlock')}
+                              >
+                                <Unlock className="h-3.5 w-3.5 text-signal-green" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Unlock account</TooltipContent>
+                          </Tooltip>
+                        )}
+                        {user.username !== currentUser && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                aria-label={`${user.disabled ? 'Enable' : 'Disable'} ${user.username}`}
+                                className="h-7 w-7"
+                                disabled={accountBusy === user.username}
+                                onClick={() => {
+                                  if (user.disabled) handleAccountState(user.username, 'enable')
+                                  else setDisableTarget(user.username)
+                                }}
+                              >
+                                {user.disabled ? (
+                                  <UserCheck className="h-3.5 w-3.5 text-signal-green" />
+                                ) : (
+                                  <UserX className="h-3.5 w-3.5 text-signal-red" />
+                                )}
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{user.disabled ? 'Enable account' : 'Disable account'}</TooltipContent>
+                          </Tooltip>
+                        )}
                         {/* Rotate key — every active user with an API key (admins and delegated users) */}
                         {user.username !== currentUser && user.status === 'active' && (
                           <Tooltip>
@@ -555,6 +732,36 @@ export function UsersPage() {
             ))}
           </TableBody>
         </Table>
+      )}
+
+      {/* Range + pager — always mounted once loaded, so the total never jumps in
+          and out of the layout. */}
+      {!loading && !error && (
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-text-secondary" role="status">
+            {from}–{to} of {total}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={offset === 0}
+              onClick={() => setPage({ offset: Math.max(0, offset - limit) })}
+            >
+              <ChevronLeft className="h-4 w-4" />
+              Previous
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={to >= total}
+              onClick={() => setPage({ offset: offset + limit })}
+            >
+              Next
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
       )}
 
       {/* Create Admin Dialog */}
@@ -760,6 +967,19 @@ export function UsersPage() {
         variant="destructive"
         onConfirm={handleDelete}
         loading={deleting}
+      />
+
+      {/* Disable Confirm Dialog — reversible, but it stops the account logging in */}
+      <ConfirmDialog
+        open={disableTarget !== null}
+        onOpenChange={(open) => { if (!open && !accountBusy) { setDisableTarget(null); setActionError(null) } }}
+        title="Disable account"
+        description={`Disable "${disableTarget}"? They cannot log in until you enable the account again. Their history, comments and jobs stay intact.`}
+        confirmLabel="Disable"
+        variant="destructive"
+        onConfirm={() => { if (disableTarget) handleAccountState(disableTarget, 'disable') }}
+        loading={accountBusy !== null}
+        error={actionError}
       />
     </div>
   )

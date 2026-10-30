@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1156,6 +1156,14 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "users", "can_view_reports", "INTEGER NOT NULL DEFAULT 0"
         )
+
+        # Migration: account lockout and disable state (#379 §I). ``status``
+        # keeps its approval meaning; these three are separate security state.
+        await _migrate_add_column(
+            db, "users", "failed_login_count", "INTEGER NOT NULL DEFAULT 0"
+        )
+        await _migrate_add_column(db, "users", "locked_at", "TEXT")
+        await _migrate_add_column(db, "users", "disabled", "INTEGER NOT NULL DEFAULT 0")
 
         # Migration: role='user' → role='operator' (RBAC three-role migration)
         cursor = await db.execute(
@@ -5677,6 +5685,14 @@ def _user_row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
     data["can_use_server_providers"] = data.get("role") == "admin" or bool(
         data.get("can_use_server_providers", 0)
     )
+    if "failed_login_count" in data:
+        data["failed_login_count"] = int(data["failed_login_count"] or 0)
+    if "locked_at" in data:
+        # Derived, never stored: the timestamp is the state, ``locked`` is how
+        # every caller and the Users page asks the question.
+        data["locked"] = data["locked_at"] is not None
+    if "disabled" in data:
+        data["disabled"] = bool(data["disabled"])
     return data
 
 
@@ -5749,6 +5765,30 @@ async def get_user_by_username(username: str) -> dict[str, Any] | None:
         )
         row = await cursor.fetchone()
         return _user_row_to_dict(row) if row else None
+
+
+async def get_user_audit_snapshot(username: str) -> dict[str, Any] | None:
+    """The account state an audit row must keep before the account changes.
+
+    One read gives a deleting or rejecting admin everything the trail has to
+    say afterwards: the role, both stored grants (normalized like the admin
+    API reports them) and the status. Returns ``None`` when the username does
+    not exist, so the caller can answer 404 from the same query.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT role, status, can_view_reports, can_use_server_providers"
+                " FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+    if row is None:
+        return None
+    data = _user_row_to_dict(row)
+    data["status"] = data.get("status") or "active"
+    return data
 
 
 async def delete_user(username: str) -> bool:
@@ -5872,18 +5912,55 @@ async def change_user_role(username: str, new_role: str) -> tuple[str, str]:
     return username, raw_key
 
 
-async def list_users() -> list[dict[str, Any]]:
-    """List all users (without key hashes).
+async def list_users_page(
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    q: str = "",
+) -> tuple[list[dict[str, Any]], int]:
+    """List users (without key hashes), optionally paged and filtered.
 
     Excludes the reserved 'admin' username (bootstrap superuser
-    authenticated via ADMIN_KEY, not a real managed user).
+    authenticated via ADMIN_KEY, not a real managed user). ``q`` narrows the
+    list to usernames containing it, case-insensitively.
+
+    ``created_at`` has only second resolution, so ``id`` breaks ties — without
+    a total order two pages could repeat or skip a row. ``id ASC`` is the order
+    SQLite already produced for same-second rows, so nothing moves.
+
+    Returns ``(users, total)``; ``total`` ignores ``limit``/``offset``.
     """
+    where = "username != 'admin'"
+    params: list[Any] = []
+    if q:
+        # instr() is a literal substring match — no LIKE wildcards to escape.
+        where += " AND instr(lower(username), lower(?)) > 0"
+        params.append(q)
+    columns = (
+        "id, username, role, status, can_view_reports, can_use_server_providers,"
+        " failed_login_count, locked_at, disabled, created_at, last_seen"
+    )
     async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT id, username, role, status, can_view_reports, can_use_server_providers, created_at, last_seen"
-            " FROM users WHERE username != 'admin' ORDER BY created_at DESC"
+        cursor = await db.execute(f"SELECT COUNT(*) FROM users WHERE {where}", params)
+        row = await cursor.fetchone()
+        total = row[0] if row else 0
+        sql = (
+            f"SELECT {columns} FROM users WHERE {where}"
+            " ORDER BY created_at DESC, id ASC"
         )
-        return [_user_row_to_dict(row) for row in await cursor.fetchall()]
+        page_params = list(params)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            page_params += [limit, offset]
+        cursor = await db.execute(sql, page_params)
+        users = [_user_row_to_dict(row) for row in await cursor.fetchall()]
+    return users, total
+
+
+async def list_users() -> list[dict[str, Any]]:
+    """List all users (without key hashes)."""
+    users, _ = await list_users_page()
+    return users
 
 
 async def set_user_can_view_reports(username: str, value: bool) -> bool:
@@ -6201,6 +6278,23 @@ async def list_server_provider_models() -> list[dict[str, Any]]:
             "SELECT provider, model FROM server_provider_models ORDER BY provider, model"
         )
         return [dict(row) for row in await cursor.fetchall()]
+
+
+async def list_configured_server_providers() -> set[str]:
+    """Lower-cased ids of every provider the server has configured at all.
+
+    A provider is configured when the server holds a key for it, has an
+    included model, or has declared a free pair: the three ways a provider
+    becomes usable (#347 r4), so a free-pairs-only provider counts even though
+    it has no stored key.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT lower(provider) FROM server_ai_providers"
+            " UNION SELECT lower(provider) FROM server_provider_models"
+            " UNION SELECT lower(provider) FROM free_ai_models"
+        )
+        return {row[0] for row in await cursor.fetchall()}
 
 
 async def list_server_provider_key_models() -> list[dict[str, Any]]:
@@ -6816,6 +6910,161 @@ async def get_user_status(username: str) -> str | None:
         if row is None:
             return None
         return dict(row).get("status", "active")
+
+
+async def record_failed_login(
+    username: str, *, threshold: int
+) -> dict[str, Any] | None:
+    """Count one failed login against the account it names (#379 §I.1).
+
+    Returns ``None`` when the username names no account: an unknown name never
+    creates or changes lockout state, so probing invented names cannot make the
+    table grow. Otherwise returns ``{"failed_attempts", "locked_at",
+    "newly_locked"}``, where ``newly_locked`` is true on exactly the attempt
+    that crossed the threshold — the caller writes ``auth.account_locked`` once.
+
+    ``threshold <= 0`` disables lockout entirely and counts nothing, so a later
+    threshold change cannot instantly lock accounts on failures that happened
+    while lockout was off. An already-locked account keeps its state and its
+    counter instead of climbing past the threshold.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT failed_login_count, locked_at FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+        if row is None:
+            await db.rollback()
+            return None
+        attempts = int(row["failed_login_count"] or 0)
+        locked_at = row["locked_at"]
+        if threshold <= 0 or locked_at:
+            await db.rollback()
+            return {
+                "failed_attempts": attempts,
+                "locked_at": locked_at,
+                "newly_locked": False,
+            }
+        attempts += 1
+        newly_locked = attempts >= threshold
+        new_locked_at = audit_timestamp() if newly_locked else None
+        await db.execute(
+            "UPDATE users SET failed_login_count = ?,"
+            " locked_at = COALESCE(?, locked_at) WHERE username = ?",
+            (attempts, new_locked_at, username),
+        )
+        await db.commit()
+        return {
+            "failed_attempts": attempts,
+            "locked_at": new_locked_at or locked_at,
+            "newly_locked": newly_locked,
+        }
+
+
+async def settle_login_attempt(username: str) -> str | None:
+    """Settle an attempt that authenticated: ``"disabled"``, ``"locked"`` or None.
+
+    A disabled or locked account is refused here, before a session exists, and
+    never has its counter reset — the two fields cannot disagree about whether
+    the account is usable. An ordinary login resets ``failed_login_count`` to 0
+    and leaves ``locked_at`` alone. Returns ``None`` for an identity with no
+    ``users`` row (the bootstrap ``admin``), which is not lockable.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(
+                "SELECT failed_login_count, locked_at, disabled"
+                " FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        if row["disabled"]:
+            return "disabled"
+        if row["locked_at"]:
+            return "locked"
+        if int(row["failed_login_count"] or 0):
+            await db.execute(
+                "UPDATE users SET failed_login_count = 0"
+                " WHERE username = ? AND failed_login_count != 0",
+                (username,),
+            )
+            await db.commit()
+        return None
+
+
+async def unlock_user(username: str) -> dict[str, Any] | None:
+    """Clear an account's lock and its failure counter (#379 §I.3).
+
+    Returns ``{"locked_at", "failed_login_count"}`` as they were, so the audit
+    row can say what was cleared, or ``None`` when the username names no account.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT locked_at, failed_login_count FROM users WHERE username = ?",
+                (username,),
+            )
+        ).fetchone()
+        if row is None:
+            await db.rollback()
+            return None
+        await db.execute(
+            "UPDATE users SET locked_at = NULL, failed_login_count = 0"
+            " WHERE username = ?",
+            (username,),
+        )
+        await db.commit()
+        return {
+            "locked_at": row["locked_at"],
+            "failed_login_count": int(row["failed_login_count"] or 0),
+        }
+
+
+async def set_user_disabled(username: str, disabled: bool) -> dict[str, Any] | None:
+    """Disable or re-enable an account without deleting it (#379 §I.2).
+
+    Returns the state before the change — ``{"role", "disabled",
+    "sessions_invalidated"}`` — or ``None`` when the username names no account.
+    Disabling drops every session of the account, so the disable takes effect
+    immediately instead of at the next login; history, comments, jobs and audit
+    rows are untouched.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT role, disabled FROM users WHERE username = ?", (username,)
+            )
+        ).fetchone()
+        if row is None:
+            await db.rollback()
+            return None
+        cursor = await db.execute(
+            "UPDATE users SET disabled = ? WHERE username = ?",
+            (1 if disabled else 0, username),
+        )
+        invalidated = False
+        if disabled and cursor.rowcount > 0:
+            sessions = await db.execute(
+                "DELETE FROM sessions WHERE username = ?", (username,)
+            )
+            invalidated = sessions.rowcount > 0
+        await db.commit()
+        return {
+            "role": row["role"],
+            "disabled": bool(row["disabled"]),
+            "sessions_invalidated": invalidated,
+        }
 
 
 async def list_pending_users() -> list[dict[str, Any]]:
@@ -8617,6 +8866,28 @@ async def delete_server_setting(key: str, deleted_by: str = "") -> bool:
     return True
 
 
+async def delete_server_settings(keys: Collection[str]) -> list[str]:
+    """Delete overrides for *keys*; return the keys actually removed.
+
+    Bulk, history-free variant of :func:`delete_server_setting` for keys that
+    are no longer settable at all (server-only / env-owned): one statement, no
+    history rows, idempotent on a clean DB.
+    """
+    if not keys:
+        return []
+    placeholders = ",".join("?" for _ in keys)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"DELETE FROM server_settings WHERE key IN ({placeholders}) RETURNING key",
+            tuple(keys),
+        )
+        removed = [row["key"] for row in await cursor.fetchall()]
+        await db.commit()
+    if removed:
+        logger.info("Server settings purged (server-only keys): %s", sorted(removed))
+    return removed
+
+
 async def get_server_settings_history(
     key: str | None = None, limit: int = 100
 ) -> list[dict[str, Any]]:
@@ -9996,6 +10267,316 @@ def _audit_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     return event
 
 
+def _audit_target_job_ref(event: dict[str, Any]) -> str | None:
+    """The job reference an event carries, if any: a job id or a job name.
+
+    ``job`` targets hold whatever the writer had at hand: the job id
+    (``job.delete``) or the job name (``job.metadata_set``/``_delete``, whose
+    route is name-keyed). ``comment`` targets name the job the comment belongs
+    to in ``details.job_id``, so the list can render "comment on <label>".
+    Every other target type has no job — the client has the ids.
+    """
+    if event.get("target_type") == "job":
+        return event.get("target_id") or None
+    if event.get("target_type") == "comment":
+        job_id = (event.get("details") or {}).get("job_id")
+        return str(job_id) if job_id else None
+    return None
+
+
+def _is_job_uuid(ref: str) -> bool:
+    """Is this reference a job id (``main.py`` mints a uuid4) or a job name?"""
+    try:
+        uuid.UUID(ref)
+    except ValueError:
+        return False
+    return True
+
+
+async def _audit_target_jobs(
+    db: aiosqlite.Connection, refs: Sequence[str]
+) -> dict[str, tuple[str, str | None]]:
+    """Resolve one page's job references to ``(job_id, label)`` in one query.
+
+    A reference is a job id or a job name, so the query matches both and the
+    result is keyed by both: either shape resolves without a second round
+    trip. The newest row wins when a job name was analyzed more than once.
+
+    Read at list time, never stored: neither value is a column and neither
+    enters ``entry_hash``. A missing job simply has no entry, so the caller
+    reports ``None`` rather than an error or an empty string.
+    """
+    if not refs:
+        return {}
+    marks = ", ".join("?" * len(refs))
+    cursor = await db.execute(
+        "SELECT job_id, COALESCE("
+        " NULLIF(json_extract(result_json, '$.job_name'), ''),"
+        " NULLIF(json_extract(result_json, '$.origin_job_name'), '')"
+        ") AS label FROM results"
+        " WHERE result_json IS NOT NULL AND json_valid(result_json)"
+        f" AND (job_id IN ({marks}) OR label IN ({marks}))"
+        " ORDER BY created_at, rowid",
+        [*refs, *refs],
+    )
+    rows = await cursor.fetchall()
+    # Name keys first, so an id that is also some row's name stays the id.
+    resolved = {
+        row["label"]: (row["job_id"], row["label"]) for row in rows if row["label"]
+    }
+    resolved.update({row["job_id"]: (row["job_id"], row["label"]) for row in rows})
+    return resolved
+
+
+def _audit_resolved_target(
+    event: dict[str, Any], resolved: dict[str, tuple[str, str | None]]
+) -> tuple[str | None, str | None]:
+    """``(target_job_id, target_label)`` for one event, read at list time only.
+
+    An unresolved uuid is still the job's id (the job may come back) while an
+    unresolved name is still the label a human reads — only the link is
+    missing. Every other target type gets neither.
+    """
+    ref = _audit_target_job_ref(event)
+    if not ref:
+        return None, None
+    job_id, label = resolved.get(ref, (None, None))
+    if _is_job_uuid(ref):
+        return ref, label
+    return job_id, label or ref
+
+
+#: Target families and the audit actions that record their removal. A family
+#: is the target type, except ``provider``, which splits in two: the server's
+#: provider (``provider.remove``) and one user's own credential for it
+#: (``user.ai_credential_delete`` — the only row that can explain that target).
+#: ``comment`` and ``transcript`` are absent on purpose: a comment's own row is
+#: the evidence, and transcripts are pruned by the sidecar's retention, so
+#: neither has a rootcoz removal to point at. Types nothing removes
+#: (``failure``, ``feedback``, ``audit``, ``database``, ``logs``, ``metadata``,
+#: ``settings``) are absent for that same reason.
+_AUDIT_REMOVAL_ACTIONS: dict[str, tuple[str, ...]] = {
+    "job": ("user.job_delete", "admin.job_delete"),
+    "user": ("admin.user_delete",),
+    "provider": ("provider.remove",),
+    "provider_credential": ("user.ai_credential_delete",),
+    "setting": ("settings.reset",),
+}
+
+#: ``action → family``, so a fetched row lands in the same bucket the page's
+#: references use.
+_AUDIT_REMOVAL_FAMILY: dict[str, str] = {
+    action: family
+    for family, actions in _AUDIT_REMOVAL_ACTIONS.items()
+    for action in actions
+}
+
+#: Actions whose ``provider`` target is one user's own key, not the server's.
+_AUDIT_USER_CREDENTIAL_ACTIONS = (
+    "user.ai_credential_set",
+    "user.ai_credential_delete",
+)
+
+
+def _audit_deletion_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
+    """``(family, actor, subject)`` a target's removal is matched on, or ``None``.
+
+    ``actor`` is the lower-cased user whose own credential the target is, and
+    empty for a target that belongs to the server. ``subject`` is lower-cased
+    for a username and a provider id — identity strings — and literal for a
+    setting key and a job reference, which are matched exactly.
+
+    ``None`` for a target type nothing in rootcoz removes, so those events stay
+    all-``null`` instead of borrowing another row's deletion.
+    """
+    target_type = str(event.get("target_type") or "")
+    subject = str(event.get("target_id") or "")
+    if not subject:
+        return None
+    if target_type == "job":
+        return "job", "", subject
+    if target_type == "user":
+        return "user", "", subject.lower()
+    if target_type == "provider":
+        if event.get("action") in _AUDIT_USER_CREDENTIAL_ACTIONS:
+            actor = str(event.get("actor") or "").lower()
+            return "provider_credential", actor, subject.lower()
+        return "provider", "", subject.lower()
+    if target_type == "setting":
+        return "setting", "", subject
+    return None
+
+
+async def _audit_present_targets(
+    db: aiosqlite.Connection,
+    keys: Collection[tuple[str, str, str]],
+    resolved: dict[str, tuple[str, str | None]],
+) -> set[tuple[str, str, str]]:
+    """Which of this page's targets still exist, keyed like their removal.
+
+    One query per target family for the whole page — never one per event — and
+    every answer is read here instead of stored: a username that comes back, a
+    provider re-added, a setting override re-saved or a user's key put back
+    leaves its events unfilled again.
+
+    A job is present when ``results`` still resolves its reference, a user when
+    ``users`` holds the name, a server provider when any of its key, selection
+    or free pair is configured, a per-user credential when that user's stored
+    key map still names the provider, and a setting when ``server_settings``
+    holds an override for the key.
+    """
+    present = {key for key in keys if key[0] == "job" and key[2] in resolved}
+    users = {key[2] for key in keys if key[0] == "user"}
+    providers = {key[2] for key in keys if key[0] == "provider"}
+    settings = {key[2] for key in keys if key[0] == "setting"}
+    credentials = {(key[1], key[2]) for key in keys if key[0] == "provider_credential"}
+    if users:
+        marks = ", ".join("?" * len(users))
+        cursor = await db.execute(
+            f"SELECT lower(username) FROM users WHERE lower(username) IN ({marks})",
+            list(users),
+        )
+        present |= {("user", "", row[0]) for row in await cursor.fetchall()}
+    if providers:
+        configured = await list_configured_server_providers()
+        present |= {("provider", "", name) for name in providers & configured}
+    if settings:
+        marks = ", ".join("?" * len(settings))
+        cursor = await db.execute(
+            f"SELECT key FROM server_settings WHERE key IN ({marks})",
+            list(settings),
+        )
+        present |= {("setting", "", row[0]) for row in await cursor.fetchall()}
+    if credentials:
+        names = sorted({actor for actor, _ in credentials})
+        marks = ", ".join("?" * len(names))
+        cursor = await db.execute(
+            "SELECT username, ai_credentials_enc FROM users"
+            f" WHERE lower(username) IN ({marks})",
+            names,
+        )
+        held: dict[str, set[str]] = {}
+        for row in await cursor.fetchall():
+            name = str(row["username"]).lower()
+            try:
+                held[name] = {
+                    provider.lower() for provider in _decode_ai_credentials(row[1])
+                }
+            except UnreadableAiCredentialsError:
+                # An unreadable key map cannot prove a key is gone, so it
+                # answers "still there" rather than claiming a removal.
+                held[name] = {pair[1] for pair in credentials if pair[0] == name}
+        present |= {
+            ("provider_credential", actor, provider)
+            for actor, provider in credentials
+            if provider in held.get(actor, set())
+        }
+    return present
+
+
+async def _audit_target_deletions(
+    db: aiosqlite.Connection, keys: Collection[tuple[str, str, str]]
+) -> dict[tuple[str, str, str], tuple[str, str, int]]:
+    """Resolve this page's removed targets to their newest delete event.
+
+    One query for the whole page and every target family. A job reference is
+    matched as ``target_id`` or as a member of a bulk delete's
+    ``details.job_ids`` list, a username and a provider id case-insensitively,
+    a setting key exactly. A per-user credential only matches a row naming the
+    same actor: one user's key never explains another's.
+
+    The value is ``(actor, created_at, id)`` of the newest matching row. A
+    target with no such row is simply absent, so the caller reports ``None``:
+    it may have been removed before the trail existed — the list admits that
+    instead of inventing a deletion.
+
+    Read at list time and never stored: none of these values is a column and
+    none enters ``entry_hash``.
+    """
+    if not keys:
+        return {}
+    actions = sorted(
+        {action for family, _, _ in keys for action in _AUDIT_REMOVAL_ACTIONS[family]}
+    )
+    job_refs = sorted({subject for family, _, subject in keys if family == "job"})
+    exact = sorted(
+        {subject for family, _, subject in keys if family in ("job", "setting")}
+    )
+    folded = sorted(
+        {
+            subject
+            for family, _, subject in keys
+            if family in ("user", "provider", "provider_credential")
+        }
+    )
+    conditions: list[str] = []
+    params: list[Any] = [*actions]
+    if exact:
+        conditions.append(f"target_id IN ({', '.join('?' * len(exact))})")
+        params.extend(exact)
+    if folded:
+        conditions.append(f"lower(target_id) IN ({', '.join('?' * len(folded))})")
+        params.extend(folded)
+    if job_refs:
+        # A bulk delete names its jobs in ``details``, not in ``target_id``.
+        conditions.append(
+            "(json_valid(details) AND EXISTS ("
+            " SELECT 1 FROM json_each(audit_events.details, '$.job_ids')"
+            f" WHERE json_each.value IN ({', '.join('?' * len(job_refs))})))"
+        )
+        params.extend(job_refs)
+    cursor = await db.execute(
+        "SELECT id, actor, action, created_at, target_id, details FROM audit_events"
+        f" WHERE action IN ({', '.join('?' * len(actions))})"
+        f" AND ({' OR '.join(conditions)})"
+        " ORDER BY id DESC",
+        params,
+    )
+    wanted: dict[str, set[tuple[str, str, str]]] = {}
+    for key in keys:
+        wanted.setdefault(key[0], set()).add(key)
+    deletions: dict[tuple[str, str, str], tuple[str, str, int]] = {}
+    for row in await cursor.fetchall():
+        family = _AUDIT_REMOVAL_FAMILY[row["action"]]
+        details = _decode_audit_details(row["details"])
+        target = str(row["target_id"] or "")
+        actor = str(row["actor"] or "").lower()
+        if family == "job":
+            named = {target, *(details.get("job_ids") or [])}
+            matches = [key for key in wanted.get("job", ()) if key[2] in named]
+        else:
+            # A setting key is a literal; a username and a provider id are
+            # identity strings the page already folded to lower case.
+            subject = target if family == "setting" else target.lower()
+            matches = [
+                key
+                for key in wanted.get(family, ())
+                if key[2] == subject and (not key[1] or key[1] == actor)
+            ]
+        # Newest first, so ``setdefault`` keeps the newest row per target.
+        for key in matches:
+            deletions.setdefault(key, (row["actor"], row["created_at"], row["id"]))
+    return deletions
+
+
+def _audit_resolved_deletion(
+    event: dict[str, Any],
+    present: set[tuple[str, str, str]],
+    deletions: dict[tuple[str, str, str], tuple[str, str, int]],
+) -> tuple[str | None, str | None, int | None]:
+    """``(target_deleted_by, target_deleted_at, target_delete_event_id)``.
+
+    Only a target that no longer exists is cross-referenced: one that is still
+    there was not removed, so it needs no evidence either way. A removed target
+    with no audited removal keeps all three ``None``. A deletion's own target
+    cross-references itself — it is the evidence, so that is the honest answer.
+    """
+    key = _audit_deletion_key(event)
+    if key is None or key in present:
+        return None, None, None
+    return deletions.get(key, (None, None, None))
+
+
 def _audit_export_event_row(row: aiosqlite.Row) -> dict[str, Any]:
     """Decoded row plus the exact bytes ``entry_hash`` covers.
 
@@ -10213,6 +10794,9 @@ def _audit_like_patterns(q: str) -> list[str]:
     )
 
 
+_AUDIT_Q_COLUMNS: tuple[str, ...] = ("actor", "target_id", "action")
+
+
 def _audit_filter_sql(
     *,
     actor: str | None = None,
@@ -10223,15 +10807,18 @@ def _audit_filter_sql(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    event_id: int | None = None,
 ) -> tuple[str, list[Any]]:
     """``(WHERE clause, params)`` for the audit list/export filters.
 
     Shared by :func:`list_audit_events` and :func:`iter_audit_events` so the
-    list and the export can never drift apart.
+    list and the export can never drift apart. ``event_id`` narrows the result
+    to one row (the list endpoint's ``id`` filter); its absence matches all.
     """
     conditions: list[str] = []
     params: list[Any] = []
     for column, value in (
+        ("id", event_id),
         ("target_type", target_type),
         ("target_id", target_id),
         ("outcome", outcome),
@@ -10248,10 +10835,17 @@ def _audit_filter_sql(
         params.extend(actions)
     if q:
         # Escape LIKE metacharacters — a literal "%" must not act as a wildcard.
+        # ``details`` is searched in every serialization an old row may use; the
+        # identity columns exactly as typed. Widened per #379: searching a
+        # username, a job name or an action id must find the rows that show it.
         patterns = _audit_like_patterns(q)
-        like = "details LIKE ? ESCAPE '\\'"
-        conditions.append(f"({' OR '.join([like] * len(patterns))})")
-        params.extend(patterns)
+        clauses = [
+            f"{column} LIKE ? ESCAPE '\\'"
+            for column in (*_AUDIT_Q_COLUMNS, "details")
+            for _ in patterns
+        ]
+        conditions.append(f"({' OR '.join(clauses)})")
+        params.extend(patterns * (len(_AUDIT_Q_COLUMNS) + 1))
     if date_from:
         conditions.append("created_at >= ?")
         params.append(date_from)
@@ -10272,6 +10866,7 @@ async def list_audit_events(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    event_id: int | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -10279,7 +10874,22 @@ async def list_audit_events(
 
     Filters are pushed into SQL so ``offset``/``limit`` page over the
     filtered set. ``actor`` matches case-insensitively, ``action`` accepts one
-    id or a list of ids, and ``q`` is a substring search over ``details``.
+    id or a list of ids, ``q`` is a substring search over ``actor``,
+    ``target_id``, ``action`` and ``details``, and ``event_id`` selects exactly
+    one event (no match is an empty list, never an error).
+
+    Each event carries ``target_gone``: ``true`` when its target no longer
+    exists, ``false`` when it does, and ``null`` for a target type that has no
+    presence to check (transcript, logs, metadata, …).
+
+    Each event carries ``target_job_id`` (the uuid of the job it refers to) and
+    ``target_label`` (that job's display name), both resolved here in one query
+    for the page and never stored. A target that no longer exists additionally
+    carries ``target_deleted_by``, ``target_deleted_at`` and
+    ``target_delete_event_id`` — the newest audit row that recorded its removal,
+    or all three ``None`` when the trail cannot say. Target types nothing in
+    rootcoz removes (``comment``, ``transcript``, ``failure``, …) always get the
+    three ``None``.
     Returns ``{"events": [...], "total": <int>}``.
     """
     where, params = _audit_filter_sql(
@@ -10291,6 +10901,7 @@ async def list_audit_events(
         q=q,
         date_from=date_from,
         date_to=date_to,
+        event_id=event_id,
     )
 
     async with _connect_db() as db:
@@ -10303,7 +10914,33 @@ async def list_audit_events(
             [*params, limit, offset],
         )
         rows = await cursor.fetchall()
-    return {"events": [_audit_event_row(row) for row in rows], "total": total}
+        events = [_audit_event_row(row) for row in rows]
+        refs = list(
+            dict.fromkeys(
+                ref for event in events if (ref := _audit_target_job_ref(event))
+            )
+        )
+        resolved = await _audit_target_jobs(db, refs)
+        keys = {
+            key for event in events if (key := _audit_deletion_key(event)) is not None
+        }
+        present = await _audit_present_targets(db, keys, resolved)
+        # Only a target that is gone needs its removal looked up.
+        deletions = await _audit_target_deletions(
+            db, [key for key in keys if key not in present]
+        )
+    for event in events:
+        event["target_job_id"], event["target_label"] = _audit_resolved_target(
+            event, resolved
+        )
+        (
+            event["target_deleted_by"],
+            event["target_deleted_at"],
+            event["target_delete_event_id"],
+        ) = _audit_resolved_deletion(event, present, deletions)
+        key = _audit_deletion_key(event)
+        event["target_gone"] = None if key is None else key not in present
+    return {"events": events, "total": total}
 
 
 async def iter_audit_events(

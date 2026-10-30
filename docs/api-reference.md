@@ -50,7 +50,7 @@ That single authenticated GET returns the stored analysis for one job, including
    | `operator` | Everything a reviewer can, plus submit analyses, re-analyze, abort, delete own jobs, push to exporters |
    | `admin` | Everything an operator can, plus delete any job, manage users and roles, server settings, token usage, log stream, admin chat |
 
-   `can_view_reports` is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the `ALLOWED_USERS` allow list, which is empty (open) by default and always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; `tests/test_allow_list_coverage.py` enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and `DELETE /api/user/ai-credentials/{provider}` — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.
+   `can_view_reports` is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the `ALLOWED_USERS` write allow-list — a deployment-level bound for SSO/proxy setups where a wide population authenticates but only a known team should write. It is empty by default (no username restriction; roles decide), never grants a permission, and is always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; `tests/test_allow_list_coverage.py` enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and `DELETE /api/user/ai-credentials/{provider}` — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.
 
    > **Warning:** A role you do not hold returns `403`, not `404`. `403 Admin access required`, `403 Reviewer access required`, and `403 Operator access required` name the exact gate you hit.
 
@@ -113,7 +113,7 @@ The shared body accepts the server defaults as per-request overrides:
 | `raw_xml`, `failures`, `passed_tests`, `skipped_tests` | File and raw sources |
 | `prow_job_name`, `build_id`, `gcs_prefix` | Prow build identity and artifact prefix |
 | `prow_url`, `gcs_bucket` | Prow server defaults, overridable per request |
-| `ai_provider`, `ai_model`, `force_server_credentials` | `claude`, `gemini`, or `cursor` |
+| `ai_provider`, `ai_model` | `claude`, `gemini`, or `cursor` |
 | `ai_call_timeout`, `max_concurrent_ai_calls` | AI budget for this run |
 | `peer_ai_configs`, `peer_analysis_max_rounds` | Multi-AI debate settings |
 | `additional_repos` | Extra repositories to clone for context |
@@ -211,7 +211,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | --- | --- | --- | --- |
 | GET | `/api/chat/{job_id}` | viewer | `limit` (1–500), `offset` |
 | POST | `/api/chat/{job_id}` | reviewer | `message` plus optional AI overrides; returns `202`, answer arrives over SSE |
-| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model`, `force_server_credentials` |
+| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model` |
 | POST | `/api/chat/{job_id}/abort` | reviewer | Cancel the in-flight answer |
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
 | DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
@@ -263,7 +263,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/notifications/vapid-public-key` | viewer | Web Push public key |
 | POST | `/api/notifications/subscribe` | viewer | `endpoint`, `p256dh_key`, `auth_key` |
 | POST | `/api/notifications/unsubscribe` | viewer | Removes a subscription |
-| GET | `/api/ai-models` | viewer | `provider`, `force_server_credentials`; lists models for `claude`, `gemini`, `cursor` |
+| GET | `/api/ai-models` | viewer | `provider`; lists models for `claude`, `gemini`, `cursor` |
 | GET | `/api/capabilities` | viewer | Feature toggles and whether server credentials exist |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue |
@@ -319,9 +319,21 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 
 See [Configuration Reference](configuration-reference.html) for the full environment variable surface behind these admin settings.
 
+#### Account state
+
+`GET /api/admin/users` rows carry `locked` (bool), `locked_at` (UTC timestamp or null), `disabled` (bool) and `failed_login_count` (int) alongside the role and grants, so an admin can see why an account cannot sign in without opening anything else.
+
+`POST /api/admin/users/{username}/unlock` clears both the lock and the consecutive-failure counter and records `admin.user_unlock` (details: `was_locked_at`, `failed_attempts`).
+
+`PUT /api/admin/users/{username}/disabled` with `{"disabled": true|false}` disables or re-enables the account and records `admin.user_disabled` / `admin.user_enabled`. A disabled account is refused with the *same* `401` body as a wrong credential — the response never reveals which condition applied — while its history, comments, jobs and audit rows stay intact.
+
 #### Audit events
 
-`GET /api/admin/audit` returns `{events, total, limit, offset}` newest-first. Each event carries `id`, `created_at` (UTC ISO-8601 with a trailing `Z`), `actor`, `actor_role`, `is_admin`, `action`, `target_type`, `target_id`, `outcome`, `details` (the stored JSON object, already parsed), `request_ip`, and the chain columns `prev_hash` and `entry_hash`.
+Each entry of `GET /api/admin/settings` carries `is_set` (whether a value exists, without revealing a sensitive one), `label` (the human name), `env_var`, `options`/`options_source`/`multiple`/`allow_custom` (for enumerated settings) and `server_only`/`derived`/`persistable`. A client renders `(empty)` from `is_set: false` rather than masking a value that does not exist.
+
+`GET /api/admin/audit` returns `{events, total, limit, offset}` newest-first. Each event carries `id`, `created_at` (UTC ISO-8601 with a trailing `Z`), `actor`, `actor_role`, `is_admin`, `action`, `target_type`, `target_id`, `target_label`, `target_job_id`, `outcome`, `details` (the stored JSON object, already parsed), `request_ip`, and the chain columns `prev_hash` and `entry_hash`.
+
+`target_label` and `target_job_id` are resolved **when the row is read** and are never stored or hashed: `target_label` is the human name of the target (the job's display name for a `job` target — whether `target_id` holds a uuid or the job name — and the containing job's name for a `comment` target), and `target_job_id` is the job uuid a client can link to, resolved from `target_id` for `job` targets and from `details.job_id` for `comment` targets. Both are `null` when nothing resolves, so a client can tell "no destination" from "destination unknown yet" and never render a dead link.
 
 ```bash
 curl -s "$BASE/api/admin/audit?actor=alice&action=admin.job_delete&since=2026-04-01T00:00:00Z&limit=20" \

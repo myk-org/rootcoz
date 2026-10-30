@@ -322,6 +322,26 @@ def _clear_db_settings_cache():
     clear_db_settings_cache()
 
 
+@pytest.fixture(autouse=True)
+def _restore_process_globals():
+    """Undo the two process-global leaks a test can leave for the next one.
+
+    ``rootcoz.cli.main._state`` is module-global, so one ``--json`` invocation
+    makes every later direct command call in the same worker print JSON. And
+    ``tests/test_audit.py`` raises the ``rootcoz.main`` logger level to capture
+    its log lines without lowering it again. Both only show up depending on
+    which tests share a worker, so reset them here rather than at call sites.
+    """
+    from rootcoz import main as rootcoz_main
+    from rootcoz.cli import main as cli_main
+
+    logger_level = rootcoz_main.logger.level
+    cli_main._state.clear()
+    yield
+    cli_main._state.clear()
+    rootcoz_main.logger.level = logger_level
+
+
 _TEST_SIDECAR_CATALOG = [
     {"provider": provider, "id": model}
     for provider, model in (

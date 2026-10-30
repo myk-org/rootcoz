@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, ApiError, extractApiDetail, type TestIntegrationResult } from '@/lib/api'
 import { useLatestRef } from '@/lib/useLatestRef'
 import { useSSE } from '@/lib/useSSE'
@@ -10,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
+import { SearchableMultiSelect } from '@/components/ui/searchable-multi-select'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -52,6 +54,7 @@ import { useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
+import type { AiModelsResponse } from '@/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,6 +62,8 @@ import type { RepoWithId } from '@/components/shared/AdditionalReposList'
 
 interface ServerSetting {
   key: string
+  /** Human name for the row title (E2E-F27) — the machine key is secondary. */
+  label: string
   env_var: string
   value: string
   default: string
@@ -66,13 +71,20 @@ interface ServerSetting {
   type: 'string' | 'boolean' | 'integer'
   category: string
   sensitive: boolean
+  /** Whether a value is stored at all (#379 E2E-F31). Older servers omit it. */
+  is_set?: boolean
   restart_required: boolean
   source: 'default' | 'env' | 'db'
   updated_by: string
   updated_at: string
   has_env_var?: boolean
   env_var_value?: string
-  options?: string[]
+  // Enumerated-setting contract (#379): a fixed set of choices, or the name
+  // of the set only another endpoint knows.
+  options?: string[] | null
+  options_source?: OptionSource | null
+  multiple?: boolean
+  allow_custom?: boolean
   jira_verified_method?: string
   persistable?: boolean
 }
@@ -105,6 +117,10 @@ const TEST_INTEGRATIONS: Record<string, string> = {
   'Report Portal': 'reportportal',
   Prow: 'prow',
 }
+
+// Sets of choices the server only knows at runtime, fetched from the endpoint
+// that owns them (exporters, the AI provider catalog, the user table).
+type OptionSource = 'exporters' | 'providers' | 'users'
 
 // Jira auth methods (exactly one is selected in Server Settings; none = Jira disabled)
 type JiraMethod = 'oauth' | 'basic' | 'pat' | 'atst'
@@ -142,6 +158,18 @@ function jiraSharedFieldHint(method: JiraMethod | null, key: string): string | u
   return other ? `Shared with the ${jiraMethodLabel(other)} method — both target the same Atlassian gateway tenant.` : undefined
 }
 
+// Per-setting hints for fields whose meaning is not obvious from the description.
+function settingHint(category: string, method: JiraMethod | null, key: string): string | undefined {
+  if (key === 'login_lockout_threshold') {
+    return 'Failed logins before the account locks. 0 disables lockout.'
+  }
+  return category === 'Jira' ? jiraSharedFieldHint(method, key) : undefined
+}
+
+// Why the threshold cannot be edited while the switch is off (E2E-F34).
+const LOCKOUT_OFF_HINT =
+  'Lockout is disabled — this threshold is ignored until login lockout is turned on.'
+
 function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
   // oauth and atst share locator/TLS fields (atlassian_oauth_cloud_id,
   // jira_oauth_ssl_verify) — a shared field stays visible for either of
@@ -159,9 +187,8 @@ function hiddenJiraFieldsFor(method: JiraMethod): Set<string> {
 // known set, kept alongside the backend's server-only metadata marker.
 const SERVER_ONLY_SETTING_KEYS = new Set(['admin_key', 'db_path', 'debug'])
 
-// Backend-owned settings with no UI: ambient-auth providers are an operator
-// detail, never a checkbox an admin toggles here.
-const HIDDEN_SETTING_KEYS = new Set(['ambient_auth_providers'])
+// How long a ?highlight= row stays marked after the audit link lands on it.
+const HIGHLIGHT_MS = 2500
 
 // Valid Jira auth method ids ('' / anything else = unset: Jira disabled).
 function parseJiraMethod(value?: string): JiraMethod | null {
@@ -452,6 +479,84 @@ function serializeActiveServerProviders(
 }
 
 // ---------------------------------------------------------------------------
+// Enumerated setting choices (#379)
+// ---------------------------------------------------------------------------
+
+interface DynamicOptions {
+  status: 'loading' | 'ready' | 'failed'
+  options: string[]
+  /** option -> why it cannot be picked (an exporter that is not configured) */
+  disabled: Record<string, string>
+}
+
+const LOADING_OPTIONS: DynamicOptions = { status: 'loading', options: [], disabled: {} }
+
+/** A stored list value: comma-separated, order preserved, no empties. */
+function parseSettingList(raw: string): string[] {
+  return raw.split(',').map(v => v.trim()).filter(Boolean)
+}
+
+async function fetchSettingOptions(
+  source: OptionSource,
+): Promise<Pick<DynamicOptions, 'options' | 'disabled'>> {
+  if (source === 'exporters') {
+    const exporters = await api.get<{ name: string; enabled: boolean }[]>('/api/exporters')
+    const disabled: Record<string, string> = {}
+    // An exporter that is not configured would never run, so it must not be
+    // selectable — but the admin still sees it exists and why it is out.
+    for (const exporter of exporters) if (!exporter.enabled) disabled[exporter.name] = 'not configured'
+    return { options: exporters.map(e => e.name), disabled }
+  }
+  if (source === 'providers') {
+    // The same catalog the AI pickers use. Fetched here rather than through
+    // useProviderCatalog because that hook reports an empty catalog for both
+    // "no providers" and "fetch failed", and a failed fetch must fall back to
+    // a plain input instead of a picker with nothing to pick.
+    const catalog = await api.get<AiModelsResponse>('/api/ai-models')
+    return { options: Object.keys(catalog.providers ?? {}), disabled: {} }
+  }
+  const data = await api.get<{ users: { username: string }[] }>('/api/admin/users')
+  return { options: data.users.map(u => u.username), disabled: {} }
+}
+
+/** Fetch each needed dynamic list once per mount; a failed list stays failed. */
+function useDynamicSettingOptions(
+  sources: OptionSource[],
+): Partial<Record<OptionSource, DynamicOptions>> {
+  const [state, setState] = useState<Partial<Record<OptionSource, DynamicOptions>>>({})
+  const requested = useRef(new Set<OptionSource>())
+  const alive = useRef(true)
+  // StrictMode mounts, unmounts and remounts in development: the flag must be
+  // set again on mount, or every resolved fetch after the remount is discarded
+  // and the control sits on "Loading choices…" forever (live-only bug).
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+  // Keyed by the set, so a settings refetch with the same sources is free.
+  const key = sources.join(',')
+  useEffect(() => {
+    const pending = (key ? (key.split(',') as OptionSource[]) : []).filter(s => !requested.current.has(s))
+    for (const source of pending) {
+      requested.current.add(source)
+      fetchSettingOptions(source)
+        .then(v => {
+          if (alive.current) setState(prev => ({ ...prev, [source]: { status: 'ready', ...v } }))
+        })
+        .catch(() => {
+          // Allow a later refetch to retry this source instead of pinning the
+          // field to its fallback input for the rest of the session.
+          requested.current.delete(source)
+          if (alive.current) {
+            setState(prev => ({ ...prev, [source]: { status: 'failed', options: [], disabled: {} } }))
+          }
+        })
+    }
+  }, [key])
+  return state
+}
+
+// ---------------------------------------------------------------------------
 // Source badge
 // ---------------------------------------------------------------------------
 
@@ -480,6 +585,53 @@ function SaveToDbButton({ saving, onClick }: { saving: boolean; onClick: () => v
       {saving && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
       Save to DB
     </Button>
+  )
+}
+
+// Every row is titled with its human label. The env var is the operator's link
+// to `.env` and the docs, so it lives in the label's tooltip — discoverable,
+// copyable, never a permanent second line (E2E-F27).
+function SettingRowLabel({ setting }: { setting: ServerSetting }) {
+  const label = (tabIndex?: number) => (
+    <span data-setting-title="" tabIndex={tabIndex} className="text-sm font-semibold text-text-primary">
+      {setting.label}
+    </span>
+  )
+  // A setting without an env var has nothing to reveal (jira_auth_mode).
+  if (!setting.env_var) return label()
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        {/* Focusable: the tooltip must open without a pointer, not hover-only. */}
+        {label(0)}
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        <span data-setting-env-var="" className="select-text font-mono text-xs">
+          {setting.env_var}
+        </span>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function SettingRowHeader({
+  setting,
+  saveToDbNode,
+  children,
+}: {
+  setting: ServerSetting
+  saveToDbNode?: React.ReactNode
+  children?: React.ReactNode
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <SettingRowLabel setting={setting} />
+      <SourceBadge source={setting.source} />
+      {saveToDbNode}
+      <EnvVarWarning setting={setting} />
+      {setting.restart_required && <RestartBadge />}
+      {children}
+    </div>
   )
 }
 
@@ -512,10 +664,10 @@ export function ServerSettingsPage() {
   const { isAdmin } = useAuth()
   const [state, dispatch] = useReducer(reducer, initialState)
 
-  // Peer config structured editor state
-  const [peerConfigs, setPeerConfigs] = useState<PeerConfigWithId[]>([])
-  const [peerMaxRounds, setPeerMaxRounds] = useState(3)
-  const [peerEditing, setPeerEditing] = useState(false)
+  // Peer config structured editor (always inline, E2E-F28..F30). A null draft
+  // renders the stored value, so a refetch (SSE, save, reset) never overwrites
+  // a change the admin has not saved yet.
+  const [peerDraft, setPeerDraft] = useState<PeerConfigWithId[] | null>(null)
 
   // AI default provider/model editing
   const [aiProviderEditing, setAiProviderEditing] = useState(false)
@@ -531,9 +683,34 @@ export function ServerSettingsPage() {
   const { models: aiModels, refresh: refreshModels, refreshing: refreshingModels } = useProviderModels(effectiveAiProvider)
   const cursorAuthStatus = useCursorAuthStatus()
 
-  // Additional repos structured editor state
-  const [additionalRepos, setAdditionalRepos] = useState<RepoWithId[]>([])
-  const [reposEditing, setReposEditing] = useState(false)
+  // Additional repos structured editor — same draft contract as the peers.
+  const [reposDraft, setReposDraft] = useState<RepoWithId[] | null>(null)
+
+  const settingValue = (key: string) => state.settings.find(s => s.key === key)?.value ?? ''
+  const savedPeerRows = parsePeerConfigString(settingValue('peer_ai_configs'))
+  const savedRepoRows = parseAdditionalReposString(settingValue('additional_repos'))
+  const peers = peerDraft ?? savedPeerRows
+  const repos = reposDraft ?? savedRepoRows
+  // Save/Cancel exist exactly while a draft can be saved: any change to the
+  // rows. Comparing the serialised rows keeps a revert-to-stored draft clean;
+  // comparing lengths keeps an added-but-still-empty row dirty, because it can
+  // be saved.
+  const peersDirty = peerDraft !== null && (
+    peerDraft.length !== savedPeerRows.length ||
+    serializePeerConfigs(peerDraft) !== serializePeerConfigs(savedPeerRows)
+  )
+  const reposDirty = reposDraft !== null && (
+    reposDraft.length !== savedRepoRows.length ||
+    serializeAdditionalRepos(reposDraft) !== serializeAdditionalRepos(savedRepoRows)
+  )
+  const setRepos = (action: React.SetStateAction<RepoWithId[]>) =>
+    setReposDraft(prev => (typeof action === 'function' ? action(prev ?? savedRepoRows) : action))
+  const setPeers = (action: React.SetStateAction<PeerConfigWithId[]>) =>
+    setPeerDraft(prev => (typeof action === 'function' ? action(prev ?? savedPeerRows) : action))
+  // Save, Cancel, reset and import all mean "show the stored value again".
+  function clearPeerDraft() {
+    setPeerDraft(null)
+  }
 
   // Active server providers draft (null = untouched, render the stored value).
   // Keeping the draft null until a toggle means a refetch (SSE, save, reset)
@@ -579,6 +756,18 @@ export function ServerSettingsPage() {
     const timer = setTimeout(() => dispatch({ type: 'SET_SEARCH', search: searchInput }), 200)
     return () => clearTimeout(timer)
   }, [searchInput])
+
+  // ?highlight=<key> comes from an audit row's target link: mark that setting's
+  // row for a moment so the admin sees which one the event changed.
+  const [searchParams] = useSearchParams()
+  const highlightKey = searchParams.get('highlight') ?? ''
+  const [highlighted, setHighlighted] = useState('')
+  useEffect(() => {
+    if (!highlightKey) return
+    setHighlighted(highlightKey)
+    const timer = setTimeout(() => setHighlighted(''), HIGHLIGHT_MS)
+    return () => clearTimeout(timer)
+  }, [highlightKey])
 
   // ---- Fetch settings ----
   // silent=true skips the loading skeleton (used after save/reset: keep the
@@ -628,6 +817,19 @@ export function ServerSettingsPage() {
 
   useSSE('settings', settingsEvents)
 
+  // Choices for the enumerated settings whose list lives in another endpoint
+  // (exporters, the provider catalog, the user table). Loaded once per source,
+  // off the render path so a slow sidecar never blocks the page.
+  const optionSources = useMemo(
+    () => [...new Set(
+      state.settings
+        .map(s => s.options_source)
+        .filter((source): source is OptionSource => Boolean(source)),
+    )].sort(),
+    [state.settings],
+  )
+  const dynamicOptions = useDynamicSettingOptions(optionSources)
+
   // ---- Shared save helper (returns null on success, the error message on failure) ----
   // opts.keepEditor: the Jira method switch uses this so the SAVE_SUCCESS it
   // triggers does not close an editor on a field still visible under the new
@@ -659,8 +861,8 @@ export function ServerSettingsPage() {
     }
   }
 
-  async function saveSettingValue(key: string, value: string): Promise<string | null> {
-    return saveSettings({ [key]: value })
+  async function saveSettingValue(key: string, value: string, keepEditor = false): Promise<string | null> {
+    return saveSettings({ [key]: value }, { keepEditor })
   }
 
   // ---- Save setting ----
@@ -679,6 +881,8 @@ export function ServerSettingsPage() {
       // over the fresh value (#339/#340). Dropping the draft renders whatever
       // the refetch returned — never the pre-reset selection (#346).
       if (key === 'active_server_providers') setServerProvidersDraft(null)
+      if (key === 'peer_ai_configs') clearPeerDraft()
+      if (key === 'additional_repos') setReposDraft(null)
     } catch {
       // silently fail – data will refetch anyway
     } finally {
@@ -687,9 +891,11 @@ export function ServerSettingsPage() {
   }
 
   // ---- Boolean toggle (save immediately) ----
+  // keepEditor for the lockout switch: the threshold editor it is about to
+  // disable must keep the number the admin already typed (E2E-F34).
   async function handleBooleanToggle(key: string, currentValue: string) {
     const newValue = currentValue === 'true' ? 'false' : 'true'
-    await saveSettingValue(key, newValue)
+    await saveSettingValue(key, newValue, key === 'login_lockout_enabled')
   }
 
   // ---- Persist an env-sourced setting into the DB ----
@@ -774,6 +980,8 @@ export function ServerSettingsPage() {
       // would overwrite the imported value on Save — cancel it before the
       // refetch lands. Editors on untouched keys keep their drafts.
       dispatch({ type: 'CANCEL_EDIT', keys: importedKeys })
+      if (importedKeys.includes('peer_ai_configs')) clearPeerDraft()
+      if (importedKeys.includes('additional_repos')) setReposDraft(null)
       // Revealed values are pre-import plaintext — clear them so the fresh
       // (masked) values show and editors never pre-fill a stale secret.
       dispatch({ type: 'CLEAR_REVEALED', keys: importedKeys })
@@ -792,19 +1000,11 @@ export function ServerSettingsPage() {
   }
 
   // ---- Peer config structured editor ----
-  function handleStartPeerEdit(setting: ServerSetting) {
-    setPeerConfigs(parsePeerConfigString(setting.value))
-    const maxRoundsSetting = state.settings.find(s => s.key === 'peer_analysis_max_rounds')
-    setPeerMaxRounds(maxRoundsSetting ? parseInt(maxRoundsSetting.value) || 3 : 3)
-    setPeerEditing(true)
-  }
-
+  // Rounds are a setting of their own row (E2E-F33): the peer payload is peers only.
   async function handleSavePeerConfig() {
-    const configStr = serializePeerConfigs(peerConfigs)
-    const updates: Record<string, string> = { peer_ai_configs: configStr }
-    updates.peer_analysis_max_rounds = String(peerMaxRounds)
-    const error = await saveSettings(updates)
-    if (!error) setPeerEditing(false)  // Only close on success
+    const error = await saveSettingValue('peer_ai_configs', serializePeerConfigs(peers))
+    // Only a saved change returns the editor to its clean state.
+    if (!error) clearPeerDraft()
   }
 
   async function handleSaveAiProvider(value: string) {
@@ -860,16 +1060,10 @@ export function ServerSettingsPage() {
   }
 
   // ---- Additional repos structured editor ----
-  function handleStartReposEdit(setting: ServerSetting) {
-    setAdditionalRepos(parseAdditionalReposString(setting.value))
-    setReposEditing(true)
-  }
-
   async function handleSaveRepos() {
-    const reposStr = serializeAdditionalRepos(additionalRepos)
+    const reposStr = serializeAdditionalRepos(repos)
     const error = await saveSettingValue('additional_repos', reposStr)
-    if (error) return
-    setReposEditing(false)
+    if (!error) setReposDraft(null)
   }
 
   // ---- Active server providers editor ----
@@ -932,7 +1126,6 @@ export function ServerSettingsPage() {
   const allGroups: CategoryGroup[] = useMemo(() => {
     const categoryMap = new Map<string, ServerSetting[]>()
     for (const s of state.settings) {
-      if (HIDDEN_SETTING_KEYS.has(s.key)) continue
       const cat = s.category || 'General'
       if (!categoryMap.has(cat)) categoryMap.set(cat, [])
       categoryMap.get(cat)!.push(s)
@@ -955,7 +1148,7 @@ export function ServerSettingsPage() {
     // The category is searchable too: "audit security" finds AUDIT_RETENTION_DAYS
     // under "Auth & Security".
     const matches = (s: ServerSetting, group: string) => {
-      const text = `${s.key} ${s.env_var} ${s.description} ${group}`.toLowerCase()
+      const text = `${s.label} ${s.key} ${s.env_var} ${s.description} ${group}`.toLowerCase()
       return tokens.every(token => text.includes(token))
     }
     return allGroups
@@ -968,7 +1161,8 @@ export function ServerSettingsPage() {
 
   // ---- Jira auth method (explicit selection, persisted as jira_auth_mode) ----
   // The checkbox state comes ONLY from the persisted jira_auth_mode setting.
-  const persistedJiraMethod = parseJiraMethod(state.settings.find(s => s.key === 'jira_auth_mode')?.value)
+  const jiraAuthSetting = state.settings.find(s => s.key === 'jira_auth_mode')
+  const persistedJiraMethod = parseJiraMethod(jiraAuthSetting?.value)
   // A method counts as configured only after its Test connection succeeded (#346).
   // The server attaches the verified-method marker to one settings item —
   // look it up by the marker, not by a specific key.
@@ -981,11 +1175,11 @@ export function ServerSettingsPage() {
     ? hiddenJiraFieldsFor(persistedJiraMethod)
     : new Set(JIRA_METHODS.flatMap(m => m.fields))
 
-  function handleJiraMethodCheck(method: JiraMethod, checked: boolean) {
+  function handleJiraMethodChange(method: JiraMethod | null) {
     setJiraModeError(null)
-    if (!checked) {
-      // Unchecking the active method disables Jira — a verified method gets
-      // the same confirmation as a switch; unverified applies immediately.
+    if (method === null) {
+      // Dropping the active method disables Jira — a verified method gets the
+      // same confirmation as a switch; an unverified one applies immediately.
       if (persistedJiraMethod === verifiedJiraMethod) {
         setPendingJiraSwitch('none')
       } else {
@@ -1072,6 +1266,27 @@ export function ServerSettingsPage() {
     ? activeTab
     : allGroups[0]?.category ?? ''
 
+  // A highlighted row has to be visible: open its category, expand it, then
+  // scroll to the row. One change per pass, and the saved tab is left alone —
+  // following an audit link must not rewrite the admin's own preference.
+  useEffect(() => {
+    if (!highlighted) return
+    const category = state.settings.find(s => s.key === highlighted)?.category
+    if (category) {
+      if (state.collapsedCategories.has(category)) {
+        dispatch({ type: 'TOGGLE_CATEGORY', category })
+        return
+      }
+      if (category !== effectiveTab) {
+        setActiveTab(category)
+        return
+      }
+    }
+    document
+      .querySelector(`[data-setting-key="${CSS.escape(highlighted)}"]`)
+      ?.scrollIntoView({ block: 'center' })
+  }, [highlighted, state.settings, state.collapsedCategories, effectiveTab])
+
   // ---- Per-category card (shared by the tab view and search results) ----
   function renderCategory(category: string, settings: ServerSetting[]) {
     const isCollapsed = state.collapsedCategories.has(category)
@@ -1084,10 +1299,350 @@ export function ServerSettingsPage() {
         <SaveToDbButton saving={persistingKey === s.key} onClick={() => handlePersistEnv(s.key)} />
       ) : null
     // Search must be able to find every Jira field, so auth-method hiding
-    // only applies in the tab view.
-    const rowSettings = category === 'Jira' && !state.search
-      ? settings.filter(s => !jiraHiddenFields.has(s.key))
-      : settings
+    // only applies in the tab view. jira_auth_mode is edited by the card's
+    // selector, so it never gets a row of its own (E2E-F33).
+    const rowSettings = settings.filter(s => s.key !== 'jira_auth_mode' && !(
+      category === 'Jira' && !state.search && jiraHiddenFields.has(s.key)
+    ))
+    // One setting row; the map below supplies the shared key, data attribute and
+    // match mark, so no branch can render an unaddressable row.
+    const renderSettingRow = (setting: ServerSetting) => {
+      if (setting.key === 'ai_provider') {
+        return (
+          <AiSettingRow
+            key={setting.key}
+            setting={setting}
+            editing={aiProviderEditing}
+            saveToDbNode={saveToDbNode(setting)}
+            onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
+            onCancel={() => {
+              setAiProviderEditing(false)
+              setAiProviderValue(savedAiProvider)
+              setAiModelValue(savedAiModel)
+            }}
+            onSave={() => handleSaveAiProvider(aiProviderValue)}
+            onReset={() => handleReset(setting.key)}
+            saving={state.saving}
+            historyKey={state.historyKey}
+            history={state.history}
+            historyLoading={state.historyLoading}
+            onShowHistory={() => handleShowHistory(setting.key)}
+            configureLabel="Configure provider"
+            notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
+          >
+            <ProviderSelect
+              showCredentialSources
+              value={aiProviderValue}
+              onChange={(v) => {
+                setAiProviderValue(v)
+                setAiModelValue('')
+              }}
+            />
+          </AiSettingRow>
+        )
+      }
+
+      if (setting.key === 'ai_model') {
+        return (
+          <AiSettingRow
+            key={setting.key}
+            setting={setting}
+            editing={aiModelEditing}
+            saveToDbNode={saveToDbNode(setting)}
+            onStartEdit={(v) => { setAiModelValue(v); setAiModelEditing(true) }}
+            onCancel={() => setAiModelEditing(false)}
+            onSave={() => handleSaveAiModel(aiModelValue)}
+            onReset={() => handleReset(setting.key)}
+            saving={state.saving}
+            historyKey={state.historyKey}
+            history={state.history}
+            historyLoading={state.historyLoading}
+            onShowHistory={() => handleShowHistory(setting.key)}
+            configureLabel="Configure model"
+            notConfiguredLabel="Not configured (uses AI_MODEL env var)"
+          >
+            <div className="flex items-center gap-2">
+              {/* Grows with the row so ~40-char model ids are readable;
+                  the refresh button beside it keeps its own size. */}
+              <ModelCombobox
+                value={aiModelValue}
+                onChange={setAiModelValue}
+                options={aiModels}
+                placeholder="Select model..."
+                className="min-w-0 flex-1 max-w-3xl"
+              />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={refreshModels}
+                    disabled={refreshingModels || !effectiveAiProvider}
+                    className="h-8 w-8 shrink-0"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${refreshingModels ? 'animate-spin' : ''}`} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Refresh models from sidecar</TooltipContent>
+              </Tooltip>
+            </div>
+            {!effectiveAiProvider && (
+              <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
+            )}
+          </AiSettingRow>
+        )
+      }
+
+      // ---- ACTIVE_SERVER_PROVIDERS: always-visible provider picker ----
+      if (setting.key === 'active_server_providers') {
+        const options = setting.options ?? []
+        const stored = parseActiveServerProviders(setting.value, options)
+        // Stored IDs with no discovered option have no checkbox, so a
+        // save must carry them through instead of dropping them.
+        const undiscovered = stored.filter(p => !options.includes(p))
+        // Saved selection limited to discovered options: a stale stored
+        // ID keeps its place in the DB but has no checkbox to toggle.
+        const saved = stored.filter(p => options.includes(p))
+        const checked = serverProvidersDraft ?? saved
+        const dirty = serverProvidersDraft !== null && !sameProviderSet(checked, saved)
+        const toggle = (provider: string) =>
+          setServerProvidersDraft(
+            checked.includes(provider)
+              ? checked.filter(p => p !== provider)
+              : [...checked, provider],
+          )
+        return (
+          <div key={setting.key} className="py-3 space-y-2">
+            <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode(setting)} />
+            {options.length === 0 ? (
+              setting.value.trim() ? (
+                <div className="space-y-1.5">
+                  <span className="text-xs text-text-secondary">
+                    Restricted to: <span className="font-mono">{setting.value}</span>
+                  </span>
+                  <p className="flex items-center gap-1.5 text-xs text-signal-amber">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    Provider discovery is currently unavailable — the stored restriction above stays in effect.
+                  </p>
+                  {setting.source === 'db' && (
+                    <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                      <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <span className="text-xs text-text-tertiary italic">No server providers available</span>
+              )
+            ) : (
+              <div className="space-y-2">
+                <div role="group" aria-label="Active server providers" className="space-y-1">
+                  {options.map((provider) => (
+                    <label key={provider} className="flex items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={checked.includes(provider)}
+                        onCheckedChange={() => toggle(provider)}
+                        aria-label={provider}
+                      />
+                      <span className={`font-mono ${checked.includes(provider) ? 'text-text-primary' : 'text-text-tertiary line-through'}`}>
+                        {provider}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                {checked.length === 0 && (
+                  <p className="flex items-center gap-1.5 text-xs text-signal-amber">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                    No providers selected — saving this activates ALL server providers (an empty value means all).
+                  </p>
+                )}
+                <div className="flex items-center gap-2 pt-1">
+                  {dirty && (
+                    <>
+                      <Button size="sm" onClick={() => handleSaveServerProviders(checked, options, undiscovered)} disabled={state.saving} className="h-7 text-xs">
+                        {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setServerProvidersDraft(null)} disabled={state.saving} className="h-7 text-xs">Cancel</Button>
+                    </>
+                  )}
+                  {setting.source === 'db' && (
+                    <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                      <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
+            <p className="text-xs text-text-tertiary">{setting.description}</p>
+            {setting.source === 'db' && setting.updated_by && (
+              <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+            )}
+            {setting.source === 'db' && (
+              <HistoryToggle
+                settingKey={setting.key}
+                sensitive={setting.sensitive}
+                historyKey={state.historyKey}
+                history={state.history}
+                historyLoading={state.historyLoading}
+                onShowHistory={() => handleShowHistory(setting.key)}
+              />
+            )}
+          </div>
+        )
+      }
+
+      // ---- PEER_AI_CONFIGS: structured editor ----
+      if (setting.key === 'peer_ai_configs') {
+        return (
+          <div key={setting.key} className="py-3 space-y-2">
+            <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode(setting)} />
+            {/* The editor is the row (E2E-F28): never hidden behind a link.
+                Save/Cancel appear only while a draft differs from the stored
+                value (E2E-F29/F30). */}
+            <PeerConfigList
+              peerConfigs={peers}
+              setPeerConfigs={setPeers}
+              addLabel="Add peer configuration"
+            />
+            {(peersDirty || setting.source === 'db') && (
+              <div className="flex items-center gap-2 pt-1">
+                {peersDirty && (
+                  <>
+                    <Button size="sm" onClick={handleSavePeerConfig} disabled={state.saving} className="h-7 text-xs">
+                      {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={clearPeerDraft} className="h-7 text-xs">Cancel</Button>
+                  </>
+                )}
+                {setting.source === 'db' && (
+                  <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                    <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                  </Button>
+                )}
+              </div>
+            )}
+            <p className="text-xs text-text-tertiary">{setting.description}</p>
+            {setting.source === 'db' && setting.updated_by && (
+              <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+            )}
+            {setting.source === 'db' && (
+              <HistoryToggle
+                settingKey={setting.key}
+                sensitive={setting.sensitive}
+                historyKey={state.historyKey}
+                history={state.history}
+                historyLoading={state.historyLoading}
+                onShowHistory={() => handleShowHistory(setting.key)}
+              />
+            )}
+          </div>
+        )
+      }
+
+      // ---- ADDITIONAL_REPOS: structured editor ----
+      if (setting.key === 'additional_repos') {
+        return (
+          <div key={setting.key} className="py-3 space-y-2">
+            <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode(setting)} />
+            {/* Always inline, same empty/dirty contract as the peers above. */}
+            <AdditionalReposList repos={repos} setRepos={setRepos} />
+            {(reposDirty || setting.source === 'db') && (
+              <div className="flex items-center gap-2 pt-1">
+                {reposDirty && (
+                  <>
+                    <Button size="sm" onClick={handleSaveRepos} disabled={state.saving} className="h-7 text-xs">
+                      {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setReposDraft(null)} className="h-7 text-xs">Cancel</Button>
+                  </>
+                )}
+                {setting.source === 'db' && (
+                  <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
+                    <RotateCcw className="mr-1 h-3 w-3" /> Reset
+                  </Button>
+                )}
+              </div>
+            )}
+            <p className="text-xs text-text-tertiary">{setting.description}</p>
+            {setting.source === 'db' && setting.updated_by && (
+              <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+            )}
+            {setting.source === 'db' && (
+              <HistoryToggle
+                settingKey={setting.key}
+                sensitive={setting.sensitive}
+                historyKey={state.historyKey}
+                history={state.history}
+                historyLoading={state.historyLoading}
+                onShowHistory={() => handleShowHistory(setting.key)}
+              />
+            )}
+          </div>
+        )
+      }
+
+      // ---- Enumerated settings: a picker, not a free-text box (#379) ----
+      if (setting.options?.length || setting.options_source) {
+        return (
+          <EnumSettingRow
+            key={setting.key}
+            setting={setting}
+            saveToDbNode={saveToDbNode(setting)}
+            dynamic={
+              setting.options_source
+                ? dynamicOptions[setting.options_source] ?? LOADING_OPTIONS
+                : undefined
+            }
+            saving={state.saving}
+            resetting={state.resettingKey === setting.key}
+            historyKey={state.historyKey}
+            history={state.history}
+            historyLoading={state.historyLoading}
+            onShowHistory={() => handleShowHistory(setting.key)}
+            onSave={(value) => handleSave(setting.key, value)}
+            onReset={() => handleReset(setting.key)}
+          />
+        )
+      }
+
+      // ---- Default: generic SettingRow ----
+      // Lockout is one setting with a switch and a number (E2E-F34): while the
+      // switch is off the number cannot be edited, and says why.
+      const lockoutOff = setting.key === 'login_lockout_threshold' &&
+        state.settings.some(s => s.key === 'login_lockout_enabled' && s.value === 'false')
+      return (
+        <SettingRow
+          key={setting.key}
+          setting={setting}
+          saveToDbNode={saveToDbNode(setting)}
+          hint={lockoutOff ? LOCKOUT_OFF_HINT : settingHint(category, persistedJiraMethod, setting.key)}
+          disabled={lockoutOff}
+          isEditing={state.editingKey === setting.key}
+          editValue={state.editValue}
+          saving={state.saving}
+          resetting={state.resettingKey === setting.key}
+          revealed={state.revealedKeys.has(setting.key)}
+          historyKey={state.historyKey}
+          history={state.history}
+          historyLoading={state.historyLoading}
+          onShowHistory={() => handleShowHistory(setting.key)}
+          revealedValue={state.revealedValues[setting.key]}
+          onStartEdit={() =>
+            dispatch({
+              type: 'START_EDIT',
+              key: setting.key,
+              currentValue: state.revealedValues[setting.key] ?? setting.value,
+            })
+          }
+          onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
+          onSetEditValue={(v) => dispatch({ type: 'SET_EDIT_VALUE', value: v })}
+          onSave={() => handleSave(setting.key, state.editValue)}
+          onReset={() => handleReset(setting.key)}
+          onToggleReveal={() => handleToggleReveal(setting.key)}
+          onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
+        />
+      )
+    }
+
     return (
       <Card key={category}>
         <div className="flex w-full items-center justify-between gap-2 px-4 py-3">
@@ -1141,13 +1696,45 @@ export function ServerSettingsPage() {
                 saving={state.saving}
                 pendingSwitch={pendingJiraSwitch}
                 error={jiraModeError}
-                onCheck={handleJiraMethodCheck}
+                onChange={handleJiraMethodChange}
                 onCancelSwitch={() => setPendingJiraSwitch(null)}
                 onConfirmSwitch={() => {
                   const target = pendingJiraSwitch
                   setPendingJiraSwitch(null)
                   if (target) void applyJiraMode(target === 'none' ? null : target)
                 }}
+                // jira_auth_mode has no row of its own (E2E-F33): its label,
+                // source, env line, reset and history live in this header.
+                header={jiraAuthSetting ? (
+                  <SettingRowHeader setting={jiraAuthSetting} saveToDbNode={saveToDbNode(jiraAuthSetting)}>
+                    {jiraAuthSetting.source === 'db' && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleReset(jiraAuthSetting.key)}
+                        disabled={state.resettingKey === jiraAuthSetting.key}
+                        className="h-6 px-2 text-xs text-text-tertiary hover:text-signal-red"
+                        aria-label={`Reset ${jiraAuthSetting.label}`}
+                      >
+                        {state.resettingKey === jiraAuthSetting.key ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <RotateCcw className="h-3 w-3" />
+                        )}
+                      </Button>
+                    )}
+                  </SettingRowHeader>
+                ) : undefined}
+                history={jiraAuthSetting?.source === 'db' ? (
+                  <HistoryToggle
+                    settingKey={jiraAuthSetting.key}
+                    sensitive={jiraAuthSetting.sensitive}
+                    historyKey={state.historyKey}
+                    history={state.history}
+                    historyLoading={state.historyLoading}
+                    onShowHistory={() => handleShowHistory(jiraAuthSetting.key)}
+                  />
+                ) : null}
               />
             )}
             {category === 'Jira' && (persistedJiraMethod === 'oauth' || persistedJiraMethod === 'atst') && (
@@ -1161,398 +1748,16 @@ export function ServerSettingsPage() {
               </div>
             )}
             <div className="divide-y divide-border-default">
-              {rowSettings.map((setting) => {
-                if (setting.key === 'ai_provider') {
-                  return (
-                    <AiSettingRow
-                      key={setting.key}
-                      setting={setting}
-                      editing={aiProviderEditing}
-                      saveToDbNode={saveToDbNode(setting)}
-                      onStartEdit={(v) => { setAiProviderValue(v); setAiProviderEditing(true) }}
-                      onCancel={() => {
-                        setAiProviderEditing(false)
-                        setAiProviderValue(savedAiProvider)
-                        setAiModelValue(savedAiModel)
-                      }}
-                      onSave={() => handleSaveAiProvider(aiProviderValue)}
-                      onReset={() => handleReset(setting.key)}
-                      saving={state.saving}
-                      historyKey={state.historyKey}
-                      history={state.history}
-                      historyLoading={state.historyLoading}
-                      onShowHistory={() => handleShowHistory(setting.key)}
-                      configureLabel="Configure provider"
-                      notConfiguredLabel="Not configured (uses AI_PROVIDER env var)"
-                    >
-                      <ProviderSelect
-                        showCredentialSources
-                        value={aiProviderValue}
-                        onChange={(v) => {
-                          setAiProviderValue(v)
-                          setAiModelValue('')
-                        }}
-                      />
-                    </AiSettingRow>
-                  )
-                }
-
-                if (setting.key === 'ai_model') {
-                  return (
-                    <AiSettingRow
-                      key={setting.key}
-                      setting={setting}
-                      editing={aiModelEditing}
-                      saveToDbNode={saveToDbNode(setting)}
-                      onStartEdit={(v) => { setAiModelValue(v); setAiModelEditing(true) }}
-                      onCancel={() => setAiModelEditing(false)}
-                      onSave={() => handleSaveAiModel(aiModelValue)}
-                      onReset={() => handleReset(setting.key)}
-                      saving={state.saving}
-                      historyKey={state.historyKey}
-                      history={state.history}
-                      historyLoading={state.historyLoading}
-                      onShowHistory={() => handleShowHistory(setting.key)}
-                      configureLabel="Configure model"
-                      notConfiguredLabel="Not configured (uses AI_MODEL env var)"
-                    >
-                      <div className="flex items-center gap-2">
-                        {/* Grows with the row so ~40-char model ids are readable;
-                            the refresh button beside it keeps its own size. */}
-                        <ModelCombobox
-                          value={aiModelValue}
-                          onChange={setAiModelValue}
-                          options={aiModels}
-                          placeholder="Select model..."
-                          className="min-w-0 flex-1 max-w-3xl"
-                        />
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              onClick={refreshModels}
-                              disabled={refreshingModels || !effectiveAiProvider}
-                              className="h-8 w-8 shrink-0"
-                            >
-                              <RefreshCw className={`h-4 w-4 ${refreshingModels ? 'animate-spin' : ''}`} />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Refresh models from sidecar</TooltipContent>
-                        </Tooltip>
-                      </div>
-                      {!effectiveAiProvider && (
-                        <p className="text-xs text-signal-amber">Select a provider first to see available models</p>
-                      )}
-                    </AiSettingRow>
-                  )
-                }
-
-                // ---- ACTIVE_SERVER_PROVIDERS: always-visible provider picker ----
-                if (setting.key === 'active_server_providers') {
-                  const options = setting.options ?? []
-                  const stored = parseActiveServerProviders(setting.value, options)
-                  // Stored IDs with no discovered option have no checkbox, so a
-                  // save must carry them through instead of dropping them.
-                  const undiscovered = stored.filter(p => !options.includes(p))
-                  // Saved selection limited to discovered options: a stale stored
-                  // ID keeps its place in the DB but has no checkbox to toggle.
-                  const saved = stored.filter(p => options.includes(p))
-                  const checked = serverProvidersDraft ?? saved
-                  const dirty = serverProvidersDraft !== null && !sameProviderSet(checked, saved)
-                  const toggle = (provider: string) =>
-                    setServerProvidersDraft(
-                      checked.includes(provider)
-                        ? checked.filter(p => p !== provider)
-                        : [...checked, provider],
-                    )
-                  return (
-                    <div key={setting.key} className="py-3 space-y-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                        <SourceBadge source={setting.source} />
-                        {saveToDbNode(setting)}
-                        <EnvVarWarning setting={setting} />
-                      </div>
-                      {options.length === 0 ? (
-                        setting.value.trim() ? (
-                          <div className="space-y-1.5">
-                            <span className="text-xs text-text-secondary">
-                              Restricted to: <span className="font-mono">{setting.value}</span>
-                            </span>
-                            <p className="flex items-center gap-1.5 text-xs text-signal-amber">
-                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                              Provider discovery is currently unavailable — the stored restriction above stays in effect.
-                            </p>
-                            {setting.source === 'db' && (
-                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                              </Button>
-                            )}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-text-tertiary italic">No server providers available</span>
-                        )
-                      ) : (
-                        <div className="space-y-2">
-                          <div role="group" aria-label="Active server providers" className="space-y-1">
-                            {options.map((provider) => (
-                              <label key={provider} className="flex items-center gap-2 text-xs">
-                                <Checkbox
-                                  checked={checked.includes(provider)}
-                                  onCheckedChange={() => toggle(provider)}
-                                  aria-label={provider}
-                                />
-                                <span className={`font-mono ${checked.includes(provider) ? 'text-text-primary' : 'text-text-tertiary line-through'}`}>
-                                  {provider}
-                                </span>
-                              </label>
-                            ))}
-                          </div>
-                          {checked.length === 0 && (
-                            <p className="flex items-center gap-1.5 text-xs text-signal-amber">
-                              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                              No providers selected — saving this activates ALL server providers (an empty value means all).
-                            </p>
-                          )}
-                          <div className="flex items-center gap-2 pt-1">
-                            {dirty && (
-                              <>
-                                <Button size="sm" onClick={() => handleSaveServerProviders(checked, options, undiscovered)} disabled={state.saving} className="h-7 text-xs">
-                                  {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                                </Button>
-                                <Button size="sm" variant="outline" onClick={() => setServerProvidersDraft(null)} disabled={state.saving} className="h-7 text-xs">Cancel</Button>
-                              </>
-                            )}
-                            {setting.source === 'db' && (
-                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} disabled={state.resettingKey === setting.key} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                      <p className="text-xs text-text-tertiary">{setting.description}</p>
-                      {setting.source === 'db' && setting.updated_by && (
-                        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
-                      )}
-                      {setting.source === 'db' && (
-                        <HistoryToggle
-                          settingKey={setting.key}
-                          sensitive={setting.sensitive}
-                          historyKey={state.historyKey}
-                          history={state.history}
-                          historyLoading={state.historyLoading}
-                          onShowHistory={() => handleShowHistory(setting.key)}
-                        />
-                      )}
-                    </div>
-                  )
-                }
-
-                // ---- PEER_AI_CONFIGS: structured editor ----
-                if (setting.key === 'peer_ai_configs') {
-                  return (
-                    <div key={setting.key} className="py-3 space-y-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                        <SourceBadge source={setting.source} />
-                        {saveToDbNode(setting)}
-                        <EnvVarWarning setting={setting} />
-                      </div>
-                      {peerEditing ? (
-                        <div className="space-y-3">
-                          <PeerConfigList
-                            peerConfigs={peerConfigs}
-                            setPeerConfigs={setPeerConfigs}
-                            maxRounds={peerMaxRounds}
-                            setMaxRounds={setPeerMaxRounds}
-                          />
-                          <div className="flex items-center gap-2 pt-1">
-                            <Button size="sm" onClick={handleSavePeerConfig} disabled={state.saving} className="h-7 text-xs">
-                              {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => setPeerEditing(false)} className="h-7 text-xs">Cancel</Button>
-                            {setting.source === 'db' && (
-                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          {setting.value ? (
-                            <div className="flex flex-wrap gap-1.5">
-                              {splitOutsideBrackets(setting.value).map((entry, i) => {
-                                const trimmed = entry.trim()
-                                const colonIdx = trimmed.indexOf(':')
-                                const provider = colonIdx > 0 ? trimmed.slice(0, colonIdx) : trimmed
-                                const model = colonIdx > 0 ? trimmed.slice(colonIdx + 1) : ''
-                                return (
-                                  <span key={i} className="inline-flex items-center gap-1 rounded-md bg-surface-elevated px-2 py-0.5 text-xs font-mono border border-border-default">
-                                    <span className="text-text-tertiary">{provider}</span>
-                                    <span className="text-text-tertiary">/</span>
-                                    <span className="text-text-primary">{model}</span>
-                                  </span>
-                                )
-                              })}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-text-tertiary italic">Not configured</span>
-                          )}
-                          <button type="button" onClick={() => handleStartPeerEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
-                            Configure peers
-                          </button>
-                        </div>
-                      )}
-                      <p className="text-xs text-text-tertiary">{setting.description}</p>
-                      {setting.source === 'db' && setting.updated_by && (
-                        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
-                      )}
-                      {setting.source === 'db' && (
-                        <HistoryToggle
-                          settingKey={setting.key}
-                          sensitive={setting.sensitive}
-                          historyKey={state.historyKey}
-                          history={state.history}
-                          historyLoading={state.historyLoading}
-                          onShowHistory={() => handleShowHistory(setting.key)}
-                        />
-                      )}
-                    </div>
-                  )
-                }
-
-                // ---- PEER_ANALYSIS_MAX_ROUNDS: managed by PeerConfigList ----
-                if (setting.key === 'peer_analysis_max_rounds') {
-                  return (
-                    <div key={setting.key} className="py-3 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                        <SourceBadge source={setting.source} />
-                        {saveToDbNode(setting)}
-                        <EnvVarWarning setting={setting} />
-                      </div>
-                      <p className="text-xs text-text-tertiary">
-                        Managed via Peer AI Configs above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || '3'}</span>
-                      </p>
-                    </div>
-                  )
-                }
-
-                // ---- ADDITIONAL_REPOS: structured editor ----
-                if (setting.key === 'additional_repos') {
-                  return (
-                    <div key={setting.key} className="py-3 space-y-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                        <SourceBadge source={setting.source} />
-                        {saveToDbNode(setting)}
-                        <EnvVarWarning setting={setting} />
-                      </div>
-                      {reposEditing ? (
-                        <div className="space-y-3">
-                          <AdditionalReposList repos={additionalRepos} setRepos={setAdditionalRepos} />
-                          <div className="flex items-center gap-2 pt-1">
-                            <Button size="sm" onClick={handleSaveRepos} disabled={state.saving} className="h-7 text-xs">
-                              {state.saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => setReposEditing(false)} className="h-7 text-xs">Cancel</Button>
-                            {setting.source === 'db' && (
-                              <Button size="sm" variant="ghost" onClick={() => handleReset(setting.key)} className="h-7 text-xs text-text-tertiary hover:text-signal-red">
-                                <RotateCcw className="mr-1 h-3 w-3" /> Reset
-                              </Button>
-                            )}
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          {setting.value ? (
-                            <div className="space-y-1">
-                              {parseAdditionalReposString(setting.value).map((repo) => (
-                                <div key={repo.id} className="inline-flex items-center gap-2 rounded-md bg-surface-elevated px-2 py-1 text-xs font-mono border border-border-default mr-1.5">
-                                  <span className="font-semibold text-text-primary">{repo.name}</span>
-                                  <span className="text-text-tertiary truncate max-w-[300px]">{repo.url}</span>
-                                  {repo.ref && <span className="text-signal-blue">{repo.ref}</span>}
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <span className="text-xs text-text-tertiary italic">Not configured</span>
-                          )}
-                          <button type="button" onClick={() => handleStartReposEdit(setting)} className="mt-1.5 text-xs text-text-link hover:text-signal-blue font-medium">
-                            Configure repositories
-                          </button>
-                        </div>
-                      )}
-                      <p className="text-xs text-text-tertiary">{setting.description}</p>
-                      {setting.source === 'db' && setting.updated_by && (
-                        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
-                      )}
-                      {setting.source === 'db' && (
-                        <HistoryToggle
-                          settingKey={setting.key}
-                          sensitive={setting.sensitive}
-                          historyKey={state.historyKey}
-                          history={state.history}
-                          historyLoading={state.historyLoading}
-                          onShowHistory={() => handleShowHistory(setting.key)}
-                        />
-                      )}
-                    </div>
-                  )
-                }
-
-                // ---- JIRA_AUTH_MODE: managed by the auth method selector ----
-                if (setting.key === 'jira_auth_mode') {
-                  return (
-                    <div key={setting.key} className="py-3 space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-                        <SourceBadge source={setting.source} />
-                        <EnvVarWarning setting={setting} />
-                      </div>
-                      <p className="text-xs text-text-tertiary">
-                        Managed via the auth method selector above. Current: <span className="font-mono font-medium text-text-primary">{setting.value || 'unset — Jira disabled'}</span>
-                      </p>
-                    </div>
-                  )
-                }
-
-                // ---- Default: generic SettingRow ----
-                return (
-                  <SettingRow
-                    key={setting.key}
-                    setting={setting}
-                    saveToDbNode={saveToDbNode(setting)}
-                    hint={category === 'Jira' ? jiraSharedFieldHint(persistedJiraMethod, setting.key) : undefined}
-                    isEditing={state.editingKey === setting.key}
-                    editValue={state.editValue}
-                    saving={state.saving}
-                    resetting={state.resettingKey === setting.key}
-                    revealed={state.revealedKeys.has(setting.key)}
-                    historyKey={state.historyKey}
-                    history={state.history}
-                    historyLoading={state.historyLoading}
-                    onShowHistory={() => handleShowHistory(setting.key)}
-                    revealedValue={state.revealedValues[setting.key]}
-                    onStartEdit={() =>
-                      dispatch({
-                        type: 'START_EDIT',
-                        key: setting.key,
-                        currentValue: state.revealedValues[setting.key] ?? setting.value,
-                      })
-                    }
-                    onCancelEdit={() => dispatch({ type: 'CANCEL_EDIT' })}
-                    onSetEditValue={(v) => dispatch({ type: 'SET_EDIT_VALUE', value: v })}
-                    onSave={() => handleSave(setting.key, state.editValue)}
-                    onReset={() => handleReset(setting.key)}
-                    onToggleReveal={() => handleToggleReveal(setting.key)}
-                    onBooleanToggle={() => handleBooleanToggle(setting.key, setting.value)}
-                  />
-                )
-              })}
+              {rowSettings.map((setting) => (
+                <div
+                  key={setting.key}
+                  data-setting-key={setting.key}
+                  // A mark that costs no layout: no border, no size change.
+                  className={highlighted === setting.key ? 'rounded-md bg-signal-blue/10' : undefined}
+                >
+                  {renderSettingRow(setting)}
+                </div>
+              ))}
             </div>
             {category === 'AI' && <ServerProvidersCard />}
 
@@ -1831,12 +2036,7 @@ function AiSettingRow({
 }: AiSettingRowProps) {
   return (
     <div key={setting.key} className="py-3 space-y-2">
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-        <SourceBadge source={setting.source} />
-        {saveToDbNode}
-        <EnvVarWarning setting={setting} />
-      </div>
+      <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode} />
       {editing ? (
         <div className="space-y-3">
           {children}
@@ -1885,6 +2085,178 @@ function AiSettingRow({
 }
 
 // ---------------------------------------------------------------------------
+// Enumerated setting row (#379): a picker, never free text, so an admin cannot
+// guess a value the server already knows.
+// ---------------------------------------------------------------------------
+
+interface EnumSettingRowProps {
+  setting: ServerSetting
+  saveToDbNode?: React.ReactNode
+  /** Runtime choices for an options_source setting (undefined = fixed options). */
+  dynamic?: DynamicOptions
+  saving: boolean
+  resetting: boolean
+  historyKey: string
+  history: HistoryEntry[]
+  historyLoading: boolean
+  onShowHistory: () => void
+  onSave: (value: string) => void
+  onReset: () => void
+}
+
+interface EnumPickerProps {
+  setting: ServerSetting
+  options: string[]
+  saving: boolean
+  onSave: (value: string) => void
+}
+
+function EnumSettingRow({
+  setting,
+  saveToDbNode,
+  dynamic,
+  saving,
+  resetting,
+  historyKey,
+  history,
+  historyLoading,
+  onShowHistory,
+  onSave,
+  onReset,
+}: EnumSettingRowProps) {
+  const options = dynamic ? dynamic.options : setting.options ?? []
+  const failed = dynamic?.status === 'failed'
+  return (
+    <div className="py-3 space-y-2">
+      <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode}>
+        {setting.source === 'db' && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={onReset}
+            disabled={resetting}
+            className="h-6 px-2 text-xs text-text-tertiary hover:text-signal-red"
+            aria-label={`Reset ${setting.env_var}`}
+          >
+            {resetting ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+          </Button>
+        )}
+      </SettingRowHeader>
+      {failed ? (
+        <FallbackSettingInput setting={setting} saving={saving} onSave={onSave} />
+      ) : setting.multiple ? (
+        <MultiValuePicker
+          setting={setting}
+          options={options}
+          disabledOptions={dynamic?.disabled ?? {}}
+          loading={dynamic?.status === 'loading'}
+          saving={saving}
+          onSave={onSave}
+        />
+      ) : (
+        <SingleValuePicker setting={setting} options={options} saving={saving} onSave={onSave} />
+      )}
+      <p className="text-xs text-text-tertiary">{setting.description}</p>
+      {setting.source === 'db' && setting.updated_by && (
+        <p className="text-xs text-text-quaternary">Modified by {setting.updated_by}</p>
+      )}
+      {setting.source === 'db' && (
+        <HistoryToggle
+          settingKey={setting.key}
+          sensitive={setting.sensitive}
+          historyKey={historyKey}
+          history={history}
+          historyLoading={historyLoading}
+          onShowHistory={onShowHistory}
+        />
+      )}
+    </div>
+  )
+}
+
+function SingleValuePicker({ setting, options, saving, onSave }: EnumPickerProps) {
+  // A stored value the server no longer offers must stay visible (and
+  // selectable) rather than silently vanish from the control.
+  const choices = setting.value && !options.includes(setting.value)
+    ? [...options, setting.value]
+    : options
+  return (
+    <SearchableMultiSelect
+      label={setting.env_var}
+      multiple={false}
+      values={setting.value ? [setting.value] : []}
+      options={choices.map(value => ({ value }))}
+      disabled={saving}
+      placeholder="Not set"
+      onChange={next => onSave(next[0])}
+    />
+  )
+}
+
+function MultiValuePicker({
+  setting,
+  options,
+  disabledOptions,
+  loading,
+  saving,
+  onSave,
+}: EnumPickerProps & {
+  disabledOptions: Record<string, string>
+  loading: boolean
+}) {
+  // A long list is searched, not scrolled (E2E-F32); comma-separated with no
+  // spaces, in the order the admin picked.
+  return (
+    <SearchableMultiSelect
+      label={setting.env_var}
+      values={parseSettingList(setting.value)}
+      options={options.map(value => ({
+        value,
+        disabled: Boolean(disabledOptions[value]),
+        hint: disabledOptions[value],
+      }))}
+      loading={loading}
+      allowCustom={setting.allow_custom}
+      disabled={saving}
+      placeholder={loading ? 'Loading choices…' : 'Add…'}
+      onChange={next => onSave(next.join(','))}
+    />
+  )
+}
+
+/** The fetch for a dynamic list failed: fall back to typing, never a dead end. */
+function FallbackSettingInput({ setting, saving, onSave }: Omit<EnumPickerProps, 'options'>) {
+  // A refetch (save, reset, SSE) owns the stored value: a draft made against an
+  // older value is dropped instead of being written back over the new one.
+  const [draft, setDraft] = useState<{ base: string; text: string } | null>(null)
+  const text = draft && draft.base === setting.value ? draft.text : setting.value
+  const dirty = text !== setting.value
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Input
+          value={text}
+          onChange={e => setDraft({ base: setting.value, text: e.target.value })}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && dirty) onSave(text)
+          }}
+          placeholder={setting.multiple ? 'value1,value2' : 'value'}
+          aria-label={`Edit ${setting.env_var}`}
+          className="h-9 max-w-xs font-mono text-sm"
+        />
+        <Button size="sm" onClick={() => onSave(text)} disabled={saving || !dirty} className="h-9 text-xs">
+          {saving ? <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Saving</> : 'Save'}
+        </Button>
+      </div>
+      <p className="text-xs text-signal-amber">
+        Could not load the choices from the server — type{' '}
+        {setting.multiple ? 'the values comma-separated' : 'the value'} and save instead.
+      </p>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Setting Row
 // ---------------------------------------------------------------------------
 
@@ -1892,6 +2264,8 @@ interface SettingRowProps {
   setting: ServerSetting
   saveToDbNode?: React.ReactNode
   hint?: string
+  /** Depends on another setting (lockout off): no editing, and why. */
+  disabled?: boolean
   isEditing: boolean
   editValue: string
   saving: boolean
@@ -1915,6 +2289,7 @@ function SettingRow({
   setting,
   saveToDbNode,
   hint,
+  disabled = false,
   isEditing,
   editValue,
   saving,
@@ -1942,26 +2317,31 @@ function SettingRow({
     }
   }, [isEditing])
 
-  const displayValue = setting.sensitive
-    ? (revealed && revealedValue !== undefined ? revealedValue : '••••••••')
-    : setting.value
+  // De-emphasis without a layout change: the row keeps its height and value.
+  const disabledClass = disabled ? ' cursor-not-allowed opacity-50' : ''
+
+  // Nothing stored must never look stored (E2E-F31): `is_set` is the API's
+  // answer, and a server that predates it only omits it, so a value is the
+  // next best signal. Masked dots and the eye exist only for a set secret.
+  const isSet = setting.is_set ?? Boolean(setting.value)
+  const maskSecret = setting.sensitive && isSet
+  const displayValue = !setting.sensitive
+    ? setting.value
+    : isSet
+      ? (revealed && revealedValue !== undefined ? revealedValue : '••••••••')
+      : ''
 
   // ---- Editing mode ----
   if (isEditing) {
     return (
       <div className="py-3 space-y-2">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-          <SourceBadge source={setting.source} />
-          {saveToDbNode}
-          <EnvVarWarning setting={setting} />
-          {setting.restart_required && <RestartBadge />}
-        </div>
+        <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode} />
         <Input
           ref={inputRef}
           type={setting.type === 'integer' ? 'number' : setting.sensitive ? 'password' : 'text'}
           autoComplete={setting.sensitive ? 'new-password' : 'off'}
           value={editValue}
+          disabled={disabled}
           onChange={(e) => onSetEditValue(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') onSave()
@@ -1973,7 +2353,7 @@ function SettingRow({
         <p className="text-xs text-text-tertiary">{setting.description}</p>
         {hint && <p className="text-xs text-text-quaternary">{hint}</p>}
         <div className="flex items-center gap-2">
-          <Button size="sm" onClick={onSave} disabled={saving} className="h-7 text-xs">
+          <Button size="sm" onClick={onSave} disabled={saving || disabled} className="h-7 text-xs">
             {saving ? (
               <>
                 <Loader2 className="mr-1 h-3 w-3 animate-spin" />
@@ -2009,13 +2389,8 @@ function SettingRow({
       <div className="flex items-start justify-between gap-4">
         {/* Left side: info */}
         <div className="min-w-0 flex-1 space-y-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono text-xs font-semibold text-text-primary">{setting.env_var}</span>
-            <SourceBadge source={setting.source} />
-            {saveToDbNode}
-            <EnvVarWarning setting={setting} />
-            {setting.restart_required && <RestartBadge />}
-            {setting.sensitive && (
+          <SettingRowHeader setting={setting} saveToDbNode={saveToDbNode}>
+            {maskSecret && (
               <button
                 type="button"
                 onClick={onToggleReveal}
@@ -2025,7 +2400,7 @@ function SettingRow({
                 {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
               </button>
             )}
-          </div>
+          </SettingRowHeader>
 
           {/* Value display */}
           {setting.type === 'boolean' ? (
@@ -2043,7 +2418,8 @@ function SettingRow({
             <button
               type="button"
               onClick={onStartEdit}
-              className="block max-w-full cursor-pointer truncate rounded px-1 py-0.5 text-left font-mono text-sm text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary"
+              disabled={disabled}
+              className={`block max-w-full cursor-pointer truncate rounded px-1 py-0.5 text-left font-mono text-sm text-text-secondary transition-colors hover:bg-surface-hover hover:text-text-primary${disabledClass}`}
               aria-label={`Edit ${setting.env_var}`}
             >
               {displayValue || <span className="italic text-text-tertiary">(empty)</span>}
@@ -2084,6 +2460,7 @@ function SettingRow({
               size="sm"
               variant="ghost"
               onClick={onStartEdit}
+              disabled={disabled}
               className="h-7 text-xs"
             >
               Edit
@@ -2216,7 +2593,11 @@ interface JiraAuthMethodControlProps {
   saving: boolean
   pendingSwitch: JiraMethod | 'none' | null
   error: string | null
-  onCheck: (method: JiraMethod, checked: boolean) => void
+  /** The jira_auth_mode row's own header: it has no row of its own (E2E-F33). */
+  header?: React.ReactNode
+  history?: React.ReactNode
+  /** null = no method: Jira is disabled. */
+  onChange: (method: JiraMethod | null) => void
   onCancelSwitch: () => void
   onConfirmSwitch: () => void
 }
@@ -2252,40 +2633,38 @@ function JiraOauthUrlRow({ cloudId }: { cloudId: string }) {
   )
 }
 
+// A select needs a real value for "nothing" — the backend stores '' when Jira
+// has no method, and the five real values are the ones it validates.
+const NO_JIRA_METHOD = 'none'
+
 function JiraAuthMethodControl({
   selected,
   saving,
   pendingSwitch,
   error,
-  onCheck,
+  header,
+  history,
+  onChange,
   onCancelSwitch,
   onConfirmSwitch,
 }: JiraAuthMethodControlProps) {
+  // Same searchable picker as every other enumerated setting (E2E-F32).
+  const choices = [
+    ...JIRA_METHODS.map(m => ({ value: m.id, label: m.label })),
+    { value: NO_JIRA_METHOD, label: 'None — Jira disabled' },
+  ]
   return (
     <div className="mb-3 space-y-2 rounded-md border border-border-default bg-surface-elevated px-3 py-2.5">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold text-text-secondary">Auth method</span>
-        {selected === null && (
-          <span className="text-xs text-text-tertiary">
-            No method selected — Jira is disabled
-          </span>
-        )}
-      </div>
-      <div role="group" aria-label="Jira auth method" className="space-y-1.5">
-        {JIRA_METHODS.map((m) => (
-          <label key={m.id} className="flex items-center gap-2 text-xs">
-            <Checkbox
-              checked={selected === m.id}
-              disabled={saving}
-              onCheckedChange={(checked) => onCheck(m.id, checked === true)}
-              aria-label={m.label}
-            />
-            <span className={selected === m.id ? 'font-medium text-text-primary' : 'text-text-secondary'}>
-              {m.label}
-            </span>
-          </label>
-        ))}
-      </div>
+      {header ?? <span className="text-xs font-semibold text-text-secondary">Auth method</span>}
+      <SearchableMultiSelect
+        label="Jira auth method"
+        className="max-w-md"
+        multiple={false}
+        values={[selected ?? NO_JIRA_METHOD]}
+        options={choices}
+        disabled={saving}
+        onChange={(next) => onChange(next[0] === NO_JIRA_METHOD ? null : (next[0] as JiraMethod))}
+      />
       {error && (
         <p role="alert" className="flex items-center gap-1.5 text-xs text-signal-red">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
@@ -2293,8 +2672,9 @@ function JiraAuthMethodControl({
         </p>
       )}
       <p className="text-xs text-text-quaternary">
-        Exactly one method is active. Uncheck it to disable Jira.
+        Exactly one method is active. Choose None to disable Jira.
       </p>
+      {history}
       <AlertDialog open={pendingSwitch !== null} onOpenChange={(open) => { if (!open) onCancelSwitch() }}>
         <AlertDialogContent>
           <AlertDialogHeader>

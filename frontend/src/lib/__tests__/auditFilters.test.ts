@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { EMPTY_FILTERS, detailsSearchTexts, matchesFilters, type AuditEvent } from '@/lib/auditFilters'
+import {
+  EMPTY_FILTERS,
+  activeTimePreset,
+  detailsSearchTexts,
+  matchesFilters,
+  presetSince,
+  type AuditEvent,
+} from '@/lib/auditFilters'
 
 function event(overrides: Partial<AuditEvent> = {}): AuditEvent {
   return {
@@ -73,6 +80,15 @@ describe('matchesFilters', () => {
     expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'not-there' })).toBe(false)
   })
 
+  it('searches actor, target id and action the way the widened server search does', () => {
+    // A streamed row is filtered here too: it must survive the same `q` that
+    // found it on the server, wherever the needle sits.
+    expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'ALICE' })).toBe(true)
+    expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'ai_call_TIMEOUT' })).toBe(true)
+    expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'settings.update' })).toBe(true)
+    expect(matchesFilters(event(), { ...EMPTY_FILTERS, q: 'carol' })).toBe(false)
+  })
+
   it('matches q written with the server-side (spaced) JSON or the compact JSON', () => {
     const e = event({ details: { key: 'value' } })
     expect(matchesFilters(e, { ...EMPTY_FILTERS, q: '"key": "value"' })).toBe(true)
@@ -92,5 +108,33 @@ describe('matchesFilters', () => {
     ).toBe(true)
     expect(matchesFilters(event(), { ...EMPTY_FILTERS, action: 'user.role.change' })).toBe(false)
     expect(matchesFilters(event(), { ...EMPTY_FILTERS, outcome: 'denied' })).toBe(false)
+  })
+
+  it('keeps a pinned row alone in the view', () => {
+    expect(matchesFilters(event({ id: 42 }), { ...EMPTY_FILTERS, event: '42' })).toBe(true)
+    expect(matchesFilters(event({ id: 43 }), { ...EMPTY_FILTERS, event: '42' })).toBe(false)
+  })
+})
+
+describe('activeTimePreset', () => {
+  const now = Date.parse('2024-03-04T12:00:00Z')
+
+  it('names the preset the URL was written with', () => {
+    expect(activeTimePreset({ ...EMPTY_FILTERS, since: presetSince(1, now) }, now)).toBe('1h')
+    expect(activeTimePreset({ ...EMPTY_FILTERS, since: presetSince(24, now) }, now)).toBe('24h')
+    expect(activeTimePreset({ ...EMPTY_FILTERS, since: presetSince(7 * 24, now) }, now)).toBe('7d')
+  })
+
+  it('still recognises a preset a few minutes after the URL was written', () => {
+    expect(
+      activeTimePreset({ ...EMPTY_FILTERS, since: presetSince(24, now) }, now + 4 * 60_000),
+    ).toBe('24h')
+  })
+
+  it('calls no bounds All time and a hand-picked window nothing at all', () => {
+    expect(activeTimePreset(EMPTY_FILTERS, now)).toBe('all')
+    expect(activeTimePreset({ ...EMPTY_FILTERS, since: presetSince(3, now) }, now)).toBeNull()
+    // An `until` is precision the presets never write, so they cannot claim it.
+    expect(activeTimePreset({ ...EMPTY_FILTERS, until: '2024-01-31' }, now)).toBeNull()
   })
 })

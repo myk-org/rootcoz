@@ -298,7 +298,7 @@
 </tr>
 </tbody>
 </table></div>
-<p><code>can_view_reports</code> is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the <code>ALLOWED_USERS</code> allow list, which is empty (open) by default and always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; <code>tests/test_allow_list_coverage.py</code> enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and <code>DELETE /api/user/ai-credentials/{provider}</code> — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.</p>
+<p><code>can_view_reports</code> is a separate flag from role. Admins always have it; anyone else needs an admin to grant it. Most calls that create or modify data also run against the <code>ALLOWED_USERS</code> write allow-list — a deployment-level bound for SSO/proxy setups where a wide population authenticates but only a known team should write. It is empty by default (no username restriction; roles decide), never grants a permission, and is always bypassed for admins. The check is per-handler, not global, so it is enforced on data-modifying routes rather than as a middleware boundary; <code>tests/test_allow_list_coverage.py</code> enumerates the mutating routes and fails if one that can write data is added without the check. The exemptions are listed exactly in that test: the authentication routes, the read-only Jira and token-validation lookups, the metadata rules preview, and <code>DELETE /api/user/ai-credentials/{provider}</code> — revoking your own key stays possible even if you are off the list, otherwise being removed would leave you holding a credential you cannot remove.</p>
 <blockquote>
 <p><strong>Warning:</strong> A role you do not hold returns <code>403</code>, not <code>404</code>. <code>403 Admin access required</code>, <code>403 Reviewer access required</code>, and <code>403 Operator access required</code> name the exact gate you hit.</p>
 </blockquote>
@@ -549,7 +549,7 @@
 <td>Prow server defaults, overridable per request</td>
 </tr>
 <tr>
-<td><code>ai_provider</code>, <code>ai_model</code>, <code>force_server_credentials</code></td>
+<td><code>ai_provider</code>, <code>ai_model</code></td>
 <td><code>claude</code>, <code>gemini</code>, or <code>cursor</code></td>
 </tr>
 <tr>
@@ -949,7 +949,7 @@
 <td>POST</td>
 <td><code>/api/chat/{job_id}/init</code></td>
 <td>reviewer</td>
-<td>Explicit <code>ai_provider</code>, <code>ai_model</code>, <code>force_server_credentials</code></td>
+<td>Explicit <code>ai_provider</code>, <code>ai_model</code></td>
 </tr>
 <tr>
 <td>POST</td>
@@ -1152,7 +1152,7 @@
 <td>GET</td>
 <td><code>/api/ai-models</code></td>
 <td>viewer</td>
-<td><code>provider</code>, <code>force_server_credentials</code>; lists models for <code>claude</code>, <code>gemini</code>, <code>cursor</code></td>
+<td><code>provider</code>; lists models for <code>claude</code>, <code>gemini</code>, <code>cursor</code></td>
 </tr>
 <tr>
 <td>GET</td>
@@ -1408,8 +1408,14 @@
 </tbody>
 </table></div>
 <p>See <a href="configuration-reference.html">Configuration Reference</a> for the full environment variable surface behind these admin settings.</p>
+<h4 id="account-state">Account state</h4>
+<p><code>GET /api/admin/users</code> rows carry <code>locked</code> (bool), <code>locked_at</code> (UTC timestamp or null), <code>disabled</code> (bool) and <code>failed_login_count</code> (int) alongside the role and grants, so an admin can see why an account cannot sign in without opening anything else.</p>
+<p><code>POST /api/admin/users/{username}/unlock</code> clears both the lock and the consecutive-failure counter and records <code>admin.user_unlock</code> (details: <code>was_locked_at</code>, <code>failed_attempts</code>).</p>
+<p><code>PUT /api/admin/users/{username}/disabled</code> with <code>{"disabled": true|false}</code> disables or re-enables the account and records <code>admin.user_disabled</code> / <code>admin.user_enabled</code>. A disabled account is refused with the <em>same</em> <code>401</code> body as a wrong credential — the response never reveals which condition applied — while its history, comments, jobs and audit rows stay intact.</p>
 <h4 id="audit-events">Audit events</h4>
-<p><code>GET /api/admin/audit</code> returns <code>{events, total, limit, offset}</code> newest-first. Each event carries <code>id</code>, <code>created_at</code> (UTC ISO-8601 with a trailing <code>Z</code>), <code>actor</code>, <code>actor_role</code>, <code>is_admin</code>, <code>action</code>, <code>target_type</code>, <code>target_id</code>, <code>outcome</code>, <code>details</code> (the stored JSON object, already parsed), <code>request_ip</code>, and the chain columns <code>prev_hash</code> and <code>entry_hash</code>.</p>
+<p>Each entry of <code>GET /api/admin/settings</code> carries <code>is_set</code> (whether a value exists, without revealing a sensitive one), <code>label</code> (the human name), <code>env_var</code>, <code>options</code>/<code>options_source</code>/<code>multiple</code>/<code>allow_custom</code> (for enumerated settings) and <code>server_only</code>/<code>derived</code>/<code>persistable</code>. A client renders <code>(empty)</code> from <code>is_set: false</code> rather than masking a value that does not exist.</p>
+<p><code>GET /api/admin/audit</code> returns <code>{events, total, limit, offset}</code> newest-first. Each event carries <code>id</code>, <code>created_at</code> (UTC ISO-8601 with a trailing <code>Z</code>), <code>actor</code>, <code>actor_role</code>, <code>is_admin</code>, <code>action</code>, <code>target_type</code>, <code>target_id</code>, <code>target_label</code>, <code>target_job_id</code>, <code>outcome</code>, <code>details</code> (the stored JSON object, already parsed), <code>request_ip</code>, and the chain columns <code>prev_hash</code> and <code>entry_hash</code>.</p>
+<p><code>target_label</code> and <code>target_job_id</code> are resolved <strong>when the row is read</strong> and are never stored or hashed: <code>target_label</code> is the human name of the target (the job's display name for a <code>job</code> target — whether <code>target_id</code> holds a uuid or the job name — and the containing job's name for a <code>comment</code> target), and <code>target_job_id</code> is the job uuid a client can link to, resolved from <code>target_id</code> for <code>job</code> targets and from <code>details.job_id</code> for <code>comment</code> targets. Both are <code>null</code> when nothing resolves, so a client can tell "no destination" from "destination unknown yet" and never render a dead link.</p>
 <div class="highlight"><pre><span></span><code>curl<span class="w"> </span>-s<span class="w"> </span><span class="s2">"</span><span class="nv">$BASE</span><span class="s2">/api/admin/audit?actor=alice&amp;action=admin.job_delete&amp;since=2026-04-01T00:00:00Z&amp;limit=20"</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>-H<span class="w"> </span><span class="s2">"Authorization: Bearer </span><span class="nv">$KEY</span><span class="s2">"</span>
 </code></pre></div>

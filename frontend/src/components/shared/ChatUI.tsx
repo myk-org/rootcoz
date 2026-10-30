@@ -3,7 +3,6 @@ import { api, ApiError } from '@/lib/api'
 import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
-import { Toggle } from '@/components/shared/Toggle'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog, useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
@@ -48,7 +47,7 @@ export interface ChatMessage {
 }
 
 type ChatHistory = { messages: ChatMessage[]; total: number; active_session_version: string; active_session?: { ai_provider: string; ai_model: string; credential_source: string } | null; preparing?: { phase: string; detail: string } | null }
-type SessionChoice = { provider: string; model: string; forceServer: boolean }
+type SessionChoice = { provider: string; model: string; credentialSource: string }
 
 interface ChatUIProps {
   /** API base path — e.g. '/api/chat/job123' or '/api/admin/chat' */
@@ -61,8 +60,6 @@ interface ChatUIProps {
   defaultProvider?: string
   /** Initial AI model */
   defaultModel?: string
-  /** Initial credential source (admin settings) */
-  defaultForceServer?: boolean
   /** Empty state message */
   emptyMessage?: string
   /** Empty state subtitle */
@@ -90,7 +87,6 @@ export function ChatUI({
   header,
   defaultProvider = '',
   defaultModel = '',
-  defaultForceServer = false,
   emptyMessage = 'Start a conversation',
   emptySubtitle = '',
 }: ChatUIProps) {
@@ -110,19 +106,8 @@ export function ChatUI({
   const [aiProvider, setAiProvider] = useState(() => normalizeProvider(defaultProvider))
   const [aiModel, setAiModel] = useState(defaultModel)
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
-  const [forceServer, setForceServer] = useState(defaultForceServer)
-  const { providers, providerStatus } = useProviderCatalog(forceServer && canUseServerProviders)
-  const cursorAuthStatus = useCursorAuthStatus(forceServer && canUseServerProviders)
-  const selectedModel = providers[aiProvider]?.find(model => model.id === aiModel)
-  // An admin-declared free pair runs on server credentials without the
-  // (for this user disabled) server toggle: the backend admits the exact
-  // free pair on the free grant, but only with force_server_credentials.
-  // A pair the user's own key already covers keeps honoring the toggle
-  // (and the user-key catalog) — forcing server there would ignore keys
-  // the user explicitly has.
-  const freeServerModel = !!selectedModel?.free && canUseFreeProviders
-    && !selectedModel.credential_sources?.includes('user')
-  const effectiveForceServer = (forceServer && canUseServerProviders) || freeServerModel
+  const { providers, providerStatus } = useProviderCatalog()
+  const cursorAuthStatus = useCursorAuthStatus()
 
   const [copiedMsgId, setCopiedMsgId] = useState<number | null>(null)
   const [copiedAll, setCopiedAll] = useState(false)
@@ -168,8 +153,7 @@ export function ChatUI({
   const prepStatus = prepPhase && initStepIndex === 0
     ? `${PREP_STEPS[prepActiveIndex]?.label ?? INIT_STEPS[0]}${prepPhase.detail ? `: ${prepPhase.detail}` : ''}...`
     : INIT_STEPS[initStepIndex]
-  const needsServerToggle = !effectiveForceServer && !!selectedModel && !selectedModel.credential_sources?.includes('user') && selectedModel.credential_sources?.includes('server') && !freeServerModel
-  const validPair = !needsServerToggle && isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, effectiveForceServer, canUseServerProviders, canUseFreeProviders)
+  const validPair = isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, false, canUseServerProviders, canUseFreeProviders)
   const canSend = Boolean(sessionStarted && !clearing && input.trim() && !sendBusy)
   const sendBlockedReason = clearing ? 'Clearing chat session'
     : !sessionStarted
@@ -212,7 +196,7 @@ export function ChatUI({
       setSessionChoice(null)
       setSessionStarted(false)
     } else {
-      setSessionChoice({ provider: active.ai_provider, model: active.ai_model, forceServer: active.credential_source === 'server' })
+      setSessionChoice({ provider: active.ai_provider, model: active.ai_model, credentialSource: active.credential_source })
       setSessionStarted(true)
     }
   }, [])
@@ -301,12 +285,12 @@ export function ChatUI({
     console.info('[ChatUI] Starting chat session')
     try {
       const result = await api.post<{ ready: boolean; session_id?: string }>(`${apiBasePath}/init`, {
-        ai_provider: aiProvider, ai_model: aiModel, force_server_credentials: effectiveForceServer,
+        ai_provider: aiProvider, ai_model: aiModel,
       })
       if (!mountedRef.current) return
       if (!result.ready || !result.session_id) throw new Error('Chat session unavailable. Clear chat and Start a new session.')
       confirmedInitRef.current = true
-      setSessionChoice({ provider: aiProvider, model: aiModel, forceServer: effectiveForceServer })
+      setSessionChoice({ provider: aiProvider, model: aiModel, credentialSource: '' })
       setSessionStarted(true)
       setInitStepIndex(1)
       console.info('[ChatUI] Chat session confirmed')
@@ -314,7 +298,11 @@ export function ChatUI({
         const { history, generation } = await fetchMessages()
         if (!historyIsCurrent(generation)) return
         setMessages(history.messages)
-        if (history.active_session) sessionVersionRef.current = history.active_session_version
+        if (history.active_session) {
+          sessionVersionRef.current = history.active_session_version
+          // The server decides which source it used; pin the reported one.
+          setSessionChoice((choice) => choice && { ...choice, credentialSource: history.active_session!.credential_source })
+        }
         setPrepPhase(history.preparing ?? null)
         setInitStepIndex(2)
         console.info('[ChatUI] Chat history loaded after start')
@@ -416,7 +404,6 @@ export function ChatUI({
       }>(apiBasePath, {
         message: trimmed,
         ...(sessionChoice && { ai_provider: sessionChoice.provider, ai_model: sessionChoice.model }),
-        force_server_credentials: sessionChoice?.forceServer ?? null,
       })
 
       if (!mountedRef.current) return
@@ -495,7 +482,7 @@ export function ChatUI({
         console.info('[ChatUI] New Session cancelled: history changed during preflight')
         return
       }
-      if (Boolean(active) !== sessionStarted || (active && (!sessionChoice || active.ai_provider !== sessionChoice.provider || active.ai_model !== sessionChoice.model || (active.credential_source === 'server') !== sessionChoice.forceServer || sessionVersionRef.current !== history.active_session_version))) {
+      if (Boolean(active) !== sessionStarted || (active && (!sessionChoice || active.ai_provider !== sessionChoice.provider || active.ai_model !== sessionChoice.model || active.credential_source !== sessionChoice.credentialSource || sessionVersionRef.current !== history.active_session_version))) {
         setMessages(history.messages)
         applySession(active, history.active_session_version)
         console.info('[ChatUI] New Session cancelled: active session changed in another tab')
@@ -558,22 +545,18 @@ export function ChatUI({
           <div className="flex items-center gap-3">
             {sessionStarted ? (
               <span className="text-xs text-text-secondary">{sessionChoice
-                ? `${sessionChoice.provider} / ${sessionChoice.model}${sessionChoice.forceServer ? ' · Server' : ' · User'}`
+                ? `${sessionChoice.provider} / ${sessionChoice.model}${sessionChoice.credentialSource === 'server' ? ' · Server' : ' · User'}`
                 : 'Existing session · selection pinned by server'}</span>
             ) : <div className="flex flex-col items-end gap-1">
               <div className="flex items-center gap-3">
-                <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} /></div>
-                <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} hideNotice /></div>
-                <div className="flex items-center gap-2 text-xs text-text-secondary">
-                  <span>Use server credentials</span>
-                  <Toggle checked={effectiveForceServer} onChange={setForceServer} label="Use server credentials" disabled={!canUseServerProviders} />
-                </div>
+                <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={false} /></div>
+                <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={false} hideNotice /></div>
                 <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
                   {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
                 </Button>
               </div>
               {/* Below the whole provider+model row, so it cannot distort the controls. */}
-              <AnalysisModelNotice provider={aiProvider} forceServer={effectiveForceServer} />
+              <AnalysisModelNotice provider={aiProvider} forceServer={false} />
             </div>}
             <Tooltip>
               <TooltipTrigger asChild>
@@ -614,9 +597,7 @@ export function ChatUI({
           </div>
         )}
         {!sessionStarted && !loadingHistory && (
-          <p className="px-6 pt-2 text-xs text-text-tertiary" role="status">{needsServerToggle && canUseServerProviders
-            ? 'Use server credentials to start with this model.'
-            : 'Select an available AI provider and model, then Start Chat. History remains visible until you clear it.'}</p>
+          <p className="px-6 pt-2 text-xs text-text-tertiary" role="status">Select an available AI provider and model, then Start Chat. History remains visible until you clear it.</p>
         )}
         {starting && <div className="px-6 pt-2 text-xs" role="status">
           <p>{prepStatus}</p>

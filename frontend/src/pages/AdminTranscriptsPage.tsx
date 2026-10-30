@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { api } from '@/lib/api'
+import { useSearchParams } from 'react-router-dom'
+import { api, ApiError } from '@/lib/api'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -81,7 +82,7 @@ export function AdminTranscriptsPage() {
   const [error, setError] = useState('')
   const [jobFilter, setJobFilter] = useState('')
   const [appliedFilter, setAppliedFilter] = useState('')
-  const [viewing, setViewing] = useState<TranscriptItem | null>(null)
+  const [viewing, setViewing] = useState<string | null>(null)
   const [viewContent, setViewContent] = useState('')
   const [viewLoading, setViewLoading] = useState(false)
   const [viewError, setViewError] = useState('')
@@ -105,19 +106,34 @@ export function AdminTranscriptsPage() {
 
   const items = useMemo(() => data?.items ?? [], [data])
 
-  const openViewer = useCallback(async (item: TranscriptItem) => {
-    setViewing(item)
+  const openViewer = useCallback(async (sessionId: string) => {
+    setViewing(sessionId)
     setViewContent('')
     setViewError('')
     setViewLoading(true)
     try {
-      setViewContent(await api.getText(`/api/admin/transcripts/${item.session_id}`))
+      setViewContent(await api.getText(`/api/admin/transcripts/${sessionId}`))
     } catch (err) {
-      setViewError(err instanceof Error ? err.message : 'Failed to load transcript')
+      // A pruned session is the common answer, not an outage: say so instead of
+      // echoing an HTTP status the admin cannot act on.
+      setViewError(
+        err instanceof ApiError && err.status === 404
+          ? 'not found — this transcript was removed by the sidecar’s retention, or never existed.'
+          : err instanceof Error
+            ? err.message
+            : 'Failed to load transcript',
+      )
     } finally {
       setViewLoading(false)
     }
   }, [])
+
+  // ?session=<id> is an audit row's target: open that transcript straight away.
+  const [searchParams] = useSearchParams()
+  const sessionParam = searchParams.get('session') ?? ''
+  useEffect(() => {
+    if (sessionParam) void openViewer(sessionParam)
+  }, [sessionParam, openViewer])
 
   return (
     <div className="space-y-6">
@@ -242,7 +258,7 @@ export function AdminTranscriptsPage() {
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => void openViewer(item)}
+                          onClick={() => void openViewer(item.session_id)}
                           title="View transcript"
                         >
                           <Eye className="h-4 w-4" />
@@ -269,7 +285,7 @@ export function AdminTranscriptsPage() {
         <DialogContent className="max-w-4xl max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle className="font-mono text-sm flex items-center gap-2">
-              <FileText className="h-4 w-4" /> {viewing?.session_id}.jsonl
+              <FileText className="h-4 w-4" /> {viewing}.jsonl
             </DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-auto">

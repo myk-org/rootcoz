@@ -246,6 +246,34 @@ def _no_key_providers(monkeypatch) -> None:
     )
 
 
+def _provider_auth_status(monkeypatch, configured: dict[str, bool]) -> None:
+    """Pin the sidecar's per-provider auth status for AMBIENT_AUTH_PROVIDERS.
+
+    Only the providers in *configured* are registered: any other id answers
+    the sidecar's 404, exactly as an unregistered provider does in production.
+    """
+
+    async def _status(provider: str) -> dict[str, Any]:
+        configured_ids = {name.lower(): state for name, state in configured.items()}
+        if provider.lower() not in configured_ids:
+            request = httpx.Request("GET", f"http://sidecar/models/{provider}/status")
+            raise httpx.HTTPStatusError(
+                "provider not registered",
+                request=request,
+                response=httpx.Response(404, request=request),
+            )
+        return {
+            "provider": provider,
+            "registered": True,
+            "authStatus": {"configured": configured_ids[provider.lower()]},
+        }
+
+    monkeypatch.setattr(
+        "pi_sidecar_client.get_sidecar_client",
+        lambda: SimpleNamespace(get_model_provider_status=_status),
+    )
+
+
 @pytest.fixture
 def test_client(mock_settings, temp_db_path: Path):
     """Create a test client with mocked dependencies.
@@ -9543,6 +9571,7 @@ class TestAdminSettingsEndpoints:
         assert "category" in item
         assert "type" in item
         assert "sensitive" in item
+        assert "is_set" in item
         assert "description" in item
         # Sensitive values are masked by default
         sensitive_items = [i for i in data if i["sensitive"] and i["value"]]
@@ -9550,6 +9579,95 @@ class TestAdminSettingsEndpoints:
             assert si["value"] == "••••••••", (
                 f"Sensitive field {si['key']} not masked by default"
             )
+
+    def test_every_setting_reports_whether_it_is_set(self, test_client) -> None:
+        """#379 E2E-J09: `is_set` is a boolean on every entry, never a hint."""
+        data = test_client.get("/api/admin/settings").json()
+        assert all(isinstance(item["is_set"], bool) for item in data)
+
+    @pytest.mark.parametrize("key", ["github_token", "gcs_bucket"])
+    def test_unset_setting_reports_is_set_false(self, test_client, key: str) -> None:
+        """An empty secret must not look stored — the flag says so, not the mask."""
+        item = _settings_item(test_client, key)
+        assert item["value"] == ""
+        assert item["is_set"] is False
+
+    def test_configured_setting_reports_is_set_true(self, test_client) -> None:
+        """A saved value flips `is_set`, and a secret stays masked either way."""
+        plain = test_client.put(
+            "/api/admin/settings", json={"settings": {"gcs_bucket": "my-bucket"}}
+        )
+        assert plain.status_code == 200, plain.json()
+        assert _settings_item(test_client, "gcs_bucket")["is_set"] is True
+
+        secret = "gh-configured-token"  # pragma: allowlist secret
+        stored = test_client.put(
+            "/api/admin/settings", json={"settings": {"github_token": secret}}
+        )
+        assert stored.status_code == 200, stored.json()
+        item = _settings_item(test_client, "github_token")
+        assert item["is_set"] is True
+        # The flag never becomes a way to read the secret back
+        assert item["value"] == "••••••••" and secret not in json.dumps(item)
+
+    def test_login_lockout_threshold_is_a_runtime_auth_setting(
+        self, test_client
+    ) -> None:
+        """§I.1: the threshold is an Auth & Security setting, ``0`` disables it."""
+        from rootcoz.config import get_settings
+
+        key = "login_lockout_threshold"
+        item = next(
+            s for s in test_client.get("/api/admin/settings").json() if s["key"] == key
+        )
+        assert (item["category"], item["type"], item["default"]) == (
+            "Auth & Security",
+            "integer",
+            "5",
+        )
+        assert not item["sensitive"] and not item["restart_required"]
+        # A negative threshold is a typo, not a policy: 400. ``0`` is legal.
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: "-1"}}
+            ).status_code
+            == 400
+        )
+        assert (
+            test_client.put(
+                "/api/admin/settings", json={"settings": {key: "0"}}
+            ).status_code
+            == 200
+        )
+        assert get_settings().login_lockout_threshold == 0
+
+    def test_login_lockout_enabled_is_a_runtime_auth_toggle(self, test_client) -> None:
+        """E2E-I09/I10: an explicit switch, rendered as a switch, before the count."""
+        from rootcoz.config import get_settings
+
+        settings = test_client.get("/api/admin/settings").json()
+        keys = [s["key"] for s in settings]
+        item = next(s for s in settings if s["key"] == "login_lockout_enabled")
+        assert (item["category"], item["type"], item["default"], item["source"]) == (
+            "Auth & Security",
+            "boolean",
+            "true",
+            "default",
+        )
+        assert not item["sensitive"] and not item["restart_required"]
+        # The toggle reads as the off switch, so it sits directly before the count.
+        assert keys.index("login_lockout_enabled") + 1 == keys.index(
+            "login_lockout_threshold"
+        )
+
+        assert (
+            test_client.put(
+                "/api/admin/settings",
+                json={"settings": {"login_lockout_enabled": "false"}},
+            ).status_code
+            == 200
+        )
+        assert get_settings().login_lockout_enabled is False
 
     def test_repo_clone_limit_metadata_and_db_override(self, test_client) -> None:
         """Clone concurrency is a live, validated Server setting."""
@@ -9697,6 +9815,8 @@ class TestAdminSettingsEndpoints:
     ) -> None:
         """Valid IDs save stripped, de-duplicated and in the registered spelling."""
         _no_key_providers(monkeypatch)
+        _provider_auth_status(monkeypatch, {"claude": True, "gemini": True})
+        monkeypatch.setenv("CLAUDE_API_KEY", "claude-key")  # pragma: allowlist secret
         response = test_client.put(
             "/api/admin/settings",
             json={
@@ -9708,6 +9828,79 @@ class TestAdminSettingsEndpoints:
         # The catalog spells them lowercase: the stored value must too, so the
         # consumer's exclusion matches the sidecar's registry id (#378).
         assert (item["value"], item["source"]) == ("claude, gemini", "db")
+
+    def test_ambient_auth_providers_rejects_an_id_with_no_deployment_credential(
+        self, test_client, monkeypatch
+    ) -> None:
+        """A provider nobody can authenticate is a 400 that names it (#379 J08)."""
+        _no_key_providers(monkeypatch)
+        _provider_auth_status(monkeypatch, {"claude": False})
+        from rootcoz import ai_client
+
+        ai_client.update_model_catalog([{"provider": "claude", "id": "sonnet"}])
+        monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+        before = _settings_item(test_client, "ambient_auth_providers")
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "claude"}},
+        )
+        assert response.status_code == 400, response.json()
+        detail = response.json()["detail"]
+        assert "no deployment credential" in detail
+        assert "claude" in detail
+        # Nothing declared ambient, so nothing was saved
+        assert _settings_item(test_client, "ambient_auth_providers") == before
+
+    def test_ambient_auth_providers_accepts_a_deployment_env_credential(
+        self, test_client, monkeypatch
+    ) -> None:
+        """An ambient <PROVIDER>_API_KEY in the deployment env is accepted."""
+        _no_key_providers(monkeypatch)
+        # No sidecar answer is needed: the deployment env already resolves it
+        _provider_auth_status(monkeypatch, {})
+        from rootcoz import ai_client
+
+        ai_client.update_model_catalog([{"provider": "claude", "id": "sonnet"}])
+        monkeypatch.setenv("CLAUDE_API_KEY", "claude-key")  # pragma: allowlist secret
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "claude"}},
+        )
+        assert response.status_code == 200, response.json()
+        assert (
+            _settings_item(test_client, "ambient_auth_providers")["value"] == "claude"
+        )
+
+    def test_ambient_auth_providers_accepts_a_sidecar_authenticated_provider(
+        self, test_client, monkeypatch
+    ) -> None:
+        """A provider the sidecar reports as configured is accepted (#379 J08)."""
+        _no_key_providers(monkeypatch)
+        monkeypatch.setattr(
+            "rootcoz.main.supported_key_providers",
+            AsyncMock(return_value=["google-vertex-claude"]),
+        )
+        # ADC/Vertex authenticates it — no <PROVIDER>_API_KEY anywhere
+        _provider_auth_status(monkeypatch, {"google-vertex-claude": True})
+        monkeypatch.delenv("GOOGLE_VERTEX_CLAUDE_API_KEY", raising=False)
+        # Start from an empty list so only discovery can make this ID known
+        assert (
+            test_client.put(
+                "/api/admin/settings",
+                json={"settings": {"ambient_auth_providers": ""}},
+            ).status_code
+            == 200
+        )
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"ambient_auth_providers": "Google-Vertex-Claude"}},
+        )
+        assert response.status_code == 200, response.json()
+        # Stored as the sidecar registers it, not as the admin typed it (#378)
+        assert (
+            _settings_item(test_client, "ambient_auth_providers")["value"]
+            == "google-vertex-claude"
+        )
 
     def test_ambient_auth_providers_unknown_id_rejected(
         self, test_client, monkeypatch
@@ -9762,51 +9955,58 @@ class TestAdminSettingsEndpoints:
         assert _settings_item(test_client, "ambient_auth_providers")["value"] == ""
 
     def test_ambient_auth_providers_accepted_when_discovery_unavailable(
-        self, test_client, monkeypatch
+        self, test_client, monkeypatch, caplog
     ) -> None:
         """A cold catalog plus no discovery answer must not reject a save."""
+        import logging
+
         from rootcoz import ai_client
 
         monkeypatch.setattr(ai_client, "_model_catalog_cache", None)
         monkeypatch.setattr(
             "rootcoz.main.supported_key_providers", AsyncMock(return_value=[])
         )
-        response = test_client.put(
-            "/api/admin/settings",
-            json={"settings": {"ambient_auth_providers": "Some New Provider"}},
-        )
+        _provider_auth_status(monkeypatch, {})
+        with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                response = test_client.put(
+                    "/api/admin/settings",
+                    json={"settings": {"ambient_auth_providers": "Some New Provider"}},
+                )
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
         assert response.status_code == 200, response.json()
         # Accepted unchanged — a transient sidecar gap is never a save failure
         assert (
             _settings_item(test_client, "ambient_auth_providers")["value"]
             == "Some New Provider"
         )
+        # Fail-open is logged, so a typo accepted during an outage is traceable
+        assert any("No provider catalog" in r.getMessage() for r in caplog.records)
 
-    def test_ambient_auth_providers_accepts_registered_ambient_provider(
-        self, test_client, monkeypatch
+    def test_ambient_auth_providers_accepted_when_credentials_unknown(
+        self, test_client, monkeypatch, caplog
     ) -> None:
-        """A key-incapable-but-registered provider ID is accepted (#378)."""
+        """A warm catalog whose deployment credentials cannot be read fails open."""
+        import logging
+
+        _no_key_providers(monkeypatch)
         monkeypatch.setattr(
-            "rootcoz.main.supported_key_providers",
-            AsyncMock(return_value=["google-vertex-claude"]),
+            "rootcoz.ai_client.deployment_provider_credentials", lambda: None
         )
-        # Start from an empty list so only discovery can make this ID known
-        assert (
-            test_client.put(
-                "/api/admin/settings",
-                json={"settings": {"ambient_auth_providers": ""}},
-            ).status_code
-            == 200
-        )
-        response = test_client.put(
-            "/api/admin/settings",
-            json={"settings": {"ambient_auth_providers": "Google-Vertex-Claude"}},
-        )
+        with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                response = test_client.put(
+                    "/api/admin/settings",
+                    json={"settings": {"ambient_auth_providers": "claude"}},
+                )
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
         assert response.status_code == 200, response.json()
-        # Stored as the sidecar registers it, not as the admin typed it (#378)
-        assert (
-            _settings_item(test_client, "ambient_auth_providers")["value"]
-            == "google-vertex-claude"
+        assert any(
+            "Deployment credentials unknown" in r.getMessage() for r in caplog.records
         )
 
     def test_put_settings_server_only_rejected(self, test_client) -> None:
@@ -9870,7 +10070,6 @@ class TestAdminSettingsEndpoints:
             json={
                 "settings": {
                     "auto_push_exporters": "reportportal",
-                    "allowed_users": "alice,bob",
                     "require_approval": "false",
                     "public_base_url": "https://rootcoz.example.com",
                 }
@@ -9879,7 +10078,6 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 200
         assert set(response.json()["updated"]) == {
             "auto_push_exporters",
-            "allowed_users",
             "require_approval",
             "public_base_url",
         }
@@ -10159,6 +10357,238 @@ class TestAdminSettingsEndpoints:
             headers={"Authorization": ""},
         )
         assert response.status_code in (401, 403)
+
+
+# #379: the choice contract every enumerated setting must publish, and the
+# exact values the UI codes against.
+_ENUM_SETTING_CHOICES: dict[str, dict[str, Any]] = {
+    "default_user_role": {
+        "options": ["viewer", "reviewer", "operator"],
+        "options_source": None,
+        "multiple": False,
+        "allow_custom": False,
+    },
+    "jira_auth_mode": {
+        "options": ["oauth", "basic", "pat", "atst"],
+        "options_source": None,
+        "multiple": False,
+        "allow_custom": False,
+    },
+    "log_level": {
+        "options": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        "options_source": None,
+        "multiple": False,
+        "allow_custom": False,
+    },
+    "auto_push_exporters": {
+        "options": None,
+        "options_source": "exporters",
+        "multiple": True,
+        "allow_custom": False,
+    },
+    "ambient_auth_providers": {
+        "options": None,
+        "options_source": "providers",
+        "multiple": True,
+        "allow_custom": False,
+    },
+    "allowed_users": {
+        "options": None,
+        "options_source": "users",
+        "multiple": True,
+        "allow_custom": True,
+    },
+}
+
+_STATIC_ENUM_ACCEPTED_VALUES = [
+    (key, value)
+    for key, contract in _ENUM_SETTING_CHOICES.items()
+    for value in (contract["options"] or [])
+]
+
+
+class TestEnumeratedSettings:
+    """#379: enumerated settings publish their choices and enforce them."""
+
+    @pytest.mark.parametrize(("key", "expected"), sorted(_ENUM_SETTING_CHOICES.items()))
+    def test_metadata_describes_the_choices(
+        self, test_client, key: str, expected: dict[str, Any]
+    ) -> None:
+        """GET /api/admin/settings carries the exact contract the UI codes to."""
+        item = _settings_item(test_client, key)
+        assert {field: item[field] for field in expected} == expected
+
+    def test_every_setting_carries_the_choice_contract(self, test_client) -> None:
+        """The four keys are always present, so the UI needs no special case."""
+        for item in test_client.get("/api/admin/settings").json():
+            assert {"options", "options_source", "multiple", "allow_custom"} <= set(
+                item
+            )
+
+    @pytest.mark.parametrize(("key", "value"), _STATIC_ENUM_ACCEPTED_VALUES)
+    def test_static_enum_accepts_every_allowed_value(
+        self, test_client, key: str, value: str
+    ) -> None:
+        response = test_client.put(
+            "/api/admin/settings", json={"settings": {key: value}}
+        )
+        assert response.status_code == 200, response.json()
+        assert _settings_item(test_client, key)["value"] == value
+
+    @pytest.mark.parametrize(
+        ("key", "bad"),
+        [
+            ("default_user_role", "admin"),
+            ("jira_auth_mode", "none"),
+            ("log_level", "LOUD"),
+        ],
+    )
+    def test_static_enum_rejects_a_value_outside_the_set(
+        self, test_client, key: str, bad: str
+    ) -> None:
+        """A bad value is a 400 naming every allowed one, and saves nothing."""
+        before = _settings_item(test_client, key)
+        response = test_client.put("/api/admin/settings", json={"settings": {key: bad}})
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert key.upper() in detail.upper()
+        for option in _ENUM_SETTING_CHOICES[key]["options"]:
+            assert option in detail
+        assert _settings_item(test_client, key) == before
+
+    @pytest.mark.parametrize(
+        ("key", "typed", "stored"),
+        [
+            # Case-insensitive acceptance, canonical storage: the saved value is
+            # always one the picker offers, and an existing LOG_LEVEL=info env
+            # keeps working through the persist path.
+            ("log_level", " info ", "INFO"),
+            ("jira_auth_mode", "PAT", "pat"),
+        ],
+    )
+    def test_enum_value_is_stored_in_canonical_form(
+        self, test_client, key: str, typed: str, stored: str
+    ) -> None:
+        response = test_client.put(
+            "/api/admin/settings", json={"settings": {key: typed}}
+        )
+        assert response.status_code == 200, response.json()
+        assert _settings_item(test_client, key)["value"] == stored
+
+    def test_auto_push_exporters_accepts_a_registry_plugin(self, test_client) -> None:
+        """A known plugin saves in the registry's spelling (case-insensitive)."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"auto_push_exporters": " ReportPortal "}},
+        )
+        assert response.status_code == 200, response.json()
+        assert _settings_item(test_client, "auto_push_exporters")["value"] == (
+            "reportportal"
+        )
+
+    def test_auto_push_exporters_rejects_an_unknown_plugin(self, test_client) -> None:
+        """A bogus plugin name is rejected — auto-push would silently skip it."""
+        before = _settings_item(test_client, "auto_push_exporters")
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"auto_push_exporters": "reportportal,nope"}},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "nope" in detail and "reportportal" in detail
+        assert _settings_item(test_client, "auto_push_exporters") == before
+
+    def test_auto_push_exporters_fails_open_on_empty_registry(
+        self, test_client, monkeypatch, caplog
+    ) -> None:
+        """A cold registry must not block an admin — accept, but warn."""
+        import logging
+
+        from rootcoz import main
+
+        monkeypatch.setattr(main, "_EXPORTER_CLASSES", {})
+        with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                response = test_client.put(
+                    "/api/admin/settings",
+                    json={"settings": {"auto_push_exporters": "not-loaded-yet"}},
+                )
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
+        assert response.status_code == 200, response.json()
+        assert _settings_item(test_client, "auto_push_exporters")["value"] == (
+            "not-loaded-yet"
+        )
+        assert any("registry is empty" in r.getMessage() for r in caplog.records)
+
+    def test_allowed_users_accepts_unknown_usernames(self, test_client) -> None:
+        """SSO users may not exist yet: unknown names save, normalised in order."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"allowed_users": "  alice ,bob,,  carol "}},
+        )
+        assert response.status_code == 200, response.json()
+        assert _settings_item(test_client, "allowed_users")["value"] == (
+            "alice, bob, carol"
+        )
+
+    def test_allowed_users_rejects_a_bad_shape(self, test_client) -> None:
+        """Only the shape is checked — a name with a space is a typo, not a user."""
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"allowed_users": "alice smith"}},
+        )
+        assert response.status_code == 400
+        assert "allowed_users" in response.json()["detail"]
+
+    def test_import_rejects_an_ambient_provider_with_no_credential(
+        self, test_client, monkeypatch
+    ) -> None:
+        """An imported file cannot declare an unauthenticated provider ambient."""
+        from rootcoz import ai_client
+
+        _no_key_providers(monkeypatch)
+        _provider_auth_status(monkeypatch, {"claude": False})
+        monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+        ai_client.update_model_catalog([{"provider": "claude", "id": "claude/model"}])
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {"ambient_auth_providers": "claude"}},
+        )
+        assert response.status_code == 422, response.json()
+        detail = response.json()["detail"]
+        assert "no deployment credential" in detail and "claude" in detail
+        # Nothing was written — the import is validated before any DB write
+        assert _settings_item(test_client, "ambient_auth_providers")["source"] != "db"
+
+    @pytest.mark.parametrize(
+        ("key", "bad"),
+        [
+            ("default_user_role", "admin"),
+            ("jira_auth_mode", "none"),
+            ("log_level", "LOUD"),
+            ("auto_push_exporters", "nope"),
+            ("ambient_auth_providers", "nope-provider"),
+            ("allowed_users", "alice smith"),
+        ],
+    )
+    def test_import_rejects_an_invalid_enumerated_value(
+        self, test_client, monkeypatch, key: str, bad: str
+    ) -> None:
+        """An imported file cannot bypass the save-path validation."""
+        from rootcoz import ai_client
+
+        _no_key_providers(monkeypatch)
+        ai_client.update_model_catalog([{"provider": "claude", "id": "claude/model"}])
+        response = test_client.post(
+            "/api/admin/settings/import",
+            json={"version": 1, "settings": {key: bad}},
+        )
+        assert response.status_code == 422
+        assert key.upper() in response.json()["detail"].upper()
+        # Nothing was written — the import is validated before any DB write
+        assert _settings_item(test_client, key)["source"] != "db"
 
 
 class TestAdminSettingsExportImport:
@@ -12332,10 +12762,11 @@ class TestCursorStatusForClient:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "admin, forced", [(False, False), (False, True), (True, False), (True, True)]
+    "admin, credential_source",
+    [(False, "user"), (False, "server"), (True, "user"), (True, "server")],
 )
 async def test_chat_send_validates_with_sender_credentials(
-    monkeypatch, tmp_path, admin, forced
+    monkeypatch, tmp_path, admin, credential_source
 ):
     from rootcoz import ai_client, main
     from rootcoz.models import ChatMessageRequest
@@ -12343,9 +12774,7 @@ async def test_chat_send_validates_with_sender_credentials(
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "send.db")
     await storage.init_db()
     await storage.create_admin_user("alice")
-    await storage.save_ai_session_source(
-        "sid", "alice", "openai", "server" if forced else "user"
-    )
+    await storage.save_ai_session_source("sid", "alice", "openai", credential_source)
     await storage.add_chat_message(
         main.ADMIN_CHAT_JOB_ID if admin else "job",
         "assistant",
@@ -12363,19 +12792,8 @@ async def test_chat_send_validates_with_sender_credentials(
     )
     monkeypatch.setattr(
         main,
-        "get_settings",
-        lambda: SimpleNamespace(
-            allowed_users_set=set(), force_server_credentials=forced
-        ),
-    )
-    monkeypatch.setattr(
-        main,
         "get_result",
-        AsyncMock(
-            return_value={
-                "result": {"request_params": {"force_server_credentials": forced}}
-            }
-        ),
+        AsyncMock(return_value={"result": {"request_params": {}}}),
     )
     monkeypatch.setattr(
         main.storage, "add_chat_message_pair", AsyncMock(return_value=(1, 2))
@@ -12384,13 +12802,12 @@ async def test_chat_send_validates_with_sender_credentials(
     seen = []
 
     async def validate(provider, model):
-        seen.append(
-            (ai_client.ai_username.get(), ai_client.force_server_credentials.get())
-        )
+        seen.append((ai_client.ai_username.get(), "validated"))
+        ai_client._selected_credential_source.set(credential_source)
         return provider, model
 
     monkeypatch.setattr(main, "resolve_catalog_pair", validate)
-    ai_client._selected_credential_source.set("server" if forced else "user")
+    ai_client._selected_credential_source.set("")
     send = main.send_admin_chat_message if admin else main.send_chat_message
     args = (
         ChatMessageRequest(
@@ -12400,13 +12817,12 @@ async def test_chat_send_validates_with_sender_credentials(
         BackgroundTasks(),
     )
     original_user = ai_client.ai_username.set("previous")
-    original_force = ai_client.force_server_credentials.set(not forced)
     try:
         result = await (send(*args) if admin else send("job", *args))
         assert result["assistant_message_id"] == 2
-        assert seen == [("alice", forced)]
+        # The sender's identity is the scope for validation, then restored.
+        assert seen == [("alice", "validated")]
         assert ai_client.ai_username.get() == "previous"
-        assert ai_client.force_server_credentials.get() is not forced
 
         monkeypatch.setattr(
             main,
@@ -12417,14 +12833,12 @@ async def test_chat_send_validates_with_sender_credentials(
             await (send(*args) if admin else send("job", *args))
         assert exc.value.status_code == 422
         assert ai_client.ai_username.get() == "previous"
-        assert ai_client.force_server_credentials.get() is not forced
     finally:
-        ai_client.force_server_credentials.reset(original_force)
         ai_client.ai_username.reset(original_user)
 
 
 @pytest.mark.asyncio
-async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_path):
+async def test_admin_chat_init_uses_selected_source(monkeypatch, tmp_path):
     from rootcoz import ai_client, main
     from rootcoz.engine import chat
     from rootcoz.models import ChatInitRequest
@@ -12447,21 +12861,18 @@ async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_p
     seen = []
 
     async def init(**kwargs):
-        seen.append(
-            (ai_client.ai_username.get(), ai_client.force_server_credentials.get())
-        )
+        seen.append((ai_client.ai_username.get(), ai_client.chat_session_source.get()))
         return "session"
 
     monkeypatch.setattr(chat, "init_admin_chat_session", init)
     request = SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True))
-    original_force = ai_client.force_server_credentials.set(False)
+    original_source = ai_client.chat_session_source.set("user")
     try:
-        body = ChatInitRequest(
-            ai_provider="openai", ai_model="test-model", force_server_credentials=True
-        )
+        body = ChatInitRequest(ai_provider="openai", ai_model="test-model")
         assert (await main.init_admin_chat(request, body))["session_id"] == "session"
-        assert seen == [("alice", True)]
-        assert ai_client.force_server_credentials.get() is False
+        assert seen == [("alice", "server")]
+        # The per-session source is scoped to the init call only.
+        assert ai_client.chat_session_source.get() == "user"
         monkeypatch.setattr(
             chat,
             "init_admin_chat_session",
@@ -12470,14 +12881,14 @@ async def test_admin_chat_init_uses_forced_server_credentials(monkeypatch, tmp_p
         await storage.delete_chat_messages(main.ADMIN_CHAT_JOB_ID, username="alice")
         with pytest.raises(RuntimeError, match="unavailable"):
             await main.init_admin_chat(request, body)
-        assert ai_client.force_server_credentials.get() is False
+        assert ai_client.chat_session_source.get() == "user"
     finally:
-        ai_client.force_server_credentials.reset(original_force)
+        ai_client.chat_session_source.reset(original_source)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fails", [False, True])
-async def test_admin_chat_processing_forces_server_and_resets_context(
+async def test_admin_chat_processing_uses_session_source_and_resets_context(
     monkeypatch, tmp_path, fails
 ):
     from rootcoz import ai_client, main
@@ -12503,7 +12914,6 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
         lambda: SimpleNamespace(
             ai_provider="openai",
             ai_model="test-model",
-            force_server_credentials=True,
             ai_call_timeout=30,
         ),
     )
@@ -12528,16 +12938,13 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
     seen = []
 
     async def run(**kwargs):
-        seen.append(
-            (ai_client.ai_username.get(), ai_client.force_server_credentials.get())
-        )
+        seen.append((ai_client.ai_username.get(), ai_client.chat_session_source.get()))
         if fails:
             raise RuntimeError("unavailable")
         return True, "reply", "session"
 
     monkeypatch.setattr(chat, "admin_chat_with_ai", run)
-    ai_client._selected_credential_source.set("server")
-    original_force = ai_client.force_server_credentials.set(False)
+    original_source = ai_client.chat_session_source.set("user")
     original_user = ai_client.ai_username.set("previous")
     try:
         await main._process_admin_chat_message(
@@ -12547,14 +12954,14 @@ async def test_admin_chat_processing_forces_server_and_resets_context(
             ai_provider_override="openai",
             ai_model_override="test-model",
             username="alice",
-            force_server=True,
+            credential_source="server",
         )
-        assert seen == [("alice", True)]
+        assert seen == [("alice", "server")]
         assert ai_client.ai_username.get() == "previous"
-        assert ai_client.force_server_credentials.get() is False
+        assert ai_client.chat_session_source.get() == "user"
     finally:
         ai_client.ai_username.reset(original_user)
-        ai_client.force_server_credentials.reset(original_force)
+        ai_client.chat_session_source.reset(original_source)
 
 
 class TestResolveChatAiConfig:
@@ -13489,3 +13896,80 @@ def _post_submit_queued(test_client, payload: dict) -> tuple[dict, AsyncMock]:
         data = response.json()
         assert data["status"] == "queued"
         return data, mock_process
+
+
+class TestAdminUsersPaging:
+    """GET /api/admin/users paging and username search (plan E2E-J11)."""
+
+    @staticmethod
+    def _seed(test_client, *usernames: str) -> None:
+        for username in usernames:
+            response = test_client.post(
+                "/api/admin/users/create",
+                json={"username": username, "role": "viewer"},
+            )
+            assert response.status_code == 200
+
+    def test_unpaged_call_keeps_every_user_and_reports_the_totals(
+        self, test_client
+    ) -> None:
+        self._seed(test_client, "alice", "bob")
+
+        body = test_client.get("/api/admin/users").json()
+
+        assert {user["username"] for user in body["users"]} == {"alice", "bob"}
+        assert body["total"] == 2
+        # No limit asked for means nothing was cut, so the page is the whole set.
+        assert body["limit"] == 2
+        assert body["offset"] == 0
+
+    def test_limit_and_offset_walk_the_unpaged_order_without_overlap(
+        self, test_client
+    ) -> None:
+        self._seed(test_client, "alice", "bob", "carol", "dana")
+
+        everyone = test_client.get("/api/admin/users").json()
+        first = test_client.get(
+            "/api/admin/users", params={"limit": 2, "offset": 0}
+        ).json()
+        second = test_client.get(
+            "/api/admin/users", params={"limit": 2, "offset": 2}
+        ).json()
+
+        assert len(first["users"]) == len(second["users"]) == 2
+        # The total ignores limit/offset; each page reports its own window.
+        assert first["total"] == second["total"] == 4
+        assert (first["limit"], first["offset"]) == (2, 0)
+        assert (second["limit"], second["offset"]) == (2, 2)
+        # Paged order is the unpaged order, not a reshuffle.
+        assert [user["id"] for user in first["users"] + second["users"]] == [
+            user["id"] for user in everyone["users"]
+        ]
+        assert [user["id"] for user in first["users"]] == [
+            user["id"] for user in everyone["users"][:2]
+        ]
+
+    def test_query_matches_the_username_case_insensitively(self, test_client) -> None:
+        self._seed(test_client, "alice", "bob", "malika")
+
+        body = test_client.get("/api/admin/users", params={"q": "AL"}).json()
+
+        assert sorted(user["username"] for user in body["users"]) == [
+            "alice",
+            "malika",
+        ]
+        assert body["total"] == 2
+        # q and limit combine: total still ignores the page bound.
+        paged = test_client.get(
+            "/api/admin/users", params={"q": "AL", "limit": 1, "offset": 0}
+        ).json()
+        assert len(paged["users"]) == 1
+        assert paged["total"] == 2
+
+    @pytest.mark.parametrize(
+        "params",
+        [{"limit": 0}, {"limit": 501}, {"offset": -1}],
+        ids=["limit-below-range", "limit-above-range", "negative-offset"],
+    )
+    def test_out_of_range_paging_is_rejected(self, test_client, params) -> None:
+        assert test_client.get("/api/admin/users", params=params).status_code == 422

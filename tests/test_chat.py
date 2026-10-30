@@ -1521,11 +1521,7 @@ async def test_init_chat_under_barrier_rejects_deleting_job():
             await main_mod._init_chat_under_barrier(
                 "gone-job",
                 "alice",
-                ChatInitRequest(
-                    ai_provider="claude",
-                    ai_model="sonnet-4",
-                    force_server_credentials=True,
-                ),
+                ChatInitRequest(ai_provider="claude", ai_model="sonnet-4"),
             )
         assert exc.value.status_code == 404
     finally:
@@ -1908,9 +1904,7 @@ async def test_chat_init_releases_barrier_before_clone(setup_test_db, monkeypatc
         main_mod._init_chat_under_barrier(
             job_id,
             "alice",
-            ChatInitRequest(
-                ai_provider="claude", ai_model="sonnet-4", force_server_credentials=True
-            ),
+            ChatInitRequest(ai_provider="claude", ai_model="sonnet-4"),
         )
     )
     await clone_started.wait()
@@ -2150,11 +2144,7 @@ async def _start_chat(
     ):
         response = test_client.post(
             f"/api/chat/{job_id}/init",
-            json={
-                "ai_provider": provider,
-                "ai_model": model,
-                "force_server_credentials": True,
-            },
+            json={"ai_provider": provider, "ai_model": model},
         )
     assert response.status_code == 200, response.text
     assert response.json()["session_id"] == f"session-{job_id}"
@@ -2303,11 +2293,7 @@ class TestChatEndpoints:
         await _save_job(temp_db_path, "chat-badprov-job")
         response = test_client.post(
             "/api/chat/chat-badprov-job/init",
-            json={
-                "ai_provider": "invalid-provider",
-                "ai_model": "x",
-                "force_server_credentials": True,
-            },
+            json={"ai_provider": "invalid-provider", "ai_model": "x"},
         )
         assert response.status_code == 422
         assert "Unknown Pi-sidecar provider/model pair" in response.json()["detail"]
@@ -2365,7 +2351,7 @@ class TestChatEndpoints:
         await _save_job(temp_db_path, "chat-partial-job")
         response = test_client.post(
             "/api/chat/chat-partial-job/init",
-            json={"ai_provider": "claude", "force_server_credentials": True},
+            json={"ai_provider": "claude"},
         )
         assert response.status_code == 422
         await _start_chat(test_client, "chat-partial-job")
@@ -2689,11 +2675,7 @@ async def test_rotation_does_not_reactivate_older_server_chat(
     ):
         response = test_client.post(
             f"{path}/init",
-            json={
-                "ai_provider": "claude",
-                "ai_model": "sonnet-4",
-                "force_server_credentials": True,
-            },
+            json={"ai_provider": "claude", "ai_model": "sonnet-4"},
             headers=headers,
         )
     assert response.status_code == 200, response.text
@@ -2757,17 +2739,12 @@ async def test_init_without_session_does_not_notify(
                     json={
                         "ai_provider": "claude",
                         "ai_model": "sonnet-4",
-                        "force_server_credentials": True,
                     },
                 )
         else:
             response = test_client.post(
                 f"{path}/init",
-                json={
-                    "ai_provider": "claude",
-                    "ai_model": "sonnet-4",
-                    "force_server_credentials": True,
-                },
+                json={"ai_provider": "claude", "ai_model": "sonnet-4"},
             )
             assert response.status_code == 200, response.text
             assert response.json()["session_id"] == ""
@@ -2807,12 +2784,15 @@ async def test_orphan_history_can_start_without_losing_messages(
         )
         return "new-orphan-session"
 
+    def select(*args, **kwargs):
+        """Resolve as the real validator does: this pair comes from the server pool."""
+        from rootcoz import ai_client
+
+        ai_client._selected_credential_source.set("server")
+        return "claude", "sonnet-4"
+
     with (
-        patch(
-            "rootcoz.main._validate_chat_selection",
-            new_callable=AsyncMock,
-            return_value=("claude", "sonnet-4"),
-        ),
+        patch("rootcoz.main._validate_chat_selection", side_effect=select),
         patch(
             "rootcoz.main._create_ai_auth_header",
             new_callable=AsyncMock,
@@ -2837,11 +2817,7 @@ async def test_orphan_history_can_start_without_losing_messages(
         ),
         patch("rootcoz.main.notify_chat_changed") as notify,
     ):
-        body = {
-            "ai_provider": "claude",
-            "ai_model": "sonnet-4",
-            "force_server_credentials": True,
-        }
+        body = {"ai_provider": "claude", "ai_model": "sonnet-4"}
         first = test_client.post(f"{path}/init", json=body)
         assert first.status_code == 200, first.text
         assert first.json()["session_id"] == "new-orphan-session"
@@ -3081,11 +3057,7 @@ async def test_chat_availability_does_not_bypass_route_authorization(
         test_client.post(
             "/api/chat/authorized-job/init",
             headers=headers,
-            json={
-                "ai_provider": "claude",
-                "ai_model": "sonnet-4",
-                "force_server_credentials": True,
-            },
+            json={"ai_provider": "claude", "ai_model": "sonnet-4"},
         ).status_code
         == 403
     )

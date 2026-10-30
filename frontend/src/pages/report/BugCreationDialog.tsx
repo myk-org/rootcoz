@@ -378,7 +378,7 @@ export function BugCreationDialog({
                     onBlur={() => setTimeout(() => setShowProjectDropdown(false), 200)}
                     placeholder="Type to search projects..."
                     autoComplete="off"
-                    className="w-full h-9 border bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary"
+                    className="px-2"
                   />
                   {showProjectDropdown && jiraProjects.length > 0 && (
                     <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-border-default bg-surface-card shadow-lg">
@@ -424,7 +424,7 @@ export function BugCreationDialog({
                     onChange={(e) => setCustomIssueType(e.target.value)}
                     placeholder="Enter custom issue type..."
                     autoComplete="off"
-                    className="w-full h-9 border bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary mt-1"
+                    className="px-2 mt-1"
                   />
                 )}
               </div>
@@ -445,7 +445,7 @@ export function BugCreationDialog({
                     onBlur={() => setTimeout(() => setShowSecurityDropdown(false), 200)}
                     placeholder="None (public)"
                     autoComplete="off"
-                    className="w-full h-9 border bg-surface-elevated px-2 text-sm text-text-primary placeholder:text-text-tertiary"
+                    className="px-2"
                   />
                   {showSecurityDropdown && securityLevels.length > 0 && (
                     <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-border-default bg-surface-card shadow-lg">
