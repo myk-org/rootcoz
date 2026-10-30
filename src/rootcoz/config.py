@@ -819,13 +819,15 @@ class Settings(BaseSettings):
     # Consecutive failed logins before the account is locked (#379 §I.1).
     # There is no automatic expiry: "it unlocked itself after 15 minutes" is
     # exactly what an attacker waits for, so a lock needs an admin unlock.
+    # A lock blocks new logins only — see _account_block_reason.
     login_lockout_threshold: int = Field(
         default=5,
         ge=0,
         description=(
             "Lock an account after this many consecutive failed logins. "
             "0 also disables lockout. A locked account can only be "
-            "unlocked by an admin — there is no automatic expiry."
+            "unlocked by an admin — there is no automatic expiry. A lock "
+            "blocks new logins; existing sessions and API keys keep working."
         ),
     )
 

@@ -48,10 +48,15 @@ const LOCKOUT_HINT_THRESHOLD = '5'
 /** The page's debounce, so a search test can wait exactly past it. */
 const SEARCH_DEBOUNCE_MS = 300
 
-function mockServer(all: Array<{ username: string }>) {
+function mockServer(
+  all: Array<{ username: string }>,
+  // A promise lets a test hold the threshold open and settle it on demand.
+  lockoutThreshold: string | null | Promise<string | null> = LOCKOUT_HINT_THRESHOLD,
+) {
   get.mockImplementation(async (url: string) => {
     if (url === '/api/admin/settings') {
-      return [{ key: 'login_lockout_threshold', value: LOCKOUT_HINT_THRESHOLD }]
+      const value = await lockoutThreshold
+      return value === null ? [] : [{ key: 'login_lockout_threshold', value }]
     }
     const params = new URL(url, 'http://localhost').searchParams
     const limit = Number(params.get('limit'))
@@ -62,7 +67,10 @@ function mockServer(all: Array<{ username: string }>) {
   })
 }
 
-const mockUsers = (users: Array<{ username: string }>) => mockServer(users)
+const mockUsers = (
+  users: Array<{ username: string }>,
+  lockoutThreshold?: string | null | Promise<string | null>,
+) => mockServer(users, lockoutThreshold)
 
 /** Every request the page made for rows, in order. */
 const usersRequests = () =>
@@ -413,5 +421,85 @@ describe('UsersPage account state', () => {
     expect(screen.getByText('carol')).toBeInTheDocument()
     expect(screen.getByText('locked (3/5)')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Unlock carol' })).toBeInTheDocument()
+  })
+
+  // The actions read the same answer as the badge, so a disabled or locked
+  // account can be brought back whatever its registration status says.
+  it('offers Enable on a disabled pending account, and not Approve', async () => {
+    mockUsers([user('dana', { status: 'pending', disabled: true })])
+    renderPage()
+
+    const dana = (await screen.findByText('dana')).closest('tr')!
+    expect(within(dana).getByRole('button', { name: 'Enable dana' })).toBeInTheDocument()
+    expect(within(dana).queryByRole('button', { name: /Approve/ })).not.toBeInTheDocument()
+    expect(within(dana).queryByRole('button', { name: /Reject/ })).not.toBeInTheDocument()
+  })
+
+  it('offers Unlock on a locked pending account', async () => {
+    mockUsers([user('frank', { status: 'pending', locked: true, failed_login_count: 2 })])
+    renderPage()
+
+    const frank = (await screen.findByText('frank')).closest('tr')!
+    expect(within(frank).getByRole('button', { name: 'Unlock frank' })).toBeInTheDocument()
+    // A lock is not a disable: no Enable/Disable control is offered beside it.
+    expect(within(frank).queryByRole('button', { name: /Enable|Disable/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps Approve and Reject on a pending account that is neither disabled nor locked', async () => {
+    mockUsers([user('dana', { status: 'pending' })])
+    renderPage()
+
+    const dana = (await screen.findByText('dana')).closest('tr')!
+    expect(within(dana).getByRole('button', { name: 'Approve dana' })).toBeInTheDocument()
+    expect(within(dana).getByRole('button', { name: 'Reject dana' })).toBeInTheDocument()
+    expect(within(dana).queryByRole('button', { name: 'Unlock dana' })).not.toBeInTheDocument()
+  })
+
+  it('keeps Enable on a disabled active account', async () => {
+    mockUsers([user('bob', { disabled: true })])
+    renderPage()
+
+    const bob = (await screen.findByText('bob')).closest('tr')!
+    expect(within(bob).getByRole('button', { name: 'Enable bob' })).toBeInTheDocument()
+    expect(within(bob).queryByRole('button', { name: 'Disable bob' })).not.toBeInTheDocument()
+  })
+})
+
+describe('UsersPage locked badge', () => {
+  const locked = (extra: Record<string, unknown> = {}) =>
+    user('carol', { locked: true, locked_at: '2025-01-01T00:00:00Z', ...extra })
+
+  it('stays a bare locked when the lockout is turned off, never locked (5/0)', async () => {
+    let release!: (value: string) => void
+    const threshold = new Promise<string>((resolve) => { release = resolve })
+    mockUsers([locked({ failed_login_count: 5 })], threshold)
+    renderPage()
+
+    const row = (await screen.findByText('carol')).closest('tr')!
+    expect(within(row).getByText('locked')).toBeInTheDocument()
+
+    // Threshold 0 means the lockout is off; a standing lock is still not released.
+    await act(async () => release('0'))
+    expect(get).toHaveBeenCalledWith('/api/admin/settings')
+    expect(within(row).getByText('locked')).toBeInTheDocument()
+    expect(row).not.toHaveTextContent('/0')
+  })
+
+  it('divides by the threshold when there is one', async () => {
+    mockUsers([locked({ failed_login_count: 5 })])
+    renderPage()
+
+    const row = (await screen.findByText('carol')).closest('tr')!
+    expect(await within(row).findByText('locked (5/5)')).toBeInTheDocument()
+  })
+
+  it('stays a bare locked when the threshold is not readable', async () => {
+    mockUsers([locked({ failed_login_count: 5 })], null)
+    renderPage()
+
+    const row = (await screen.findByText('carol')).closest('tr')!
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/api/admin/settings'))
+    expect(within(row).getByText('locked')).toBeInTheDocument()
+    expect(within(row).queryByText(/locked \(/)).not.toBeInTheDocument()
   })
 })

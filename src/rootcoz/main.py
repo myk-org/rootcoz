@@ -2783,7 +2783,12 @@ async def _record_account_blocked(
 
 
 def _account_block_reason(user: dict[str, Any] | None) -> str | None:
-    """``"disabled"`` / ``"locked"`` for a row that must not authenticate (#379).
+    """``"disabled"`` / ``"locked"`` for a row that must not log in (#379).
+
+    Only the login path asks this. ``disabled`` is an admin taking the account
+    out of service, so the middleware refuses it on every path too; ``locked``
+    is a credential-guessing guard, and refusing it anywhere but here would let
+    a stranger who knows a username cut off that account's sessions and keys.
 
     ``None`` for a usable account and for the bootstrap admin, which has no
     ``users`` row and is therefore unaffected.
@@ -2918,6 +2923,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 session_token = _read_cookie(request, "rootcoz_session")
                 if session_token and await storage.get_session(session_token):
                     return await call_next(request)
+                # A blocked identity stays on the login page: sending it to "/"
+                # only bounces it back here, one audit row per hop (#379).
+                # No row here — the refusal was audited where it was decided.
+                if _account_block_reason(
+                    await storage.get_user_by_username(proxy_username)
+                ):
+                    return await call_next(request)
                 # SSO user hitting /login — redirect to dashboard
                 response: Response = RedirectResponse(url="/", status_code=303)
                 if _read_cookie(request, "rootcoz_username") != proxy_username:
@@ -3032,9 +3044,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 cookie_username = ""
             username = cookie_username
 
-        # 5. Refuse a disabled or locked account on every path (#379): a key, a
-        #    session and a proxy identity are all only as good as the row they
-        #    name. The row is loaded once here and reused for the grants below.
+        # 5. Refuse a disabled account on every path (#379): a key, a session and
+        #    a proxy identity are all only as good as the row they name. A
+        #    locked one is refused at login only — see _account_block_reason.
+        #    The row is loaded once here and reused for the grants below.
         #    "admin" is reserved, so a bootstrap admin has no row to check.
         if (
             has_valid_session
@@ -3043,12 +3056,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             and fetched_user is None
         ):
             fetched_user = await storage.get_user_by_username(username)
-        block_reason = _account_block_reason(fetched_user)
-        if block_reason is not None:
-            logger.debug("Refused %s account '%s' on %s", block_reason, username, path)
+        if fetched_user and fetched_user.get("disabled"):
+            logger.debug("Refused disabled account '%s' on %s", username, path)
             await _record_account_blocked(
                 username=username,
-                reason=block_reason,
+                reason="disabled",
                 role=resolved_role,
                 request=request,
             )

@@ -3557,7 +3557,7 @@ def test_users_list_exposes_lockout_and_disable_state(temp_db_path: Path) -> Non
         assert row["failed_login_count"] == 1
 
 
-# --- a blocked account is refused on every auth path (#379) ----------------
+# --- disabled is refused everywhere, locked only at login (#379) -----------
 
 #: The middleware's answer to a bad credential — a refused account must match it,
 #: byte for byte, so the caller never learns which condition applied.
@@ -3590,19 +3590,62 @@ def _auth_probe(client, path: str, username: str, key: str, session_token: str):
     return client.get("/api/auth/me", headers={"X-Forwarded-User": username})
 
 
-@pytest.mark.parametrize("state", ["disabled", "locked"])
-def test_a_blocked_account_is_refused_on_every_auth_path(
-    temp_db_path: Path, state: str
+@pytest.mark.parametrize("path", ["bearer", "session", "proxy"])
+def test_a_locked_account_keeps_the_access_it_already_has(
+    temp_db_path: Path, path: str
+) -> None:
+    """The lock guards the login, not the account (#379).
+
+    Locking on a session or a key would let a stranger who knows a username
+    cut off that account with five wrong guesses, so only a new login is
+    refused and the existing credential keeps working until rotated.
+    """
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        username = f"locked-{path}"
+        key = _register(client, username)
+        token = asyncio.run(
+            storage.create_session(username, is_admin=False, role="reviewer")
+        )
+        _set_account_state(username, locked=True)
+
+        assert _login(client, username, key).status_code == 401
+        blocked = [
+            event
+            for event in _events(action="auth.login_blocked")
+            if event["actor"] == username
+        ]
+        assert len(blocked) == 1
+        assert blocked[0]["outcome"] == "denied"
+        assert blocked[0]["details"] == {"reason": "locked"}
+
+        response = _auth_probe(client, path, username, key, token)
+        assert response.status_code == 200, (path, response.text)
+        assert response.json()["username"] == username
+        # A working credential is not a refusal, so the trail keeps one row.
+        assert (
+            len(
+                [
+                    event
+                    for event in _events(action="auth.login_blocked")
+                    if event["actor"] == username
+                ]
+            )
+            == 1
+        )
+
+
+def test_a_disabled_account_is_refused_on_every_auth_path(
+    temp_db_path: Path,
 ) -> None:
     """A key, a session and a proxy identity are all only as good as their row."""
     for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
         for path in ("bearer", "session", "proxy"):
-            username = f"{state}-{path}"
+            username = f"disabled-{path}"
             key = _register(client, username)
             token = asyncio.run(
                 storage.create_session(username, is_admin=False, role="reviewer")
             )
-            _set_account_state(username, **{state: True})
+            _set_account_state(username, disabled=True)
 
             response = _auth_probe(client, path, username, key, token)
             assert response.status_code == 401, (path, response.text)
@@ -3616,7 +3659,65 @@ def test_a_blocked_account_is_refused_on_every_auth_path(
             assert len(blocked) == 1, path
             assert blocked[0]["outcome"] == "denied"
             assert blocked[0]["target_id"] == username
-            assert blocked[0]["details"] == {"reason": state}
+            assert blocked[0]["details"] == {"reason": "disabled"}
+
+
+_SSO_BLOCKED_USER = "sso-blocked"
+
+
+def test_a_blocked_sso_user_lands_on_the_login_page_instead_of_looping(
+    temp_db_path: Path,
+) -> None:
+    """ "/" refuses, "/login" must not send the same identity back (#379).
+
+    One pass of the loop writes one row: the refusal is recorded where it is
+    decided, never again on the redirect that follows it.
+    """
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        _register(client, _SSO_BLOCKED_USER)
+        _set_account_state(_SSO_BLOCKED_USER, disabled=True)
+        client.cookies.clear()
+        headers = {"accept": "text/html", "x-forwarded-user": _SSO_BLOCKED_USER}
+
+        refused = client.get("/", headers=headers, follow_redirects=False)
+        assert refused.status_code == 303
+        assert refused.headers["location"] == "/login"
+
+        page = client.get("/login", headers=headers, follow_redirects=False)
+        assert page.status_code != 303, page.headers.get("location")
+
+        rows = _events(action="auth.login_blocked", actor=_SSO_BLOCKED_USER)
+        assert len(rows) == 1
+        assert rows[0]["details"] == {"reason": "disabled"}
+
+        # A second attempt is a second row — one per attempt, not per hop.
+        assert (
+            client.get("/", headers=headers, follow_redirects=False).status_code == 303
+        )
+        assert (
+            client.get("/login", headers=headers, follow_redirects=False).status_code
+            != 303
+        )
+        assert len(_events(action="auth.login_blocked", actor=_SSO_BLOCKED_USER)) == 2
+
+
+def test_a_healthy_sso_user_still_shortcuts_to_the_dashboard(
+    temp_db_path: Path,
+) -> None:
+    """The blocked-account check must not touch an ordinary identity."""
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        _register(client, "sso-healthy")
+        client.cookies.clear()
+
+        response = client.get(
+            "/login",
+            headers={"x-forwarded-user": "sso-healthy"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/"
+        assert response.cookies.get("rootcoz_username") == "sso-healthy"
+        assert _events(action="auth.login_blocked") == []
 
 
 def test_the_bootstrap_admin_is_never_blocked(temp_db_path: Path) -> None:

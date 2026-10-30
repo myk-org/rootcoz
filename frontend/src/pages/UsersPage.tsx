@@ -224,8 +224,9 @@ export function UsersPage() {
     return () => clearTimeout(timer)
   }, [search, query, setQuery])
 
-  // Only asked when a row is actually locked; a failed read leaves the badge at
-  // the bare failure count rather than hiding the lock.
+  // Only asked when a row is actually locked; an unknown threshold (failed read,
+  // or the 0 that means the lockout is turned off) leaves the badge at the bare
+  // 'locked' rather than hiding the lock or printing 'locked (5/0)'.
   useEffect(() => {
     if (lockoutThreshold !== null || !users.some((u) => u.locked)) return
     api
@@ -533,8 +534,8 @@ export function UsersPage() {
           </TableHeader>
           <TableBody>
             {users.map((user, i) => {
-              // One answer for the badge and the muting, so a row cannot look
-              // half-disabled (or half-pending).
+              // One answer for the badge, the muting and the actions, so a row
+              // cannot look half-disabled (or half-pending).
               const state = accountState(user)
               const muted = state === 'disabled'
               return (
@@ -553,12 +554,13 @@ export function UsersPage() {
                     </span>
                   </TableCell>
                   <TableCell>
-                    {/* disabled > locked > registration status (see accountState). */}
+                    {/* disabled > locked > registration status (see accountState).
+                        The fraction needs a limit to divide by: with the lockout
+                        turned off (0) a standing lock reads bare 'locked', never
+                        'locked (5/0)'. */}
                     <StateBadge state={state}>
-                      {state === 'locked'
-                        ? lockoutThreshold === null
-                          ? 'locked'
-                          : `locked (${user.failed_login_count}/${lockoutThreshold})`
+                      {state === 'locked' && lockoutThreshold
+                        ? `locked (${user.failed_login_count}/${lockoutThreshold})`
                         : state}
                     </StateBadge>
                   </TableCell>
@@ -614,65 +616,15 @@ export function UsersPage() {
                   <TableCell className="text-right">
                     {user.username === 'admin' ? (
                       <span className="text-xs text-text-tertiary italic">built-in</span>
-                    ) : user.status === 'pending' ? (
-                      <div className="flex items-center justify-end gap-1">
-                        <TooltipProvider delayDuration={200}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                aria-label={`Approve ${user.username}`}
-                                className="h-7 w-7"
-                                disabled={actionInProgress === user.username}
-                                onClick={() => { setApproveTarget(user.username); setApproveServerGrant(!!user.can_use_server_providers) }}
-                              >
-                                <CheckCircle className="h-3.5 w-3.5 text-signal-green" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Approve</TooltipContent>
-                          </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                aria-label={`Reject ${user.username}`}
-                                className="h-7 w-7"
-                                disabled={actionInProgress === user.username}
-                                onClick={() => handleReject(user.username)}
-                              >
-                                <XCircle className="h-3.5 w-3.5 text-signal-red" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Reject</TooltipContent>
-                          </Tooltip>
-                          {user.username !== currentUser && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  aria-label={`Delete ${user.username}`}
-                                  className="h-7 w-7"
-                                  onClick={() => setDeleteTarget(user.username)}
-                                >
-                                  <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent>Delete user</TooltipContent>
-                            </Tooltip>
-                          )}
-                        </TooltipProvider>
-                      </div>
                     ) : (
                       <div className="flex items-center justify-end gap-1">
                         <TooltipProvider delayDuration={200}>
-                          {/* Account state — disable/enable, and unlock while locked */}
-                          {user.username !== currentUser && user.locked && (
+                          {/* Account state — these read the same accountState as the
+                              badge: a disabled row always offers Enable and a locked
+                              one always offers Unlock, whatever the registration
+                              status says, and Disable is offered only when neither
+                              is in effect. */}
+                          {user.username !== currentUser && state === 'locked' && (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
@@ -690,30 +642,67 @@ export function UsersPage() {
                               <TooltipContent>Unlock account</TooltipContent>
                             </Tooltip>
                           )}
-                          {user.username !== currentUser && (
+                          {user.username !== currentUser && state !== 'locked' && (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button
                                   type="button"
                                   variant="ghost"
                                   size="icon"
-                                  aria-label={`${user.disabled ? 'Enable' : 'Disable'} ${user.username}`}
+                                  aria-label={`${state === 'disabled' ? 'Enable' : 'Disable'} ${user.username}`}
                                   className="h-7 w-7"
                                   disabled={accountBusy === user.username}
                                   onClick={() => {
-                                    if (user.disabled) handleAccountState(user.username, 'enable')
+                                    if (state === 'disabled') handleAccountState(user.username, 'enable')
                                     else setDisableTarget(user.username)
                                   }}
                                 >
-                                  {user.disabled ? (
+                                  {state === 'disabled' ? (
                                     <UserCheck className="h-3.5 w-3.5 text-signal-green" />
                                   ) : (
                                     <UserX className="h-3.5 w-3.5 text-signal-red" />
                                   )}
                                 </Button>
                               </TooltipTrigger>
-                              <TooltipContent>{user.disabled ? 'Enable account' : 'Disable account'}</TooltipContent>
+                              <TooltipContent>{state === 'disabled' ? 'Enable account' : 'Disable account'}</TooltipContent>
                             </Tooltip>
+                          )}
+                          {/* Registration status — approve/reject a waiting account, hidden once it is disabled */}
+                          {user.username !== currentUser && state !== 'disabled' && user.status === 'pending' && (
+                            <>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={`Approve ${user.username}`}
+                                    className="h-7 w-7"
+                                    disabled={actionInProgress === user.username}
+                                    onClick={() => { setApproveTarget(user.username); setApproveServerGrant(!!user.can_use_server_providers) }}
+                                  >
+                                    <CheckCircle className="h-3.5 w-3.5 text-signal-green" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Approve</TooltipContent>
+                              </Tooltip>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    aria-label={`Reject ${user.username}`}
+                                    className="h-7 w-7"
+                                    disabled={actionInProgress === user.username}
+                                    onClick={() => handleReject(user.username)}
+                                  >
+                                    <XCircle className="h-3.5 w-3.5 text-signal-red" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Reject</TooltipContent>
+                              </Tooltip>
+                            </>
                           )}
                           {/* Rotate key — every active user with an API key (admins and delegated users) */}
                           {user.username !== currentUser && user.status === 'active' && (
