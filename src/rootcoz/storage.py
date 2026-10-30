@@ -3691,7 +3691,8 @@ async def get_tracked_in_link(link_id: int) -> dict[str, Any] | None:
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, job_id, created_by FROM tracked_in_links WHERE id = ?",
+            "SELECT id, job_id, test_name, type, created_by"
+            " FROM tracked_in_links WHERE id = ?",
             (link_id,),
         )
         row = await cursor.fetchone()

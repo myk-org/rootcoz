@@ -1011,7 +1011,7 @@ def _registered_user_session(app_client, username: str) -> dict[str, Any]:
     }
 
 
-def test_tracker_token_set_and_delete_audit_the_tracker_only(app_client) -> None:
+def test_tracker_token_set_and_delete_audit_the_field_only(app_client) -> None:
     session = _registered_user_session(app_client, "carol")
 
     token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
@@ -1029,12 +1029,17 @@ def test_tracker_token_set_and_delete_audit_the_tracker_only(app_client) -> None
     assert response.status_code == 200, response.text
 
     sets = _events(action="user.tracker_token_set")
-    assert {event["details"]["tracker"] for event in sets} == {"github", "jira"}
+    # One row per field that changed: the field is the whole point, and
+    # "the jira token" alone cannot tell the email from the secret (#379).
+    assert {event["details"]["field"] for event in sets} == {
+        "github_token",
+        "jira_token",
+    }
     assert all(event["target_type"] == "user" for event in sets)
     assert all(event["target_id"] == "carol" for event in sets)
     deletes = _events(action="user.tracker_token_delete")
     assert len(deletes) == 1
-    assert deletes[0]["details"] == {"tracker": "jira"}
+    assert deletes[0]["details"] == {"field": "jira_token"}
     stored = json.dumps(sets + deletes)
     assert token not in stored
     assert "gh-token-0123456789" not in stored
@@ -1064,7 +1069,7 @@ def test_tracker_token_audit_records_only_actual_changes(app_client) -> None:
     assert cleared.status_code == 200, cleared.text
     deletes = _events(action="user.tracker_token_delete")
     assert len(deletes) == 1
-    assert deletes[0]["details"] == {"tracker": "jira"}
+    assert deletes[0]["details"] == {"field": "jira_token"}
     assert len(_events(action="user.tracker_token_set")) == 1
 
     # Clearing an already empty field is not a change either.

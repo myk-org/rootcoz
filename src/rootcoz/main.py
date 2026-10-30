@@ -1385,8 +1385,8 @@ async def _record_refused_attempt(
     action: str,
     request: Request,
     message: str,
-    target_type: str,
-    target_id: str,
+    target_type: str | None = None,
+    target_id: str = "",
     exc: HTTPException,
     details: dict[str, Any] | None = None,
     denied: bool = False,
@@ -1398,6 +1398,11 @@ async def _record_refused_attempt(
     error detail the client sees is not copied into the trail. ``denied`` marks
     a handler whose every refusal is an access/shape denial rather than a
     failed action.
+
+    ``target_type``/``target_id`` are optional: a refusal can happen before
+    there is a target to name (a submission that never produced a job, a bulk
+    write with no single job), and an unnamed target stays NULL rather than
+    being invented.
     """
     outcome, reason = _audit_rejection(exc)
     if denied:
@@ -1407,11 +1412,23 @@ async def _record_refused_attempt(
         actor=getattr(request.state, "username", ""),
         message=f"{message} ({outcome}: {reason})",
         target_type=target_type,
-        target_id=target_id,
+        target_id=target_id or None,
         outcome=outcome,
         details={"reason": reason, **(details or {})},
         request=request,
     )
+
+
+def _refusal_exception(exc: Exception, *, status_code: int = 400) -> HTTPException:
+    """The ``HTTPException`` a refusal surfaced as.
+
+    The storage layer raises ``ValueError`` for a payload it rejects, which the
+    endpoint already converts to a 4xx (``status_code``); auditing the attempt
+    and answering the client must therefore come from the same exception.
+    """
+    if isinstance(exc, HTTPException):
+        return exc
+    return HTTPException(status_code=status_code, detail=str(exc))
 
 
 # Statuses that indicate the analysis is still in progress.
@@ -5677,16 +5694,22 @@ async def analyze(
         ai_username.reset(token)
 
     display_name = _resolve_request_display_name(body)
-    return await _enqueue_ci_source_analysis(
-        body=body,
-        merged=merged,
-        resolved_peers=resolved_peers,
-        display_name=display_name,
-        analysis_type=body.type,
-        base_url=base_url,
-        username=request.state.username,
-        message_prefix="Analysis",
-        is_admin=bool(request.state.is_admin),
+    return await _enqueue_audited_analysis(
+        request=request,
+        ingest_only=False,
+        provider=body.ai_provider or "",
+        model=body.ai_model or "",
+        enqueue=_enqueue_ci_source_analysis(
+            body=body,
+            merged=merged,
+            resolved_peers=resolved_peers,
+            display_name=display_name,
+            analysis_type=body.type,
+            base_url=base_url,
+            username=request.state.username,
+            message_prefix="Analysis",
+            is_admin=bool(request.state.is_admin),
+        ),
     )
 
 
@@ -5708,17 +5731,21 @@ async def submit(
 
     display_name = _resolve_request_display_name(body)
     merged = _merge_settings(body, settings)
-    return await _enqueue_ci_source_analysis(
-        body=body,
-        merged=merged,
-        resolved_peers=None,
-        display_name=display_name,
-        analysis_type=body.type,
-        base_url=base_url,
-        username=request.state.username,
-        message_prefix="Submit",
-        is_admin=bool(request.state.is_admin),
+    return await _enqueue_audited_analysis(
+        request=request,
         ingest_only=True,
+        enqueue=_enqueue_ci_source_analysis(
+            body=body,
+            merged=merged,
+            resolved_peers=None,
+            display_name=display_name,
+            analysis_type=body.type,
+            base_url=base_url,
+            username=request.state.username,
+            message_prefix="Submit",
+            is_admin=bool(request.state.is_admin),
+            ingest_only=True,
+        ),
     )
 
 
@@ -5744,28 +5771,42 @@ async def _audit_analysis_rerun(
     provider: str,
     model: str,
     outcome: Literal["success", "failure"],
+    trigger: str = "manual",
+    failure_uuid: str = "",
+    test_name: str = "",
 ) -> None:
-    """Record one ``analysis.rerun`` — who re-ran a job, with what, and why.
+    """Record one ``analysis.rerun`` — who re-ran what, with what, and why.
 
     ``provider``/``model`` are the pair the run was queued with (empty when it
-    defers to the tests repo's ``settings.json``). ``previous_classification``
-    is absent when the job had no classified failure to override.
+    defers to the tests repo's ``settings.json``). ``trigger`` names the entry
+    point: ``manual`` for a whole job, ``failure`` for one failure re-analyzed
+    in place, which also records that failure's uuid and test name.
+
+    ``previous_classification`` is the job's dominant classification — what the
+    whole-job rerun may overturn — so it is absent for a single-failure rerun,
+    which leaves every other failure's classification alone.
     """
-    previous_classification = _dominant_classification(result_data)
     details: dict[str, Any] = {
         "provider": provider,
         "model": model,
-        "trigger": "manual",
+        "trigger": trigger,
     }
-    if previous_classification:
-        details["previous_classification"] = previous_classification
+    subject = f"job {job_id}"
+    if failure_uuid:
+        details["failure_uuid"] = failure_uuid
+        details["test_name"] = test_name
+        subject = f"failure {failure_uuid} of job {job_id}"
+    else:
+        previous_classification = _dominant_classification(result_data)
+        if previous_classification:
+            details["previous_classification"] = previous_classification
     await record_audit(
         action="analysis.rerun",
         actor=request.state.username,
         message=(
-            f"User '{request.state.username}' re-ran the analysis of job {job_id}"
+            f"User '{request.state.username}' re-ran the analysis of {subject}"
             f" with {provider or '<deferred>'}/{model or '<deferred>'}"
-            f" (manual, {outcome})"
+            f" ({trigger}, {outcome})"
         ),
         target_type="job",
         target_id=job_id,
@@ -5773,6 +5814,60 @@ async def _audit_analysis_rerun(
         details=details,
         request=request,
     )
+
+
+async def _enqueue_audited_analysis(
+    *,
+    request: Request,
+    ingest_only: bool,
+    provider: str = "",
+    model: str = "",
+    enqueue: Coroutine[Any, Any, dict[str, Any]],
+) -> dict[str, Any]:
+    """Enqueue a CI analysis as exactly one ``analysis.submit`` row.
+
+    Shared by ``POST /analyze`` and ``POST /submit``, which promise the same
+    thing: one row per attempt whatever the outcome. ``ingest_only`` says which
+    endpoint it came from, ``provider``/``model`` are empty when the run defers
+    to the tests repo's ``settings.json``, and the job id is recorded only once
+    the enqueue produced one. The row is written from ``finally`` so a refusal
+    and a crash leave the same evidence as a success, through one call site.
+    """
+    details: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "ingest_only": ingest_only,
+    }
+    outcome: Literal["success", "failure", "denied"] = "success"
+    job_id = ""
+    try:
+        queued = await enqueue
+        job_id = str(queued.get("job_id") or "")
+    except HTTPException as exc:
+        outcome, reason = _audit_rejection(exc)
+        details["reason"] = reason
+        raise
+    except Exception:
+        outcome = "failure"
+        details["reason"] = "internal_error"
+        raise
+    finally:
+        what = "an ingest-only job" if ingest_only else "an analysis"
+        await record_audit(
+            action="analysis.submit",
+            actor=request.state.username,
+            message=(
+                f"User '{request.state.username}' submitted {what}"
+                f"{' ' + job_id if job_id else ''} with"
+                f" {provider or '<deferred>'}/{model or '<deferred>'} ({outcome})"
+            ),
+            target_type="job",
+            target_id=job_id or None,
+            outcome=outcome,
+            details=details,
+            request=request,
+        )
+    return queued
 
 
 @app.post(
@@ -6891,153 +6986,172 @@ async def re_analyze_failure(
     _check_allow_list(request)
     _require_operator(request)
 
-    # Parse optional body
-    body_data: dict[str, Any] = {}
-    raw_body = await request.body()
-    if raw_body:
+    try:
+        # Parse optional body
+        body_data: dict[str, Any] = {}
+        raw_body = await request.body()
+        if raw_body:
+            try:
+                body_data = await request.json()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid JSON body: {exc}"
+                ) from exc
+            if not isinstance(body_data, dict):
+                raise HTTPException(
+                    status_code=400, detail="Request body must be a JSON object"
+                )
+        overrides = ReAnalyzeFailureRequest(**body_data)
+
+        # Find the failure across all stored results
+        match = await storage.find_failure_by_uuid(failure_uuid)
+        if not match:
+            raise HTTPException(
+                status_code=404, detail=f"Failure {failure_uuid} not found"
+            )
+
+        parent_job_id = match["job_id"]
+        failure_dict = match["failure"]
+
+        # Load the parent job to get AI config
+        stored = await get_result(parent_job_id, strip_sensitive=False)
+        if not stored or not stored.get("result"):
+            raise HTTPException(
+                status_code=404, detail=f"Parent job {parent_job_id} not found"
+            )
+
+        result_data = stored["result"]
+        params = result_data.get("request_params", {})
+
+        if not params:
+            raise HTTPException(
+                status_code=400,
+                detail="Original analysis has no stored request_params; cannot re-analyze",
+            )
+
+        # Decrypt parent settings
         try:
-            body_data = await request.json()
+            decrypted_params = decrypt_sensitive_fields(dict(params))
         except Exception as exc:
             raise HTTPException(
-                status_code=400, detail=f"Invalid JSON body: {exc}"
+                status_code=400,
+                detail=f"Failed to decrypt stored params: {exc}",
             ) from exc
-        if not isinstance(body_data, dict):
-            raise HTTPException(
-                status_code=400, detail="Request body must be a JSON object"
-            )
-    overrides = ReAnalyzeFailureRequest(**body_data)
 
-    # Find the failure across all stored results
-    match = await storage.find_failure_by_uuid(failure_uuid)
-    if not match:
-        raise HTTPException(status_code=404, detail=f"Failure {failure_uuid} not found")
+        _validate_decrypted_sensitive_fields(decrypted_params)
 
-    parent_job_id = match["job_id"]
-    failure_dict = match["failure"]
+        # Resolve settings: parent defaults + overrides from request body
+        ai_provider = decrypted_params.get("ai_provider", "")
+        ai_model = decrypted_params.get("ai_model", "")
+        if overrides.ai_provider is not None:
+            ai_provider = overrides.ai_provider
+        if overrides.ai_model is not None:
+            ai_model = overrides.ai_model
 
-    # Load the parent job to get AI config
-    stored = await get_result(parent_job_id, strip_sensitive=False)
-    if not stored or not stored.get("result"):
-        raise HTTPException(
-            status_code=404, detail=f"Parent job {parent_job_id} not found"
-        )
+        ai_call_timeout = decrypted_params.get("ai_call_timeout")
+        if overrides.ai_call_timeout is not None:
+            ai_call_timeout = overrides.ai_call_timeout
 
-    result_data = stored["result"]
-    params = result_data.get("request_params", {})
+        raw_prompt = decrypted_params.get("raw_prompt", "")
+        if overrides.raw_prompt is not None:
+            raw_prompt = overrides.raw_prompt
 
-    if not params:
-        raise HTTPException(
-            status_code=400,
-            detail="Original analysis has no stored request_params; cannot re-analyze",
-        )
+        peer_ai_configs = decrypted_params.get("peer_ai_configs")
+        if overrides.peer_ai_configs is not None:
+            peer_ai_configs = overrides.peer_ai_configs
 
-    # Decrypt parent settings
-    try:
-        decrypted_params = decrypt_sensitive_fields(dict(params))
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to decrypt stored params: {exc}",
-        ) from exc
+        peer_analysis_max_rounds = decrypted_params.get("peer_analysis_max_rounds", 3)
+        if overrides.peer_analysis_max_rounds is not None:
+            peer_analysis_max_rounds = overrides.peer_analysis_max_rounds
 
-    _validate_decrypted_sensitive_fields(decrypted_params)
+        tests_repo_url = decrypted_params.get("tests_repo_url", "")
+        tests_repo_ref = decrypted_params.get("tests_repo_ref", "")
+        tests_repo_token = decrypted_params.get("tests_repo_token", "")
+        if overrides.tests_repo_url is not None:
+            tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
 
-    # Resolve settings: parent defaults + overrides from request body
-    ai_provider = decrypted_params.get("ai_provider", "")
-    ai_model = decrypted_params.get("ai_model", "")
-    if overrides.ai_provider is not None:
-        ai_provider = overrides.ai_provider
-    if overrides.ai_model is not None:
-        ai_model = overrides.ai_model
-
-    ai_call_timeout = decrypted_params.get("ai_call_timeout")
-    if overrides.ai_call_timeout is not None:
-        ai_call_timeout = overrides.ai_call_timeout
-
-    raw_prompt = decrypted_params.get("raw_prompt", "")
-    if overrides.raw_prompt is not None:
-        raw_prompt = overrides.raw_prompt
-
-    peer_ai_configs = decrypted_params.get("peer_ai_configs")
-    if overrides.peer_ai_configs is not None:
-        peer_ai_configs = overrides.peer_ai_configs
-
-    peer_analysis_max_rounds = decrypted_params.get("peer_analysis_max_rounds", 3)
-    if overrides.peer_analysis_max_rounds is not None:
-        peer_analysis_max_rounds = overrides.peer_analysis_max_rounds
-
-    tests_repo_url = decrypted_params.get("tests_repo_url", "")
-    tests_repo_ref = decrypted_params.get("tests_repo_ref", "")
-    tests_repo_token = decrypted_params.get("tests_repo_token", "")
-    if overrides.tests_repo_url is not None:
-        tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
-
-    # Defer AI validation when a tests repo can supply .rootcoz/settings.json
-    # (same as submit-time deferred AI). Background applies settings.json after clone.
-    settings = get_settings()
-    token = ai_username.set(request.state.username)
-    try:
-        ai_provider, ai_model = await _resolve_ai_config_allow_defer(
-            BaseAnalysisRequest(
-                ai_provider=ai_provider or None,
-                ai_model=ai_model or None,
-                tests_repo_url=tests_repo_url or None,
-                force_server_credentials=(
-                    overrides.force_server_credentials
-                    if overrides.force_server_credentials is not None
-                    else decrypted_params.get("force_server_credentials")
+        # Defer AI validation when a tests repo can supply .rootcoz/settings.json
+        # (same as submit-time deferred AI). Background applies settings.json after clone.
+        settings = get_settings()
+        token = ai_username.set(request.state.username)
+        try:
+            ai_provider, ai_model = await _resolve_ai_config_allow_defer(
+                BaseAnalysisRequest(
+                    ai_provider=ai_provider or None,
+                    ai_model=ai_model or None,
+                    tests_repo_url=tests_repo_url or None,
+                    force_server_credentials=(
+                        overrides.force_server_credentials
+                        if overrides.force_server_credentials is not None
+                        else decrypted_params.get("force_server_credentials")
+                    ),
                 ),
-            ),
-            settings,
-            request=request,
-        )
-        for peer in peer_ai_configs or []:
-            await _validate_catalog_pair(*_peer_catalog_pair(peer))
-    finally:
-        ai_username.reset(token)
+                settings,
+                request=request,
+            )
+            for peer in peer_ai_configs or []:
+                await _validate_catalog_pair(*_peer_catalog_pair(peer))
+        finally:
+            ai_username.reset(token)
 
-    if "additional_repos" not in decrypted_params:
-        additional_repos_list: list[AdditionalRepo] | None = None
-    else:
-        additional_repos_list_raw = decrypted_params.get("additional_repos")
-        if additional_repos_list_raw is None:
-            additional_repos_list = None
+        if "additional_repos" not in decrypted_params:
+            additional_repos_list: list[AdditionalRepo] | None = None
         else:
+            additional_repos_list_raw = decrypted_params.get("additional_repos")
+            if additional_repos_list_raw is None:
+                additional_repos_list = None
+            else:
+                additional_repos_list = [
+                    AdditionalRepo(**r) if isinstance(r, dict) else r
+                    for r in additional_repos_list_raw
+                ]
+        if overrides.additional_repos is not None:
             additional_repos_list = [
                 AdditionalRepo(**r) if isinstance(r, dict) else r
-                for r in additional_repos_list_raw
+                for r in overrides.additional_repos
             ]
-    if overrides.additional_repos is not None:
-        additional_repos_list = [
-            AdditionalRepo(**r) if isinstance(r, dict) else r
-            for r in overrides.additional_repos
-        ]
 
-    max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
+        max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
 
-    # Immediately patch the failure as "running"
-    already_running = False
+        # Immediately patch the failure as "running"
+        already_running = False
 
-    def _patch_running(result_data: dict[str, Any]) -> None:
-        nonlocal already_running
-        failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
-        if failure:
-            if failure.get("reanalysis_status") == "running":
-                already_running = True
-                return
-            failure["reanalysis_status"] = "running"
-            failure["reanalyzed_with"] = {
-                "ai_provider": ai_provider,
-                "ai_model": ai_model,
-            }
+        def _patch_running(result_data: dict[str, Any]) -> None:
+            nonlocal already_running
+            failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+            if failure:
+                if failure.get("reanalysis_status") == "running":
+                    already_running = True
+                    return
+                failure["reanalysis_status"] = "running"
+                failure["reanalyzed_with"] = {
+                    "ai_provider": ai_provider,
+                    "ai_model": ai_model,
+                }
 
-    await patch_result_json(parent_job_id, _patch_running)
+        await patch_result_json(parent_job_id, _patch_running)
 
-    if already_running:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Failure {failure_uuid} is already being re-analyzed",
+        if already_running:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Failure {failure_uuid} is already being re-analyzed",
+            )
+    except HTTPException as exc:
+        # One row per attempt: a re-analyze that stopped at a guard (unknown
+        # failure, unreadable params, already running) still says who tried.
+        await _record_refused_attempt(
+            action="analysis.rerun",
+            request=request,
+            message=(
+                f"User '{request.state.username}' re-ran the analysis of"
+                f" failure {failure_uuid}"
+            ),
+            target_type="failure",
+            target_id=failure_uuid,
+            exc=exc,
+            details={"trigger": "failure"},
         )
+        raise
     notify_job_status_changed(parent_job_id)
 
     # Start background task
@@ -7078,6 +7192,17 @@ async def re_analyze_failure(
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
+    await _audit_analysis_rerun(
+        request=request,
+        job_id=parent_job_id,
+        result_data=result_data,
+        provider=ai_provider,
+        model=ai_model,
+        outcome="success",
+        trigger="failure",
+        failure_uuid=failure_uuid,
+        test_name=str(failure_dict.get("test_name") or ""),
+    )
     return {
         "status": "accepted",
         "job_id": parent_job_id,
@@ -7344,16 +7469,18 @@ async def add_comment(
     _check_allow_list(request)
     _require_reviewer(request)
     logger.debug(f"POST /results/{job_id}/comments: test_name={body.test_name}")
-    await _validate_test_name_in_result(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
-
-    error_signature, error_signature_v2 = await _get_failure_signatures(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
 
     username = request.state.username
+    message = f"User '{username}' commented on '{body.test_name}' in job {job_id}"
     try:
+        await _validate_test_name_in_result(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        )
+
+        error_signature, error_signature_v2 = await _get_failure_signatures(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        )
+
         comment_id = await storage.add_comment(
             job_id=job_id,
             test_name=body.test_name,
@@ -7364,8 +7491,18 @@ async def add_comment(
             error_signature_v2=error_signature_v2,
             username=username,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (HTTPException, ValueError) as exc:
+        refusal = _refusal_exception(exc)
+        await _record_refused_attempt(
+            action="comment.add",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=refusal,
+            details={"test_name": body.test_name},
+        )
+        raise refusal from None
 
     # Detect @mentions once and reuse for both web-push and SSE notifications
     mentioned = detect_mentions(body.comment)
@@ -7394,6 +7531,15 @@ async def add_comment(
 
     notify_comments_changed(job_id)
 
+    await record_audit(
+        action="comment.add",
+        actor=username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={"test_name": body.test_name, "comment_id": comment_id},
+        request=request,
+    )
     return {"id": comment_id}
 
 
@@ -7623,6 +7769,18 @@ async def enrich_comments(
 
     logger.debug(
         f"enrich_comments: job_id={job_id}, enrichments_count={len(enrichments)}"
+    )
+    await record_audit(
+        action="comment.enrich",
+        actor=request.state.username,
+        message=(
+            f"User '{request.state.username}' enriched"
+            f" {len(enrichments)} comment(s) in job {job_id}"
+        ),
+        target_type="job",
+        target_id=job_id,
+        details={"count": len(enrichments)},
+        request=request,
     )
     return {"enrichments": enrichments}
 
@@ -8688,29 +8846,58 @@ async def set_tracked_in_endpoint(
     _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"PUT /results/{job_id}/tracked-in: test_name={body.test_name}")
-    result = await get_result(job_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Job not found")
+    message = (
+        f"User '{request.state.username}' linked '{body.test_name}' in job {job_id}"
+    )
+    try:
+        result = await get_result(job_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Job not found")
 
-    # Auto-detect type from URL if not provided
-    if not body.url:
-        raise HTTPException(
-            status_code=400,
-            detail="URL is required. Use DELETE to remove links.",
+        # Auto-detect type from URL if not provided
+        if not body.url:
+            raise HTTPException(
+                status_code=400,
+                detail="URL is required. Use DELETE to remove links.",
+            )
+
+        tracked_type = body.type
+        if not tracked_type:
+            tracked_type = _detect_tracker_type(body.url)
+
+        link_id = await storage.add_tracked_in_link(
+            job_id,
+            body.test_name,
+            body.url,
+            tracked_type,
+            child_job_name=body.child_job_name,
+            child_build_number=body.child_build_number,
+            tracked_by=request.state.username,
         )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="tracked_in.set",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"test_name": body.test_name, "type": body.type},
+        )
+        raise
 
-    tracked_type = body.type
-    if not tracked_type:
-        tracked_type = _detect_tracker_type(body.url)
-
-    link_id = await storage.add_tracked_in_link(
-        job_id,
-        body.test_name,
-        body.url,
-        tracked_type,
-        child_job_name=body.child_job_name,
-        child_build_number=body.child_build_number,
-        tracked_by=request.state.username,
+    await record_audit(
+        action="tracked_in.set",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={
+            "test_name": body.test_name,
+            "type": tracked_type,
+            "link_id": link_id,
+        },
+        request=request,
     )
     return {
         "status": "ok",
@@ -8752,17 +8939,44 @@ async def delete_tracked_in_endpoint(
     """
     _require_reviewer(request)
     _check_allow_list(request)
+    message = f"User '{request.state.username}' removed a link in job {job_id}"
     link = await storage.get_tracked_in_link(link_id)
-    if not link:
-        raise HTTPException(status_code=404, detail="Link not found")
-    if link.get("job_id") != job_id:
-        raise HTTPException(status_code=404, detail="Link not found")
-    if not request.state.is_admin and link["created_by"] != request.state.username:
-        raise HTTPException(
-            status_code=403,
-            detail="You can only delete your own tracked links",
+    try:
+        if not link:
+            raise HTTPException(status_code=404, detail="Link not found")
+        if link.get("job_id") != job_id:
+            raise HTTPException(status_code=404, detail="Link not found")
+        if not request.state.is_admin and link["created_by"] != request.state.username:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete your own tracked links",
+            )
+        await storage.delete_tracked_in_link(link_id)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="tracked_in.delete",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"link_id": link_id},
         )
-    await storage.delete_tracked_in_link(link_id)
+        raise
+
+    await record_audit(
+        action="tracked_in.delete",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={
+            "link_id": link_id,
+            "type": link.get("type", ""),
+            "test_name": link.get("test_name", ""),
+        },
+        request=request,
+    )
     return {"status": "ok", "deleted_id": link_id}
 
 
@@ -9520,38 +9734,65 @@ async def update_tags(
     """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
     _require_reviewer(request)
     _check_allow_list(request)
+    message = f"User '{request.state.username}' set the tags of job {job_id}"
     body = await _read_json_object(request)
-    raw_tags = body.get("tags")
-    if not isinstance(raw_tags, list) or not all(isinstance(t, str) for t in raw_tags):
-        raise HTTPException(status_code=400, detail="tags must be a list of strings")
+    try:
+        raw_tags = body.get("tags")
+        if not isinstance(raw_tags, list) or not all(
+            isinstance(t, str) for t in raw_tags
+        ):
+            raise HTTPException(
+                status_code=400, detail="tags must be a list of strings"
+            )
 
-    # Normalize: strip, lowercase, deduplicate, remove blanks
-    seen: set[str] = set()
-    tags: list[str] = []
-    for t in raw_tags:
-        normalized = t.strip().lower()
-        if normalized and normalized not in seen and normalized not in _SYSTEM_TAGS:
-            seen.add(normalized)
-            tags.append(normalized)
+        # Normalize: strip, lowercase, deduplicate, remove blanks
+        seen: set[str] = set()
+        tags: list[str] = []
+        for t in raw_tags:
+            normalized = t.strip().lower()
+            if normalized and normalized not in seen and normalized not in _SYSTEM_TAGS:
+                seen.add(normalized)
+                tags.append(normalized)
 
-    stored = await get_result(job_id)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
+        stored = await get_result(job_id)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
 
-    result_data = stored["result"]
-    old_tags = result_data.get("tags", [])
+        result_data = stored["result"]
+        old_tags = result_data.get("tags", [])
 
-    # Preserve system tags
-    # re-analyze tag
-    if "re-analyze" in [str(t).lower() for t in old_tags] and "re-analyze" not in tags:
-        tags.append("re-analyze")
-    # Submitter tag
-    submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
-    if submitted_by:
-        tags = _ensure_submitter_tag(tags, submitted_by)
+        # Preserve system tags
+        # re-analyze tag
+        if "re-analyze" in [str(t).lower() for t in old_tags] and (
+            "re-analyze" not in tags
+        ):
+            tags.append("re-analyze")
+        # Submitter tag
+        submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
+        if submitted_by:
+            tags = _ensure_submitter_tag(tags, submitted_by)
 
-    await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
+        await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="job.tags_set",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+        )
+        raise
     notify_dashboard_changed()
+    await record_audit(
+        action="job.tags_set",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={"tags": tags},
+        request=request,
+    )
     return {"job_id": job_id, "tags": tags}
 
 
@@ -9651,10 +9892,26 @@ async def override_pattern_endpoint(
         f"PUT /results/{job_id}/override-pattern: test_name={body.test_name}, "
         f"pattern={body.pattern}"
     )
-    await _validate_test_name_in_result(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
     username = request.state.username
+    message = (
+        f"User '{username}' overrode the pattern of '{body.test_name}'"
+        f" in job {job_id} to '{body.pattern}'"
+    )
+    try:
+        await _validate_test_name_in_result(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="pattern.override",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"test_name": body.test_name, "pattern": body.pattern},
+        )
+        raise
 
     parent_job_name = await storage.get_parent_job_name_for_test(
         body.test_name, job_id=job_id
@@ -9688,6 +9945,15 @@ async def override_pattern_endpoint(
             exc_info=True,
         )
 
+    await record_audit(
+        action="pattern.override",
+        actor=username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={"test_name": body.test_name, "pattern": body.pattern},
+        request=request,
+    )
     return {"status": "ok", "pattern": body.pattern}
 
 
@@ -10906,61 +11172,102 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
     # Sidecar body_template leaves "{references}" when the model omits the arg.
     references = _sanitize_sidecar_placeholder(body.references)
     classify_job_id = body.job_id
-
-    if not test_name:
-        raise HTTPException(status_code=400, detail="test_name is required")
-
-    if classification == "KNOWN_BUG" and not str(references).strip():
-        raise HTTPException(
-            status_code=400,
-            detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
-        )
-
-    # Detect AI caller: the AI prompt includes source="ai" in the request body.
-    # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
-    # used consistently for all AI-originated actions (auto-review, classification).
-    is_ai_caller = body.source == "ai"
-
-    # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
-    # regardless of the authenticated session username.
-    # Human callers must have an authenticated username — reject if missing
-    # to prevent misattribution as AI_SYSTEM_USERNAME.
-    if not is_ai_caller and not request.state.username:
-        raise HTTPException(
-            status_code=401, detail="Authentication required to classify tests"
-        )
-    created_by = AI_SYSTEM_USERNAME if is_ai_caller else request.state.username
-
-    # Human classifications are visible immediately.
-    # AI classifications become visible after analysis completes
-    # and calls make_classifications_visible().
-    visible = 0 if is_ai_caller else 1
-
-    # Look up parent job name from failure_history, scoped to this job
-    parent_job_name = await storage.get_parent_job_name_for_test(
-        test_name, job_id=classify_job_id
+    message = (
+        f"User '{request.state.username}' classified '{test_name}' as"
+        f" '{classification}' in job {classify_job_id}"
     )
-    if not parent_job_name and classify_job_id:
-        # Job might not be in failure_history yet (analysis in progress)
-        result = await storage.get_result(classify_job_id)
-        if result and result.get("result"):
-            parent_job_name = result["result"].get("job_name", "")
 
     try:
-        classification_id = await storage.set_test_classification(
-            test_name=test_name,
-            classification=classification,
-            reason=reason,
-            job_name=job_name,
-            parent_job_name=parent_job_name,
-            created_by=created_by,
-            references=references,
-            job_id=classify_job_id,
-            child_build_number=body.child_build_number,
-            visible=visible,
+        if not test_name:
+            raise HTTPException(status_code=400, detail="test_name is required")
+
+        if classification == "KNOWN_BUG" and not str(references).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
+            )
+
+        # Detect AI caller: the AI prompt includes source="ai" in the request body.
+        # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
+        # used consistently for all AI-originated actions (auto-review, classification).
+        is_ai_caller = body.source == "ai"
+
+        # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
+        # regardless of the authenticated session username.
+        # Human callers must have an authenticated username — reject if missing
+        # to prevent misattribution as AI_SYSTEM_USERNAME.
+        if not is_ai_caller and not request.state.username:
+            raise HTTPException(
+                status_code=401, detail="Authentication required to classify tests"
+            )
+        created_by = AI_SYSTEM_USERNAME if is_ai_caller else request.state.username
+
+        # Human classifications are visible immediately.
+        # AI classifications become visible after analysis completes
+        # and calls make_classifications_visible().
+        visible = 0 if is_ai_caller else 1
+
+        # What the pattern axis said before this change, so the audit row can
+        # read "from → to".
+        previous_pattern = ""
+        if not is_ai_caller:
+            previous_pattern = await storage.get_history_classification(
+                classify_job_id, test_name, child_build_number=body.child_build_number
+            )
+
+        # Look up parent job name from failure_history, scoped to this job
+        parent_job_name = await storage.get_parent_job_name_for_test(
+            test_name, job_id=classify_job_id
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not parent_job_name and classify_job_id:
+            # Job might not be in failure_history yet (analysis in progress)
+            result = await storage.get_result(classify_job_id)
+            if result and result.get("result"):
+                parent_job_name = result["result"].get("job_name", "")
+
+        try:
+            classification_id = await storage.set_test_classification(
+                test_name=test_name,
+                classification=classification,
+                reason=reason,
+                job_name=job_name,
+                parent_job_name=parent_job_name,
+                created_by=created_by,
+                references=references,
+                job_id=classify_job_id,
+                child_build_number=body.child_build_number,
+                visible=visible,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="classification.override",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=classify_job_id,
+            exc=exc,
+            details={"test_name": test_name, "to": classification},
+        )
+        raise
+    # A human classification is an override and gets its own row. The AI's own
+    # classifications belong to the analysis that produced them (#379), and one
+    # row per classified test would bury the rest of the trail.
+    if not is_ai_caller:
+        await record_audit(
+            action="classification.override",
+            actor=created_by,
+            message=message,
+            target_type="job",
+            target_id=classify_job_id,
+            details={
+                "test_name": test_name,
+                "from": previous_pattern,
+                "to": classification,
+            },
+            request=request,
+        )
     if classify_job_id:
         notify_comments_changed(classify_job_id)
     return {"id": classification_id}
@@ -11171,10 +11478,8 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         # refreshed catalog lists no Cursor models — that outage is what the
         # probe reports (#374). The sidecar registry still names a registered
         # provider whose listing came back empty.
-        cursor_providers = {
-            *build_friendly_catalog(models),
-            *(await registered_provider_ids() or ()),
-        }
+        catalog = build_friendly_catalog(models)
+        cursor_providers = {*catalog, *(await registered_provider_ids() or ())}
         has_cursor = _has_cursor_provider(cursor_providers)
         cursor_status = await probe_cursor_auth(force=True) if has_cursor else None
         # A forced refresh also re-reads every deployment-credential listing
@@ -11194,12 +11499,35 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         }
         if cursor_status is not None:
             payload["provider_status"] = {"cursor": cursor_status}
+        # One action id for every model refresh (#379): ``scope`` says whether
+        # the whole catalog was re-read or a single provider (see
+        # ``refresh_server_provider_models``). Never the model list itself.
+        await record_audit(
+            action="provider.models_refresh",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' refreshed every provider's"
+                f" models ({len(catalog)} providers)"
+            ),
+            details={"scope": "all", "provider_count": len(catalog)},
+            request=request,
+        )
         return strip_sensitive_from_response(payload)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to refresh AI models")
-        raise HTTPException(
+        refusal = HTTPException(
             status_code=502, detail="Failed to refresh AI models from sidecar"
         )
+        await _record_refused_attempt(
+            action="provider.models_refresh",
+            request=request,
+            message=(
+                f"Admin '{request.state.username}' refreshed every provider's models"
+            ),
+            exc=refusal,
+            details={"scope": "all"},
+        )
+        raise refusal from exc
 
 
 @app.get("/health", operation_id="healthCheck")
@@ -12291,8 +12619,14 @@ async def set_user_ai_credential(
     if not model:
         raise HTTPException(status_code=400, detail="Select a model to verify the key")
     outcome = await verify_ai_key(provider, model, key)
+    replaced = False
     if outcome == "accepted":
         try:
+            # Read before the write, or every save looks like a replace. A
+            # case-variant spelling is the same provider under a drifted name
+            # and is consolidated by the write below, so it counts as a replace.
+            existing = await storage.get_user_ai_credentials(username)
+            replaced = any(name.lower() == provider.lower() for name in existing)
             sessions = await storage.update_user_ai_credential(
                 username,
                 provider,
@@ -12310,12 +12644,15 @@ async def set_user_ai_credential(
         action="user.ai_credential_set",
         actor=username,
         message=(
-            f"User '{username}' set their {provider} AI credential (outcome={outcome})"
+            f"User '{username}' set their {provider} AI credential"
+            f" (outcome={outcome}, model={model})"
         ),
         target_type="provider",
         target_id=provider,
         outcome="success" if outcome == "accepted" else "failure",
-        details={"provider": provider},
+        # ``model`` is what the key was verified against and ``replaced`` tells
+        # an add from a rotation afterwards (#379) — never the key itself.
+        details={"provider": provider, "model": model, "replaced": replaced},
         request=request,
     )
     return JSONResponse(
@@ -12527,14 +12864,15 @@ async def delete_filter_preset_endpoint(preset_id: int, request: Request) -> Non
 
 # --- User token endpoints ---
 
-# Which tracker each stored credential field belongs to, so the audit row can
-# name the tracker without the token (#379). ``jira_email`` is deliberately
-# absent: it is not a credential.
-_TRACKER_TOKEN_FIELDS: dict[str, str] = {
-    "github_token": "github",
-    "jira_token": "jira",
-    "jira_sa_token": "jira",
-}
+# Which stored credential field each submitted token belongs to is the field
+# itself (#379): "the jira token changed" cannot tell an email from a secret,
+# so the audit row names the field. The value is never recorded.
+_TRACKER_TOKEN_FIELDS: tuple[str, ...] = (
+    "github_token",
+    "jira_email",
+    "jira_token",
+    "jira_sa_token",
+)
 
 
 @app.get("/api/user/tokens", operation_id="getUserTokensEndpoint")
@@ -12584,7 +12922,7 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     # Presence-based, so an omitted field keeps its stored value and an empty
     # one clears it. Stringifying first would store a null as the literal "None".
     kwargs: dict[str, str] = {}
-    for field in ("github_token", "jira_email", "jira_token", "jira_sa_token"):
+    for field in _TRACKER_TOKEN_FIELDS:
         if field not in body:
             continue
         value = body[field]
@@ -12614,8 +12952,8 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     if not kwargs:
         return JSONResponse(content={"ok": True, "saved": False})
 
-    # One row per (tracker, kind) and only for a field that really changed: the
-    # profile form resubmits every field on each save, so an unchanged value (or
+    # One row per field and only for a field that really changed: the profile
+    # form resubmits every field on each save, so an unchanged value (or
     # clearing one that was never set) must not write a row. Read the stored
     # values first — afterwards every submitted value trivially "matches".
     stored = await storage.get_user_tokens(username)
@@ -12624,21 +12962,15 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     }
     await storage.save_user_tokens(username, **kwargs)
     logger.debug(f"Saved tokens for user '{username}': {sorted(kwargs)}")
-    audited: set[tuple[str, str]] = set()
-    for field, tracker in _TRACKER_TOKEN_FIELDS.items():
-        if field not in changed:
-            continue
-        kind = "set" if changed[field] else "delete"
-        if (tracker, kind) in audited:
-            continue
-        audited.add((tracker, kind))
+    for field, value in changed.items():
+        kind = "set" if value else "delete"
         await record_audit(
             action=f"user.tracker_token_{kind}",
             actor=username,
-            message=f"User '{username}' {kind} the {tracker} tracker token",
+            message=f"User '{username}' {kind} {field}",
             target_type="user",
             target_id=username,
-            details={"tracker": tracker},
+            details={"field": field},
             request=request,
         )
     return JSONResponse(content={"ok": True, "saved": True})
@@ -13094,11 +13426,35 @@ async def export_audit_events_endpoint(
     )
 
     async def _events() -> AsyncIterator[dict[str, Any]]:
-        async for batch in storage.iter_audit_events(
-            batch_size=_AUDIT_EXPORT_BATCH, **filters
-        ):
-            for event in batch:
-                yield _audit_export_event(event)
+        exported = 0
+        try:
+            async for batch in storage.iter_audit_events(
+                batch_size=_AUDIT_EXPORT_BATCH, **filters
+            ):
+                for event in batch:
+                    exported += 1
+                    yield _audit_export_event(event)
+        finally:
+            # Recorded once the rows have gone out, so the export record can
+            # never land in its own snapshot and ``count`` is exactly what this
+            # response wrote — including a stream the client cut short.
+            await record_audit(
+                action="audit.export",
+                actor=request.state.username,
+                message=(
+                    f"Admin '{request.state.username}' exported the audit trail as"
+                    f" {format} ({exported} events)"
+                ),
+                target_type="audit",
+                details={
+                    "format": format,
+                    "filters": {
+                        name: value for name, value in filters.items() if value
+                    },
+                    "count": exported,
+                },
+                request=request,
+            )
 
     async def _json_chunks() -> AsyncIterator[str]:
         yield "["
@@ -15870,6 +16226,20 @@ async def export_server_settings(
         include_sensitive,
         request.state.username,
     )
+    # The count is what is left after the export's own filtering, and
+    # ``include_sensitive`` is the difference between a shareable file and
+    # plaintext secrets — both belong in the trail. Never the values.
+    await record_audit(
+        action="admin.settings_export",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' exported {len(settings)} server"
+            f" settings (include_sensitive={include_sensitive})"
+        ),
+        target_type="settings",
+        details={"include_sensitive": include_sensitive, "keys": len(settings)},
+        request=request,
+    )
     return JSONResponse(content=content, headers={"Cache-Control": "no-store"})
 
 
@@ -16782,9 +17152,33 @@ async def delete_job_metadata_endpoint(
     """Delete metadata for a job."""
     _require_admin(request)
     logger.debug(f"DELETE /api/jobs/{job_name}/metadata")
-    deleted = await storage.delete_job_metadata(job_name)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"No metadata for job '{job_name}'")
+    message = (
+        f"Admin '{request.state.username}' deleted the metadata of job '{job_name}'"
+    )
+    try:
+        deleted = await storage.delete_job_metadata(job_name)
+        if not deleted:
+            raise HTTPException(
+                status_code=404, detail=f"No metadata for job '{job_name}'"
+            )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="job.metadata_delete",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_name,
+            exc=exc,
+        )
+        raise
+    await record_audit(
+        action="job.metadata_delete",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_name,
+        request=request,
+    )
     return {"status": "deleted", "job_name": job_name}
 
 
@@ -16801,11 +17195,33 @@ async def bulk_set_job_metadata(
     """
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/metadata/bulk: {len(body.items)} items")
+    message = (
+        f"Admin '{request.state.username}' bulk-imported metadata for"
+        f" {len(body.items)} job(s)"
+    )
     try:
         items = [item.model_dump() for item in body.items]
-        return await storage.bulk_set_metadata(items)
+        saved = await storage.bulk_set_metadata(items)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+        refusal = _refusal_exception(exc, status_code=422)
+        await _record_refused_attempt(
+            action="job.metadata_set",
+            request=request,
+            message=message,
+            target_type="metadata",
+            exc=refusal,
+            details={"bulk": True, "count": len(body.items)},
+        )
+        raise refusal from None
+    await record_audit(
+        action="job.metadata_set",
+        actor=request.state.username,
+        message=message,
+        target_type="metadata",
+        details={"bulk": True, "count": saved["updated"]},
+        request=request,
+    )
+    return saved
 
 
 @app.get("/api/jobs/metadata/rules", operation_id="listMetadataRules")
@@ -17407,6 +17823,57 @@ async def preview_feedback(
         ai_username.reset(token)
 
 
+def _feedback_github_refusal(exc: Exception) -> HTTPException:
+    """The refusal a failed GitHub call answers with.
+
+    401 means the token is bad; 403 means it is valid but either lacks the repo
+    scope or is rate limited. A classic PAT authenticates fine without `repo`,
+    so identity checks cannot tell these apart. Reporting both as "invalid or
+    expired" made a scope problem look like a lost key. Neither is a gateway
+    failure: 502 stays reserved for an unreachable GitHub API.
+
+    Rate limiting is classified up front, before any status branch, so a new
+    rate-limit status cannot fall through to the generic 502. GitHub uses 403
+    for the primary limit and 429 for the secondary limit; 429 is
+    definitionally a rate limit, while 403 needs header/body evidence.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        if response.status_code == 429 or (
+            response.status_code == 403
+            and (
+                response.headers.get("x-ratelimit-remaining") == "0"
+                or "rate limit" in response.text.lower()
+            )
+        ):
+            # A new token cannot fix a spent quota, so never point at the token.
+            return HTTPException(
+                status_code=429,
+                detail="GitHub API rate limit reached. Try again later.",
+            )
+        if response.status_code == 401:
+            return HTTPException(
+                status_code=403,
+                detail="GitHub token is invalid or expired. "
+                "Generate a new token in Profile Settings.",
+            )
+        if response.status_code == 403:
+            # Reaching here means no rate-limit signal, so it is a real scope
+            # failure and the token is the thing to fix.
+            return HTTPException(
+                status_code=403,
+                detail="GitHub token is missing the 'repo' scope. "
+                "Regenerate it in Profile Settings with repo access.",
+            )
+        return HTTPException(
+            status_code=502, detail=f"GitHub API error: {response.status_code}"
+        )
+    if isinstance(exc, httpx.RequestError):
+        return HTTPException(status_code=502, detail=f"GitHub API unreachable: {exc}")
+    logger.exception("Failed to create feedback issue")
+    return HTTPException(status_code=500, detail="Failed to create feedback issue")
+
+
 @app.post(
     "/api/feedback/create",
     status_code=201,
@@ -17423,92 +17890,68 @@ async def create_feedback(
     """
     _check_allow_list(request)
     settings = get_settings()
-    if not settings.feedback_enabled:
-        raise HTTPException(
-            status_code=503, detail="Feedback submission is disabled on this server"
-        )
-
-    username = request.state.username
-    user_tokens = await storage.get_user_tokens(username)
-    github_token = user_tokens.get("github_token", "")
-
-    # Bootstrap admin (ADMIN_KEY auth) has no DB entry, so get_user_tokens
-    # returns empty. Fall back to the server-level token for this special user
-    # only — regular users must configure their own GitHub token.
-    if not github_token and username == "admin" and settings.github_token:
-        github_token = settings.github_token.get_secret_value()
-
-    if not github_token:
-        raise HTTPException(
-            status_code=400,
-            detail="GitHub token is required. Set up your token in Profile Settings.",
-        )
-
+    message = f"User '{request.state.username}' created a feedback issue"
     try:
-        # Attribution comes from the signed provenance the preview embedded in
-        # its body — never from the request (which carries no provider/model)
-        # and never re-resolved here, so a settings change between preview and
-        # create cannot miscredit the model that wrote the body.
-        return await create_feedback_from_preview(
-            title=body.title,
-            body=body.body,
-            labels=body.labels,
-            github_token=github_token,
-        )
-    except httpx.HTTPStatusError as exc:
-        # 401 means the token is bad; 403 means it is valid but either lacks
-        # the repo scope or is rate limited. A classic PAT authenticates fine
-        # without `repo`, so identity checks cannot tell these apart. Reporting
-        # both as "invalid or expired" made a scope problem look like a lost
-        # key. Neither is a gateway failure: 502 stays reserved for an
-        # unreachable GitHub API.
-        #
-        # Rate limiting is classified up front, before any status branch, so a
-        # new rate-limit status cannot fall through to the generic 502. GitHub
-        # uses 403 for the primary limit and 429 for the secondary limit; 429
-        # is definitionally a rate limit, while 403 needs header/body evidence.
-        response = exc.response
-        if response.status_code == 429 or (
-            response.status_code == 403
-            and (
-                response.headers.get("x-ratelimit-remaining") == "0"
-                or "rate limit" in response.text.lower()
+        if not settings.feedback_enabled:
+            raise HTTPException(
+                status_code=503, detail="Feedback submission is disabled on this server"
             )
-        ):
-            # A new token cannot fix a spent quota, so never point at the token.
+
+        username = request.state.username
+        user_tokens = await storage.get_user_tokens(username)
+        github_token = user_tokens.get("github_token", "")
+
+        # Bootstrap admin (ADMIN_KEY auth) has no DB entry, so get_user_tokens
+        # returns empty. Fall back to the server-level token for this special user
+        # only — regular users must configure their own GitHub token.
+        if not github_token and username == "admin" and settings.github_token:
+            github_token = settings.github_token.get_secret_value()
+
+        if not github_token:
             raise HTTPException(
-                status_code=429,
-                detail="GitHub API rate limit reached. Try again later.",
-            ) from exc
-        if exc.response.status_code == 401:
-            raise HTTPException(
-                status_code=403,
-                detail="GitHub token is invalid or expired. "
-                "Generate a new token in Profile Settings.",
-            ) from exc
-        if exc.response.status_code == 403:
-            # Reaching here means no rate-limit signal, so it is a real scope
-            # failure and the token is the thing to fix.
-            raise HTTPException(
-                status_code=403,
-                detail="GitHub token is missing the 'repo' scope. "
-                "Regenerate it in Profile Settings with repo access.",
-            ) from exc
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API error: {exc.response.status_code}",
-        ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API unreachable: {exc}",
-        ) from exc
-    except Exception as exc:  # non-fatal feedback submission
-        logger.exception("Failed to create feedback issue")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to create feedback issue",
-        ) from exc
+                status_code=400,
+                detail="GitHub token is required. Set up your token in Profile Settings.",
+            )
+
+        try:
+            # Attribution comes from the signed provenance the preview embedded in
+            # its body — never from the request (which carries no provider/model)
+            # and never re-resolved here, so a settings change between preview and
+            # create cannot miscredit the model that wrote the body.
+            issue = await create_feedback_from_preview(
+                title=body.title,
+                body=body.body,
+                labels=body.labels,
+                github_token=github_token,
+            )
+        except Exception as exc:  # GitHub API failure or anything else
+            raise _feedback_github_refusal(exc) from exc
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="feedback.create",
+            request=request,
+            message=message,
+            target_type="feedback",
+            exc=exc,
+            details={"kind": "github_issue"},
+        )
+        raise
+
+    # The kind and the issue the run produced — never the body the user wrote.
+    await record_audit(
+        action="feedback.create",
+        actor=request.state.username,
+        message=f"{message} (#{issue.issue_number})",
+        target_type="feedback",
+        target_id=str(issue.issue_number),
+        details={
+            "kind": "github_issue",
+            "issue_number": issue.issue_number,
+            "issue_url": issue.issue_url,
+        },
+        request=request,
+    )
+    return issue
 
 
 # -- Chat helpers --

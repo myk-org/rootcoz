@@ -367,9 +367,25 @@ def _mock_sidecar_calls():
     mock_client.prompt = AsyncMock(side_effect=_deny_sidecar)
     mock_client.abort = AsyncMock()
 
+    # The server-keyed session path (a deployment provider key reaching chat)
+    # posts through the raw client instead of ``create_session``. Stub it, or a
+    # machine whose shell exports a provider key takes a different code path and
+    # the suite fails on "'MagicMock' object can't be awaited".
+    fake_session = MagicMock()
+    fake_session.raise_for_status = MagicMock()
+    fake_session.json = MagicMock(return_value={"session_id": "sess-123"})
+    mock_client._client = MagicMock()
+    mock_client._client.post = AsyncMock(return_value=fake_session)
+
+    # Hermeticity: a provider key exported in the developer's shell must not
+    # change which path the app takes. Blank every ambient ``*_API_KEY`` for the
+    # duration of the test; tests that need one set it explicitly.
+    ambient_keys = {name: "" for name in os.environ if name.endswith("_API_KEY")}
+
     deny_ai = AsyncMock(side_effect=_deny_sidecar)
 
     with (
+        patch.dict(os.environ, ambient_keys),
         # --- clients (bound imports + package) ---
         patch("pi_sidecar_client.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),
