@@ -505,7 +505,7 @@ export function AdminAuditPage() {
       <div>
         <h1 className="text-2xl font-semibold">Audit</h1>
         <p className="text-sm text-muted-foreground">
-          Who did what, when. Redacted — values of sensitive settings are never recorded.
+          Who did what, when. Usernames are recorded verbatim; credential values never are.
         </p>
       </div>
 
@@ -639,127 +639,135 @@ export function AdminAuditPage() {
 
       <Card>
         <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>
-                  {/* Stored values and the date filters are UTC; the cells show local time. */}
-                  <TooltipProvider delayDuration={200}>
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span
-                          data-testid="time-basis"
-                          tabIndex={0}
-                          aria-label="Stored times and the date filters are UTC — this column is shown in your local time."
-                          className="cursor-help"
-                        >
-                          Time <span className="text-xs font-normal text-text-tertiary">UTC</span>
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Stored times and the date filters are UTC — this column is shown in your local
-                        time.
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </TableHead>
-                <TableHead>Actor</TableHead>
-                <TableHead>Action</TableHead>
-                <TableHead>Target</TableHead>
-                <TableHead>Outcome</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {loading &&
-                Array.from({ length: 5 }, (_, i) => (
-                  <TableRow key={`skeleton-${i}`}>
-                    <TableCell colSpan={5}>
-                      <Skeleton className="h-4 w-full" />
+          {/* Nothing may push the table sideways: the columns are fixed and
+              every cell wraps, so a pathological value only makes a row taller. */}
+          <div className="w-full overflow-x-hidden">
+            <Table className="table-fixed">
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-[9rem]">
+                    {/* Stored values and the date filters are UTC; the cells show local time. */}
+                    <TooltipProvider delayDuration={200}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span
+                            data-testid="time-basis"
+                            tabIndex={0}
+                            aria-label="Stored times and the date filters are UTC — this column is shown in your local time."
+                            className="cursor-help"
+                          >
+                            Time <span className="text-xs font-normal text-text-tertiary">UTC</span>
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          Stored times and the date filters are UTC — this column is shown in your local
+                          time.
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </TableHead>
+                  <TableHead className="w-[22ch]">Actor</TableHead>
+                  <TableHead className="w-[26ch]">Action</TableHead>
+                  <TableHead className="w-[26ch]">Target</TableHead>
+                  <TableHead className="w-[8rem]">Outcome</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {loading &&
+                  Array.from({ length: 5 }, (_, i) => (
+                    <TableRow key={`skeleton-${i}`}>
+                      <TableCell colSpan={5}>
+                        <Skeleton className="h-4 w-full" />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                {!loading && !error && events.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                      No audit events yet
                     </TableCell>
                   </TableRow>
-                ))}
-              {!loading && !error && events.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
-                    No audit events yet
-                  </TableCell>
-                </TableRow>
-              )}
-              {!loading &&
-                events.map((event) => {
-                  const expanded = expandedId === event.id
-                  const label = actions.find((a) => a.action === event.action)?.label ?? event.action
-                  // A row with no details has nothing to expand; making it look
-                  // clickable only to reveal "{}" is a dead affordance.
-                  const hasDetails = Object.keys(event.details ?? {}).length > 0
-                  const toggle = () => {
-                    if (hasDetails) setExpandedId(expanded ? null : event.id)
-                  }
-                  return (
-                    <Fragment key={event.id}>
-                      <TableRow
-                        {...(hasDetails ? { 'aria-expanded': expanded, tabIndex: 0 } : {})}
-                        onClick={toggle}
-                        onKeyDown={(e) => {
-                          if (!hasDetails) return
-                          if (e.key === 'Enter' || e.key === ' ') {
-                            e.preventDefault()
-                            toggle()
-                          }
-                        }}
-                        className={hasDetails ? 'cursor-pointer' : undefined}
-                      >
-                        <TableCell
-                          className="whitespace-nowrap text-sm text-text-secondary"
-                          title={formatRelativeTime(event.created_at)}
+                )}
+                {!loading &&
+                  events.map((event) => {
+                    const expanded = expandedId === event.id
+                    const label = actions.find((a) => a.action === event.action)?.label ?? event.action
+                    // A row with no details has nothing to expand; making it look
+                    // clickable only to reveal "{}" is a dead affordance.
+                    const hasDetails = Object.keys(event.details ?? {}).length > 0
+                    const toggle = () => {
+                      if (hasDetails) setExpandedId(expanded ? null : event.id)
+                    }
+                    return (
+                      <Fragment key={event.id}>
+                        <TableRow
+                          {...(hasDetails ? { 'aria-expanded': expanded, tabIndex: 0 } : {})}
+                          onClick={toggle}
+                          onKeyDown={(e) => {
+                            if (!hasDetails) return
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              toggle()
+                            }
+                          }}
+                          className={hasDetails ? 'cursor-pointer' : undefined}
                         >
-                          {formatTimestamp(event.created_at)}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          <span className="font-medium text-text-primary">{event.actor}</span>
-                          {event.actor_role && (
-                            <span className="ml-2 text-xs text-text-tertiary">{event.actor_role}</span>
-                          )}
-                          {event.is_admin && event.actor_role !== 'admin' && (
-                            <span className="ml-2 text-xs font-medium text-signal-blue">admin</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {label}
-                          {!hasDetails && (
-                            <span className="mt-0.5 block text-xs text-text-tertiary">
-                              No details recorded
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="font-mono text-xs text-text-secondary">
-                          {targetLabel(event)}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={OUTCOME_BADGE_VARIANT[event.outcome] ?? 'outline'}>
-                            {event.outcome}
-                          </Badge>
-                        </TableCell>
-                      </TableRow>
-                      {expanded && (
-                        <TableRow>
-                          <TableCell colSpan={5} className="bg-surface-elevated/40">
-                            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-text-secondary">
-                              {JSON.stringify(event.details ?? {}, null, 2)}
-                            </pre>
-                            {event.request_ip && (
-                              <p className="mt-2 font-mono text-xs text-text-tertiary">
-                                request_ip: {event.request_ip}
-                              </p>
+                          <TableCell
+                            className="max-w-[9rem] whitespace-nowrap align-top text-sm text-text-secondary"
+                            title={formatRelativeTime(event.created_at)}
+                          >
+                            {formatTimestamp(event.created_at)}
+                          </TableCell>
+                          <TableCell className="max-w-[22ch] break-all align-top text-sm">
+                            <span className="block font-medium text-text-primary">{event.actor}</span>
+                            {event.actor_role && (
+                              <span className="mt-0.5 block text-xs text-text-tertiary">
+                                {event.actor_role}
+                              </span>
+                            )}
+                            {event.is_admin && event.actor_role !== 'admin' && (
+                              <span className="mt-0.5 block text-xs font-medium text-signal-blue">
+                                admin
+                              </span>
                             )}
                           </TableCell>
+                          <TableCell className="max-w-[26ch] whitespace-normal break-words align-top text-sm">
+                            <span className="block max-w-[20ch]">{label}</span>
+                            {!hasDetails && (
+                              <span className="mt-0.5 block text-xs text-text-tertiary">
+                                No details recorded
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="max-w-[26ch] whitespace-normal break-words align-top font-mono text-xs text-text-secondary">
+                            {targetLabel(event)}
+                          </TableCell>
+                          <TableCell className="max-w-[8rem] whitespace-nowrap align-top">
+                            <Badge variant={OUTCOME_BADGE_VARIANT[event.outcome] ?? 'outline'}>
+                              {event.outcome}
+                            </Badge>
+                          </TableCell>
                         </TableRow>
-                      )}
-                    </Fragment>
-                  )
-                })}
-            </TableBody>
-          </Table>
+                        {expanded && (
+                          <TableRow>
+                            <TableCell colSpan={5} className="bg-surface-elevated/40">
+                              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-text-secondary">
+                                {JSON.stringify(event.details ?? {}, null, 2)}
+                              </pre>
+                              {event.request_ip && (
+                                <p className="mt-2 font-mono text-xs text-text-tertiary">
+                                  request_ip: {event.request_ip}
+                                </p>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 

@@ -352,6 +352,35 @@ describe('AdminAuditPage', () => {
     expect(locationKeys).toHaveLength(2)
   })
 
+  it('wraps an over-long actor instead of widening the table', async () => {
+    // An over-long username attempt really did reach the audit log at 257 chars.
+    const actor = 'z'.repeat(300)
+    mockAuditApi(1, () => [event({ actor })])
+    const { container } = renderPage()
+
+    const name = await screen.findByText(actor)
+    const cell = name.closest('td')!
+
+    // The long token breaks; the cell is bounded and top-aligned.
+    expect(cell).toHaveClass('break-all', 'align-top', 'max-w-[22ch]')
+    expect(cell).toHaveTextContent(actor)
+
+    // A fixed layout plus a width on every header is what stops one cell from
+    // pushing the other columns out of view.
+    const table = container.querySelector('table')!
+    expect(table).toHaveClass('table-fixed')
+    for (const head of screen.getAllByRole('columnheader')) {
+      expect(head.className).toMatch(/w-\[9rem\]|w-\[22ch\]|w-\[26ch\]|w-\[8rem\]/)
+    }
+
+    // No cell renders unbreakable text: each one wraps or is a single-line narrow
+    // value (time, outcome).
+    for (const td of screen.getAllByRole('cell')) {
+      expect(td.className).toMatch(/align-top/)
+      expect(td.className).toMatch(/break-all|break-words|whitespace-nowrap/)
+    }
+  })
+
   it('shows the empty state', async () => {
     mockAuditApi(0, () => [])
     renderPage()
