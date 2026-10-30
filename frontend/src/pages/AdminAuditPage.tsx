@@ -713,7 +713,7 @@ export function AdminAuditPage() {
                           className={hasDetails ? 'cursor-pointer' : undefined}
                         >
                           <TableCell
-                            className="max-w-[9rem] whitespace-nowrap align-top text-sm text-text-secondary"
+                            className="max-w-[9rem] whitespace-normal break-words align-top text-sm text-text-secondary"
                             title={formatRelativeTime(event.created_at)}
                           >
                             {formatTimestamp(event.created_at)}
