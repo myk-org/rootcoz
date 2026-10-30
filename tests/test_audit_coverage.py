@@ -21,6 +21,14 @@ import pytest
 MAIN = Path(__file__).resolve().parents[1] / "src" / "rootcoz" / "main.py"
 MUTATING = {"post", "put", "delete", "patch"}
 
+#: Helpers that audit an attempt only when it is refused or fails. A route that
+#: calls one of these but never reaches a success-auditing path is not covered:
+#: the trail would show only the denials of an endpoint whose happy path is
+#: invisible.
+REFUSAL_ONLY_HELPERS = frozenset(
+    {"_record_refused_attempt", "_record_failed_attempt", "_refusal_exception"}
+)
+
 #: Mutating endpoints that intentionally write no audit row, each with the
 #: reason recorded in the issue's "Documented skips" table.
 AUDIT_EXEMPT: dict[tuple[str, str], str] = {
@@ -91,7 +99,7 @@ def _called_names(node: ast.AST) -> set[str]:
 
 def _audited(node: ast.AST, helpers: set[str]) -> bool:
     called = _called_names(node)
-    return "record_audit" in called or bool(called & helpers)
+    return "record_audit" in called or bool((called & helpers) - REFUSAL_ONLY_HELPERS)
 
 
 def test_every_mutating_route_is_audited_or_explicitly_exempt() -> None:
@@ -114,6 +122,29 @@ def test_every_mutating_route_is_audited_or_explicitly_exempt() -> None:
         "AUDIT_EXEMPT with the reason recorded in issue #379:\n  "
         + "\n  ".join(sorted(missing))
     )
+
+
+def test_a_refusal_only_helper_does_not_count_as_coverage() -> None:
+    """Catching an HTTPException and auditing it is not the same as auditing."""
+    node = ast.parse(
+        "async def only_refuses(request):\n"
+        "    try:\n"
+        "        await do_the_thing()\n"
+        "    except HTTPException as exc:\n"
+        "        await _record_refused_attempt(exc=exc)\n"
+        "        raise\n"
+    ).body[0]
+
+    assert not _audited(node, {"_record_refused_attempt"})
+
+
+def test_a_success_auditing_helper_still_counts() -> None:
+    node = ast.parse(
+        "async def audited(request):\n    await _enqueue_audited_analysis(run=run)\n"
+    ).body[0]
+
+    assert _audited(node, {"_enqueue_audited_analysis"})
+    assert not _audited(node, REFUSAL_ONLY_HELPERS)
 
 
 def test_exemptions_are_not_stale() -> None:

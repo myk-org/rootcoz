@@ -1431,6 +1431,35 @@ def _refusal_exception(exc: Exception, *, status_code: int = 400) -> HTTPExcepti
     return HTTPException(status_code=status_code, detail=str(exc))
 
 
+async def _record_failed_attempt(
+    *,
+    action: str,
+    request: Request,
+    message: str,
+    target_type: str | None = None,
+    target_id: str = "",
+    reason: str = "internal_error",
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Audit one attempt that failed for a reason with no HTTP status.
+
+    The error twin of :func:`_record_refused_attempt`: an unexpected error
+    (a write that raised, a dependency that broke) still leaves the one row the
+    endpoint promised, and the handler re-raises so the client sees the same
+    error it saw before auditing existed.
+    """
+    await record_audit(
+        action=action,
+        actor=getattr(request.state, "username", ""),
+        message=f"{message} (failure: {reason})",
+        target_type=target_type,
+        target_id=target_id or None,
+        outcome="failure",
+        details={"reason": reason, **(details or {})},
+        request=request,
+    )
+
+
 # Statuses that indicate the analysis is still in progress.
 IN_PROGRESS_STATUSES = ("pending", "running", "waiting")
 
@@ -5681,35 +5710,44 @@ async def analyze(
     All types return 202 with a job_id for async polling.
     Requires operator or admin role.
     """
-    _require_operator(request)
-    _check_allow_list(request)
     base_url = _extract_base_url()
 
-    token = ai_username.set(request.state.username)
-    try:
-        await _resolve_ai_config_allow_defer(body, settings, request)
-        merged = _merge_settings(body, settings)
-        resolved_peers = await _validate_peer_configs(body, merged)
-    finally:
-        ai_username.reset(token)
+    async def _run() -> tuple[
+        str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
+    ]:
+        # Every preliminary check lives inside the audited scope: a denial, an
+        # AI/peer config error or a settings-merge failure is an attempt too.
+        _require_operator(request)
+        _check_allow_list(request)
+        token = ai_username.set(request.state.username)
+        try:
+            provider, model = await _resolve_ai_config_allow_defer(
+                body, settings, request
+            )
+            merged = _merge_settings(body, settings)
+            resolved_peers = await _validate_peer_configs(body, merged)
+        finally:
+            ai_username.reset(token)
 
-    display_name = _resolve_request_display_name(body)
+        display_name = _resolve_request_display_name(body)
+
+        async def _enqueue() -> dict[str, Any]:
+            return await _enqueue_ci_source_analysis(
+                body=body,
+                merged=merged,
+                resolved_peers=resolved_peers,
+                display_name=display_name,
+                analysis_type=body.type,
+                base_url=base_url,
+                username=request.state.username,
+                message_prefix="Analysis",
+                is_admin=bool(request.state.is_admin),
+            )
+
+        return provider, model, _enqueue
+
     return await _enqueue_audited_analysis(
-        request=request,
-        ingest_only=False,
-        provider=body.ai_provider or "",
-        model=body.ai_model or "",
-        enqueue=_enqueue_ci_source_analysis(
-            body=body,
-            merged=merged,
-            resolved_peers=resolved_peers,
-            display_name=display_name,
-            analysis_type=body.type,
-            base_url=base_url,
-            username=request.state.username,
-            message_prefix="Analysis",
-            is_admin=bool(request.state.is_admin),
-        ),
+        request=request, ingest_only=False, prepare=_run
     )
 
 
@@ -5725,27 +5763,35 @@ async def submit(
     Same source validation and test-result collection as ``POST /analyze``,
     then stops before repository clone and AI. Requires operator or admin.
     """
-    _require_operator(request)
-    _check_allow_list(request)
     base_url = _extract_base_url()
 
-    display_name = _resolve_request_display_name(body)
-    merged = _merge_settings(body, settings)
+    async def _run() -> tuple[
+        str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
+    ]:
+        # Preliminary checks stay inside the audited scope (see ``analyze``).
+        _require_operator(request)
+        _check_allow_list(request)
+        display_name = _resolve_request_display_name(body)
+        merged = _merge_settings(body, settings)
+
+        async def _enqueue() -> dict[str, Any]:
+            return await _enqueue_ci_source_analysis(
+                body=body,
+                merged=merged,
+                resolved_peers=None,
+                display_name=display_name,
+                analysis_type=body.type,
+                base_url=base_url,
+                username=request.state.username,
+                message_prefix="Submit",
+                is_admin=bool(request.state.is_admin),
+                ingest_only=True,
+            )
+
+        return "", "", _enqueue
+
     return await _enqueue_audited_analysis(
-        request=request,
-        ingest_only=True,
-        enqueue=_enqueue_ci_source_analysis(
-            body=body,
-            merged=merged,
-            resolved_peers=None,
-            display_name=display_name,
-            analysis_type=body.type,
-            base_url=base_url,
-            username=request.state.username,
-            message_prefix="Submit",
-            is_admin=bool(request.state.is_admin),
-            ingest_only=True,
-        ),
+        request=request, ingest_only=True, prepare=_run
     )
 
 
@@ -5820,32 +5866,49 @@ async def _enqueue_audited_analysis(
     *,
     request: Request,
     ingest_only: bool,
-    provider: str = "",
-    model: str = "",
-    enqueue: Coroutine[Any, Any, dict[str, Any]],
+    prepare: Callable[
+        [],
+        Coroutine[
+            Any,
+            Any,
+            tuple[str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]],
+        ],
+    ],
 ) -> dict[str, Any]:
     """Enqueue a CI analysis as exactly one ``analysis.submit`` row.
 
     Shared by ``POST /analyze`` and ``POST /submit``, which promise the same
-    thing: one row per attempt whatever the outcome. ``ingest_only`` says which
-    endpoint it came from, ``provider``/``model`` are empty when the run defers
-    to the tests repo's ``settings.json``, and the job id is recorded only once
-    the enqueue produced one. The row is written from ``finally`` so a refusal
-    and a crash leave the same evidence as a success, through one call site.
+    thing: one row per attempt whatever the outcome. ``prepare`` performs every
+    preliminary check and returns ``(provider, model, enqueue)`` with the AI pair
+    actually resolved by ``_resolve_ai_config_allow_defer`` — never the raw
+    request fields, so a server default is recorded as the model that ran.
+    ``ingest_only`` says which endpoint it came from, and the job id is recorded
+    only once the enqueue produced one. The row is written from ``finally`` so a
+    refusal and a crash leave the same evidence as a success, through one call
+    site.
     """
     details: dict[str, Any] = {
-        "provider": provider,
-        "model": model,
+        "provider": "",
+        "model": "",
         "ingest_only": ingest_only,
     }
     outcome: Literal["success", "failure", "denied"] = "success"
+    queued: dict[str, Any] = {}
     job_id = ""
     try:
-        queued = await enqueue
+        provider, model, enqueue = await prepare()
+        details["provider"] = provider
+        details["model"] = model
+        queued = await enqueue()
         job_id = str(queued.get("job_id") or "")
     except HTTPException as exc:
         outcome, reason = _audit_rejection(exc)
         details["reason"] = reason
+        raise
+    except asyncio.CancelledError:
+        # A cancelled request never produced a job, so it is not a success.
+        outcome = "failure"
+        details["reason"] = "cancelled"
         raise
     except Exception:
         outcome = "failure"
@@ -5853,13 +5916,15 @@ async def _enqueue_audited_analysis(
         raise
     finally:
         what = "an ingest-only job" if ingest_only else "an analysis"
+        provider = details["provider"] or "<deferred>"
+        model = details["model"] or "<deferred>"
         await record_audit(
             action="analysis.submit",
             actor=request.state.username,
             message=(
                 f"User '{request.state.username}' submitted {what}"
                 f"{' ' + job_id if job_id else ''} with"
-                f" {provider or '<deferred>'}/{model or '<deferred>'} ({outcome})"
+                f" {provider}/{model} ({outcome})"
             ),
             target_type="job",
             target_id=job_id or None,
@@ -6985,6 +7050,7 @@ async def re_analyze_failure(
     """
     _check_allow_list(request)
     _require_operator(request)
+    parent_job_id = ""
 
     try:
         # Parse optional body
@@ -7139,6 +7205,8 @@ async def re_analyze_failure(
     except HTTPException as exc:
         # One row per attempt: a re-analyze that stopped at a guard (unknown
         # failure, unreadable params, already running) still says who tried.
+        # The row names the same target as the success row — the parent job —
+        # so a filter by job shows both; the failure uuid goes in the details.
         await _record_refused_attempt(
             action="analysis.rerun",
             request=request,
@@ -7146,10 +7214,10 @@ async def re_analyze_failure(
                 f"User '{request.state.username}' re-ran the analysis of"
                 f" failure {failure_uuid}"
             ),
-            target_type="failure",
-            target_id=failure_uuid,
+            target_type="job",
+            target_id=parent_job_id,
             exc=exc,
-            details={"trigger": "failure"},
+            details={"trigger": "failure", "failure_uuid": failure_uuid},
         )
         raise
     notify_job_status_changed(parent_job_id)
@@ -7466,13 +7534,15 @@ async def add_comment(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Add a comment to a test failure."""
-    _check_allow_list(request)
-    _require_reviewer(request)
     logger.debug(f"POST /results/{job_id}/comments: test_name={body.test_name}")
 
     username = request.state.username
     message = f"User '{username}' commented on '{body.test_name}' in job {job_id}"
     try:
+        # Authorization is part of the attempt: a denied call still leaves one
+        # row, so these checks live inside the refusal block.
+        _check_allow_list(request)
+        _require_reviewer(request)
         await _validate_test_name_in_result(
             job_id, body.test_name, body.child_job_name, body.child_build_number
         )
@@ -7657,22 +7727,10 @@ async def set_reviewed(
     }
 
 
-@app.post("/results/{job_id}/enrich-comments", operation_id="enrichComments")
-async def enrich_comments(
-    job_id: str,
-    request: Request,
-    settings: Settings = _SETTINGS_DEP,
-    _: None = Depends(_bind_job_id),
-) -> dict[str, Any]:
-    """Fetch live statuses for GitHub PRs and Jira tickets found in comments.
-
-    Read-only: no storage writes, no external mutations. Any authenticated user
-    may call it, since the statuses are rendered beside the comment links a
-    viewer can already read.
-    """
-    _check_allow_list(request)
-    logger.debug(f"POST /results/{job_id}/enrich-comments")
-
+async def _collect_comment_enrichments(
+    job_id: str, settings: Settings
+) -> dict[str, list[dict[str, Any]]]:
+    """Resolve live statuses for every tracker link found in a job's comments."""
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
@@ -7770,6 +7828,46 @@ async def enrich_comments(
     logger.debug(
         f"enrich_comments: job_id={job_id}, enrichments_count={len(enrichments)}"
     )
+    return enrichments
+
+
+@app.post("/results/{job_id}/enrich-comments", operation_id="enrichComments")
+async def enrich_comments(
+    job_id: str,
+    request: Request,
+    settings: Settings = _SETTINGS_DEP,
+    _: None = Depends(_bind_job_id),
+) -> dict[str, Any]:
+    """Fetch live statuses for GitHub PRs and Jira tickets found in comments.
+
+    Read-only: no storage writes, no external mutations. Any authenticated user
+    may call it, since the statuses are rendered beside the comment links a
+    viewer can already read.
+    """
+    logger.debug(f"POST /results/{job_id}/enrich-comments")
+    message = f"User '{request.state.username}' enriched comments in job {job_id}"
+    try:
+        _check_allow_list(request)
+        enrichments = await _collect_comment_enrichments(job_id, settings)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="comment.enrich",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+        )
+        raise
+    except Exception:
+        await _record_failed_attempt(
+            action="comment.enrich",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+        )
+        raise
     await record_audit(
         action="comment.enrich",
         actor=request.state.username,
@@ -9735,8 +9833,10 @@ async def update_tags(
     _require_reviewer(request)
     _check_allow_list(request)
     message = f"User '{request.state.username}' set the tags of job {job_id}"
-    body = await _read_json_object(request)
     try:
+        # Malformed JSON is an attempt too: read inside the refusal scope so
+        # the 400 leaves one row instead of nothing.
+        body = await _read_json_object(request)
         raw_tags = body.get("tags")
         if not isinstance(raw_tags, list) or not all(
             isinstance(t, str) for t in raw_tags
@@ -11212,7 +11312,10 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
         previous_pattern = ""
         if not is_ai_caller:
             previous_pattern = await storage.get_history_classification(
-                classify_job_id, test_name, child_build_number=body.child_build_number
+                classify_job_id,
+                test_name,
+                child_job_name=job_name,
+                child_build_number=body.child_build_number,
             )
 
         # Look up parent job name from failure_history, scoped to this job
@@ -12597,49 +12700,91 @@ async def set_user_ai_credential(
     provider: str, body: AiCredentialInput, request: Request
 ) -> JSONResponse:
     """Encrypt and save a key for a sidecar-confirmed provider."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    username = await _credential_user(request)
-    # Resolve to the sidecar's exact-case id: the gate below accepts any
-    # caller spelling (#347), but verification and storage must use the
-    # canonical id or the sidecar rejects the session and the stored row
-    # drifts from the catalog's spelling.
-    canonical = await _canonical_key_provider_id(provider)
-    if canonical is None:
-        raise HTTPException(
-            status_code=400, detail="Provider does not support session API keys"
-        )
-    provider = canonical
-    key = body.api_key.get_secret_value()
-    if error := _validate_submitted_api_key(key):
-        raise HTTPException(status_code=400, detail=error)
-    from rootcoz.ai_client import verify_ai_key
-
-    model = body.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Select a model to verify the key")
-    outcome = await verify_ai_key(provider, model, key)
+    username = request.state.username
+    message = f"User '{username}' set their {provider} AI credential"
+    details: dict[str, Any] = {"provider": provider}
     replaced = False
-    if outcome == "accepted":
-        try:
-            # Read before the write, or every save looks like a replace. A
-            # case-variant spelling is the same provider under a drifted name
-            # and is consolidated by the write below, so it counts as a replace.
+    try:
+        _require_reviewer(request)
+        _check_allow_list(request)
+        username = await _credential_user(request)
+        # Resolve to the sidecar's exact-case id: the gate below accepts any
+        # caller spelling (#347), but verification and storage must use the
+        # canonical id or the sidecar rejects the session and the stored row
+        # drifts from the catalog's spelling.
+        canonical = await _canonical_key_provider_id(provider)
+        if canonical is None:
+            raise HTTPException(
+                status_code=400, detail="Provider does not support session API keys"
+            )
+        provider = canonical
+        details["provider"] = provider
+        key = body.api_key.get_secret_value()
+        if error := _validate_submitted_api_key(key):
+            raise HTTPException(status_code=400, detail=error)
+        from rootcoz.ai_client import verify_ai_key
+
+        model = body.model.strip()
+        if not model:
+            raise HTTPException(
+                status_code=400, detail="Select a model to verify the key"
+            )
+        details["model"] = model
+        outcome = await verify_ai_key(provider, model, key)
+        if outcome == "accepted":
+            # Read before the write, or every save looks like a replace. Only
+            # the exact stored spelling counts: the write below overwrites that
+            # key, while a case variant can be a genuinely different provider.
             existing = await storage.get_user_ai_credentials(username)
-            replaced = any(name.lower() == provider.lower() for name in existing)
+            replaced = provider in existing
             sessions = await storage.update_user_ai_credential(
                 username,
                 provider,
                 key,
                 registered_providers=await registered_provider_ids(),
             )
-        except storage.UnreadableAiCredentialsError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        await _revoke_ai_sessions(sessions)
-    message = {
+            await _revoke_ai_sessions(sessions)
+    except storage.UnreadableAiCredentialsError as exc:
+        refusal = _refusal_exception(exc, status_code=409)
+        await _record_refused_attempt(
+            action="user.ai_credential_set",
+            request=request,
+            message=message,
+            target_type="provider",
+            target_id=provider,
+            exc=refusal,
+            details={"reason": "unreadable_credentials", **details},
+        )
+        raise refusal from exc
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="user.ai_credential_set",
+            request=request,
+            message=message,
+            target_type="provider",
+            target_id=provider,
+            exc=exc,
+            details=details,
+        )
+        raise
+    except Exception:
+        await _record_failed_attempt(
+            action="user.ai_credential_set",
+            request=request,
+            message=message,
+            target_type="provider",
+            target_id=provider,
+            reason="internal_error",
+            details=details,
+        )
+        raise
+    message_body = {
         "rejected": "Check the key and selected model; existing credential unchanged.",
         "inconclusive": "Try again when the provider is available; existing credential unchanged.",
     }.get(outcome)
+    details["replaced"] = replaced
+    if outcome != "accepted":
+        details["reason"] = outcome
     await record_audit(
         action="user.ai_credential_set",
         actor=username,
@@ -12652,7 +12797,7 @@ async def set_user_ai_credential(
         outcome="success" if outcome == "accepted" else "failure",
         # ``model`` is what the key was verified against and ``replaced`` tells
         # an add from a rotation afterwards (#379) — never the key itself.
-        details={"provider": provider, "model": model, "replaced": replaced},
+        details=details,
         request=request,
     )
     return JSONResponse(
@@ -12660,7 +12805,7 @@ async def set_user_ai_credential(
             {
                 "outcome": outcome,
                 "ok": outcome == "accepted",
-                **({"message": message} if message else {}),
+                **({"message": message_body} if message_body else {}),
             }
         ),
         headers={"Cache-Control": "no-store"},
@@ -12908,59 +13053,97 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     empty string or ``null`` clears that one field, and a string sets it.
     Clearing one field never touches the others.
     """
-    _require_reviewer(request)
-    _check_allow_list(request)
     username = request.state.username
-    if not username:
-        raise HTTPException(status_code=401, detail="Username required")
-    # Verify user exists in DB
-    user = await storage.get_user_by_username(username)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found. Register first.")
-    body = await _read_json_object(request)
-
-    # Presence-based, so an omitted field keeps its stored value and an empty
-    # one clears it. Stringifying first would store a null as the literal "None".
+    message = f"User '{username}' saved tracker tokens"
+    submitted: list[str] = []
     kwargs: dict[str, str] = {}
-    for field in _TRACKER_TOKEN_FIELDS:
-        if field not in body:
-            continue
-        value = body[field]
-        if value is None:
-            kwargs[field] = ""
-        elif isinstance(value, str):
-            kwargs[field] = value.strip()
-        else:
+    action = "user.tracker_token_set"
+    try:
+        _require_reviewer(request)
+        _check_allow_list(request)
+        if not username:
+            raise HTTPException(status_code=401, detail="Username required")
+        # Verify user exists in DB
+        user = await storage.get_user_by_username(username)
+        if not user:
             raise HTTPException(
-                status_code=400, detail=f"{field} must be a string or null"
+                status_code=404, detail="User not found. Register first."
             )
-        if (
-            field == "jira_sa_token"
-            and kwargs[field]
-            and classify_jira_secret(kwargs[field]) is None
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "jira_sa_token must be an ATOA-prefixed Atlassian OAuth "
-                    "2.0 credential client secret or an ATST-prefixed "
-                    "service-account scoped token — use jira_token for "
-                    "regular credentials"
-                ),
-            )
+        body = await _read_json_object(request)
 
-    if not kwargs:
-        return JSONResponse(content={"ok": True, "saved": False})
+        # Presence-based, so an omitted field keeps its stored value and an
+        # empty one clears it. Stringifying first would store a null as the
+        # literal "None".
+        for field in _TRACKER_TOKEN_FIELDS:
+            if field not in body:
+                continue
+            submitted.append(field)
+            value = body[field]
+            if value is None:
+                kwargs[field] = ""
+            elif isinstance(value, str):
+                kwargs[field] = value.strip()
+            else:
+                raise HTTPException(
+                    status_code=400, detail=f"{field} must be a string or null"
+                )
+            if (
+                field == "jira_sa_token"
+                and kwargs[field]
+                and classify_jira_secret(kwargs[field]) is None
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "jira_sa_token must be an ATOA-prefixed Atlassian OAuth "
+                        "2.0 credential client secret or an ATST-prefixed "
+                        "service-account scoped token — use jira_token for "
+                        "regular credentials"
+                    ),
+                )
 
-    # One row per field and only for a field that really changed: the profile
-    # form resubmits every field on each save, so an unchanged value (or
-    # clearing one that was never set) must not write a row. Read the stored
-    # values first — afterwards every submitted value trivially "matches".
-    stored = await storage.get_user_tokens(username)
-    changed = {
-        field: value for field, value in kwargs.items() if value != stored[field]
-    }
-    await storage.save_user_tokens(username, **kwargs)
+        if not kwargs:
+            return JSONResponse(content={"ok": True, "saved": False})
+        action = (
+            "user.tracker_token_delete"
+            if not any(kwargs.values())
+            else "user.tracker_token_set"
+        )
+
+        # One row per field and only for a field that really changed: the
+        # profile form resubmits every field on each save, so an unchanged
+        # value (or clearing one that was never set) must not write a row. Read
+        # the stored values first — afterwards every submitted value trivially
+        # "matches".
+        stored = await storage.get_user_tokens(username)
+        changed = {
+            field: value for field, value in kwargs.items() if value != stored[field]
+        }
+        await storage.save_user_tokens(username, **kwargs)
+    except HTTPException as exc:
+        # One row for the attempt, never one per submitted field, and never the
+        # value that was rejected.
+        await _record_refused_attempt(
+            action=action,
+            request=request,
+            message=message,
+            target_type="user",
+            target_id=username,
+            exc=exc,
+            details={"fields": submitted},
+        )
+        raise
+    except Exception:
+        await _record_failed_attempt(
+            action=action,
+            request=request,
+            message=message,
+            target_type="user",
+            target_id=username,
+            reason="storage_error",
+            details={"fields": submitted},
+        )
+        raise
     logger.debug(f"Saved tokens for user '{username}': {sorted(kwargs)}")
     for field, value in changed.items():
         kind = "set" if value else "delete"
@@ -17120,22 +17303,35 @@ async def set_job_metadata_endpoint(
     """Set or update metadata for a job."""
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/{job_name}/metadata")
-    current = await storage.get_job_metadata(job_name) or {}
-    saved = await storage.set_job_metadata(
-        job_name,
-        team=body.team if "team" in body.model_fields_set else current.get("team"),
-        tier=body.tier if "tier" in body.model_fields_set else current.get("tier"),
-        version=body.version
-        if "version" in body.model_fields_set
-        else current.get("version"),
-        labels=body.labels
-        if "labels" in body.model_fields_set
-        else current.get("labels", []),
-    )
+    message = f"Admin '{request.state.username}' set metadata for job '{job_name}'"
+    try:
+        current = await storage.get_job_metadata(job_name) or {}
+        saved = await storage.set_job_metadata(
+            job_name,
+            team=body.team if "team" in body.model_fields_set else current.get("team"),
+            tier=body.tier if "tier" in body.model_fields_set else current.get("tier"),
+            version=body.version
+            if "version" in body.model_fields_set
+            else current.get("version"),
+            labels=body.labels
+            if "labels" in body.model_fields_set
+            else current.get("labels", []),
+        )
+    except Exception:
+        # A storage failure still leaves the one row the contract promises;
+        # the client keeps getting the same 500 from the re-raised error.
+        await _record_failed_attempt(
+            action="job.metadata_set",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_name,
+        )
+        raise
     await record_audit(
         action="job.metadata_set",
         actor=request.state.username,
-        message=f"Admin '{request.state.username}' set metadata for job '{job_name}'",
+        message=message,
         target_type="job",
         target_id=job_name,
         request=request,

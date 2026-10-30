@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from rootcoz import main, monitoring, storage
+from rootcoz import ai_client, main, monitoring, storage
 from rootcoz.encryption import encrypt_sensitive_fields
 from tests.conftest import admin_login, make_app_client
 
@@ -1078,6 +1078,67 @@ def test_tracker_token_audit_records_only_actual_changes(app_client) -> None:
     assert len(_events(action="user.tracker_token_delete")) == 1
 
 
+def test_tracker_token_validation_failure_is_audited_once(app_client) -> None:
+    """A rejected save is one row, whatever the field count, and never a value."""
+    session = _registered_user_session(app_client, "gina")
+    bad_secret = "not-a-service-token"  # pragma: allowlist secret
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    response = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token, "jira_sa_token": bad_secret},
+        **session,
+    )
+    assert response.status_code == 400, response.text
+
+    events = _events(action="user.tracker_token_set")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["outcome"], event["target_type"]) == ("failure", "user")
+    assert event["target_id"] == "gina"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "fields": ["jira_token", "jira_sa_token"],
+    }
+    assert bad_secret not in json.dumps(event)
+
+    saved = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token},
+        **session,
+    )
+    assert saved.status_code == 200, saved.text
+    events = _events(action="user.tracker_token_set")
+    assert [event["outcome"] for event in events] == ["success", "failure"]
+
+
+def test_tracker_token_storage_failure_is_audited(app_client) -> None:
+    session = _registered_user_session(app_client, "helen")
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    with (
+        patch.object(
+            storage, "save_user_tokens", AsyncMock(side_effect=OSError("disk full"))
+        ),
+        pytest.raises(OSError),
+    ):
+        app_client.put(
+            "/api/user/tokens",
+            json={"jira_token": token},
+            **session,
+        )
+
+    event = _events(action="user.tracker_token_set")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "storage_error", "fields": ["jira_token"]}
+
+    saved = app_client.put(
+        "/api/user/tokens",
+        json={"jira_token": token},
+        **session,
+    )
+    assert saved.status_code == 200, saved.text
+    assert len(_events(action="user.tracker_token_set")) == 2
+
+
 def test_comment_delete_is_audited_without_the_body(app_client) -> None:
     admin_login(app_client)
     asyncio.run(
@@ -1214,6 +1275,1048 @@ def test_export_push_with_the_exporter_disabled_is_audited(app_client) -> None:
     assert events[0]["outcome"] == "failure"
     assert events[0]["details"]["plugin"] == "reportportal"
     assert events[0]["details"]["reason"] == "invalid_request"
+
+
+# --- one row per action for the state changes an admin investigates (#379) ---
+
+_ANALYZE_BODY: dict[str, Any] = {
+    "type": "raw",
+    "failures": [
+        {"test_name": "test_a", "error_message": "assert False", "stack_trace": "l1"}
+    ],
+    "ai_provider": "claude",
+    "ai_model": "test-model",
+}
+
+
+def _store_job(job_id: str = "job-1", **overrides: Any) -> dict[str, Any]:
+    """Store one completed job with a single failure, for the row tests."""
+    result: dict[str, Any] = {
+        "job_name": "my-job",
+        "failures": [{"test_name": "test_a", "analysis": {}}],
+        **overrides,
+    }
+    asyncio.run(storage.save_result(job_id, "", "completed", result))
+    return result
+
+
+async def _boom(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    """An enqueue that refuses the request instead of queueing a job."""
+    raise main.HTTPException(status_code=422, detail="Unsupported analysis type")
+
+
+def test_analysis_submit_is_audited(app_client) -> None:
+    admin_login(app_client)
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "test-model")),
+        ),
+        patch.object(main, "_validate_peer_configs", AsyncMock(return_value=None)),
+        patch.object(
+            main,
+            "_enqueue_ci_source_analysis",
+            AsyncMock(return_value={"job_id": "job-new"}),
+        ),
+    ):
+        response = app_client.post("/analyze", json=_ANALYZE_BODY)
+    assert response.status_code == 202, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert (event["target_type"], event["target_id"]) == ("job", "job-new")
+    assert event["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "ingest_only": False,
+    }
+
+
+def test_analysis_submit_refusal_is_audited(app_client) -> None:
+    """An enqueue that never produced a job still leaves one failure row."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "test-model")),
+        ),
+        patch.object(main, "_validate_peer_configs", AsyncMock(return_value=None)),
+        patch.object(main, "_enqueue_ci_source_analysis", _boom),
+    ):
+        response = app_client.post("/analyze", json=_ANALYZE_BODY)
+    assert response.status_code == 422, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "failure"
+    assert event["target_id"] is None
+    assert event["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "ingest_only": False,
+        "reason": "invalid_payload",
+    }
+
+
+def test_ingest_only_submit_is_audited(app_client) -> None:
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_enqueue_ci_source_analysis",
+        AsyncMock(return_value={"job_id": "job-submitted"}),
+    ):
+        response = app_client.post(
+            "/submit",
+            json={
+                "type": "raw",
+                "failures": [{"test_name": "test_a", "error_message": "x"}],
+            },
+        )
+    assert response.status_code == 202, response.text
+
+    event = _events(action="analysis.submit")[0]
+    assert event["details"]["ingest_only"] is True
+    assert event["target_id"] == "job-submitted"
+
+
+def test_analysis_submit_ai_config_failure_is_audited(app_client) -> None:
+    """An exit before the enqueue still leaves one row for the attempt."""
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_resolve_ai_config_allow_defer",
+        AsyncMock(
+            side_effect=main.HTTPException(
+                status_code=400, detail="AI provider is not configured"
+            )
+        ),
+    ):
+        response = app_client.post("/analyze", json=_ANALYZE_BODY)
+    assert response.status_code == 400, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "failure"
+    assert event["target_id"] is None
+    assert event["details"] == {
+        "provider": "",
+        "model": "",
+        "ingest_only": False,
+        "reason": "invalid_request",
+    }
+
+
+def test_analysis_submit_operator_denial_is_audited(app_client) -> None:
+    """The role gate now sits inside the audited scope."""
+    session = _registered_user_session(app_client, "viewer-audit")
+    response = app_client.post("/analyze", json=_ANALYZE_BODY, **session)
+    assert response.status_code == 403, response.text
+
+    events = _events(action="analysis.submit")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "denied"
+    assert event["details"]["reason"] == "forbidden"
+
+
+def test_analysis_submit_records_the_resolved_model(app_client) -> None:
+    """The row names the model that ran, not the empty request fields."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "server-default-model")),
+        ),
+        patch.object(main, "_validate_peer_configs", AsyncMock(return_value=None)),
+        patch.object(
+            main,
+            "_enqueue_ci_source_analysis",
+            AsyncMock(return_value={"job_id": "job-defaulted"}),
+        ),
+    ):
+        response = app_client.post(
+            "/analyze",
+            json={
+                "type": "raw",
+                "failures": [{"test_name": "test_a", "error_message": "x"}],
+            },
+        )
+    assert response.status_code == 202, response.text
+
+    event = _events(action="analysis.submit")[0]
+    assert event["details"] == {
+        "provider": "claude",
+        "model": "server-default-model",
+        "ingest_only": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_submit_is_not_logged_as_a_success(audit_db: Path) -> None:
+    """A cancelled enqueue produced no job, so it is a failure, not a success."""
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+
+    async def _prepare() -> tuple[str, str, Any]:
+        async def _enqueue() -> dict[str, Any]:
+            raise asyncio.CancelledError
+
+        return "claude", "test-model", _enqueue
+
+    with pytest.raises(asyncio.CancelledError):
+        await main._enqueue_audited_analysis(
+            request=request, ingest_only=False, prepare=_prepare
+        )
+
+    events = (await storage.list_audit_events(action="analysis.submit"))["events"]
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "failure"
+    assert event["details"]["reason"] == "cancelled"
+    assert event["target_id"] is None
+
+
+def test_failure_re_analyze_is_audited(app_client) -> None:
+    admin_login(app_client)
+    failure_uuid = "123e4567-e89b-12d3-a456-426614174000"
+    _store_job(
+        "job-failure",
+        failures=[
+            {"test_name": "test_a", "id": failure_uuid, "analysis": {}},
+        ],
+        request_params=encrypt_sensitive_fields(
+            {"ai_provider": "claude", "ai_model": "test-model", "submitted_by": "admin"}
+        ),
+    )
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "test-model")),
+        ),
+        patch.object(
+            main, "_reanalyze_failure_background", AsyncMock(return_value=None)
+        ),
+        patch.object(main, "notify_job_status_changed"),
+    ):
+        response = app_client.post(f"/api/failures/{failure_uuid}/re-analyze")
+    assert response.status_code == 202, response.text
+
+    events = _events(action="analysis.rerun")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-failure"
+    assert event["details"] == {
+        "provider": "claude",
+        "model": "test-model",
+        "trigger": "failure",
+        "failure_uuid": failure_uuid,
+        "test_name": "test_a",
+    }
+
+
+def test_failure_re_analyze_of_an_unknown_failure_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.post("/api/failures/no-such-uuid/re-analyze")
+    assert response.status_code == 404, response.text
+
+    events = _events(action="analysis.rerun")
+    assert len(events) == 1
+    event = events[0]
+    # Same target as the success row (the parent job, unknown here), with the
+    # failure uuid in the details so a job filter still surfaces both.
+    assert (event["outcome"], event["target_type"]) == ("failure", "job")
+    assert event["target_id"] is None
+    assert event["details"] == {
+        "reason": "not_found",
+        "trigger": "failure",
+        "failure_uuid": "no-such-uuid",
+    }
+
+
+def test_failure_re_analyze_refusal_names_the_parent_job(app_client) -> None:
+    """A refused rerun on a known job filters the same way as the success row."""
+    admin_login(app_client)
+    failure_uuid = "123e4567-e89b-12d3-a456-426614174001"
+    # No request_params: the guard refuses before the rerun can be queued.
+    _store_job(
+        "job-refused",
+        failures=[{"test_name": "test_a", "id": failure_uuid, "analysis": {}}],
+    )
+
+    response = app_client.post(f"/api/failures/{failure_uuid}/re-analyze")
+    assert response.status_code == 400, response.text
+
+    event = _events(action="analysis.rerun")[0]
+    assert (event["outcome"], event["target_type"]) == ("failure", "job")
+    assert event["target_id"] == "job-refused"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "trigger": "failure",
+        "failure_uuid": failure_uuid,
+    }
+
+
+def test_comment_add_is_audited_without_the_body(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-comment")
+
+    response = app_client.post(
+        "/results/job-comment/comments",
+        json={"test_name": "test_a", "comment": "body text that must not be audited"},
+    )
+    assert response.status_code == 201, response.text
+
+    events = _events(action="comment.add")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-comment"
+    assert event["details"] == {
+        "test_name": "test_a",
+        "comment_id": response.json()["id"],
+    }
+    assert "body text" not in json.dumps(event)
+
+
+def test_comment_add_for_an_unknown_test_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-comment")
+
+    response = app_client.post(
+        "/results/job-comment/comments",
+        json={"test_name": "not_a_test", "comment": "a note"},
+    )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="comment.add")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "invalid_request", "test_name": "not_a_test"}
+
+
+def test_comment_add_denied_by_the_allow_list_is_audited(app_client) -> None:
+    """An authorization refusal before the body check still leaves one row."""
+    session = _registered_user_session(app_client, "denied-user")
+    _store_job("job-denied")
+
+    with patch.object(
+        main,
+        "_check_allow_list",
+        side_effect=main.HTTPException(status_code=403, detail="Not allowed"),
+    ):
+        response = app_client.post(
+            "/results/job-denied/comments",
+            json={"test_name": "test_a", "comment": "a note"},
+            **session,
+        )
+    assert response.status_code == 403, response.text
+
+    events = _events(action="comment.add")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "denied"
+    assert event["details"] == {"reason": "forbidden", "test_name": "test_a"}
+
+
+def test_comment_enrich_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-enrich")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich",
+            test_name="test_a",
+            comment="see https://github.com/o/r/pull/1",
+            username="admin",
+        )
+    )
+    with (
+        patch.object(
+            main,
+            "detect_github_prs",
+            return_value=[{"owner": "o", "repo": "r", "number": 1}],
+        ),
+        patch.object(main, "detect_github_issues", return_value=[]),
+        patch.object(
+            main, "fetch_github_pr_status", AsyncMock(return_value={"state": "open"})
+        ),
+    ):
+        response = app_client.post("/results/job-enrich/enrich-comments")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="comment.enrich")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-enrich"
+    assert event["details"] == {"count": 1}
+
+
+def test_comment_enrich_failure_is_audited(app_client) -> None:
+    """An enrichment that raises still leaves one failure row."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            storage,
+            "get_comments_for_job",
+            AsyncMock(side_effect=RuntimeError("db down")),
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        app_client.post("/results/job-enrich/enrich-comments")
+
+    event = _events(action="comment.enrich")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "internal_error"}
+    assert event["target_id"] == "job-enrich"
+
+    response = app_client.post("/results/job-enrich/enrich-comments")
+    assert response.status_code == 200, response.text
+    assert [event["outcome"] for event in _events(action="comment.enrich")] == [
+        "success",
+        "failure",
+    ]
+
+
+def test_pattern_override_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-pattern")
+
+    response = app_client.put(
+        "/results/job-pattern/override-pattern",
+        json={"test_name": "test_a", "pattern": "FLAKY"},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="pattern.override")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-pattern"
+    assert event["details"] == {"test_name": "test_a", "pattern": "FLAKY"}
+
+
+def test_pattern_override_for_an_unknown_test_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-pattern")
+
+    response = app_client.put(
+        "/results/job-pattern/override-pattern",
+        json={"test_name": "not_a_test", "pattern": "FLAKY"},
+    )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="pattern.override")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "test_name": "not_a_test",
+        "pattern": "FLAKY",
+    }
+
+
+def test_classification_override_records_from_and_to(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-classify")
+
+    first = app_client.post(
+        "/history/classify",
+        json={
+            "test_name": "test_a",
+            "classification": "FLAKY",
+            "job_id": "job-classify",
+        },
+    )
+    assert first.status_code == 201, first.text
+    second = app_client.post(
+        "/history/classify",
+        json={
+            "test_name": "test_a",
+            "classification": "REGRESSION",
+            "job_id": "job-classify",
+        },
+    )
+    assert second.status_code == 201, second.text
+
+    events = _events(action="classification.override")
+    assert [event["details"] for event in events] == [
+        {"test_name": "test_a", "from": "FLAKY", "to": "REGRESSION"},
+        {"test_name": "test_a", "from": "", "to": "FLAKY"},
+    ]
+    assert all(event["target_id"] == "job-classify" for event in events)
+    assert all(event["outcome"] == "success" for event in events)
+
+
+def test_classification_override_refusal_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-classify")
+
+    response = app_client.post(
+        "/history/classify",
+        json={"test_name": " ", "classification": "FLAKY", "job_id": "job-classify"},
+    )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="classification.override")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "test_name": "",
+        "to": "FLAKY",
+    }
+
+
+def test_classification_override_from_uses_the_child_job_pattern(app_client) -> None:
+    """A child-job classification reads that child's previous pattern, not the parent's."""
+    admin_login(app_client)
+    _store_job("job-child")
+    asyncio.run(
+        storage.set_test_classification(
+            test_name="test_a",
+            classification="FLAKY",
+            job_id="job-child",
+            job_name="child-job",
+            child_build_number=7,
+            visible=1,
+        )
+    )
+
+    response = app_client.post(
+        "/history/classify",
+        json={
+            "test_name": "test_a",
+            "classification": "REGRESSION",
+            "job_id": "job-child",
+            "job_name": "child-job",
+            "child_build_number": 7,
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    event = _events(action="classification.override")[0]
+    assert event["details"] == {
+        "test_name": "test_a",
+        "from": "FLAKY",
+        "to": "REGRESSION",
+    }
+
+
+def test_tags_set_is_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-tags")
+
+    response = app_client.put(
+        "/results/job-tags/tags", json={"tags": ["Foo", "bar", "foo"]}
+    )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="job.tags_set")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["target_id"] == "job-tags"
+    assert event["details"] == {"tags": ["foo", "bar"]}
+
+
+def test_tags_set_on_an_unknown_job_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put("/results/no-job/tags", json={"tags": ["foo"]})
+    assert response.status_code == 404, response.text
+
+    event = _events(action="job.tags_set")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "not_found"}
+
+
+def test_tags_set_with_a_malformed_body_is_audited(app_client) -> None:
+    """Invalid JSON and a non-object body are attempts, not silent 400s."""
+    admin_login(app_client)
+    _store_job("job-tags")
+
+    malformed = app_client.put(
+        "/results/job-tags/tags",
+        content=b"{not json",
+        headers={"Content-Type": "application/json"},
+    )
+    assert malformed.status_code == 400, malformed.text
+    not_object = app_client.put("/results/job-tags/tags", json=["foo"])
+    assert not_object.status_code == 400, not_object.text
+
+    events = _events(action="job.tags_set")
+    assert [event["outcome"] for event in events] == ["failure", "failure"]
+    assert all(event["details"] == {"reason": "invalid_request"} for event in events)
+
+    saved = app_client.put("/results/job-tags/tags", json={"tags": ["foo"]})
+    assert saved.status_code == 200, saved.text
+    assert _events(action="job.tags_set")[0]["outcome"] == "success"
+    assert len(_events(action="job.tags_set")) == 3
+
+
+def test_bulk_metadata_set_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/jobs/metadata/bulk",
+        json={"items": [{"job_name": "j1"}, {"job_name": "j2"}]},
+    )
+    assert response.status_code == 200, response.text
+
+    events = _events(action="job.metadata_set")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["details"] == {"bulk": True, "count": 2}
+
+
+def test_bulk_metadata_set_refusal_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/jobs/metadata/bulk", json={"items": [{"job_name": ""}]}
+    )
+    assert response.status_code == 422, response.text
+
+    event = _events(action="job.metadata_set")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_payload",
+        "bulk": True,
+        "count": 1,
+    }
+
+
+def test_job_metadata_set_storage_failure_is_audited(app_client) -> None:
+    """A failed write leaves one row and the client sees the same error."""
+    admin_login(app_client)
+    with (
+        patch.object(
+            storage, "set_job_metadata", AsyncMock(side_effect=RuntimeError("db down"))
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        app_client.put("/api/jobs/my-job/metadata", json={"team": "core"})
+
+    events = _events(action="job.metadata_set")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "failure"
+    assert events[0]["details"] == {"reason": "internal_error"}
+    assert (events[0]["target_type"], events[0]["target_id"]) == ("job", "my-job")
+
+    saved = app_client.put("/api/jobs/my-job/metadata", json={"team": "core"})
+    assert saved.status_code == 200, saved.text
+    assert [event["outcome"] for event in _events(action="job.metadata_set")] == [
+        "success",
+        "failure",
+    ]
+
+
+def test_job_metadata_delete_is_audited(app_client) -> None:
+    admin_login(app_client)
+    saved = app_client.put("/api/jobs/my-job/metadata", json={"team": "core"})
+    assert saved.status_code == 200, saved.text
+
+    response = app_client.delete("/api/jobs/my-job/metadata")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="job.metadata_delete")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert (event["target_type"], event["target_id"]) == ("job", "my-job")
+
+
+def test_job_metadata_delete_of_an_unknown_job_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.delete("/api/jobs/no-job/metadata")
+    assert response.status_code == 404, response.text
+
+    event = _events(action="job.metadata_delete")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "not_found"}
+
+
+def test_tracked_in_set_and_delete_are_audited(app_client) -> None:
+    admin_login(app_client)
+    _store_job("job-tracked")
+
+    created = app_client.put(
+        "/results/job-tracked/tracked-in",
+        json={"test_name": "test_a", "url": "https://github.com/o/r/issues/1"},
+    )
+    assert created.status_code == 200, created.text
+    link_id = created.json()["id"]
+
+    deleted = app_client.delete(f"/results/job-tracked/tracked-in/{link_id}")
+    assert deleted.status_code == 200, deleted.text
+
+    sets = _events(action="tracked_in.set")
+    assert len(sets) == 1
+    assert sets[0]["target_id"] == "job-tracked"
+    assert sets[0]["details"] == {
+        "test_name": "test_a",
+        "type": "github",
+        "link_id": link_id,
+    }
+    # The URL is deliberately absent: a tracker link can carry userinfo.
+    assert "github.com" not in json.dumps(sets[0])
+
+    deletes = _events(action="tracked_in.delete")
+    assert len(deletes) == 1
+    assert deletes[0]["details"] == {
+        "link_id": link_id,
+        "type": "github",
+        "test_name": "test_a",
+    }
+
+
+def test_tracked_in_delete_of_an_unknown_link_is_audited(app_client) -> None:
+    admin_login(app_client)
+    response = app_client.delete("/results/job-tracked/tracked-in/4242")
+    assert response.status_code == 404, response.text
+
+    event = _events(action="tracked_in.delete")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "not_found", "link_id": 4242}
+
+
+def test_feedback_create_is_audited_without_the_body(app_client) -> None:
+    admin_login(app_client)
+    created = SimpleNamespace(
+        issue_url="https://github.com/o/r/issues/7", issue_number=7, title="A title"
+    )
+    with (
+        patch.object(
+            storage,
+            "get_user_tokens",
+            AsyncMock(return_value={"github_token": "gh-token-0123456789"}),
+        ),
+        patch.object(
+            main, "create_feedback_from_preview", AsyncMock(return_value=created)
+        ),
+    ):
+        response = app_client.post(
+            "/api/feedback/create",
+            json={
+                "title": "A title",
+                "body": "body text that must not be audited",
+                "labels": ["feedback"],
+            },
+        )
+    assert response.status_code == 201, response.text
+
+    events = _events(action="feedback.create")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert (event["target_type"], event["target_id"]) == ("feedback", "7")
+    assert event["details"] == {
+        "kind": "github_issue",
+        "issue_number": 7,
+        "issue_url": "https://github.com/o/r/issues/7",
+    }
+    stored = json.dumps(event)
+    assert "body text" not in stored
+    assert "gh-token-0123456789" not in stored
+
+
+def test_feedback_create_without_a_token_is_audited(app_client) -> None:
+    admin_login(app_client)
+    with patch.object(storage, "get_user_tokens", AsyncMock(return_value={})):
+        response = app_client.post(
+            "/api/feedback/create", json={"title": "A title", "body": "A body"}
+        )
+    assert response.status_code == 400, response.text
+
+    event = _events(action="feedback.create")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "invalid_request",
+        "kind": "github_issue",
+    }
+    assert "A body" not in json.dumps(event)
+
+
+def test_global_model_refresh_is_audited(app_client) -> None:
+    admin_login(app_client)
+    sidecar = SimpleNamespace(refresh_models=AsyncMock(return_value={"claude": []}))
+    with (
+        patch("pi_sidecar_client.get_sidecar_client", return_value=sidecar),
+        patch.object(main, "update_model_catalog"),
+        patch.object(main, "clear_cursor_auth_cache"),
+        patch.object(main, "registered_provider_ids", AsyncMock(return_value=set())),
+        patch.object(
+            main, "build_friendly_catalog", return_value={"claude": [], "openai": []}
+        ),
+        patch.object(
+            main,
+            "capture_deployment_provider_listings",
+            AsyncMock(return_value={}),
+        ),
+    ):
+        response = app_client.post("/api/admin/ai-models/refresh")
+    assert response.status_code == 200, response.text
+
+    events = _events(action="provider.models_refresh")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["details"] == {"scope": "all", "provider_count": 2}
+
+
+def test_global_model_refresh_failure_is_audited(app_client) -> None:
+    admin_login(app_client)
+    sidecar = SimpleNamespace(
+        refresh_models=AsyncMock(side_effect=RuntimeError("sidecar down"))
+    )
+    with patch("pi_sidecar_client.get_sidecar_client", return_value=sidecar):
+        response = app_client.post("/api/admin/ai-models/refresh")
+    assert response.status_code == 502, response.text
+
+    event = _events(action="provider.models_refresh")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {"reason": "upstream_failure", "scope": "all"}
+
+
+def test_settings_export_records_sensitivity_and_key_count(app_client) -> None:
+    admin_login(app_client)
+    asyncio.run(storage.set_server_setting("ai_provider", "value-not-in-the-row"))
+
+    plain = app_client.get("/api/admin/settings/export")
+    assert plain.status_code == 200, plain.text
+    sensitive = app_client.get(
+        "/api/admin/settings/export", params={"include_sensitive": "true"}
+    )
+    assert sensitive.status_code == 200, sensitive.text
+
+    events = _events(action="admin.settings_export")
+    assert [(e["outcome"], e["details"]) for e in events] == [
+        ("success", {"include_sensitive": True, "keys": 1}),
+        ("success", {"include_sensitive": False, "keys": 1}),
+    ]
+    assert all(e["target_type"] == "settings" for e in events)
+    assert "value-not-in-the-row" not in json.dumps(events)
+
+
+def test_audit_export_is_audited_with_its_filters(
+    app_client, temp_db_path: Path
+) -> None:
+    admin_login(app_client)
+    _clear_audit(temp_db_path)
+    for index in range(2):
+        asyncio.run(storage.insert_audit_event(action="action.x", actor="alice"))
+
+    response = app_client.get(
+        "/api/admin/audit/export", params={"format": "csv", "action": "action.x"}
+    )
+    assert response.status_code == 200, response.text
+    # The export record is written once the rows are on their way, so it can
+    # never appear in its own snapshot.
+    assert len(response.text.strip().splitlines()) == 3  # header + two rows
+
+    events = _events(action="audit.export")
+    assert len(events) == 1
+    event = events[0]
+    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert event["details"] == {
+        "format": "csv",
+        "filters": {"action": ["action.x"]},
+        "count": 2,
+    }
+
+
+def test_the_new_rows_never_carry_a_secret_or_a_comment_body(app_client) -> None:
+    """The trail may name what changed; it must never carry what was written."""
+    admin_login(app_client)
+    _store_job("job-secrets")
+    token = "jira-token-0123456789abcdef"  # pragma: allowlist secret
+    api_key = "sk-live-0a1b2c3d0a1b2c3d"  # pragma: allowlist secret  # gitleaks:allow
+    comment = "comment body that must not be audited"
+
+    session = _registered_user_session(app_client, "erin")
+    saved = app_client.put("/api/user/tokens", json={"jira_token": token}, **session)
+    assert saved.status_code == 200, saved.text
+    posted = app_client.post(
+        "/results/job-secrets/comments",
+        json={"test_name": "test_a", "comment": comment},
+    )
+    assert posted.status_code == 201, posted.text
+    with (
+        patch.object(
+            main, "supported_key_providers", AsyncMock(return_value=["openai"])
+        ),
+        patch.object(ai_client, "verify_ai_key", AsyncMock(return_value="rejected")),
+    ):
+        app_client.put(
+            "/api/user/ai-credentials/openai",
+            json={"api_key": api_key, "model": "gpt-4o"},
+            **session,
+        )
+
+    stored = json.dumps(_events())
+    assert token not in stored
+    assert api_key not in stored
+    assert comment not in stored
+
+
+@pytest.mark.asyncio
+async def test_ai_credential_set_records_the_model_and_whether_it_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An add and a rotation must be distinguishable afterwards (#379)."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ai.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    monkeypatch.setattr(main, "registered_provider_ids", AsyncMock(return_value=set()))
+    from rootcoz import ai_client
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+
+    for key in ("first-key-000000", "second-key-111111"):  # pragma: allowlist secret
+        await main.set_user_ai_credential(
+            "openai",
+            main.AiCredentialInput(api_key=key, model="gpt-4o"),
+            request,
+        )
+
+    events = (await storage.list_audit_events(action="user.ai_credential_set"))[
+        "events"
+    ]
+    assert [event["details"] for event in events] == [
+        {"provider": "openai", "model": "gpt-4o", "replaced": True},
+        {"provider": "openai", "model": "gpt-4o", "replaced": False},
+    ]
+    assert [event["outcome"] for event in events] == ["success", "success"]
+    stored = json.dumps(events)
+    assert "first-key-000000" not in stored
+    assert "second-key-111111" not in stored
+
+
+@pytest.mark.asyncio
+async def test_ai_credential_failures_are_each_audited_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every failure path of a key save leaves exactly one failure row."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ai-failures.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["openai"])
+    )
+    from rootcoz import ai_client
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+    key = "valid-key-000000"  # pragma: allowlist secret
+
+    # Invalid input: no model to verify against.
+    with pytest.raises(main.HTTPException):
+        await main.set_user_ai_credential(
+            "openai", main.AiCredentialInput(api_key=key, model=" "), request
+        )
+
+    # Verification refused the key.
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="rejected"))
+    rejected = await main.set_user_ai_credential(
+        "openai", main.AiCredentialInput(api_key=key, model="gpt-4o"), request
+    )
+    assert rejected.status_code == 200
+
+    # The stored map cannot be read, so the write is refused with 409.
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
+    monkeypatch.setattr(
+        storage,
+        "get_user_ai_credentials",
+        AsyncMock(side_effect=storage.UnreadableAiCredentialsError("broken")),
+    )
+    with pytest.raises(main.HTTPException) as unreadable:
+        await main.set_user_ai_credential(
+            "openai", main.AiCredentialInput(api_key=key, model="gpt-4o"), request
+        )
+    assert unreadable.value.status_code == 409
+
+    # Persistence failed after a successful verification.
+    monkeypatch.setattr(storage, "get_user_ai_credentials", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        storage,
+        "update_user_ai_credential",
+        AsyncMock(side_effect=RuntimeError("db down")),
+    )
+    with pytest.raises(RuntimeError):
+        await main.set_user_ai_credential(
+            "openai", main.AiCredentialInput(api_key=key, model="gpt-4o"), request
+        )
+
+    events = (await storage.list_audit_events(action="user.ai_credential_set"))[
+        "events"
+    ]
+    assert [event["outcome"] for event in events] == ["failure"] * 4
+    assert [event["details"]["reason"] for event in events] == [
+        "internal_error",
+        "unreadable_credentials",
+        "rejected",
+        "invalid_request",
+    ]
+    assert all(event["details"]["provider"] == "openai" for event in events)
+    assert key not in json.dumps(events)
+
+
+@pytest.mark.asyncio
+async def test_ai_credential_case_variant_is_not_a_rotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new spelling is a new credential, not a rotation of a case-distinct one."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ai-case.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    monkeypatch.setattr(
+        main, "supported_key_providers", AsyncMock(return_value=["Foo", "foo"])
+    )
+    monkeypatch.setattr(
+        main, "registered_provider_ids", AsyncMock(return_value={"Foo", "foo"})
+    )
+    from rootcoz import ai_client
+
+    monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", role="admin", is_admin=True),
+        headers={},
+        client=None,
+    )
+
+    for provider, key in (
+        ("Foo", "first-key-000000"),
+        ("foo", "second-key-111111"),
+    ):  # pragma: allowlist secret
+        await main.set_user_ai_credential(
+            provider,
+            main.AiCredentialInput(api_key=key, model="gpt-4o"),
+            request,
+        )
+
+    events = (await storage.list_audit_events(action="user.ai_credential_set"))[
+        "events"
+    ]
+    assert [event["details"]["replaced"] for event in events] == [False, False]
+    assert [event["details"]["provider"] for event in events] == ["foo", "Foo"]
 
 
 def test_transcript_download_is_audited(app_client, tmp_path: Path) -> None:
