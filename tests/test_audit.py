@@ -4741,3 +4741,48 @@ def test_suppression_summary_reports_its_own_previous_window(
     monitoring.record_audit_auth_suppression("A", limit=1)
 
     assert "previous window dropped 3" in messages[-1]
+
+
+async def test_audit_write_retries_a_contended_lock(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A burst of writers can outlast ``busy_timeout``.
+
+    The row must still be written: a lost audit row is a compliance hole, not a
+    missing log line. Only the lock is retried.
+    """
+    real = storage._insert_audit_event_once
+    calls = {"count": 0}
+
+    async def flaky(**kwargs):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return await real(**kwargs)
+
+    monkeypatch.setattr(storage, "_insert_audit_event_once", flaky)
+    monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
+
+    row = await storage.insert_audit_event(action="auth.login", actor="alice")
+
+    assert row is not None
+    assert calls["count"] == 3, "two contended attempts then a successful one"
+
+
+async def test_audit_write_does_not_retry_a_real_storage_error(
+    audit_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine storage fault must surface, never be masked as contention."""
+    calls = {"count": 0}
+
+    async def broken(**kwargs):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        raise sqlite3.OperationalError("no such table: audit_events")
+
+    monkeypatch.setattr(storage, "_insert_audit_event_once", broken)
+    monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
+
+    with pytest.raises(sqlite3.OperationalError):
+        await storage.insert_audit_event(action="auth.login", actor="alice")
+
+    assert calls["count"] == 1, "not retried"

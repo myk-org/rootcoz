@@ -9925,6 +9925,10 @@ _AUDIT_HASH_FIELDS_V2 = (*_AUDIT_HASH_FIELDS, "throttle_rescue")
 # The version new rows are written with.
 _AUDIT_HASH_VERSION = 2
 
+#: Attempts (and backoff base) for a contended audit write lock.
+_AUDIT_LOCK_ATTEMPTS = 4
+_AUDIT_LOCK_BACKOFF_SECONDS = 0.05
+
 # One column list for every reader (insert/list/verify/export) so they agree.
 # ``throttle_rescue`` is read here because a v2 hash covers it.
 _AUDIT_COLUMNS = (
@@ -10081,7 +10085,7 @@ async def _audit_throttle_decision(
     return "rescue" if (await cursor.fetchone())[0] < throttle.limit else "drop"
 
 
-async def insert_audit_event(
+async def _insert_audit_event_once(
     *,
     action: str,
     actor: str,
@@ -10164,6 +10168,54 @@ async def insert_audit_event(
         await db.commit()
     stored["entry_hash"] = entry_hash
     return _audit_event_row(stored)
+
+
+async def insert_audit_event(
+    action: str,
+    actor: str,
+    *,
+    actor_role: str | None = None,
+    is_admin: bool = False,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    outcome: str = "success",
+    details: dict[str, Any] | None = None,
+    request_ip: str | None = None,
+    throttle: AuditThrottle | None = None,
+) -> dict[str, Any] | None:
+    """Insert one audit event, retrying a contended write lock.
+
+    ``BEGIN IMMEDIATE`` serialises the chain tail read against concurrent
+    inserts, but a burst of logins can outlast ``busy_timeout`` and raise
+    ``database is locked``. An audit row that is lost that way is a compliance
+    hole rather than a missing log line, so the write is retried with a short
+    exponential backoff before the failure is reported to :func:`record_audit`
+    (which still never raises to the action being audited).
+
+    Only lock/busy errors are retried; every other storage error propagates
+    immediately so a real fault is never masked as contention.
+    """
+    for attempt in range(_AUDIT_LOCK_ATTEMPTS):
+        try:
+            return await _insert_audit_event_once(
+                action=action,
+                actor=actor,
+                actor_role=actor_role,
+                is_admin=is_admin,
+                target_type=target_type,
+                target_id=target_id,
+                outcome=outcome,
+                details=details,
+                request_ip=request_ip,
+                throttle=throttle,
+            )
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            contended = "locked" in message or "busy" in message
+            if not contended or attempt == _AUDIT_LOCK_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(_AUDIT_LOCK_BACKOFF_SECONDS * (2**attempt))
+    raise AssertionError("unreachable: the retry loop returns or raises")
 
 
 def _audit_like_escape(fragment: str) -> str:
