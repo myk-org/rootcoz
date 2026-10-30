@@ -2688,6 +2688,7 @@ class TestPushReportPortalUnreviewedGating:
         assert response.status_code == 409
         assert response.json()["detail"] == (
             "job has 1 unreviewed failure(s) — review them before pushing"
+            " — an admin can allow this with RP_ALLOW_UNREVIEWED_PUSH=true"
         )
 
     @patch("rootcoz.main.ReportPortalClient")

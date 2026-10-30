@@ -89,7 +89,10 @@ interface ReportPortalButtonProps {
 
 export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, childBuildNumber, hasFailures }: ReportPortalButtonProps) {
   const { reportportalProject } = useReportState()
-  const { unreviewedCount, allowUnreviewedPush } = useUnreviewedPushGate('reportportal')
+  const { unreviewedCount, allowUnreviewedPush } = useUnreviewedPushGate('reportportal', {
+    childJobName,
+    childBuildNumber,
+  })
   const displayJobName = childJobName ?? jobName
   const displayBuildNumber = childBuildNumber ?? buildNumber
   const [confirmOpen, setConfirmOpen] = useState(false)

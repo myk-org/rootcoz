@@ -70,7 +70,10 @@ interface DatadogButtonProps {
 export function DatadogButton({ jobId, jobName, buildNumber, childJobName, childBuildNumber, hasFailures }: DatadogButtonProps) {
   const displayJobName = childJobName ?? jobName
   const displayBuildNumber = childBuildNumber ?? buildNumber
-  const { unreviewedCount, allowUnreviewedPush } = useUnreviewedPushGate('datadog')
+  const { unreviewedCount, allowUnreviewedPush } = useUnreviewedPushGate('datadog', {
+    childJobName,
+    childBuildNumber,
+  })
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
   const [resultDialogOpen, setResultDialogOpen] = useState(false)

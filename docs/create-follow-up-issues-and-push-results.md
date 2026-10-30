@@ -95,7 +95,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    At least one of the three must be enabled or the push is refused.
 
-   Manual pushes are also gated on review completion: until every failure in the job is reviewed, the push is refused with `409 job has N unreviewed failure(s) — review them before pushing`. Each exporter has its own server-level escape hatch, and they are independent — enabling one does not ungate the other exporter:
+   Manual pushes are also gated on review completion: until every failure **in the pushed scope** is reviewed, the push is refused with `409 job has N unreviewed failure(s) — review them before pushing`. A child-scoped push is a scope of its own, so a fully reviewed child can be pushed while the parent or a sibling still waits for review — the error names the scope it is about (`child job 'x' #5`). Each exporter has its own server-level escape hatch, and they are independent — enabling one does not ungate the other exporter:
 
    | Toggle | Effect when enabled |
    | --- | --- |

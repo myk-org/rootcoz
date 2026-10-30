@@ -97,4 +97,33 @@ describe('countUnreviewedFailures', () => {
     )
     expect(unreviewed).toBe(1)
   })
+
+  it('lets a fully reviewed child through while the parent is unreviewed', () => {
+    // The server gates a push against the subtree it exports; a reviewed
+    // child must not be blocked by an unreviewed sibling or parent.
+    const reviews = { 'child#5::test-x': makeReview(true) }
+    const failures = [{ test_name: 'test-parent' }]
+    const children = [makeChild('child', 5)]
+
+    expect(countUnreviewedFailures(failures, children, reviews)).toBe(1)
+    expect(
+      countUnreviewedFailures(failures, children, reviews, {
+        childJobName: 'child',
+        childBuildNumber: 5,
+      }),
+    ).toBe(0)
+  })
+
+  it('finds a nested child scope', () => {
+    const nested = makeChild('inner', 9)
+    const outer = { ...makeChild('outer', 5), failures: [], failed_children: [nested] }
+    const reviews = { 'inner#9::test-x': makeReview(true) }
+
+    expect(
+      countUnreviewedFailures([], [outer], reviews, {
+        childJobName: 'inner',
+        childBuildNumber: 9,
+      }),
+    ).toBe(0)
+  })
 })

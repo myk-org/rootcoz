@@ -3870,60 +3870,78 @@ async def _auto_review_matching_failures(
             # push endpoint: reuse the stored analysis timestamp instead
             # of push time.
             stored = await get_result(job_id)
-            context = await _build_export_context(
-                job_id=job_id,
-                result_data=result_data,
-                settings=settings,
-                pushed_by=AI_SYSTEM_USERNAME,
-                fetch_history=_exporter_needs_history_classifications(auto_push_names),
-                fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                    auto_push_names, settings
-                ),
-                analysis_timestamp=(
-                    _stored_analysis_timestamp(stored) if stored else None
-                ),
-            )
-            for plugin_name in auto_push_names:
-                logger.info(
-                    "All failures auto-reviewed for job %s, pushing to "
-                    "'%s' (pushed_by=%s)",
-                    job_id,
-                    plugin_name,
-                    AI_SYSTEM_USERNAME,
+            analysis_timestamp = _stored_analysis_timestamp(stored) if stored else None
+            # One context per scope: a whole-job context carries only the
+            # top-level failures, so a child-only pipeline would push nothing.
+            for scope_job, scope_build in _push_scopes(result_data):
+                context = await _build_export_context(
+                    job_id=job_id,
+                    result_data=result_data,
+                    settings=settings,
+                    child_job_name=scope_job,
+                    child_build_number=scope_build,
+                    pushed_by=AI_SYSTEM_USERNAME,
+                    fetch_history=_exporter_needs_history_classifications(
+                        auto_push_names
+                    ),
+                    fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                        auto_push_names, settings
+                    ),
+                    analysis_timestamp=analysis_timestamp,
                 )
-                try:
-                    exporter = _create_exporter(plugin_name, settings)
-                except (
-                    ValueError,
-                    TimeoutError,
-                    OSError,
-                    TypeError,
-                    RuntimeError,
-                ) as exc:
-                    logger.warning(
-                        "Auto-push skipped for exporter '%s', job_id=%s: %s",
-                        plugin_name,
+                for plugin_name in auto_push_names:
+                    logger.info(
+                        "All failures auto-reviewed for job %s%s, pushing to "
+                        "'%s' (pushed_by=%s)",
                         job_id,
-                        exc,
-                    )
-                    continue
-                try:
-                    with exporter:
-                        result = await exporter.push(context)
-                    if not result.success:
-                        logger.warning(
-                            "Auto-push to '%s' returned failure for job_id=%s: %s",
-                            plugin_name,
-                            job_id,
-                            result.message,
-                        )
-                except Exception:
-                    logger.warning(
-                        "Auto-push to '%s' failed for job_id=%s",
+                        f" scope {scope_job}#{scope_build}" if scope_job else "",
                         plugin_name,
-                        job_id,
-                        exc_info=True,
+                        AI_SYSTEM_USERNAME,
                     )
+                    await _auto_push_context(
+                        job_id, plugin_name, context, settings=settings
+                    )
+
+
+async def _auto_push_context(
+    job_id: str,
+    plugin_name: str,
+    context: ExportContext,
+    *,
+    settings: Settings,
+) -> None:
+    """Push one already-built context to one exporter; never raises.
+
+    Auto-push runs inside the analysis pipeline, so a broken exporter must
+    degrade to a warning: the analysis itself already succeeded.
+    """
+    try:
+        exporter = _create_exporter(plugin_name, settings)
+    except (ValueError, TimeoutError, OSError, TypeError, RuntimeError) as exc:
+        logger.warning(
+            "Auto-push skipped for exporter '%s', job_id=%s: %s",
+            plugin_name,
+            job_id,
+            exc,
+        )
+        return
+    try:
+        with exporter:
+            result = await exporter.push(context)
+        if not result.success:
+            logger.warning(
+                "Auto-push to '%s' returned failure for job_id=%s: %s",
+                plugin_name,
+                job_id,
+                result.message,
+            )
+    except Exception:
+        logger.warning(
+            "Auto-push to '%s' failed for job_id=%s",
+            plugin_name,
+            job_id,
+            exc_info=True,
+        )
 
 
 async def _auto_review_child_failures(
@@ -6504,17 +6522,55 @@ async def re_analyze(
     return queued
 
 
+def _push_scopes(
+    result_data: dict[str, Any],
+) -> list[tuple[str | None, int | None]]:
+    """Every scope that has failures: the job itself plus each child node.
+
+    Auto-push must build one context per scope — a whole-job context contains
+    only the top-level ``failures`` list, so a pipeline whose failures live in
+    child jobs would push nothing at all. Two child nodes can share a
+    (name, build) pair; they resolve to the same subtree, so a duplicate
+    scope is pushed once.
+    """
+    scopes: list[tuple[str | None, int | None]] = []
+    if result_data.get("failures"):
+        scopes.append((None, None))
+    seen: set[tuple[str | None, int | None]] = set(scopes)
+
+    def _walk(children: list[Any]) -> None:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            if child.get("failures"):
+                scope = (child.get("job_name") or None, child.get("build_number"))
+                if scope not in seen:
+                    seen.add(scope)
+                    scopes.append(scope)
+            _walk(child.get("failed_children", []))
+
+    _walk(result_data.get("child_job_analyses", []))
+    return scopes
+
+
 def _iter_scoped_failures(
     result_data: dict[str, Any],
+    *,
+    scope_job: str = "",
+    scope_build: int = 0,
 ) -> Iterator[tuple[dict[str, Any], str, int]]:
     """Yield ``(failure, child_job_name, child_build_number)`` across the tree.
 
     Walks the top-level ``failures`` list (child scope ``""``/``0``), then
     ``child_job_analyses`` and nested ``failed_children`` recursively.
+
+    ``scope_job``/``scope_build`` give the identity of the subtree's own
+    failures: a child-scoped push passes the child's name and build, so its
+    failures resolve against the review key they are stored under.
     """
     for failure in result_data.get("failures", []):
         if isinstance(failure, dict):
-            yield failure, "", 0
+            yield failure, scope_job, scope_build
 
     def _walk_children(
         children: list[Any],
@@ -7750,6 +7806,50 @@ def _find_child_job_in_result(
         child_job_name,
         child_build_number,
     )
+
+
+def _resolve_push_scope(
+    result_data: dict[str, Any],
+    child_job_name: str | None,
+    child_build_number: int | None,
+) -> tuple[dict[str, Any], str, int]:
+    """Subtree a push covers, plus the review identity of its own failures.
+
+    Shared by the export context and the unreviewed-failure gate: a push is
+    reviewed against exactly the failures it is about to export, so a fully
+    reviewed child can be pushed while a sibling or the parent still has
+    unreviewed work.
+
+    Args:
+        result_data: Stored result dict.
+        child_job_name: Child job name, or ``None`` for the whole job.
+        child_build_number: Child build number (required with a child name).
+
+    Returns:
+        ``(subtree, scope_job_name, scope_build_number)`` — the identity is
+        ``""/0`` for a whole-job push.
+
+    Raises:
+        ValueError: Invalid child job parameters, or no such child.
+    """
+    if child_job_name is None:
+        if child_build_number is not None:
+            raise ValueError("child_build_number requires child_job_name to be set")
+        return result_data, "", 0
+    if child_build_number is None or child_build_number == 0:
+        raise ValueError(
+            "child_build_number is required when child_job_name is provided"
+        )
+    child = _find_child_job_in_children(
+        result_data.get("child_job_analyses", []),
+        child_job_name,
+        child_build_number,
+    )
+    if not child:
+        raise ValueError(
+            f"Child job '{child_job_name}' #{child_build_number} not found"
+        )
+    return child, child_job_name, child_build_number
 
 
 async def _get_failure_signatures(
@@ -9404,7 +9504,13 @@ async def delete_tracked_in_endpoint(
     return {"status": "ok", "deleted_id": link_id}
 
 
-async def _unreviewed_failure_count(job_id: str, result_data: dict[str, Any]) -> int:
+async def _unreviewed_failure_count(
+    job_id: str,
+    result_data: dict[str, Any],
+    *,
+    child_job_name: str | None = None,
+    child_build_number: int | None = None,
+) -> int:
     """Count a job's failures that have no completed review.
 
     Shared review-completion check: the auto-push path and the manual push
@@ -9415,25 +9521,40 @@ async def _unreviewed_failure_count(job_id: str, result_data: dict[str, Any]) ->
     satisfy the gate, and a wildcard/exact-build review covers exactly the
     failures its scoping matches.
 
+    With child parameters the count covers only the subtree that push
+    exports (see :func:`_resolve_push_scope`), so a fully reviewed child is
+    never blocked by an unreviewed sibling or parent.
+
     Args:
         job_id: Analysis job identifier.
         result_data: Stored result dict containing failures.
+        child_job_name: Child job name when the push is child-scoped.
+        child_build_number: Child build number for that child.
 
     Returns:
         Number of failures lacking a review.
+
+    Raises:
+        ValueError: Invalid child job parameters, or no such child.
     """
+    scope_data, scope_job, scope_build = _resolve_push_scope(
+        result_data, child_job_name, child_build_number
+    )
     reviews = await storage.get_reviews_for_job(job_id)
     unreviewed = 0
-    for failure, child_job_name, child_build_number in _iter_scoped_failures(
-        result_data
+    for failure, job_name, build_number in _iter_scoped_failures(
+        scope_data, scope_job=scope_job, scope_build=scope_build
     ):
         test_name = failure.get("test_name", "")
-        if not resolve_failure_review(
-            reviews, test_name, child_job_name, child_build_number
-        ):
+        if not resolve_failure_review(reviews, test_name, job_name, build_number):
             unreviewed += 1
     if unreviewed:
-        logger.debug("Job %s has %d unreviewed failure(s)", job_id, unreviewed)
+        logger.debug(
+            "Job %s scope %r has %d unreviewed failure(s)",
+            job_id,
+            scope_job or "whole job",
+            unreviewed,
+        )
     return unreviewed
 
 
@@ -9462,26 +9583,48 @@ async def _gate_unreviewed_push(
     result_data: dict[str, Any],
     plugin_name: str,
     settings: Settings,
+    *,
+    child_job_name: str | None = None,
+    child_build_number: int | None = None,
 ) -> None:
-    """Reject a manual exporter push when the job has unreviewed failures.
+    """Reject a manual exporter push when the pushed scope has unreviewed failures.
 
     Raises:
-        HTTPException: 409 when any failure is unreviewed and the
-            exporter's per-plugin toggle does not allow unreviewed pushes.
+        HTTPException: 400 for invalid child parameters, 409 when any
+            failure in the pushed scope is unreviewed and the exporter's
+            per-plugin toggle does not allow unreviewed pushes.
     """
-    unreviewed = await _unreviewed_failure_count(job_id, result_data)
+    try:
+        unreviewed = await _unreviewed_failure_count(
+            job_id,
+            result_data,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if unreviewed and not _allows_unreviewed_push(plugin_name, settings):
+        scope = (
+            f"child job '{child_job_name}' #{child_build_number}"
+            if child_job_name
+            else "job"
+        )
+        toggle = _UNREVIEWED_PUSH_TOGGLE_FIELDS.get(plugin_name)
+        escape_hatch = (
+            f" — an admin can allow this with {toggle.upper()}=true" if toggle else ""
+        )
         logger.warning(
-            "Blocking manual push to '%s' for job %s: %d unreviewed failure(s)",
+            "Blocking manual push to '%s' for job %s (%s): %d unreviewed failure(s)",
             plugin_name,
             job_id,
+            scope,
             unreviewed,
         )
         raise HTTPException(
             status_code=409,
             detail=(
-                f"job has {unreviewed} unreviewed failure(s)"
-                " — review them before pushing"
+                f"{scope} has {unreviewed} unreviewed failure(s)"
+                f" — review them before pushing{escape_hatch}"
             ),
         )
 
@@ -9528,7 +9671,14 @@ async def push_to_reportportal(
 
         result_data = stored["result"]
 
-        await _gate_unreviewed_push(job_id, result_data, "reportportal", settings)
+        await _gate_unreviewed_push(
+            job_id,
+            result_data,
+            "reportportal",
+            settings,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        )
 
         try:
             push_result = await _execute_rp_push(
@@ -9626,7 +9776,14 @@ async def push_to_exporter(
 
         result_data = stored["result"]
 
-        await _gate_unreviewed_push(job_id, result_data, plugin_name, settings)
+        await _gate_unreviewed_push(
+            job_id,
+            result_data,
+            plugin_name,
+            settings,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+        )
 
         try:
             context = await _build_export_context(
@@ -9839,26 +9996,15 @@ async def _build_export_context(
     base_url = _extract_base_url()
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
 
-    # Scope to child job when requested
-    if child_job_name is not None:
-        if child_build_number is None or child_build_number == 0:
-            raise ValueError(
-                "child_build_number is required when child_job_name is provided"
-            )
-        child = _find_child_job_in_children(
-            result_data.get("child_job_analyses", []),
-            child_job_name,
-            child_build_number,
-        )
-        if not child:
-            raise ValueError(
-                f"Child job '{child_job_name}' #{child_build_number} not found"
-            )
-        result_data = child
-        anchor = f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
+    # Scope to child job when requested. The same resolver serves the push
+    # gate, so a push can never be reviewed against a different subtree
+    # than the one it exports.
+    result_data, scope_job, scope_build = _resolve_push_scope(
+        result_data, child_job_name, child_build_number
+    )
+    if scope_job:
+        anchor = f"child-{_urlquote(scope_job, safe='')}-{scope_build}"
         report_url = f"{report_url}#{anchor}"
-    elif child_build_number is not None:
-        raise ValueError("child_build_number requires child_job_name to be set")
 
     failures_data = result_data.get("failures", [])
 

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from rootcoz import main
 from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
 
 
@@ -655,6 +656,7 @@ class TestUnreviewedPushGating:
         env: dict[str, str] | None = None,
         reviews: dict | None = None,
         stored: dict | None = None,
+        path: str | None = None,
     ) -> tuple:
         """POST a push for a 2-failure job; returns (response, create_mock)."""
         from tests.conftest import admin_login, make_app_client
@@ -678,15 +680,16 @@ class TestUnreviewedPushGating:
                     failures=[{"test_name": "t1"}, {"test_name": "t2"}],
                     report_url="",
                 )
+                url = path or f"/results/job-1/push/{plugin}"
                 if reviews is None:
-                    response = client.post(f"/results/job-1/push/{plugin}")
+                    response = client.post(url)
                 else:
                     with patch(
                         "rootcoz.main.storage.get_reviews_for_job",
                         new_callable=AsyncMock,
                         return_value=reviews,
                     ):
-                        response = client.post(f"/results/job-1/push/{plugin}")
+                        response = client.post(url)
             return response, mock_create
         raise AssertionError("no client yielded")  # pragma: no cover
 
@@ -696,6 +699,7 @@ class TestUnreviewedPushGating:
         assert response.status_code == 409
         assert response.json()["detail"] == (
             "job has 2 unreviewed failure(s) — review them before pushing"
+            " — an admin can allow this with RP_ALLOW_UNREVIEWED_PUSH=true"
         )
         mock_create.assert_not_called()
 
@@ -850,6 +854,131 @@ class TestUnreviewedPushGating:
         )
         assert response.status_code == 200
         mock_create.assert_called_once()
+
+    def test_fully_reviewed_child_pushes_while_parent_unreviewed(
+        self, _init_db, temp_db_path
+    ):
+        """The gate covers the pushed scope, not the whole job.
+
+        A child whose failures are all reviewed must be pushable while the
+        parent's own failure still waits for review — otherwise a pipeline
+        with a child-only test run can never publish it.
+        """
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews={
+                "runner#5::c1": {
+                    "reviewed": True,
+                    "username": "alice",
+                    "updated_at": "",
+                },
+                "runner#5::c2": {
+                    "reviewed": True,
+                    "username": "alice",
+                    "updated_at": "",
+                },
+            },
+            stored=_GATE_CHILD_STORED,
+            path="/results/job-1/push/reportportal?child_job_name=runner"
+            "&child_build_number=5",
+        )
+        assert response.status_code == 200, response.text
+        mock_create.assert_called_once()
+
+    def test_unreviewed_child_blocks_the_child_push(self, _init_db, temp_db_path):
+        """Scope cuts both ways: only the parent reviewed leaves the child gated."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            reviews={"top": {"reviewed": True, "username": "alice", "updated_at": ""}},
+            stored=_GATE_CHILD_STORED,
+            path="/results/job-1/push/reportportal?child_job_name=runner"
+            "&child_build_number=5",
+        )
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "child job 'runner' #5" in detail
+        assert "2 unreviewed failure(s)" in detail
+        mock_create.assert_not_called()
+
+    def test_409_names_the_escape_hatch(self, _init_db, temp_db_path):
+        """The operator is told which setting opens the gate, not just that it closed."""
+        response, _ = self._post(temp_db_path, "reportportal")
+        assert response.status_code == 409
+        assert "RP_ALLOW_UNREVIEWED_PUSH" in response.json()["detail"]
+
+    def test_unknown_child_scope_is_a_400_not_a_500(self, _init_db, temp_db_path):
+        """Invalid scope parameters are client errors, caught before the exporter."""
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            stored=_GATE_CHILD_STORED,
+            path="/results/job-1/push/reportportal?child_job_name=nope"
+            "&child_build_number=9",
+        )
+        assert response.status_code == 400
+        assert "not found" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    def test_child_scope_without_build_number_is_a_400(self, _init_db, temp_db_path):
+        response, mock_create = self._post(
+            temp_db_path,
+            "reportportal",
+            stored=_GATE_CHILD_STORED,
+            path="/results/job-1/push/reportportal?child_job_name=runner",
+        )
+        assert response.status_code == 400
+        mock_create.assert_not_called()
+
+
+class TestPushScopes:
+    """Auto-push builds one context per scope, so scope enumeration is a contract."""
+
+    def test_parent_and_each_child_with_failures(self):
+        scopes = main._push_scopes(_GATE_CHILD_STORED["result"])
+        assert scopes == [(None, None), ("runner", 5)]
+
+    def test_child_only_job_yields_only_the_child(self):
+        """A child-only pipeline must not build an empty parent context."""
+        result = {
+            "job_name": "p",
+            "build_number": "1",
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "runner",
+                    "build_number": 5,
+                    "failures": [{"test_name": "c"}],
+                }
+            ],
+        }
+        assert main._push_scopes(result) == [("runner", 5)]
+
+    def test_nested_children_are_scopes_and_duplicates_collapse(self):
+        result = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "runner",
+                    "build_number": 5,
+                    "failures": [{"test_name": "c"}],
+                    "failed_children": [
+                        {
+                            "job_name": "inner",
+                            "build_number": 7,
+                            "failures": [{"test_name": "d"}],
+                        }
+                    ],
+                },
+                {
+                    "job_name": "runner",
+                    "build_number": 5,
+                    "failures": [{"test_name": "c"}],
+                },
+            ],
+        }
+        assert main._push_scopes(result) == [("runner", 5), ("inner", 7)]
 
 
 class TestExporterNeedsHistory:
