@@ -4786,3 +4786,21 @@ async def test_audit_write_does_not_retry_a_real_storage_error(
         await storage.insert_audit_event(action="auth.login", actor="alice")
 
     assert calls["count"] == 1, "not retried"
+
+
+async def test_audit_write_keeps_the_client_ip_through_the_retry_wrapper(
+    audit_db: Path,
+) -> None:
+    """The retry wrapper must forward every field, including ``request_ip``.
+
+    The trusted-proxy address is only recorded when ``TRUST_PROXY_HEADERS`` is on,
+    so this is the one place that proves the wrapper does not drop it.
+    """
+    row = await storage.insert_audit_event(
+        action="auth.login", actor="alice", request_ip="203.0.113.7"
+    )
+
+    assert row is not None
+    assert row["request_ip"] == "203.0.113.7"
+    listed = await storage.list_audit_events(action="auth.login")
+    assert listed["events"][0]["request_ip"] == "203.0.113.7"
