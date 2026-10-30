@@ -1135,8 +1135,8 @@ _AUDIT_SECRET_RE = re.compile(
 _AUDIT_RUN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
 # A bare lowercase hex string is a digest we record on purpose, not a
 # credential: leave the whole value alone. Only the detail names below qualify —
-# they are the hashes we compute ourselves. Anywhere else (a detail a caller
-# filled in, an actor, a target) a hex token is scrubbed like any other run.
+# they are the hashes we compute ourselves. Anywhere else a hex token is
+# scrubbed like any other run.
 _AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
 _AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
 # A lowercase letters-and-digits run of this length with no separator is the
@@ -1144,14 +1144,9 @@ _AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
 _AUDIT_BARE_BLOB_MIN_LENGTH = 32
 _AUDIT_LOWER_ALNUM_RE = re.compile(r"\A[0-9a-z]+\Z")
 
-# Identity lookups per audit row (#379 review). ``_known_account_runs`` resolves
-# credential-shaped runs against ``users``, and a login username is attacker
-# text: without a cap one failed attempt could ask for thousands of rows. Runs
-# past the cap are treated as unknown, i.e. redacted — never skipped.
-_AUDIT_MAX_IDENTITY_LOOKUPS = 8
 # Longest username the login endpoint will consider. Anything longer cannot
-# name an account, so it is refused like a bad credential instead of being
-# carried into the audit path.
+# name an account (usernames are at most 50 characters), so it is refused like
+# a bad credential and only its first 256 characters are recorded.
 _LOGIN_MAX_USERNAME_LENGTH = 256
 
 
@@ -1192,61 +1187,26 @@ def _looks_like_secret_run(run: str) -> bool:
     return changes / transitions >= 0.5
 
 
-def _scrub_audit_text(
-    value: str, *, digest: bool = False, keep: frozenset[str] | set[str] = frozenset()
-) -> str:
+def _scrub_audit_text(value: str, *, digest: bool = False) -> str:
     """Replace credential-shaped substrings in one free-text value.
 
     ``digest`` keeps a whole-value lowercase hex digest. Only
     :func:`_redact_details` sets it, and only for
     :data:`_AUDIT_DIGEST_DETAIL_KEYS` — hashes this process computes itself.
 
-    ``keep`` names the runs that are known accounts (see
-    :func:`_known_account_runs`): the generic long-run rule redacts by shape,
-    so a real username that happens to look like a token is redacted unless the
-    caller resolved it first. Identity fields pass the resolved set.
+    Detail values only: identity is not a detail. A username is what the trail
+    exists to show ("what did user X do", "which name is under attack"), so
+    ``actor``, ``target_id`` and the message are stored verbatim.
     """
     if digest and _AUDIT_HEX_DIGEST_RE.match(value):
         return value
     scrubbed = _AUDIT_SECRET_RE.sub("[redacted]", value)
     return _AUDIT_RUN_RE.sub(
         lambda match: (
-            "[redacted]"
-            if _looks_like_secret_run(match.group()) and match.group() not in keep
-            else match.group()
+            "[redacted]" if _looks_like_secret_run(match.group()) else match.group()
         ),
         scrubbed,
     )
-
-
-async def _known_account_runs(*values: str) -> set[str]:
-    """The credential-shaped runs in ``values`` that name an existing account.
-
-    Redaction is identity-aware: a run the generic rule would redact is a
-    token, unless it resolves to a ``users`` row — then it is the username a
-    real account signs in with and must survive. Only such a run is a lookup
-    candidate, so a normal username, message or target costs none. At most the
-    first :data:`_AUDIT_MAX_IDENTITY_LOOKUPS` in document order are resolved,
-    in one batched query: everything beyond the cap stays unknown, so it is
-    redacted rather than trusted. A failed lookup keeps nothing, so an
-    unreadable ``users`` table scrubs everything rather than raising out of
-    :func:`record_audit`.
-    """
-    candidates = list(
-        dict.fromkeys(
-            run
-            for value in values
-            for run in _AUDIT_RUN_RE.findall(value or "")
-            if _looks_like_secret_run(run)
-        )
-    )[:_AUDIT_MAX_IDENTITY_LOOKUPS]
-    if not candidates:
-        return set()
-    try:
-        resolved = await storage.known_usernames(candidates)
-    except sqlite3.Error, OSError:
-        return set()
-    return {run for run in candidates if run.lower() in resolved}
 
 
 def _redact_audit_value(value: Any, *, digest: bool = False) -> Any:
@@ -1323,15 +1283,13 @@ async def record_audit(
 
     ``message`` is the human-readable half (the pre-existing wording, so log
     consumers keep matching); ``details`` is the structured half, scrubbed by
-    :func:`_redact_details` so no secret can reach the table. ``actor``,
-    ``target_id`` and the log line get the same treatment: a credential pasted
-    into a login username must not reach the trail or the log raw.
+    :func:`_redact_details` so no secret can reach the table.
 
-    Identity is kept identity-aware (#379 review): the three identity fields
-    are redacted by shape only when the value does not resolve to an existing
-    account, so a real name that looks like a token keeps its attribution (and
-    its own throttle bucket) while a hex token typed as a username does not.
-    The lookup happens in :func:`_known_account_runs`, on that path only.
+    ``actor``, ``target_id`` and the log line are stored verbatim (#379): the
+    trail exists to attribute actions to a name, so redacting identity made it
+    useless for its purpose. A username that happens to look like a token is
+    still a username. The login endpoint bounds what it accepts, so an
+    over-long attempt is truncated there, never here.
 
     Role and admin flag default to the request's authenticated state. Never
     raises: an audit failure must not fail the action being audited.
@@ -1348,18 +1306,10 @@ async def record_audit(
     count. The log line above still fires, a summary line is logged per window,
     and the drop is counted in health. Every other action is always stored.
     """
-    known_accounts = await _known_account_runs(
-        message, actor or "", target_id if isinstance(target_id, str) else ""
-    )
     # Fully formatted on purpose: the log dedup filter suppresses consecutive
     # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
-    logger.info(f"[AUDIT] {_scrub_audit_text(message, keep=known_accounts)}")
-    resolved_actor = _scrub_audit_text(actor or "anonymous", keep=known_accounts)
-    resolved_target_id = (
-        _scrub_audit_text(target_id, keep=known_accounts)
-        if isinstance(target_id, str)
-        else target_id
-    )
+    logger.info(f"[AUDIT] {message}")
+    resolved_actor = actor or "anonymous"
     throttle: storage.AuditThrottle | None = None
     if action in _AUDIT_AUTH_FAILURE_ACTIONS:
         limit = get_settings().audit_auth_failure_max_per_minute
@@ -1385,7 +1335,7 @@ async def record_audit(
             actor_role=resolved_role,
             is_admin=resolved_admin,
             target_type=target_type,
-            target_id=resolved_target_id,
+            target_id=target_id,
             outcome=outcome,
             details=_redact_details(details),
             request_ip=_audit_request_ip(request),
@@ -11751,9 +11701,11 @@ async def login(request: Request) -> JSONResponse:
     api_key = str(body.get("api_key", ""))
 
     if len(username) > _LOGIN_MAX_USERNAME_LENGTH:
-        # An absurd username cannot name an account: refuse it like any bad
-        # credential and keep it out of the trail, so nothing walks it.
-        username = "[redacted]"
+        # An over-long name cannot name an account (usernames are at most 50
+        # characters), so it is refused like any bad credential. Keep the
+        # attempt visible in the trail, but bounded, so the row never grows
+        # with the request body.
+        username = f"{username[:_LOGIN_MAX_USERNAME_LENGTH]}…"
 
     if not username or not api_key:
         raise HTTPException(status_code=400, detail="Username and api_key are required")

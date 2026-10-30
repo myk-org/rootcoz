@@ -22,7 +22,6 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiosqlite import Connection as AiosqliteConnection
 
 from rootcoz import main, monitoring, storage
 from rootcoz.encryption import encrypt_sensitive_fields
@@ -597,34 +596,52 @@ def test_login_failure_is_audited(app_client) -> None:
     assert events[0]["outcome"] == "failure"
 
 
-def test_login_username_that_is_a_credential_is_scrubbed(
+def test_login_failure_for_unknown_username_keeps_it_verbatim(
     app_client, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A credential pasted into the login username never reaches row or log."""
+    """The trail exists to name the username under attack, not to hide it."""
+    bad = {"username": "attacker-1", "api_key": "wrong"}  # pragma: allowlist secret
     caplog.set_level(logging.INFO)
     main_logger = _capture_main_logs(caplog)
-    secret = "sk-live-abcdefghijklmnop"  # pragma: allowlist secret  # gitleaks:allow
     try:
-        response = app_client.post(
-            "/api/auth/login",
-            json={"username": secret, "api_key": "wrong"},  # pragma: allowlist secret
-        )
+        response = app_client.post("/api/auth/login", json=bad)
     finally:
         main_logger.removeHandler(caplog.handler)
     assert response.status_code == 401
 
     events = _events(action="auth.login_failed")
     assert len(events) == 1
-    assert events[0]["actor"] == "[redacted]"
-    assert events[0]["target_id"] == "[redacted]"
-    assert secret not in json.dumps(events)
-    assert secret not in caplog.text
+    assert events[0]["actor"] == "attacker-1"
+    assert events[0]["target_id"] == "attacker-1"
+    assert "Failed login attempt for username 'attacker-1'" in caplog.text
 
 
-def test_login_username_that_is_a_hex_token_is_scrubbed(
+def test_login_failure_for_a_real_account_keeps_its_exact_name(
     app_client, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A hex token is not a digest just because it has a digest's shape."""
+    caplog.set_level(logging.INFO)
+    registered = app_client.post("/api/auth/register", json={"username": "real.user"})
+    assert registered.status_code == 200, registered.text
+
+    bad = {"username": "real.user", "api_key": "wrong"}  # pragma: allowlist secret
+    main_logger = _capture_main_logs(caplog)
+    try:
+        response = app_client.post("/api/auth/login", json=bad)
+    finally:
+        main_logger.removeHandler(caplog.handler)
+    assert response.status_code == 401
+
+    events = _events(action="auth.login_failed")
+    assert len(events) == 1
+    assert events[0]["actor"] == "real.user"
+    assert events[0]["target_id"] == "real.user"
+    assert "Failed login attempt for username 'real.user'" in caplog.text
+
+
+def test_login_username_that_is_a_hex_token_is_stored_verbatim(
+    app_client, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A token typed as a username is the evidence, not a secret to hide."""
     caplog.set_level(logging.INFO)
     main_logger = _capture_main_logs(caplog)
     token = (
@@ -641,40 +658,42 @@ def test_login_username_that_is_a_hex_token_is_scrubbed(
 
     events = _events(action="auth.login_failed")
     assert len(events) == 1
-    assert events[0]["actor"] == "[redacted]"
-    assert events[0]["target_id"] == "[redacted]"
-    assert token not in json.dumps(events)
-    assert token not in caplog.text
+    assert events[0]["actor"] == token
+    assert events[0]["target_id"] == token
+    assert f"Failed login attempt for username '{token}'" in caplog.text
 
 
-def test_login_username_over_the_length_limit_is_refused_like_a_bad_key(
-    app_client,
+def test_login_username_over_the_length_limit_is_recorded_truncated(
+    app_client, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """An absurd username is a bad credential: same 401, never walked."""
+    """An over-long name is refused like a bad credential, but stays visible."""
     wrong_key = {"username": "nobody", "api_key": "wrong"}  # pragma: allowlist secret
     baseline = app_client.post("/api/auth/login", json=wrong_key)
 
-    runs = _token_runs(13)
-    username = " ".join(runs)
+    username = "a" * (main._LOGIN_MAX_USERNAME_LENGTH - 1) + "tail-beyond-the-limit"
     assert len(username) > main._LOGIN_MAX_USERNAME_LENGTH
-    resolver = AsyncMock(return_value=set())
-    with patch.object(storage, "known_usernames", resolver):
+    expected = f"{username[: main._LOGIN_MAX_USERNAME_LENGTH]}…"
+
+    caplog.set_level(logging.INFO)
+    main_logger = _capture_main_logs(caplog)
+    try:
         response = app_client.post(
             "/api/auth/login",
             json={"username": username, "api_key": "wrong"},  # pragma: allowlist secret
         )
+    finally:
+        main_logger.removeHandler(caplog.handler)
 
     assert response.status_code == 401
     assert response.json() == baseline.json()
-    # Refused at the boundary, so the audit path never looked a run up.
-    assert resolver.await_count == 0
 
     events = _events(action="auth.login_failed")
     assert len(events) == 2
-    over_long = next(event for event in events if event["actor"] == "[redacted]")
-    assert over_long["target_id"] == "[redacted]"
-    for run in runs:
-        assert run not in json.dumps(events)
+    over_long = next(event for event in events if event["actor"] == expected)
+    assert over_long["target_id"] == expected
+    assert f"Failed login attempt for username '{expected}'" in caplog.text
+    assert "tail-beyond-the-limit" not in json.dumps(events) + caplog.text
+    assert "[redacted]" not in json.dumps(over_long)
 
 
 def test_logout_is_audited(app_client) -> None:
@@ -3100,20 +3119,22 @@ async def test_record_audit_scrubs_a_secret_pasted_into_free_text(
     assert secret not in caplog.text
 
 
-async def test_record_audit_scrubs_a_credential_pasted_into_the_actor(
+async def test_record_audit_stores_identity_verbatim(
     audit_db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The username is a free-text field too: it reaches the row and the log."""
+    """Root cause fix (#379): identity is not a detail, so it is never scrubbed."""
     caplog.set_level(logging.INFO)
     main_logger = _capture_main_logs(caplog)
-    secret = "sk-live-abcdefghijklmnop"  # pragma: allowlist secret  # gitleaks:allow
+    token = (
+        "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
+    )
     try:
         await main.record_audit(
             action="auth.login_failed",
-            actor=secret,
-            message=f"Failed login attempt for username '{secret}'",
+            actor=token,
+            message=f"Failed login attempt for username '{token}'",
             target_type="user",
-            target_id=secret,
+            target_id=token,
             outcome="failure",
             request=_fake_request(),
         )
@@ -3121,10 +3142,10 @@ async def test_record_audit_scrubs_a_credential_pasted_into_the_actor(
         main_logger.removeHandler(caplog.handler)
 
     event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
-    assert event["actor"] == "[redacted]"
-    assert event["target_id"] == "[redacted]"
-    assert secret not in json.dumps(event)
-    assert secret not in caplog.text
+    assert event["actor"] == token
+    assert event["target_id"] == token
+    # The log line follows the stored identity, so log and table agree.
+    assert f"Failed login attempt for username '{token}'" in caplog.text
 
     # A normal username (including CSV-formula characters) survives untouched.
     await main.record_audit(
@@ -3140,19 +3161,31 @@ async def test_record_audit_scrubs_a_credential_pasted_into_the_actor(
     assert newest["target_id"] == "-x"
 
 
+async def test_record_audit_falls_back_for_empty_or_missing_identity(
+    audit_db: Path,
+) -> None:
+    await main.record_audit(
+        action="auth.login", actor="", message="Login success", target_id=None
+    )
+
+    event = (await storage.list_audit_events(action="auth.login"))["events"][0]
+    assert event["actor"] == "anonymous"
+    assert event["target_id"] is None
+
+
 async def test_record_audit_keeps_a_real_account_that_looks_like_a_token(
     audit_db: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Identity beats shape: a real account name is not a credential."""
+    """A token-shaped account name keeps its own attribution and throttle budget."""
     _reset_suppression(monkeypatch)
     monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
     account = "svc-ci-pipeline-Prod2024-runner"
-    # Users are stored normalized, so the lookup has to match case-insensitively.
+    # Users are stored normalized, so the rescue lookup matches case-insensitively.
     _add_existing_user(audit_db, account.lower())
 
     await _failed_logins(2, actor=account)
     assert monitoring._audit_suppressed_auth_events == 1
-    # Another actor still has its own budget: no shared ``[redacted]`` bucket.
+    # Another actor still has its own budget: no shared bucket.
     await _failed_logins(1, actor="mallory")
 
     stored = await storage.list_audit_events(action="auth.login_failed")
@@ -3161,98 +3194,6 @@ async def test_record_audit_keeps_a_real_account_that_looks_like_a_token(
         action="auth.login_failed", actor=account
     )
     assert by_actor["total"] == 1
-
-
-async def test_record_audit_scrubs_a_token_shaped_name_with_no_account(
-    audit_db: Path,
-) -> None:
-    """The same name without a users row is a token typed as a username."""
-    account = "svc-ci-pipeline-Prod2024-runner"
-    await main.record_audit(
-        action="auth.login_failed",
-        actor=account,
-        message=f"Failed login attempt for username '{account}'",
-        target_type="user",
-        target_id=account,
-        outcome="failure",
-        request=_fake_request(),
-    )
-
-    event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
-    assert event["actor"] == "[redacted]"
-    assert event["target_id"] == "[redacted]"
-    assert account not in json.dumps(event)
-
-
-def _token_runs(count: int) -> list[str]:
-    """``count`` distinct token-shaped runs (mixed case plus digits)."""
-    return [f"Tok{index:04d}AbCdEfGhIjKlMnOpQrSt" for index in range(count)]
-
-
-async def test_audit_identity_lookups_are_capped_and_batched(
-    audit_db: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A username made of 500 tokens costs one bounded lookup, not 500."""
-    caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-    runs = _token_runs(500)
-    username = " ".join(runs)
-    resolver = AsyncMock(return_value=set())
-    try:
-        with patch.object(storage, "known_usernames", resolver):
-            await main.record_audit(
-                action="auth.login_failed",
-                actor=username,
-                message=f"Failed login attempt for username '{username}'",
-                target_type="user",
-                target_id=username,
-                outcome="failure",
-                request=_fake_request(),
-            )
-    finally:
-        main_logger.removeHandler(caplog.handler)
-
-    assert resolver.await_count == 1
-    (candidates,) = resolver.await_args.args
-    assert len(candidates) == main._AUDIT_MAX_IDENTITY_LOOKUPS
-    # Document order, so the same input always resolves the same runs.
-    assert candidates == runs[: main._AUDIT_MAX_IDENTITY_LOOKUPS]
-
-    event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
-    stored = json.dumps(event)
-    assert set(event["actor"].split()) == {"[redacted]"}
-    assert set(event["target_id"].split()) == {"[redacted]"}
-    assert main._AUDIT_RUN_RE.findall(f"{event['actor']} {event['target_id']}") == []
-    for run in runs:
-        assert run not in stored
-        assert run not in caplog.text
-
-
-async def test_known_usernames_batches_past_one_in_clause(
-    audit_db: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """More candidates than one ``IN`` chunk still resolve, case-insensitively."""
-    monkeypatch.setattr(storage, "_SQL_VARIABLE_CHUNK", 3)
-    names = [f"user{index:02d}" for index in range(7)]
-    with sqlite3.connect(audit_db) as conn:
-        conn.executemany(
-            "INSERT INTO users (username) VALUES (?)", [(name,) for name in names]
-        )
-
-    statements: list[str] = []
-    real_execute = AiosqliteConnection.execute
-
-    async def counting_execute(self: AiosqliteConnection, sql: str, *args: Any) -> Any:
-        if "FROM users" in sql:
-            statements.append(sql)
-        return await real_execute(self, sql, *args)
-
-    monkeypatch.setattr(AiosqliteConnection, "execute", counting_execute)
-    found = await storage.known_usernames([*names, "ghost", names[0]])
-
-    assert found == set(names)
-    # 9 candidates at a chunk of 3: three statements, never one per name.
-    assert len(statements) == 3
 
 
 # --- volume guard for auth failures ---------------------------------------
