@@ -2203,6 +2203,9 @@ function SingleValuePicker({ setting, options, saving, onSave }: EnumPickerProps
       multiple={false}
       values={setting.value ? [setting.value] : []}
       options={choices.map(value => ({ value }))}
+      // Enumerated values the server lets an admin extend (a newly published
+      // Datadog region) must be typable here too, not only pickable.
+      allowCustom={setting.allow_custom}
       disabled={saving}
       placeholder="Not set"
       onChange={next => onSave(next[0])}

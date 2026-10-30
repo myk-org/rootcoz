@@ -2172,6 +2172,10 @@ describe('ServerSettingsPage enumerated setting pickers', () => {
         multiple: true,
         allow_custom: true,
       }),
+      mk('datadog_site', 'Datadog', 'datadoghq.com', {
+        options: ['datadoghq.com', 'datadoghq.eu'],
+        allow_custom: true,
+      }),
     )
     for (const [key, props] of Object.entries(overrides)) {
       Object.assign(settings.find((s) => s.key === key)!, props)
@@ -2245,6 +2249,39 @@ describe('ServerSettingsPage enumerated setting pickers', () => {
         'operator',
       ),
     )
+  })
+
+  it('lets a single-value picker type a custom value when the server allows it', async () => {
+    // datadog_site is a published list with allow_custom: a newly released
+    // region must be typable, not only pickable from the list.
+    mockEnumSettings()
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Datadog' }))
+
+    fireEvent.click(await screen.findByRole('combobox', { name: 'Select DATADOG_SITE' }))
+    fireEvent.change(searchBox('DATADOG_SITE'), {
+      target: { value: 'us5.datadoghq.com' },
+    })
+    // The typed value is offered as a custom row and saves what was typed.
+    const custom = screen.getByRole('option', { name: 'Add "us5.datadoghq.com"' })
+    fireEvent.mouseDown(custom)
+
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { datadog_site: 'us5.datadoghq.com' },
+      }),
+    )
+  })
+
+  it('does not offer a custom entry when the server forbids it', async () => {
+    // allow_custom is the server's decision: a closed set must stay closed.
+    mockEnumSettings()
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('combobox', { name: 'Select LOG_LEVEL' }))
+    fireEvent.change(searchBox('LOG_LEVEL'), { target: { value: 'LOUD' } })
+    // Nothing matches and no custom row is offered: a closed set stays closed.
+    expect(screen.queryAllByRole('option')).toEqual([])
   })
 
   it('cancels a single pick with Escape without saving', async () => {
