@@ -762,6 +762,9 @@ export function ServerSettingsPage() {
   const [searchParams] = useSearchParams()
   const highlightKey = searchParams.get('highlight') ?? ''
   const [highlighted, setHighlighted] = useState('')
+  // The highlight whose search this effect already cleared: the admin's own
+  // typing in the 2.5s the row stays marked must survive.
+  const clearedHighlightRef = useRef('')
   useEffect(() => {
     if (!highlightKey) return
     setHighlighted(highlightKey)
@@ -1266,11 +1269,24 @@ export function ServerSettingsPage() {
     ? activeTab
     : allGroups[0]?.category ?? ''
 
-  // A highlighted row has to be visible: open its category, expand it, then
-  // scroll to the row. One change per pass, and the saved tab is left alone —
-  // following an audit link must not rewrite the admin's own preference.
+  // A highlighted row has to be visible: drop a search that filters it out,
+  // open its category, expand it, then scroll to the row. One change per pass,
+  // and the saved tab is left alone — following an audit link must not rewrite
+  // the admin's own preference.
   useEffect(() => {
-    if (!highlighted) return
+    if (!highlighted) {
+      clearedHighlightRef.current = ''
+      return
+    }
+    // A filtered-out row is never rendered, so there would be nothing to mark.
+    if (clearedHighlightRef.current !== highlighted) {
+      clearedHighlightRef.current = highlighted
+      if (searchInput || state.search) {
+        setSearchInput('')
+        dispatch({ type: 'SET_SEARCH', search: '' })
+        return
+      }
+    }
     const category = state.settings.find(s => s.key === highlighted)?.category
     if (category) {
       if (state.collapsedCategories.has(category)) {
@@ -1285,7 +1301,7 @@ export function ServerSettingsPage() {
     document
       .querySelector(`[data-setting-key="${CSS.escape(highlighted)}"]`)
       ?.scrollIntoView({ block: 'center' })
-  }, [highlighted, state.settings, state.collapsedCategories, effectiveTab])
+  }, [highlighted, searchInput, state.search, state.settings, state.collapsedCategories, effectiveTab])
 
   // ---- Per-category card (shared by the tab view and search results) ----
   function renderCategory(category: string, settings: ServerSetting[]) {

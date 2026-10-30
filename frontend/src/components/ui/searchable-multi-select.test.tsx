@@ -241,4 +241,83 @@ describe('SearchableMultiSelect', () => {
     expect(screen.getByRole('button', { name: 'Remove gemini' })).toBeInTheDocument()
     expect(screen.queryByRole('listbox')).toBeNull()
   })
+
+  it('skips a disabled option with the arrow keys instead of stopping on it', () => {
+    // A disabled row sits between two pickable ones, like an unconfigured exporter.
+    render(
+      <Harness
+        options={[
+          { value: 'viewer' },
+          { value: 'reviewer', disabled: true, hint: 'not configured' },
+          { value: 'operator' },
+        ]}
+      />,
+    )
+    open()
+
+    fireEvent.keyDown(search(), { key: 'ArrowDown' })
+    fireEvent.keyDown(search(), { key: 'Enter' })
+
+    // One step past the disabled row, and it is the enabled one that got picked.
+    expect(screen.getByRole('button', { name: 'Remove operator' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove reviewer' })).toBeNull()
+  })
+
+  it('never rests the highlight on a leading disabled option', () => {
+    render(
+      <Harness
+        options={[
+          { value: 'reviewer', disabled: true },
+          { value: 'operator' },
+        ]}
+      />,
+    )
+    open()
+    fireEvent.keyDown(search(), { key: 'Enter' })
+
+    expect(screen.getByRole('button', { name: 'Remove operator' })).toBeInTheDocument()
+  })
+})
+
+describe('SearchableMultiSelect disabled', () => {
+  function DisabledHarness({ onSave }: { onSave: (values: string[]) => void }) {
+    const [values, setValues] = useState<string[]>([])
+    return (
+      <SearchableMultiSelect
+        label="ALLOWED_USERS"
+        disabled
+        values={values}
+        options={OPTIONS}
+        onChange={(next) => {
+          setValues(next)
+          onSave(next)
+        }}
+      />
+    )
+  }
+
+  it('does not open on click, so nothing can be picked while the value saves', () => {
+    const onSave = vi.fn()
+    render(<DisabledHarness onSave={onSave} />)
+    const trigger = screen.getByRole('combobox', { name: 'Add ALLOWED_USERS' })
+
+    fireEvent.click(trigger)
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(trigger).toHaveAttribute('aria-disabled', 'true')
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('ignores Enter and the arrow keys on the trigger', () => {
+    const onSave = vi.fn()
+    render(<DisabledHarness onSave={onSave} />)
+    const trigger = screen.getByRole('combobox', { name: 'Add ALLOWED_USERS' })
+
+    fireEvent.keyDown(trigger, { key: 'Enter' })
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+    fireEvent.keyDown(trigger, { key: ' ' })
+
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(onSave).not.toHaveBeenCalled()
+  })
 })

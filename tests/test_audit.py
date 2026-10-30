@@ -3557,6 +3557,182 @@ def test_users_list_exposes_lockout_and_disable_state(temp_db_path: Path) -> Non
         assert row["failed_login_count"] == 1
 
 
+# --- a blocked account is refused on every auth path (#379) ----------------
+
+#: The middleware's answer to a bad credential — a refused account must match it,
+#: byte for byte, so the caller never learns which condition applied.
+_GENERIC_401 = {"detail": "Authentication required. Please log in with your API key."}
+
+
+def _set_account_state(
+    username: str, *, disabled: bool = False, locked: bool = False
+) -> None:
+    """Flip the flags directly.
+
+    A session outliving its account is exactly what the middleware must refuse,
+    and ``set_user_disabled`` deletes sessions, so the session path can only be
+    proven with the flag set underneath a live session.
+    """
+    with sqlite3.connect(storage.DB_PATH) as conn:
+        conn.execute(
+            "UPDATE users SET disabled = ?, locked_at = ? WHERE username = ?",
+            (int(disabled), storage.audit_timestamp() if locked else None, username),
+        )
+
+
+def _auth_probe(client, path: str, username: str, key: str, session_token: str):
+    """One request on one authentication path, with no other credential in play."""
+    client.cookies.clear()
+    if path == "bearer":
+        return client.get("/api/auth/me", headers={"Authorization": f"Bearer {key}"})
+    if path == "session":
+        return client.get("/api/auth/me", cookies={"rootcoz_session": session_token})
+    return client.get("/api/auth/me", headers={"X-Forwarded-User": username})
+
+
+@pytest.mark.parametrize("state", ["disabled", "locked"])
+def test_a_blocked_account_is_refused_on_every_auth_path(
+    temp_db_path: Path, state: str
+) -> None:
+    """A key, a session and a proxy identity are all only as good as their row."""
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        for path in ("bearer", "session", "proxy"):
+            username = f"{state}-{path}"
+            key = _register(client, username)
+            token = asyncio.run(
+                storage.create_session(username, is_admin=False, role="reviewer")
+            )
+            _set_account_state(username, **{state: True})
+
+            response = _auth_probe(client, path, username, key, token)
+            assert response.status_code == 401, (path, response.text)
+            assert response.json() == _GENERIC_401, path
+
+            blocked = [
+                event
+                for event in _events(action="auth.login_blocked")
+                if event["actor"] == username
+            ]
+            assert len(blocked) == 1, path
+            assert blocked[0]["outcome"] == "denied"
+            assert blocked[0]["target_id"] == username
+            assert blocked[0]["details"] == {"reason": state}
+
+
+def test_the_bootstrap_admin_is_never_blocked(temp_db_path: Path) -> None:
+    """It has no ``users`` row, so there is no flag that could disable it."""
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        admin_login(client)
+        assert client.get("/api/auth/me").json()["is_admin"] is True
+        me = client.get("/api/auth/me", headers=_ADMIN_HEADERS)
+        assert me.status_code == 200
+        assert _events(action="auth.login_blocked") == []
+
+
+def test_a_polling_client_cannot_flood_the_trail(temp_db_path: Path) -> None:
+    """The existing volume guard caps the rows; the refusal keeps answering."""
+    for client in make_app_client(
+        temp_db_path, {"AUDIT_AUTH_FAILURE_MAX_PER_MINUTE": "2"}
+    ):
+        key = _register(client, "poller")
+        token = asyncio.run(
+            storage.create_session("poller", is_admin=False, role="reviewer")
+        )
+        _set_account_state("poller", disabled=True)
+
+        for _ in range(5):
+            response = _auth_probe(client, "bearer", "poller", key, token)
+            assert response.status_code == 401
+
+        assert len(_events(action="auth.login_blocked", actor="poller")) == 2
+
+
+def test_an_admin_cannot_disable_their_own_account(temp_db_path: Path) -> None:
+    """The refusal is a 400, the session survives and the denial is audited."""
+    for client in make_app_client(temp_db_path):
+        cookies = _db_admin_cookies(client, "db-admin")
+        _register(client, "switchable")
+
+        client.cookies.clear()
+        refused = client.put(
+            "/api/admin/users/db-admin/disabled",
+            json={"disabled": True},
+            cookies=cookies,
+        )
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["detail"] == "You cannot disable your own account"
+        assert _user_state("db-admin")["disabled"] is False
+        client.cookies.clear()
+        assert client.get("/api/auth/me", cookies=cookies).status_code == 200
+
+        # Disabling someone else, and re-enabling, are unaffected.
+        for disabled in (True, False):
+            response = client.put(
+                "/api/admin/users/switchable/disabled",
+                json={"disabled": disabled},
+                cookies=cookies,
+            )
+            assert response.status_code == 200, response.text
+            assert _user_state("switchable")["disabled"] is disabled
+
+        denied = [
+            event
+            for event in _events(action="admin.user_disabled")
+            if event["outcome"] == "denied"
+        ]
+        assert len(denied) == 1
+        assert denied[0]["actor"] == "db-admin"
+        assert denied[0]["target_id"] == "db-admin"
+        assert denied[0]["details"]["reason"] == "self"
+
+
+def test_the_last_enabled_admin_cannot_be_disabled(temp_db_path: Path) -> None:
+    """Zero enabled admins would end the admin surface until ``ADMIN_KEY``."""
+    for client in make_app_client(temp_db_path):
+        _db_admin_cookies(client, "only-admin")
+        client.cookies.clear()
+        admin_login(client)
+
+        refused = client.put(
+            "/api/admin/users/only-admin/disabled", json={"disabled": True}
+        )
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["detail"] == "Cannot disable the last enabled admin"
+        assert _user_state("only-admin")["disabled"] is False
+
+        # A second enabled admin makes the same disable allowed again.
+        _db_admin_cookies(client, "second-admin")
+        client.cookies.clear()
+        admin_login(client)
+        allowed = client.put(
+            "/api/admin/users/only-admin/disabled", json={"disabled": True}
+        )
+        assert allowed.status_code == 200, allowed.text
+        assert _user_state("only-admin")["disabled"] is True
+
+        denied = [
+            event
+            for event in _events(action="admin.user_disabled")
+            if event["outcome"] == "denied"
+        ]
+        assert len(denied) == 1
+        assert denied[0]["details"]["reason"] == "last_admin"
+
+
+def _db_admin_cookies(client, username: str) -> dict[str, str]:
+    """Create a DB-backed admin through the API and return its session cookies."""
+    client.cookies.clear()
+    created = client.post(
+        "/api/admin/users/create",
+        json={"username": username, "role": "admin"},
+        headers=_ADMIN_HEADERS,
+    )
+    assert created.status_code == 200, created.text
+    login = _login(client, username, created.json()["api_key"])
+    assert login.status_code == 200, login.text
+    return dict(login.cookies)
+
+
 # --- target_gone and widened q (#379) -------------------------------------
 
 #: Target types that have no presence to check — the notion does not apply.
@@ -3625,6 +3801,94 @@ def test_target_gone_is_true_for_a_removed_user_and_setting(audit_db: Path) -> N
     # Presence is read at list time, never stored: a name or a key that comes
     # back un-gones its history.
     assert _gone() == {"admin.user_role_change": False, "settings.reset": False}
+
+
+def test_target_gone_follows_a_deleted_comment(audit_db: Path) -> None:
+    """The ``#comment-<id>`` link dies with the comment, and says who removed it."""
+    _save_job(JOB_ID, JOB_NAME)
+    comment_id = asyncio.run(
+        storage.add_comment(JOB_ID, "test-a", "hello", username="alice")
+    )
+    target = _insert_audit(
+        action="comment.add",
+        actor="alice",
+        target_type="comment",
+        target_id=str(comment_id),
+        details={"job_id": JOB_ID},
+    )
+
+    # While the comment exists the link is rendered: it must not be dropped.
+    event = _only(_events(), "comment.add")
+    assert event["target_gone"] is False
+    assert _deletion_fields(event) == _NO_DELETION
+    assert (event["target_job_id"], event["target_label"]) == (JOB_ID, JOB_NAME)
+
+    asyncio.run(storage.delete_comment(comment_id, "", job_id=JOB_ID))
+    deletion = _insert_audit(
+        action="comment.delete",
+        actor="alice",
+        target_type="comment",
+        target_id=str(comment_id),
+        details={"job_id": JOB_ID},
+    )
+
+    event = _only(_events(), "comment.add")
+    assert event["target_gone"] is True
+    assert _deletion_fields(event) == (
+        "alice",
+        deletion["created_at"],
+        deletion["id"],
+    )
+    # The row that recorded the removal is its own evidence.
+    own = _only(_events(), "comment.delete")
+    assert own["target_gone"] is True
+    assert own["target_delete_event_id"] == deletion["id"]
+    assert target["id"] < deletion["id"]
+
+
+def test_target_gone_is_null_for_a_comment_with_no_recorded_job(
+    audit_db: Path,
+) -> None:
+    """Without a job there is no row to look the id up in — so no claim."""
+    asyncio.run(
+        storage.insert_audit_event(
+            action="comment.delete",
+            actor="alice",
+            target_type="comment",
+            target_id="122",
+        )
+    )
+    assert _only_event()["target_gone"] is None
+
+
+def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
+    """The audit page shows the name a human reads, however the target was named."""
+    asyncio.run(
+        storage.save_result(
+            JOB_ID,
+            status="completed",
+            result={
+                "display_name": "Human Name",
+                "job_name": "machine-name",
+                "origin_job_name": "origin-name",
+            },
+        )
+    )
+    refs = (JOB_ID, "Human Name", "machine-name", "origin-name")
+    for ref in refs:
+        asyncio.run(
+            storage.insert_audit_event(
+                action="job.metadata_set",
+                actor="alice",
+                target_type="job",
+                target_id=ref,
+            )
+        )
+
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert [(event["target_job_id"], event["target_label"]) for event in events] == [
+        (JOB_ID, "Human Name")
+    ] * len(refs)
 
 
 @pytest.mark.parametrize("target_type", _NO_PRESENCE_TARGETS)
@@ -4167,11 +4431,11 @@ def test_audit_list_admits_an_unknown_setting_reset(audit_db: Path) -> None:
     assert _deletion_fields(_only(_events(), "settings.update")) == _NO_DELETION
 
 
-def test_audit_list_never_cross_references_a_comment_to_itself(
+def test_audit_list_cross_references_a_comment_to_its_own_removal(
     audit_db: Path,
 ) -> None:
-    """A comment's own row is the evidence, so it borrows nothing — not itself."""
-    _insert_audit(
+    """A comment's own row is the evidence, so it points at itself, like a delete."""
+    deletion = _insert_audit(
         action="comment.delete",
         actor="alice",
         target_type="comment",
@@ -4179,13 +4443,18 @@ def test_audit_list_never_cross_references_a_comment_to_itself(
         details={"job_id": JOB_ID},
     )
 
-    assert _deletion_fields(_only(_events(), "comment.delete")) == _NO_DELETION
+    event = _only(_events(), "comment.delete")
+    assert event["target_gone"] is True
+    assert _deletion_fields(event) == (
+        "alice",
+        deletion["created_at"],
+        deletion["id"],
+    )
 
 
 def test_audit_list_never_invents_a_transcript_removal(audit_db: Path) -> None:
     """Transcripts are pruned by sidecar retention: rootcoz deletes none."""
     assert "transcript" not in storage._AUDIT_REMOVAL_ACTIONS
-    assert "comment" not in storage._AUDIT_REMOVAL_ACTIONS
     for session in ("session-1", "session-2"):
         _insert_audit(
             action="transcript.download",

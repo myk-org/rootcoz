@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { api, ApiError } from '@/lib/api'
 import { useClipboard } from '@/lib/useClipboard'
@@ -57,6 +57,18 @@ function StateBadge({ state, children }: { state: keyof typeof STATE_BADGE; chil
   )
 }
 
+/**
+ * One axis for the whole row: a disabled account is disabled whatever its
+ * registration status says, then a locked one, then that status. The badge and
+ * the muted name read this one answer, so they cannot disagree.
+ */
+function accountState(user: AdminUser): keyof typeof STATE_BADGE {
+  if (user.disabled) return 'disabled'
+  if (user.locked) return 'locked'
+  if (user.status === 'pending' || user.status === 'rejected') return user.status
+  return 'active'
+}
+
 function CopyableKey({ label, value }: { label: string; value: string }) {
   const { isCopied, copy } = useClipboard()
 
@@ -96,6 +108,15 @@ export function UsersPage() {
   // from then on the settled needle lives in ?q= like the page bounds do.
   const query = (searchParams.get('q') ?? searchParams.get('user') ?? '').trim()
   const [search, setSearch] = useState(query)
+  // The needle this page last put in the URL: a ?q= that differs is somebody
+  // else's navigation (Back/Forward, an audit deep link), so the input adopts it
+  // instead of the debounce rewriting the URL back to the previous search.
+  const wroteQueryRef = useRef(query)
+  useEffect(() => {
+    if (query === wroteQueryRef.current) return
+    wroteQueryRef.current = query
+    setSearch(query)
+  }, [query])
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false)
@@ -158,6 +179,7 @@ export function UsersPage() {
    */
   const setQuery = useCallback(
     (needle: string) => {
+      wroteQueryRef.current = needle
       setSearchParams((prev) => {
         const params = new URLSearchParams(prev)
         params.delete('user')
@@ -170,19 +192,25 @@ export function UsersPage() {
     [setSearchParams],
   )
 
+  // Generation guard: an earlier page or search settling late must not paint
+  // rows for a page the admin already left (#381).
+  const usersGenerationRef = useRef(0)
   const fetchUsers = useCallback(async () => {
+    const generation = ++usersGenerationRef.current
     try {
       // The server keeps no page state: every request names its own window.
       const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
       if (query) params.set('q', query)
       const data = await api.get<AdminUsersResponse>(`/api/admin/users?${params.toString()}`)
+      if (generation !== usersGenerationRef.current) return
       setUsers(data.users)
       setTotal(data.total)
       setError(null)
     } catch (err) {
+      if (generation !== usersGenerationRef.current) return
       setError(err instanceof Error ? err.message : 'Failed to load users')
     } finally {
-      setLoading(false)
+      if (generation === usersGenerationRef.current) setLoading(false)
     }
   }, [limit, offset, query])
 
@@ -504,232 +532,232 @@ export function UsersPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {users.map((user, i) => (
-              <TableRow
-                key={user.username}
-                className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}
-              >
-                <TableCell>
-                  <span className={`inline-flex items-center gap-1.5 font-mono text-sm ${user.disabled ? 'text-text-tertiary' : 'text-text-primary'}`}>
-                    {user.role === 'admin' ? (
-                      <Shield className={`h-3.5 w-3.5 ${user.disabled ? 'text-text-tertiary' : 'text-signal-amber'}`} />
-                    ) : (
-                      <span className={`h-2 w-2 rounded-full ${user.disabled ? 'bg-text-tertiary' : user.role === 'operator' ? 'bg-signal-blue' : 'bg-signal-green'}`} />
-                    )}
-                    {user.username}
-                  </span>
-                </TableCell>
-                <TableCell>
-                  {/* One axis: registration status, then the account state that overrides it. */}
-                  {user.status === 'pending' ? (
-                    <StateBadge state="pending">pending</StateBadge>
-                  ) : user.status === 'rejected' ? (
-                    <StateBadge state="rejected">rejected</StateBadge>
-                  ) : user.disabled ? (
-                    <StateBadge state="disabled">disabled</StateBadge>
-                  ) : user.locked ? (
-                    <StateBadge state="locked">
-                      {lockoutThreshold === null ? 'locked' : `locked (${user.failed_login_count}/${lockoutThreshold})`}
+            {users.map((user, i) => {
+              // One answer for the badge and the muting, so a row cannot look
+              // half-disabled (or half-pending).
+              const state = accountState(user)
+              const muted = state === 'disabled'
+              return (
+                <TableRow
+                  key={user.username}
+                  className={i % 2 === 0 ? 'bg-surface-card' : 'bg-surface-elevated/40'}
+                >
+                  <TableCell>
+                    <span className={`inline-flex items-center gap-1.5 font-mono text-sm ${muted ? 'text-text-tertiary' : 'text-text-primary'}`}>
+                      {user.role === 'admin' ? (
+                        <Shield className={`h-3.5 w-3.5 ${muted ? 'text-text-tertiary' : 'text-signal-amber'}`} />
+                      ) : (
+                        <span className={`h-2 w-2 rounded-full ${muted ? 'bg-text-tertiary' : user.role === 'operator' ? 'bg-signal-blue' : 'bg-signal-green'}`} />
+                      )}
+                      {user.username}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    {/* disabled > locked > registration status (see accountState). */}
+                    <StateBadge state={state}>
+                      {state === 'locked'
+                        ? lockoutThreshold === null
+                          ? 'locked'
+                          : `locked (${user.failed_login_count}/${lockoutThreshold})`
+                        : state}
                     </StateBadge>
-                  ) : (
-                    <StateBadge state="active">active</StateBadge>
-                  )}
-                </TableCell>
-                <TableCell>
-                  {user.username === 'admin' || user.username === currentUser ? (
-                    <RoleBadge role={user.role} />
-                  ) : (
-                    <Select
-                      value={user.role}
-                      onValueChange={(newRole) => {
-                        if (newRole !== user.role) {
-                          setRoleChangeTarget({ username: user.username, currentRole: user.role, newRole })
-                        }
-                      }}
-                    >
-                      <SelectTrigger className="h-7 w-[96px] text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="viewer">viewer</SelectItem>
-                        <SelectItem value="reviewer">reviewer</SelectItem>
-                        <SelectItem value="operator">operator</SelectItem>
-                        <SelectItem value="admin">admin</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  )}
-                </TableCell>
-                <TableCell>
-                  {user.role === 'admin' ? (
-                    <span className="text-xs text-text-tertiary">Always</span>
-                  ) : (
-                    <Switch
-                      checked={!!user.can_view_reports}
-                      disabled={reportsToggleInProgress === user.username}
-                      onCheckedChange={(checked) => handleToggleCanViewReports(user.username, checked)}
-                      aria-label={`Toggle view reports for ${user.username}`}
-                    />
-                  )}
-                </TableCell>
-                <TableCell>
-                  {user.role === 'admin' ? (
-                    <span className="text-xs text-text-tertiary">Always</span>
-                  ) : (
-                    <Switch checked={!!user.can_use_server_providers} disabled={grantToggleInProgress === user.username || user.status !== 'active'} onCheckedChange={(checked) => handleToggleServerGrant(user.username, checked)} aria-label={`Allow server providers for ${user.username}`} />
-                  )}
-                </TableCell>
-                <TableCell className="font-mono text-xs text-text-tertiary">
-                  {formatTimestamp(user.created_at)}
-                </TableCell>
-                <TableCell className="font-mono text-xs text-text-tertiary">
-                  {user.last_seen ? formatRelativeTime(user.last_seen) : '—'}
-                </TableCell>
-                <TableCell className="text-right">
-                  {user.username === 'admin' ? (
-                    <span className="text-xs text-text-tertiary italic">built-in</span>
-                  ) : user.status === 'pending' ? (
-                    <div className="flex items-center justify-end gap-1">
-                      <TooltipProvider delayDuration={200}>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Approve ${user.username}`}
-                              className="h-7 w-7"
-                              disabled={actionInProgress === user.username}
-                              onClick={() => { setApproveTarget(user.username); setApproveServerGrant(!!user.can_use_server_providers) }}
-                            >
-                              <CheckCircle className="h-3.5 w-3.5 text-signal-green" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Approve</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Reject ${user.username}`}
-                              className="h-7 w-7"
-                              disabled={actionInProgress === user.username}
-                              onClick={() => handleReject(user.username)}
-                            >
-                              <XCircle className="h-3.5 w-3.5 text-signal-red" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Reject</TooltipContent>
-                        </Tooltip>
-                        {user.username !== currentUser && (
+                  </TableCell>
+                  <TableCell>
+                    {user.username === 'admin' || user.username === currentUser ? (
+                      <RoleBadge role={user.role} />
+                    ) : (
+                      <Select
+                        value={user.role}
+                        onValueChange={(newRole) => {
+                          if (newRole !== user.role) {
+                            setRoleChangeTarget({ username: user.username, currentRole: user.role, newRole })
+                          }
+                        }}
+                      >
+                        <SelectTrigger className="h-7 w-[96px] text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="viewer">viewer</SelectItem>
+                          <SelectItem value="reviewer">reviewer</SelectItem>
+                          <SelectItem value="operator">operator</SelectItem>
+                          <SelectItem value="admin">admin</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {user.role === 'admin' ? (
+                      <span className="text-xs text-text-tertiary">Always</span>
+                    ) : (
+                      <Switch
+                        checked={!!user.can_view_reports}
+                        disabled={reportsToggleInProgress === user.username}
+                        onCheckedChange={(checked) => handleToggleCanViewReports(user.username, checked)}
+                        aria-label={`Toggle view reports for ${user.username}`}
+                      />
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {user.role === 'admin' ? (
+                      <span className="text-xs text-text-tertiary">Always</span>
+                    ) : (
+                      <Switch checked={!!user.can_use_server_providers} disabled={grantToggleInProgress === user.username || user.status !== 'active'} onCheckedChange={(checked) => handleToggleServerGrant(user.username, checked)} aria-label={`Allow server providers for ${user.username}`} />
+                    )}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-text-tertiary">
+                    {formatTimestamp(user.created_at)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-text-tertiary">
+                    {user.last_seen ? formatRelativeTime(user.last_seen) : '—'}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {user.username === 'admin' ? (
+                      <span className="text-xs text-text-tertiary italic">built-in</span>
+                    ) : user.status === 'pending' ? (
+                      <div className="flex items-center justify-end gap-1">
+                        <TooltipProvider delayDuration={200}>
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon"
-                                aria-label={`Delete ${user.username}`}
+                                aria-label={`Approve ${user.username}`}
                                 className="h-7 w-7"
-                                onClick={() => setDeleteTarget(user.username)}
+                                disabled={actionInProgress === user.username}
+                                onClick={() => { setApproveTarget(user.username); setApproveServerGrant(!!user.can_use_server_providers) }}
                               >
-                                <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                                <CheckCircle className="h-3.5 w-3.5 text-signal-green" />
                               </Button>
                             </TooltipTrigger>
-                            <TooltipContent>Delete user</TooltipContent>
+                            <TooltipContent>Approve</TooltipContent>
                           </Tooltip>
-                        )}
-                      </TooltipProvider>
-                    </div>
-                  ) : (
-                    <div className="flex items-center justify-end gap-1">
-                      <TooltipProvider delayDuration={200}>
-                        {/* Account state — disable/enable, and unlock while locked */}
-                        {user.username !== currentUser && user.locked && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon"
-                                aria-label={`Unlock ${user.username}`}
+                                aria-label={`Reject ${user.username}`}
                                 className="h-7 w-7"
-                                disabled={accountBusy === user.username}
-                                onClick={() => handleAccountState(user.username, 'unlock')}
+                                disabled={actionInProgress === user.username}
+                                onClick={() => handleReject(user.username)}
                               >
-                                <Unlock className="h-3.5 w-3.5 text-signal-green" />
+                                <XCircle className="h-3.5 w-3.5 text-signal-red" />
                               </Button>
                             </TooltipTrigger>
-                            <TooltipContent>Unlock account</TooltipContent>
+                            <TooltipContent>Reject</TooltipContent>
                           </Tooltip>
-                        )}
-                        {user.username !== currentUser && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                aria-label={`${user.disabled ? 'Enable' : 'Disable'} ${user.username}`}
-                                className="h-7 w-7"
-                                disabled={accountBusy === user.username}
-                                onClick={() => {
-                                  if (user.disabled) handleAccountState(user.username, 'enable')
-                                  else setDisableTarget(user.username)
-                                }}
-                              >
-                                {user.disabled ? (
-                                  <UserCheck className="h-3.5 w-3.5 text-signal-green" />
-                                ) : (
-                                  <UserX className="h-3.5 w-3.5 text-signal-red" />
-                                )}
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>{user.disabled ? 'Enable account' : 'Disable account'}</TooltipContent>
-                          </Tooltip>
-                        )}
-                        {/* Rotate key — every active user with an API key (admins and delegated users) */}
-                        {user.username !== currentUser && user.status === 'active' && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                aria-label={`Rotate key for ${user.username}`}
-                                className="h-7 w-7"
-                                onClick={() => setRotateTarget(user.username)}
-                              >
-                                <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Rotate API key</TooltipContent>
-                          </Tooltip>
-                        )}
-                        {/* Delete */}
-                        {user.username !== currentUser && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon"
-                                aria-label={`Delete ${user.username}`}
-                                className="h-7 w-7"
-                                onClick={() => setDeleteTarget(user.username)}
-                              >
-                                <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>Delete user</TooltipContent>
-                          </Tooltip>
-                        )}
-                      </TooltipProvider>
-                    </div>
-                  )}
-                </TableCell>
-              </TableRow>
-            ))}
+                          {user.username !== currentUser && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Delete ${user.username}`}
+                                  className="h-7 w-7"
+                                  onClick={() => setDeleteTarget(user.username)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Delete user</TooltipContent>
+                            </Tooltip>
+                          )}
+                        </TooltipProvider>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-end gap-1">
+                        <TooltipProvider delayDuration={200}>
+                          {/* Account state — disable/enable, and unlock while locked */}
+                          {user.username !== currentUser && user.locked && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Unlock ${user.username}`}
+                                  className="h-7 w-7"
+                                  disabled={accountBusy === user.username}
+                                  onClick={() => handleAccountState(user.username, 'unlock')}
+                                >
+                                  <Unlock className="h-3.5 w-3.5 text-signal-green" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Unlock account</TooltipContent>
+                            </Tooltip>
+                          )}
+                          {user.username !== currentUser && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`${user.disabled ? 'Enable' : 'Disable'} ${user.username}`}
+                                  className="h-7 w-7"
+                                  disabled={accountBusy === user.username}
+                                  onClick={() => {
+                                    if (user.disabled) handleAccountState(user.username, 'enable')
+                                    else setDisableTarget(user.username)
+                                  }}
+                                >
+                                  {user.disabled ? (
+                                    <UserCheck className="h-3.5 w-3.5 text-signal-green" />
+                                  ) : (
+                                    <UserX className="h-3.5 w-3.5 text-signal-red" />
+                                  )}
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>{user.disabled ? 'Enable account' : 'Disable account'}</TooltipContent>
+                            </Tooltip>
+                          )}
+                          {/* Rotate key — every active user with an API key (admins and delegated users) */}
+                          {user.username !== currentUser && user.status === 'active' && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Rotate key for ${user.username}`}
+                                  className="h-7 w-7"
+                                  onClick={() => setRotateTarget(user.username)}
+                                >
+                                  <RefreshCw className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-blue" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Rotate API key</TooltipContent>
+                            </Tooltip>
+                          )}
+                          {/* Delete */}
+                          {user.username !== currentUser && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon"
+                                  aria-label={`Delete ${user.username}`}
+                                  className="h-7 w-7"
+                                  onClick={() => setDeleteTarget(user.username)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-signal-red" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Delete user</TooltipContent>
+                            </Tooltip>
+                          )}
+                        </TooltipProvider>
+                      </div>
+                    )}
+                  </TableCell>
+                </TableRow>
+              )
+            })}
           </TableBody>
         </Table>
       )}

@@ -5741,13 +5741,24 @@ async def create_admin_user(
     return username, raw_key
 
 
+#: The columns every identity lookup returns, one list so an auth check can
+#: never read a row that is missing the account state it must honour (#379).
+_USER_LOOKUP_COLUMNS = (
+    "id, username, role, can_view_reports, can_use_server_providers,"
+    " disabled, locked_at, created_at, last_seen"
+)
+
+
 async def get_user_by_key(api_key: str) -> dict[str, Any] | None:
-    """Look up a user by their raw API key."""
+    """Look up a user by their raw API key.
+
+    Selects ``disabled`` and ``locked_at`` so every caller that authenticates
+    with the key can refuse the account without a second query (#379).
+    """
     key_hash = hash_api_key(api_key)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, can_view_reports, can_use_server_providers, created_at, last_seen"
-            " FROM users WHERE api_key_hash = ?",
+            f"SELECT {_USER_LOOKUP_COLUMNS} FROM users WHERE api_key_hash = ?",
             (key_hash,),
         )
         row = await cursor.fetchone()
@@ -5755,12 +5766,11 @@ async def get_user_by_key(api_key: str) -> dict[str, Any] | None:
 
 
 async def get_user_by_username(username: str) -> dict[str, Any] | None:
-    """Look up a user by username."""
+    """Look up a user by username, with the account state authentication needs."""
     username = _normalize_username(username)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT id, username, role, can_view_reports, can_use_server_providers, created_at, last_seen"
-            " FROM users WHERE username = ?",
+            f"SELECT {_USER_LOOKUP_COLUMNS} FROM users WHERE username = ?",
             (username,),
         )
         row = await cursor.fetchone()
@@ -7029,16 +7039,27 @@ async def unlock_user(username: str) -> dict[str, Any] | None:
         }
 
 
-async def set_user_disabled(username: str, disabled: bool) -> dict[str, Any] | None:
+async def set_user_disabled(
+    username: str, disabled: bool, *, requester: str = ""
+) -> dict[str, Any] | None:
     """Disable or re-enable an account without deleting it (#379 §I.2).
 
     Returns the state before the change — ``{"role", "disabled",
-    "sessions_invalidated"}`` — or ``None`` when the username names no account.
-    Disabling drops every session of the account, so the disable takes effect
-    immediately instead of at the next login; history, comments, jobs and audit
-    rows are untouched.
+    "sessions_invalidated", "refused"}`` — or ``None`` when the username names
+    no account. Disabling drops every session of the account, so the disable
+    takes effect immediately instead of at the next login; history, comments,
+    jobs and audit rows are untouched.
+
+    Two disables are refused, inside this transaction so two admins cannot
+    refuse each other's guard (#379): the caller's own account (``"self"``) and
+    the last enabled admin (``"last_admin"``, counted excluding the target).
+    A refusal writes nothing, leaves ``disabled`` at its prior value and reports
+    the reason in ``refused``, for the endpoint to answer 400 and audit. Both
+    checks are about the whole admin surface staying reachable, so re-enabling
+    is always allowed — it can only widen access.
     """
     username = _normalize_username(username)
+    requester = _normalize_username(requester) if requester else ""
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         row = await (
@@ -7049,6 +7070,29 @@ async def set_user_disabled(username: str, disabled: bool) -> dict[str, Any] | N
         if row is None:
             await db.rollback()
             return None
+        already_disabled = bool(row["disabled"])
+        refused: str | None = None
+        if disabled and not already_disabled:
+            if requester and username == requester:
+                refused = "self"
+            elif row["role"] == "admin":
+                others = await (
+                    await db.execute(
+                        "SELECT COUNT(*) FROM users"
+                        " WHERE role = 'admin' AND disabled = 0 AND username != ?",
+                        (username,),
+                    )
+                ).fetchone()
+                if not others[0]:
+                    refused = "last_admin"
+        if refused is not None:
+            await db.rollback()
+            return {
+                "role": row["role"],
+                "disabled": already_disabled,
+                "sessions_invalidated": False,
+                "refused": refused,
+            }
         cursor = await db.execute(
             "UPDATE users SET disabled = ? WHERE username = ?",
             (1 if disabled else 0, username),
@@ -7062,8 +7106,9 @@ async def set_user_disabled(username: str, disabled: bool) -> dict[str, Any] | N
         await db.commit()
         return {
             "role": row["role"],
-            "disabled": bool(row["disabled"]),
+            "disabled": already_disabled,
             "sessions_invalidated": invalidated,
+            "refused": None,
         }
 
 
@@ -10298,9 +10343,11 @@ async def _audit_target_jobs(
 ) -> dict[str, tuple[str, str | None]]:
     """Resolve one page's job references to ``(job_id, label)`` in one query.
 
-    A reference is a job id or a job name, so the query matches both and the
-    result is keyed by both: either shape resolves without a second round
-    trip. The newest row wins when a job name was analyzed more than once.
+    A reference is a job id or any of the job's names, so the query matches all
+    of them and the result is keyed by every shape: either resolves without a
+    second round trip. The label prefers ``display_name`` — the name a human
+    reads — then ``job_name``, then ``origin_job_name``. The newest row wins
+    when a job name was analyzed more than once.
 
     Read at list time, never stored: neither value is a column and neither
     enters ``entry_hash``. A missing job simply has no entry, so the caller
@@ -10309,21 +10356,29 @@ async def _audit_target_jobs(
     if not refs:
         return {}
     marks = ", ".join("?" * len(refs))
+    # Every name is optional and none is unique, so the label is the first one
+    # that is set while the match is any of them.
+    names = ("display_name", "job_name", "origin_job_name")
+    name_expr = {
+        name: f"NULLIF(json_extract(result_json, '$.{name}'), '')" for name in names
+    }
+    label_expr = "COALESCE(" + ", ".join(name_expr[name] for name in names) + ")"
     cursor = await db.execute(
-        "SELECT job_id, COALESCE("
-        " NULLIF(json_extract(result_json, '$.job_name'), ''),"
-        " NULLIF(json_extract(result_json, '$.origin_job_name'), '')"
-        ") AS label FROM results"
-        " WHERE result_json IS NOT NULL AND json_valid(result_json)"
-        f" AND (job_id IN ({marks}) OR label IN ({marks}))"
+        f"SELECT job_id, {label_expr} AS label,"
+        f" {', '.join(name_expr[name] + ' AS ' + name for name in names)}"
+        " FROM results WHERE result_json IS NOT NULL AND json_valid(result_json)"
+        f" AND (job_id IN ({marks})"
+        f" OR {' OR '.join(name_expr[name] + f' IN ({marks})' for name in names)})"
         " ORDER BY created_at, rowid",
-        [*refs, *refs],
+        [*refs] * (len(names) + 1),
     )
     rows = await cursor.fetchall()
     # Name keys first, so an id that is also some row's name stays the id.
-    resolved = {
-        row["label"]: (row["job_id"], row["label"]) for row in rows if row["label"]
-    }
+    resolved: dict[str, tuple[str, str | None]] = {}
+    for row in rows:  # oldest first, so the newest row's label wins
+        for name in names:
+            if row[name]:
+                resolved[str(row[name])] = (row["job_id"], row["label"])
     resolved.update({row["job_id"]: (row["job_id"], row["label"]) for row in rows})
     return resolved
 
@@ -10350,9 +10405,8 @@ def _audit_resolved_target(
 #: is the target type, except ``provider``, which splits in two: the server's
 #: provider (``provider.remove``) and one user's own credential for it
 #: (``user.ai_credential_delete`` — the only row that can explain that target).
-#: ``comment`` and ``transcript`` are absent on purpose: a comment's own row is
-#: the evidence, and transcripts are pruned by the sidecar's retention, so
-#: neither has a rootcoz removal to point at. Types nothing removes
+#: ``transcript`` is absent on purpose: transcripts are pruned by the sidecar's
+#: retention, so it has no rootcoz removal to point at. Types nothing removes
 #: (``failure``, ``feedback``, ``audit``, ``database``, ``logs``, ``metadata``,
 #: ``settings``) are absent for that same reason.
 _AUDIT_REMOVAL_ACTIONS: dict[str, tuple[str, ...]] = {
@@ -10361,6 +10415,9 @@ _AUDIT_REMOVAL_ACTIONS: dict[str, tuple[str, ...]] = {
     "provider": ("provider.remove",),
     "provider_credential": ("user.ai_credential_delete",),
     "setting": ("settings.reset",),
+    # A deleted comment's own row is both the evidence and the removal, so its
+    # history never links to a ``#comment-<id>`` that no longer exists.
+    "comment": ("comment.delete",),
 }
 
 #: ``action → family``, so a fetched row lands in the same bucket the page's
@@ -10395,6 +10452,12 @@ def _audit_deletion_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
         return None
     if target_type == "job":
         return "job", "", subject
+    if target_type == "comment":
+        # The comment id is matched literally and the job it belonged to is
+        # carried in the actor slot, so one job's comments never explain
+        # another's. No recorded job means no presence to check at all.
+        job_id = str((event.get("details") or {}).get("job_id") or "")
+        return ("comment", job_id, subject) if job_id else None
     if target_type == "user":
         return "user", "", subject.lower()
     if target_type == "provider":
@@ -10419,17 +10482,29 @@ async def _audit_present_targets(
     provider re-added, a setting override re-saved or a user's key put back
     leaves its events unfilled again.
 
-    A job is present when ``results`` still resolves its reference, a user when
-    ``users`` holds the name, a server provider when any of its key, selection
-    or free pair is configured, a per-user credential when that user's stored
-    key map still names the provider, and a setting when ``server_settings``
-    holds an override for the key.
+    A job is present when ``results`` still resolves its reference, a comment
+    when ``comments`` still holds that id for its job, a user when ``users``
+    holds the name, a server provider when any of its key, selection or free
+    pair is configured, a per-user credential when that user's stored key map
+    still names the provider, and a setting when ``server_settings`` holds an
+    override for the key.
     """
     present = {key for key in keys if key[0] == "job" and key[2] in resolved}
     users = {key[2] for key in keys if key[0] == "user"}
     providers = {key[2] for key in keys if key[0] == "provider"}
     settings = {key[2] for key in keys if key[0] == "setting"}
     credentials = {(key[1], key[2]) for key in keys if key[0] == "provider_credential"}
+    comments = {(key[1], key[2]) for key in keys if key[0] == "comment"}
+    if comments:
+        job_ids = sorted({job_id for job_id, _ in comments})
+        marks = ", ".join("?" * len(job_ids))
+        cursor = await db.execute(
+            f"SELECT id, job_id FROM comments WHERE job_id IN ({marks})", job_ids
+        )
+        present |= {
+            ("comment", str(row["job_id"]), str(row["id"]))
+            for row in await cursor.fetchall()
+        }
     if users:
         marks = ", ".join("?" * len(users))
         cursor = await db.execute(
@@ -10500,7 +10575,11 @@ async def _audit_target_deletions(
     )
     job_refs = sorted({subject for family, _, subject in keys if family == "job"})
     exact = sorted(
-        {subject for family, _, subject in keys if family in ("job", "setting")}
+        {
+            subject
+            for family, _, subject in keys
+            if family in ("job", "setting", "comment")
+        }
     )
     folded = sorted(
         {
@@ -10544,6 +10623,15 @@ async def _audit_target_deletions(
         if family == "job":
             named = {target, *(details.get("job_ids") or [])}
             matches = [key for key in wanted.get("job", ()) if key[2] in named]
+        elif family == "comment":
+            # A comment id is literal; the job in ``details`` keeps two jobs'
+            # same-numbered targets apart if ids ever restart.
+            job_id = str(details.get("job_id") or "")
+            matches = [
+                key
+                for key in wanted.get("comment", ())
+                if key[2] == target and (not key[1] or key[1] == job_id)
+            ]
         else:
             # A setting key is a literal; a username and a provider id are
             # identity strings the page already folded to lower case.
@@ -10883,13 +10971,13 @@ async def list_audit_events(
     presence to check (transcript, logs, metadata, …).
 
     Each event carries ``target_job_id`` (the uuid of the job it refers to) and
-    ``target_label`` (that job's display name), both resolved here in one query
-    for the page and never stored. A target that no longer exists additionally
-    carries ``target_deleted_by``, ``target_deleted_at`` and
+    ``target_label`` (that job's user-facing name), both resolved here in one
+    query for the page and never stored. A target that no longer exists
+    additionally carries ``target_deleted_by``, ``target_deleted_at`` and
     ``target_delete_event_id`` — the newest audit row that recorded its removal,
     or all three ``None`` when the trail cannot say. Target types nothing in
-    rootcoz removes (``comment``, ``transcript``, ``failure``, …) always get the
-    three ``None``.
+    rootcoz removes (``transcript``, ``failure``, …) always get the three
+    ``None``.
     Returns ``{"events": [...], "total": <int>}``.
     """
     where, params = _audit_filter_sql(

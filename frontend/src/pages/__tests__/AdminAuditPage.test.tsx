@@ -432,6 +432,52 @@ describe('AdminAuditPage', () => {
     expect(link).toHaveAttribute('href', href)
   })
 
+  it('links a settings update that names its keys in details, not in target_id', async () => {
+    mockAuditApi(1, () => [
+      event({ target_type: 'setting', target_id: '', details: { changed_keys: ['ai_model'] } }),
+    ])
+    renderPage()
+
+    expect(await screen.findByRole('link', { name: 'ai_model' })).toHaveAttribute(
+      'href',
+      '/admin/settings?highlight=ai_model',
+    )
+  })
+
+  it('links the first changed key and lists the rest as plain text', async () => {
+    mockAuditApi(1, () => [
+      event({
+        target_type: 'setting',
+        target_id: '',
+        details: { changed_keys: ['ai_model', 'ai_provider', 'ai_call_timeout'] },
+      }),
+    ])
+    renderPage()
+
+    const link = await screen.findByRole('link', { name: 'ai_model' })
+    expect(link).toHaveAttribute('href', '/admin/settings?highlight=ai_model')
+    // One destination, not three: only the first key is a link.
+    expect(screen.getAllByRole('link')).toHaveLength(1)
+    expect(link.closest('td')).toHaveTextContent('ai_model ai_provider, ai_call_timeout')
+  })
+
+  it('links a settings action with no target id through its first changed key', async () => {
+    mockAuditApi(1, () => [
+      event({
+        action: 'admin.setting_reset',
+        target_type: null,
+        target_id: null,
+        details: { changed_keys: ['jenkins_url'] },
+      }),
+    ])
+    renderPage()
+
+    expect(await screen.findByRole('link', { name: 'jenkins_url' })).toHaveAttribute(
+      'href',
+      '/admin/settings?highlight=jenkins_url',
+    )
+  })
+
   it('links a failure target to the report of the job it belongs to', async () => {
     const failure = '8f14e45f-ceea-467a-9575-9d1c0c1b0d0f'
     mockAuditApi(1, () => [
@@ -913,6 +959,50 @@ describe('AdminAuditPage', () => {
     )
     expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?q=alice&limit=100')
     expect(await screen.findByText('Showing 1–100 of 120')).toBeInTheDocument()
+  })
+
+  it('persists the offset in the URL with a replace, so a reload shows that page', async () => {
+    mockAuditApi(120, pageOfEvents(120))
+    const { router } = renderRouted(['/admin/audit'])
+
+    expect(await screen.findByText('Showing 1–50 of 120')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Next'))
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=50'),
+    )
+    expect(screen.getByTestId('location')).toHaveTextContent('/admin/audit?offset=50')
+    // replace, not push: paging does not fill the Back stack with pages.
+    expect(router.state.historyAction).toBe('REPLACE')
+    expect(locationKeys).toHaveLength(2)
+
+    fireEvent.click(screen.getByText('Previous'))
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=0'),
+    )
+    // The first page is the URL with no offset at all.
+    expect(screen.getByTestId('location')).toHaveTextContent(/\/admin\/audit$/)
+  })
+
+  it('honours ?offset=50&limit=50 on mount and reports the same range', async () => {
+    mockAuditApi(120, pageOfEvents(120))
+    renderPage('/admin/audit?offset=50&limit=50')
+
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=50&offset=50'),
+    )
+    expect(await screen.findByText('Showing 51–100 of 120')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled()
+  })
+
+  it('follows a shared link whose window is on a later page of a filtered set', async () => {
+    mockAuditApi(120, pageOfEvents(120))
+    renderPage('/admin/audit?q=alice&offset=100&limit=25')
+
+    await waitFor(() =>
+      expect(apiGet).toHaveBeenLastCalledWith('/api/admin/audit?limit=25&offset=100&q=alice'),
+    )
+    expect(await screen.findByText('Showing 101–120 of 120')).toBeInTheDocument()
   })
 
   it('honours ?limit=250 on mount and ignores an invalid ?limit=9999', async () => {

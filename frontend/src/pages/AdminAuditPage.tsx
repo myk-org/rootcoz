@@ -5,7 +5,7 @@ import { useSignOut } from '@/lib/useSignOut'
 import { EMPTY_FILTERS, activeTimePreset, matchesFilters, presetSince, TIME_PRESETS, type AuditEvent, type AuditFilters } from '@/lib/auditFilters'
 import { parsePageSize } from '@/lib/pageParams'
 import { CONTROL_CLASS } from '@/lib/controlStyles'
-import { cn, formatRelativeTime, formatTimestamp } from '@/lib/utils'
+import { cn, formatRelativeTime, formatTimestamp, toIntInRange } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -73,6 +73,10 @@ const OUTCOME_BADGE_VARIANT: Record<string, 'success' | 'destructive' | 'warning
 /** ?limit is read against the sizes this page offers (see parsePageSize). */
 const pageSizeFrom = (raw: string | null) => parsePageSize(raw, PAGE_SIZE_OPTIONS, DEFAULT_PAGE_SIZE)
 
+/** ?offset is a row index: a negative or non-numeric value is the first page. */
+const pageOffsetFrom = (raw: string | null) =>
+  toIntInRange(raw ?? '', 0, Number.MAX_SAFE_INTEGER, 0)
+
 /** The filters kept in the URL, so a copied link shows the same rows. */
 const FILTER_KEYS = Object.keys(EMPTY_FILTERS) as Array<keyof AuditFilters>
 
@@ -111,7 +115,7 @@ type AuditAction =
   | { type: 'offset'; value: number }
   | { type: 'limit'; value: PageSize }
   /** The URL changed under us (Back/Forward, an outside link). */
-  | { type: 'sync'; filters: AuditFilters; limit: PageSize; live: boolean }
+  | { type: 'sync'; filters: AuditFilters; limit: PageSize; offset: number; live: boolean }
   | { type: 'draft'; field: 'actorDraft' | 'qDraft'; value: string }
   | { type: 'live'; phase: LivePhase }
   | { type: 'clear' }
@@ -127,13 +131,13 @@ function reducer(state: AuditState, action: AuditAction): AuditState {
     // A new page size makes the old offset meaningless.
     case 'limit':
       return { ...state, limit: action.value, offset: 0 }
-    // An adopted query describes rows from the start of the list.
+    // An adopted query describes the page the URL names, not always the first.
     case 'sync':
       return {
         ...state,
         filters: action.filters,
         limit: action.limit,
-        offset: 0,
+        offset: action.offset,
         actorDraft: action.filters.actor,
         qDraft: action.filters.q,
         // A streaming tail keeps its phase; a live URL re-arms a dead one.
@@ -159,7 +163,7 @@ function initialState(params: URLSearchParams): AuditState {
   const filters = filtersFromParams(params)
   return {
     filters,
-    offset: 0,
+    offset: pageOffsetFrom(params.get('offset')),
     limit: pageSizeFrom(params.get('limit')),
     livePhase: params.get('live') === '1' ? 'connecting' : 'off',
     actorDraft: filters.actor,
@@ -290,6 +294,25 @@ function targetGone(event: AuditEvent): boolean {
   )
 }
 
+/** Actions that write a setting; such a row names its keys in details only. */
+const SETTING_ACTION_PREFIXES = ['settings.', 'admin.setting_']
+
+/**
+ * The setting keys a row changed. A settings update names what it touched in
+ * `details.changed_keys` (there is no single target setting to put in
+ * `target_id`), so the row can still link to the first key it changed.
+ */
+function changedSettingKeys(event: AuditEvent): string[] {
+  const { target_type: type, action, target_id: id, details } = event
+  if (id) return []
+  if (!(type === 'setting' || SETTING_ACTION_PREFIXES.some((prefix) => action.startsWith(prefix))))
+    return []
+  const keys = details?.changed_keys
+  return Array.isArray(keys)
+    ? keys.filter((key): key is string => typeof key === 'string' && key.trim() !== '')
+    : []
+}
+
 /**
  * Where the target lives, derived from the ids — never from the label, never
  * stored, and never a dead link: a gone target has no destination.
@@ -301,7 +324,12 @@ function targetGone(event: AuditEvent): boolean {
  */
 function targetHref(event: AuditEvent): string | null {
   const { target_type: type, target_id: id, target_job_id: jobId, details } = event
-  if (!id || targetGone(event)) return null
+  if (targetGone(event)) return null
+  // A settings update has no target id: its changed key is the destination.
+  if (!id) {
+    const [first] = changedSettingKeys(event)
+    return first ? `/admin/settings?highlight=${encodeURIComponent(first)}` : null
+  }
   switch (type) {
     case 'job': {
       const report = jobId === undefined ? (JOB_UUID.test(id) ? id : null) : jobId
@@ -396,7 +424,8 @@ function GoneTargetMarker({ target }: { target: GoneTarget }) {
 /** The visible text: the label when one resolved, else the bare id. */
 function targetText(event: AuditEvent): string {
   const { target_type: type, target_id: id, target_label: label, details } = event
-  if (!id || !type) return targetLabel(event)
+  const [changed] = changedSettingKeys(event)
+  if (!id || !type) return changed ?? targetLabel(event)
   switch (type) {
     case 'job':
       return label ?? id
@@ -559,13 +588,14 @@ export function AdminAuditPage() {
 
   // Latest state for the URL-sync effect, which must not re-run on every
   // keystroke — a stale read there would adopt the URL over a fresh edit.
-  const stateRef = useRef({ filters, limit, live })
+  const stateRef = useRef({ filters, offset, limit, live })
   useEffect(() => {
-    stateRef.current = { filters, limit, live }
+    stateRef.current = { filters, offset, limit, live }
   })
 
-  // Mirror the filters back into the URL. Unrelated params (limit, live) stay,
-  // and empty filters are removed rather than stored as empty strings.
+  // Mirror the filters and the page window back into the URL. Unrelated params
+  // (limit, live) stay, and empty filters are removed rather than stored as
+  // empty strings — a reload or a shared link then shows the page being read.
   useEffect(() => {
     writeUrl((next) => {
       for (const key of FILTER_KEYS) {
@@ -573,8 +603,10 @@ export function AdminAuditPage() {
         if (value) next.set(key, value)
         else next.delete(key)
       }
+      if (offset > 0) next.set('offset', String(offset))
+      else next.delete('offset')
     })
-  }, [filters, writeUrl])
+  }, [filters, offset, writeUrl])
 
   // Back/Forward or an outside link can replace the query while this page stays
   // mounted. This page only ever writes with `replace`, so any other navigation
@@ -586,15 +618,23 @@ export function AdminAuditPage() {
     const current = stateRef.current
     const adopted = filtersFromParams(searchParams)
     const adoptedLimit = pageSizeFrom(searchParams.get('limit'))
+    const adoptedOffset = pageOffsetFrom(searchParams.get('offset'))
     const adoptedLive = searchParams.get('live') === '1'
     if (
       adoptedLimit === current.limit &&
+      adoptedOffset === current.offset &&
       adoptedLive === current.live &&
       filtersMatchParams(searchParams, current.filters)
     ) {
       return
     }
-    dispatch({ type: 'sync', filters: adopted, limit: adoptedLimit, live: adoptedLive })
+    dispatch({
+      type: 'sync',
+      filters: adopted,
+      limit: adoptedLimit,
+      offset: adoptedOffset,
+      live: adoptedLive,
+    })
   }, [searchParams, navigationType, dispatch])
 
   const [result, setResult] = useState<{ key: string; data: AuditListResponse } | null>(null)
@@ -1012,6 +1052,9 @@ export function AdminAuditPage() {
                       const label = actions.find((a) => a.action === event.action)?.label ?? event.action
                       const href = targetHref(event)
                       const text = targetText(event)
+                      // A settings update can change several keys: the link names
+                      // the first, the rest stay plain text beside it.
+                      const otherKeys = changedSettingKeys(event).slice(1)
                       const gone = goneTarget(event)
                       // A feedback target lives on GitHub, not in this app.
                       const external = href !== null && /^https?:\/\//i.test(href)
@@ -1102,6 +1145,9 @@ export function AdminAuditPage() {
                                 </Tooltip>
                               ) : (
                                 text
+                              )}
+                              {otherKeys.length > 0 && (
+                                <span className="text-text-tertiary"> {otherKeys.join(', ')}</span>
                               )}
                               {/* Same cell, same name: only a gone target adds a line. */}
                               {gone && <GoneTargetMarker target={gone} />}

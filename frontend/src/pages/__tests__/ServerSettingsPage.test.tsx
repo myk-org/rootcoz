@@ -1,7 +1,7 @@
 import { StrictMode } from 'react'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '@/lib/api'
 import { ServerSettingsPage } from '../ServerSettingsPage'
@@ -137,6 +137,14 @@ function renderPage(entry = '/admin/settings') {
   )
 }
 
+/** A router the test can navigate, like following an audit row's link. */
+function renderRouted(entry = '/admin/settings') {
+  const router = createMemoryRouter([{ path: '/admin/settings', element: <ServerSettingsPage /> }], {
+    initialEntries: [entry],
+  })
+  return { router, ...render(<RouterProvider router={router} />) }
+}
+
 /**
  * A row is found by its key: the env var lives in the label tooltip, never in
  * row text (E2E-F27), so `screen.getByText('JIRA_PAT')` is no longer the way.
@@ -220,6 +228,31 @@ describe('ServerSettingsPage tabs and search', () => {
     expect(scrollIntoView).toHaveBeenCalled()
     // Following an audit link must not rewrite the admin's own tab preference.
     expect(localStorage.getItem('rootcoz_settings_tab')).toBe('Server')
+  })
+
+  it('clears a search that hides the linked row before marking it', async () => {
+    // The admin is searching; the audit link names a row that search excludes.
+    const { router } = renderRouted()
+    await waitForRow('public_base_url')
+    const search = screen.getByLabelText('Search settings')
+    fireEvent.change(search, { target: { value: 'jenkins_url' } })
+    await waitFor(() => expect(screen.getByText('Search results')).toBeInTheDocument())
+    expect(shown('admin_key')).toBe(false)
+
+    await act(async () => {
+      await router.navigate('/admin/settings?highlight=admin_key')
+    })
+
+    // The search is gone, so the row exists again — and the mark lands on it.
+    await waitFor(() => expect(search).toHaveValue(''))
+    const row = await waitFor(() => {
+      const found = document.querySelector('[data-setting-key="admin_key"]')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(row.className).toContain('bg-signal-blue/10')
+    expect(scrollIntoView).toHaveBeenCalled()
+    expect(screen.queryByText('Search results')).toBeNull()
   })
 
   it('switches to a flat search results view when searching', async () => {

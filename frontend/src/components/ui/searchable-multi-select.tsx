@@ -61,6 +61,25 @@ interface Row {
   custom?: boolean
 }
 
+/**
+ * The nearest row that can be picked, starting at `from` and walking
+ * `direction`; -1 when every row that way is disabled.
+ */
+function enabledIndex(rows: Row[], from: number, direction: 1 | -1): number {
+  for (let i = from; i >= 0 && i < rows.length; i += direction) {
+    if (!rows[i].disabled) return i
+  }
+  return -1
+}
+
+/** Where the highlight may rest: the clamped index, or the nearest enabled row. */
+function restingIndex(rows: Row[], index: number): number {
+  if (!rows.length) return -1
+  const clamped = Math.min(index, rows.length - 1)
+  const down = enabledIndex(rows, clamped, 1)
+  return down >= 0 ? down : enabledIndex(rows, clamped, -1)
+}
+
 export function SearchableMultiSelect({
   values,
   options,
@@ -95,10 +114,13 @@ export function SearchableMultiSelect({
   if (allowCustom && trimmed && !exact) rows.push({ value: trimmed, custom: true })
 
   // The highlight is a plain index into the current rows; a shorter list (the
-  // admin kept typing) clamps it instead of pointing at nothing.
-  const active = rows.length ? Math.min(highlight, rows.length - 1) : -1
+  // admin kept typing) clamps it instead of pointing at nothing, and a disabled
+  // row is skipped so Enter can never land on one.
+  const active = restingIndex(rows, highlight)
 
   const setOpenState = (next: boolean) => {
+    // Disabled means the value is still being saved: the menu must not open.
+    if (disabled && next) return
     setOpen(next)
     setHighlight(0)
     if (!next) {
@@ -109,7 +131,7 @@ export function SearchableMultiSelect({
   }
 
   const pick = (row: Row) => {
-    if (row.disabled) return
+    if (disabled || row.disabled) return
     if (!multiple) {
       // One choice: the pick replaces the value and the menu is done.
       onChange([row.value])
@@ -130,12 +152,13 @@ export function SearchableMultiSelect({
   const selectedText = multiple ? "" : selectedOption?.label ?? selectedOption?.value ?? values[0] ?? ""
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === "ArrowDown") {
+    // A disabled control obeys no keyboard shortcut, open menu or not.
+    if (disabled) return
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault()
-      setHighlight(rows.length ? Math.min(active + 1, rows.length - 1) : 0)
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault()
-      setHighlight(Math.max(active - 1, 0))
+      const direction: 1 | -1 = event.key === "ArrowDown" ? 1 : -1
+      const next = enabledIndex(rows, active + direction, direction)
+      if (next >= 0) setHighlight(next)
     } else if (event.key === "Enter") {
       event.preventDefault()
       if (active >= 0) pick(rows[active])
@@ -158,8 +181,11 @@ export function SearchableMultiSelect({
           aria-expanded={open}
           aria-haspopup="listbox"
           aria-disabled={disabled || undefined}
-          onClick={() => setOpenState(!open)}
+          onClick={() => {
+            if (!disabled) setOpenState(!open)
+          }}
           onKeyDown={event => {
+            if (disabled) return
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault()
               setOpenState(!open)

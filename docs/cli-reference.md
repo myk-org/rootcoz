@@ -95,7 +95,6 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--jira-max-results` | Jira search tuning. |
 | `--github-token` | GitHub API token. `GITHUB_TOKEN`. |
 | `--ai-call-timeout` | AI timeout in minutes. |
-| `--force-server-credentials` / `--no-force-server-credentials` | Use server-managed AI credentials instead of your own key. |
 | `--raw-prompt` | Extra instructions appended to the AI prompt. |
 | `--issue-prompt` | Custom issue-generation prompt, overriding `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md`. |
 | `--peers` | Peer models as `"provider:model,provider:model"`. |

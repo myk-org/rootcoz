@@ -2758,6 +2758,61 @@ def _blocked_user_status_response(user_status: str | None) -> JSONResponse | Non
     )
 
 
+async def _record_account_blocked(
+    *, username: str, reason: str, role: str | None, request: Request
+) -> None:
+    """Audit the refusal of an identity whose account is disabled or locked (#379).
+
+    The reason is for the admin reading the trail, never for the caller: every
+    path answers the same generic 401 a bad credential gets. ``auth.login_blocked``
+    is volume-guarded, so a client polling with a stale session cannot flood the
+    trail. A disabled account is reported before the lock, the condition an
+    admin would act on first.
+    """
+    await record_audit(
+        action="auth.login_blocked",
+        actor=username,
+        message=f"Login blocked for '{reason}' user '{username}'",
+        actor_role=role,
+        target_type="user",
+        target_id=username,
+        outcome="denied",
+        details={"reason": reason},
+        request=request,
+    )
+
+
+def _account_block_reason(user: dict[str, Any] | None) -> str | None:
+    """``"disabled"`` / ``"locked"`` for a row that must not authenticate (#379).
+
+    ``None`` for a usable account and for the bootstrap admin, which has no
+    ``users`` row and is therefore unaffected.
+    """
+    if not user:
+        return None
+    if user.get("disabled"):
+        return "disabled"
+    if user.get("locked"):
+        return "locked"
+    return None
+
+
+def _unauthenticated_response(request: Request, path: str) -> Response:
+    """What an unauthenticated request gets: the login page, or the generic 401.
+
+    The single place that decides, so a refused account is byte-identical to a
+    bad credential on every path.
+    """
+    if "text/html" in request.headers.get("accept", "") and not path.startswith(
+        "/api/"
+    ):
+        return RedirectResponse(url="/login", status_code=303)
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Authentication required. Please log in with your API key."},
+    )
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Authenticate all requests via session cookie, Bearer token, or trusted SSO header.
 
@@ -2977,6 +3032,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 cookie_username = ""
             username = cookie_username
 
+        # 5. Refuse a disabled or locked account on every path (#379): a key, a
+        #    session and a proxy identity are all only as good as the row they
+        #    name. The row is loaded once here and reused for the grants below.
+        #    "admin" is reserved, so a bootstrap admin has no row to check.
+        if (
+            has_valid_session
+            and username
+            and username != "admin"
+            and fetched_user is None
+        ):
+            fetched_user = await storage.get_user_by_username(username)
+        block_reason = _account_block_reason(fetched_user)
+        if block_reason is not None:
+            logger.debug("Refused %s account '%s' on %s", block_reason, username, path)
+            await _record_account_blocked(
+                username=username,
+                reason=block_reason,
+                role=resolved_role,
+                request=request,
+            )
+            return _unauthenticated_response(request, path)
+
         request.state.username = username
         request.state.is_admin = is_admin
         request.state.role = resolved_role
@@ -2986,11 +3063,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if is_admin:
             request.state.can_view_reports = effective_can_view_reports(True)
         elif has_valid_session and username:
-            db_user = fetched_user
-            if db_user is None:
-                db_user = await storage.get_user_by_username(username)
             request.state.can_view_reports = effective_can_view_reports(
-                False, bool(db_user and db_user.get("can_view_reports"))
+                False, bool(fetched_user and fetched_user.get("can_view_reports"))
             )
         else:
             request.state.can_view_reports = False
@@ -3020,15 +3094,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Require authentication for all non-public, non-optional paths
         if not has_valid_session and not self._is_public_path(path):
-            accept = request.headers.get("accept", "")
-            if "text/html" in accept and not path.startswith("/api/"):
-                return RedirectResponse(url="/login", status_code=303)
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": "Authentication required. Please log in with your API key."
-                },
-            )
+            return _unauthenticated_response(request, path)
 
         # Check pending user status when REQUIRE_APPROVAL is enabled.
         # Admin users and the bootstrap admin always bypass this check.
@@ -12518,15 +12584,10 @@ async def login(request: Request) -> JSONResponse:
     # the caller learns "not allowed", never which of the three applied.
     block_reason = await storage.settle_login_attempt(username)
     if block_reason is not None:
-        await record_audit(
-            action="auth.login_blocked",
-            actor=username,
-            message=f"Login blocked for '{block_reason}' user '{username}'",
-            actor_role=resolved_role,
-            target_type="user",
-            target_id=username,
-            outcome="denied",
-            details={"reason": block_reason},
+        await _record_account_blocked(
+            username=username,
+            reason=block_reason,
+            role=resolved_role,
             request=request,
         )
         raise HTTPException(status_code=401, detail="Invalid username or API key")
@@ -16260,19 +16321,51 @@ async def unlock_user_endpoint(username: str, request: Request) -> dict[str, Any
     }
 
 
+#: Detail answered for each refused disable (#379). A refusal is the caller's
+#: own mistake, so it is a 400, and the admin surface is the thing protected.
+_DISABLE_REFUSAL_DETAIL: dict[str, str] = {
+    "self": "You cannot disable your own account",
+    "last_admin": "Cannot disable the last enabled admin",
+}
+
+
 @app.put("/api/admin/users/{username}/disabled", operation_id="setUserDisabledEndpoint")
 async def set_user_disabled_endpoint(
     username: str, request: Request, body: SetUserDisabledRequest
 ) -> dict[str, Any]:
-    """Disable or re-enable an account without deleting it (#379 §I.2)."""
+    """Disable or re-enable an account without deleting it (#379 §I.2).
+
+    Refused inside storage, in one transaction, when the target is the caller
+    or the last enabled admin: either would end the caller's own sessions or
+    lock the admin surface until ``ADMIN_KEY`` intervenes. Re-enabling is
+    always allowed.
+    """
     _require_admin(request)
-    prior = await storage.set_user_disabled(username, body.disabled)
+    actor = request.state.username
+    prior = await storage.set_user_disabled(username, body.disabled, requester=actor)
     if prior is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if prior["refused"] is not None:
+        await record_audit(
+            action="admin.user_disabled",
+            actor=actor,
+            message=(
+                f"Admin '{actor}' refused to disable user '{username}'"
+                f" ({prior['refused']})"
+            ),
+            target_type="user",
+            target_id=username,
+            outcome="denied",
+            details={"reason": prior["refused"], "role": prior["role"]},
+            request=request,
+        )
+        raise HTTPException(
+            status_code=400, detail=_DISABLE_REFUSAL_DETAIL[prior["refused"]]
+        )
     state = "disabled" if body.disabled else "enabled"
     logger.info(
         "Admin '%s' %s user '%s' (was_disabled=%s sessions_invalidated=%s)",
-        request.state.username,
+        actor,
         state,
         username,
         prior["disabled"],
@@ -16280,8 +16373,8 @@ async def set_user_disabled_endpoint(
     )
     await record_audit(
         action="admin.user_disabled" if body.disabled else "admin.user_enabled",
-        actor=request.state.username,
-        message=f"Admin '{request.state.username}' {state} user '{username}'",
+        actor=actor,
+        message=f"Admin '{actor}' {state} user '{username}'",
         target_type="user",
         target_id=username,
         details={

@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, RouterProvider, createMemoryRouter, useLocation } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { UsersPage } from '@/pages/UsersPage'
@@ -45,6 +45,8 @@ const user = (username: string, extra: Record<string, unknown> = {}) => ({
 // whole match, so the page's range is checked against real arithmetic. The
 // lockout threshold is a Server Setting, asked for only when a row is locked.
 const LOCKOUT_HINT_THRESHOLD = '5'
+/** The page's debounce, so a search test can wait exactly past it. */
+const SEARCH_DEBOUNCE_MS = 300
 
 function mockServer(all: Array<{ username: string }>) {
   get.mockImplementation(async (url: string) => {
@@ -76,6 +78,31 @@ function renderPage(entry = '/admin/users') {
       <UsersPage />
     </MemoryRouter>,
   )
+}
+
+function LocationProbe() {
+  const location = useLocation()
+  return <span data-testid="location">{`${location.pathname}${location.search}`}</span>
+}
+
+/** A router whose history stack the test can walk, like a real Back button. */
+function renderRouted(initialEntries: string[], initialIndex = 0) {
+  const router = createMemoryRouter(
+    [
+      {
+        path: '/admin/users',
+        element: (
+          <>
+            <UsersPage />
+            <LocationProbe />
+          </>
+        ),
+      },
+    ],
+    { initialEntries, initialIndex },
+  )
+  const view = render(<RouterProvider router={router} />)
+  return { router, ...view }
 }
 
 beforeEach(() => {
@@ -154,6 +181,70 @@ describe('UsersPage pagination', () => {
     expect(screen.getByRole('status')).toHaveTextContent('51–100 of 137')
   })
 
+  it('adopts a Back navigation instead of rewriting the search it left', async () => {
+    mockUsers([user('alice'), user('bob')])
+    // The browser stack: bob first, then the page was opened on alice.
+    const { router } = renderRouted(['/admin/users?q=bob', '/admin/users?q=alice'], 1)
+
+    expect(await screen.findByText('alice')).toBeInTheDocument()
+    expect(get).toHaveBeenCalledWith('/api/admin/users?limit=25&offset=0&q=alice')
+
+    await act(async () => {
+      await router.navigate(-1)
+    })
+
+    // The input follows the URL and the request follows the input.
+    await waitFor(() => expect(screen.getByLabelText('Search users')).toHaveValue('bob'))
+    expect(await screen.findByText('bob')).toBeInTheDocument()
+    expect(get).toHaveBeenCalledWith('/api/admin/users?limit=25&offset=0&q=bob')
+    // ...and the debounce never writes the previous needle back over it.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, SEARCH_DEBOUNCE_MS + 50))
+    })
+    expect(screen.getByTestId('location')).toHaveTextContent('/admin/users?q=bob')
+    expect(screen.getByLabelText('Search users')).toHaveValue('bob')
+    expect(usersRequests().some((url) => url.endsWith('q=alice'))).toBe(true)
+    expect(usersRequests().at(-1)).toContain('q=bob')
+  })
+
+  it('ignores a page that resolves after the admin already moved on', async () => {
+    // Two requests in flight; the older one must not paint over the newer.
+    const pending: Array<{ resolve: (value: unknown) => void }> = []
+    get.mockImplementation(() =>
+      new Promise((resolve) => {
+        pending.push({ resolve })
+      }),
+    )
+    vi.useFakeTimers()
+    try {
+      renderPage()
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(pending).toHaveLength(1)
+
+      fireEvent.change(screen.getByLabelText('Search users'), { target: { value: 'alice' } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS) })
+      expect(pending).toHaveLength(2)
+
+      const [stale, fresh] = pending
+      await act(async () => {
+        fresh.resolve({ users: [user('alice')], total: 1, limit: 25, offset: 0 })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(screen.getByText('alice')).toBeInTheDocument()
+
+      await act(async () => {
+        stale.resolve({ users: [user('bob')], total: 1, limit: 25, offset: 0 })
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      // The newest answer stands: no row for a search the admin already left.
+      expect(screen.queryByText('bob')).not.toBeInTheDocument()
+      expect(screen.getByText('alice')).toBeInTheDocument()
+      expect(screen.getByRole('status')).toHaveTextContent('1–1 of 1')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('starts over at the first window when the page size changes', async () => {
     mockServer(manyUsers(137))
     const user1 = userEvent.setup()
@@ -214,7 +305,8 @@ describe('UsersPage account state', () => {
 
     // The denominator is the live login_lockout_threshold setting.
     const lockedRow = screen.getByText('carol').closest('tr')!
-    const lockedBadge = within(lockedRow).getByText('locked (3/5)')
+    // The threshold arrives on its own request, so wait for it rather than race it.
+    const lockedBadge = await within(lockedRow).findByText('locked (3/5)')
     expect(lockedBadge).toHaveClass('text-signal-amber')
     expect(get).toHaveBeenCalledWith('/api/admin/settings')
 
@@ -229,6 +321,33 @@ describe('UsersPage account state', () => {
     await screen.findByText('alice')
 
     expect(get).not.toHaveBeenCalledWith('/api/admin/settings')
+  })
+
+  it('shows a disabled account as disabled whatever its registration status says', async () => {
+    mockUsers([
+      user('dana', { status: 'pending', disabled: true }),
+      user('evan', { status: 'rejected', disabled: true }),
+    ])
+    renderPage()
+
+    const dana = (await screen.findByText('dana')).closest('tr')!
+    expect(within(dana).getByText('disabled')).toHaveClass('text-text-tertiary')
+    expect(within(dana).queryByText('pending')).not.toBeInTheDocument()
+
+    const evan = screen.getByText('evan').closest('tr')!
+    expect(within(evan).getByText('disabled')).toHaveClass('text-text-tertiary')
+    expect(within(evan).queryByText('rejected')).not.toBeInTheDocument()
+    // The name is muted from the same answer the badge reads.
+    expect(screen.getByText('dana')).toHaveClass('text-text-tertiary')
+  })
+
+  it('still shows a locked account as locked over a stale registration status', async () => {
+    mockUsers([user('carol', { status: 'active', locked: true, failed_login_count: 3 })])
+    renderPage()
+
+    const carol = (await screen.findByText('carol')).closest('tr')!
+    expect(await within(carol).findByText('locked (3/5)')).toBeInTheDocument()
+    expect(screen.getByText('carol')).toHaveClass('text-text-primary')
   })
 
   it('disables only after confirmation, then refetches instead of patching the row', async () => {
